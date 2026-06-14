@@ -1,0 +1,15 @@
+<Project>
+  <!--
+    NuGet Central Package Management: pin every package version here once,
+    repo-wide. F# projects (added from delivery step 00 onward) reference
+    packages by name only; versions are governed centrally.
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Ylmish: the Elmish <-> Yjs sync boundary (Fable + FSharp.Data.Adaptive). -->
+    <PackageVersion Include="Ylmish" Version="1.0.0-beta0177" />
+  </ItemGroup>
+</Project>

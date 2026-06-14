@@ -1,0 +1,48 @@
+# mise — the repository interface.
+#
+# Everything goes through `mise run <task>`. See `mise tasks` for the list.
+# Toolchain is pinned for reproducibility; bump deliberately.
+
+[tools]
+# Browser Client (F#/Fable) + Session Process (F# on Node) both run on Node.
+node = "24.16.0"
+# F# toolchain. Fable compiles F# -> JS; the domain library and tests build on .NET.
+dotnet = "10.0.301"
+
+[env]
+# Keep tool-installed binaries (Fable, etc.) on PATH within tasks.
+_.path = ["{{config_root}}/node_modules/.bin"]
+
+# --- Tasks: the repo's public interface -------------------------------------
+
+[tasks.restore]
+description = "Install all dependencies (npm + .NET tools)."
+run = [
+  "npm install",
+  "dotnet tool restore",
+]
+
+[tasks.build]
+description = "Build everything (Fable compile + client bundle)."
+depends = ["restore"]
+run = "echo 'TODO: wired up in plan step 00 (foundations) / 04 (client bootstrap).'"
+
+[tasks.start]
+description = "Start the Session Process locally."
+run = "echo 'TODO: wired up in plan step 03/04 (transport + bootstrap).'"
+
+[tasks.dev]
+description = "Run the Session Process and client in watch mode."
+run = "echo 'TODO: wired up once the client and process projects exist (step 04).'"
+
+[tasks.test]
+description = "Run the automated test suite (model/protocol + E2E)."
+run = "echo 'TODO: wired up in plan step 09 (Phase 1 E2E acceptance).'"
+
+[tasks.clean]
+description = "Remove build artifacts and installed dependencies."
+run = [
+  "rm -rf node_modules",
+  "find . -type d -name bin -prune -exec rm -rf {} +",
+  "find . -type d -name obj -prune -exec rm -rf {} +",
+]

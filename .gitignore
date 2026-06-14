@@ -1,0 +1,21 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# .NET / Fable
+bin/
+obj/
+.fable/
+fable_modules/
+*.user
+
+# Build output
+dist/
+build/
+
+# Local env / secrets
+.env
+.env.local
+
+# OS / editor
+.DS_Store
