@@ -25,7 +25,7 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 | 00 | [Foundations & domain types](00-init/00-foundations-and-domain-types.md) | Solution builds; identity, envelope, `SessionEvent` exist | Done | Solution + domain library + tests green (`mise run test`) |
 | 01 | [Append-only event log](00-init/01-event-log.md) | Monotonic offsets; deterministic paged reads | Done | In-memory log behind `EventLog<'event>`; 7 model tests green |
 | 02 | [Process model & projection](00-init/02-session-process-model-and-projection.md) | Conversation projected purely from events | Done | Pure offset-gated fold in Domain; `ProcessModel` in Session Process; determinism + idempotency tests green |
-| 03 | [WebRTC transport & frames](00-init/03-webrtc-transport-and-frames.md) | Multiplexed `SessionFrame`; handshake; presence | Todo | |
+| 03 | [WebRTC transport & frames](00-init/03-webrtc-transport-and-frames.md) | Multiplexed `SessionFrame`; handshake; presence | In progress | Protocol + token-gated handshake + presence done & tested via in-memory loopback; real WebRTC/HTTP Node adapter deferred (needs Node toolchain bootstrap) |
 | 04 | [Web app bootstrap & client shell](00-init/04-web-app-bootstrap-and-client-shell.md) | App connects; connection + offset UI | Todo | |
 | 05 | [Ylmish draft sync](00-init/05-ylmish-collaborative-draft-sync.md) | Two clients converge on a draft | Todo | |
 | 06 | [Send draft & MessageSent](00-init/06-send-draft-and-message-events.md) | Send snapshots body; immutable sent message | Todo | |
@@ -51,7 +51,7 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 
 | Date | Step | Blocker | Owner | Resolution |
 |------|------|---------|-------|------------|
-| — | — | None recorded | — | — |
+| 2026-06-14 | 03 | Real WebRTC data channel + HTTP signalling needs the F#-on-Node toolchain bootstrap (Fable build of the Session Process, node-datachannel bindings, Node entry point). Protocol/handshake/presence are done & tested via loopback. | — | Open — implement as a `FrameChannel` adapter alongside the Node bootstrap (overlaps Step 04). |
 
 ## Decisions log
 
@@ -64,3 +64,4 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 | 2026-06-14 | Wire format = hand-written Thoth.Json codecs (Fable) / Thoth.Json.Net (.NET) selected via `#if FABLE_COMPILER`; private constructors are honoured, no auto-coders. |
 | 2026-06-14 | Event log is the function-shaped `EventLog<'event>` capability (Append/Read) in the Session Process; in-memory impl assigns offsets = append count; reads stream `AsyncSeq<EventPage>` over a locked snapshot. `EventPage`/`AppendResult` live in Domain (shared/Fable-safe). |
 | 2026-06-14 | Conversation projection (`ConversationProjection` + `ConversationProjection.applyEvents`) lives in Domain (shared Process/client); offset-gated fold is idempotent and never reads synced/draft state. `ProcessModel` + synced state live in the Session Process. |
+| 2026-06-14 | Transport is a pure `SessionFrame<'State>` protocol in Domain (state payload opaque, `'State` parameterised). The Session Process side is a `FrameChannel<'State>` capability with token-gated `PeerSession.run` handshake + presence; tested via an in-memory loopback. The real WebRTC data channel + HTTP signalling is a deferred adapter over `FrameChannel`. |

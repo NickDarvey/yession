@@ -11,3 +11,5 @@ module Bootstrap =
     let describe (event: SessionEvent) : string =
         match event with
         | SessionCreated _ -> "session-created"
+        | PeerJoined _ -> "peer-joined"
+        | PeerLeft _ -> "peer-left"

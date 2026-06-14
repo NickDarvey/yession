@@ -9,6 +9,7 @@
     <Compile Include="Events.fs" />
     <Compile Include="EventLog.fs" />
     <Compile Include="Conversation.fs" />
+    <Compile Include="Transport.fs" />
     <Compile Include="Serialization.fs" />
   </ItemGroup>
 

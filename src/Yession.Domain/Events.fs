@@ -17,12 +17,21 @@ type EventEnvelope<'event> =
 /// foundations define only `SessionCreated`.
 ///
 /// Planned additions:
-///   - PeerJoined / PeerLeft   -> Step 03 (control/presence)
 ///   - DraftStarted            -> Step 05/06
 ///   - MessageSent             -> Step 06
 ///   - Agent* events           -> Step 08
 type SessionEvent =
     | SessionCreated of SessionCreated
+    // Control/presence facts appended by the Session Process on connect/disconnect (Step 03).
+    | PeerJoined of PeerJoined
+    | PeerLeft of PeerLeft
 
 and SessionCreated =
     { SessionId : SessionId }
+
+and PeerJoined =
+    { PeerId : PeerId
+      DisplayName : string }
+
+and PeerLeft =
+    { PeerId : PeerId }

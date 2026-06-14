@@ -135,3 +135,76 @@ module ``Process model`` =
             |> ProcessModel.applyEvents [ envelope 1L; envelope 2L ]
         Assert.Equal(Some 2L, model.EventLog.LatestOffset |> Option.map EventOffset.value)
         Assert.Empty model.Conversation.Items
+
+module ``Peer handshake and presence`` =
+
+    let private token = "local-session-token"
+    let private peerId = PeerId.create "peer-ada" |> expect
+
+    let private hello : SessionFrame<unit> =
+        Control (PeerHello { PeerId = peerId; DisplayName = "Ada"; Token = token })
+
+    /// Run a peer session against an in-memory loopback, driving the client side with
+    /// `client` and returning the appended events once the session ends.
+    let private runSession
+        (sendToken: string)
+        (client: FrameChannel<unit> -> Async<unit>)
+        : SessionEvent list =
+        let log = newLog InMemoryEventLog.DefaultPageSize
+        let clientEnd, serverEnd = InMemoryChannel.createPair<unit> ()
+        async {
+            let! server = Async.StartChild (PeerSession.run sessionId sendToken log serverEnd)
+            do! client clientEnd
+            do! server
+        }
+        |> Async.RunSynchronously
+        let pages = readAll log None
+        pages |> List.collect (fun p -> p.Events) |> List.map (fun e -> e.Event)
+
+    [<Fact>]
+    let ``a valid hello is accepted and appends PeerJoined`` () =
+        let mutable response : SessionFrame<unit> option = None
+        let events =
+            runSession token (fun ch ->
+                async {
+                    do! ch.Send hello
+                    let! resp = ch.Receive ()
+                    response <- resp
+                    do! ch.Close ()
+                })
+        match response with
+        | Some (Control (PeerAccepted accepted)) ->
+            Assert.Equal("Ada", accepted.AssignedDisplayName)
+            Assert.Equal(sessionId, accepted.SessionId)
+            Assert.Equal(Some 0L, accepted.LatestOffset |> Option.map EventOffset.value)
+        | other -> Assert.Fail(sprintf "expected PeerAccepted, got %A" other)
+        Assert.Contains(PeerJoined { PeerId = peerId; DisplayName = "Ada" }, events)
+
+    [<Fact>]
+    let ``a bad token is rejected and appends nothing`` () =
+        let mutable response : SessionFrame<unit> option = None
+        let events =
+            runSession "the-wrong-token" (fun ch ->
+                async {
+                    do! ch.Send hello
+                    let! resp = ch.Receive ()
+                    response <- resp
+                })
+        match response with
+        | Some (Control (PeerRejected _)) -> ()
+        | other -> Assert.Fail(sprintf "expected PeerRejected, got %A" other)
+        Assert.Empty events
+
+    [<Fact>]
+    let ``disconnecting after accept appends PeerLeft after PeerJoined`` () =
+        let events =
+            runSession token (fun ch ->
+                async {
+                    do! ch.Send hello
+                    let! _ = ch.Receive () // drain PeerAccepted
+                    do! ch.Close ()        // disconnect
+                })
+        Assert.Equal<SessionEvent list>(
+            [ PeerJoined { PeerId = peerId; DisplayName = "Ada" }
+              PeerLeft { PeerId = peerId } ],
+            events)

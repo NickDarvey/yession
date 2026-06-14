@@ -28,6 +28,8 @@ module ConversationProjection =
     let private itemsFrom (envelope: EventEnvelope<SessionEvent>) : ConversationItem list =
         match envelope.Event with
         | SessionCreated _ -> [] // session lifecycle, not a conversation item
+        | PeerJoined _ -> []     // presence, not a conversation item
+        | PeerLeft _ -> []       // presence, not a conversation item
 
     /// Fold ordered event envelopes into a conversation projection.
     ///

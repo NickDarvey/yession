@@ -118,3 +118,58 @@ module ``Conversation projection`` =
         let proj2, hw2 = ConversationProjection.applyEvents hw1 page proj1
         Assert.Equal(proj1, proj2)
         Assert.Equal(hw1, hw2)
+
+module ``Session frame serialization`` =
+
+    let private sessionId = SessionId.create "session-frames" |> expect
+    let private peerId = PeerId.create "peer-1" |> expect
+    let private draftId = DraftId.create "draft-1" |> expect
+    let private requestId = RequestId.fresh ()
+    let private offset = EventOffset.create 7L |> expect
+
+    let private sampleEnvelope : EventEnvelope<SessionEvent> =
+        { EventId = EventId.fresh ()
+          SessionId = sessionId
+          Offset = offset
+          Actor = HumanPeer peerId
+          Timestamp = DateTimeOffset(2026, 6, 14, 0, 0, 0, TimeSpan.Zero)
+          Event = SessionCreated { SessionCreated.SessionId = sessionId } }
+
+    let private samplePage : EventPage<SessionEvent> =
+        { Events = [ sampleEnvelope ]; LastOffset = Some offset; IsEnd = true }
+
+    /// One frame of every variant, including each command/event-log/control sub-case.
+    let private everyVariant : SessionFrame<string> list =
+        [ State (StateSync "opaque-sync-payload")
+          Command (Request(requestId, StartDraft))
+          Command (Request(requestId, SendDraft draftId))
+          Command (Response(requestId, CommandAccepted))
+          Command (Response(requestId, CommandRejected "nope"))
+          EventLog (EventsAvailable offset)
+          EventLog (ReadEventsAfter(requestId, Some offset, 50))
+          EventLog (ReadEventsAfter(requestId, None, 10))
+          EventLog (EventsPage(requestId, samplePage))
+          Control (PeerHello { PeerId = peerId; DisplayName = "Ada"; Token = "tok" })
+          Control (PeerAccepted { SessionId = sessionId; AssignedDisplayName = "Ada"; LatestOffset = Some offset })
+          Control (PeerRejected "bad token")
+          Control Ping
+          Control Pong ]
+
+    [<Fact>]
+    let ``every session frame variant round-trips unchanged`` () =
+        let codec = Codec.sessionFrame Codec.string
+        for frame in everyVariant do
+            let roundTripped = Codec.toString codec frame |> Codec.fromString codec |> expect
+            Assert.Equal(frame, roundTripped)
+
+    [<Fact>]
+    let ``PeerJoined and PeerLeft events round-trip through the envelope codec`` () =
+        let joined =
+            { sampleEnvelope with Event = PeerJoined { PeerId = peerId; DisplayName = "Ada" } }
+        let left = { sampleEnvelope with Event = PeerLeft { PeerId = peerId } }
+        for env in [ joined; left ] do
+            let roundTripped =
+                Codec.toString Codec.sessionEventEnvelope env
+                |> Codec.fromString Codec.sessionEventEnvelope
+                |> expect
+            Assert.Equal(env, roundTripped)
