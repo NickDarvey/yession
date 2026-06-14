@@ -13,6 +13,13 @@ fable_modules/
 dist/
 build/
 
+# Fable output (compiled JS in out/ dirs and any emitted next to F# sources).
+# Hand-written .mjs (e.g. test runners) are kept.
+app/out/
+tests/**/out/
+app/**/*.js
+src/**/*.js
+
 # Local env / secrets
 .env
 .env.local

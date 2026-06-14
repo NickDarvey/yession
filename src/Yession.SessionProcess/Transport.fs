@@ -1,6 +1,8 @@
 namespace Yession.SessionProcess
 
+#if !FABLE_COMPILER
 open System.Threading.Channels
+#endif
 open Yession.Domain
 
 /// An abstract, bidirectional channel of session frames. The real carrier is a WebRTC
@@ -66,9 +68,13 @@ module PeerSession =
                 do! channel.Close ()
         }
 
+#if !FABLE_COMPILER
 /// An in-memory, fully connected pair of frame channels. Used to exercise the handshake
 /// and presence logic deterministically without WebRTC. The two ends behave like a
 /// loopback transport: frames written to one end are read from the other.
+///
+/// .NET-only (uses System.Threading.Channels): this is test scaffolding. The Fable/Node
+/// runtime uses the real WebRTC frame channel instead.
 module InMemoryChannel =
 
     /// Create a connected (clientEnd, serverEnd) pair.
@@ -104,3 +110,4 @@ module InMemoryChannel =
                     } }
 
         make toServer toClient, make toClient toServer
+#endif

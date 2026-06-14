@@ -12,10 +12,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="FSharp.Control.AsyncSeq" />
-  </ItemGroup>
-
-  <ItemGroup>
     <ProjectReference Include="..\Yession.Domain\Yession.Domain.fsproj" />
   </ItemGroup>
 

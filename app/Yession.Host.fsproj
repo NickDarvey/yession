@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Session Process host library: F# compiled to JavaScript by Fable and run on Node.
+    Fable-only (never executed as .NET); `dotnet build` only type-checks it. The runnable
+    artifacts come from `fable` via the Main / E2E projects and the mise tasks.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Interop.fs" />
+    <Compile Include="WebRtc.fs" />
+    <Compile Include="Signalling.fs" />
+    <Compile Include="Host.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\src\Yession.Domain\Yession.Domain.fsproj" />
+    <ProjectReference Include="..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
+  </ItemGroup>
+
+</Project>

@@ -23,27 +23,38 @@ run = [
 ]
 
 [tasks.build]
-description = "Build everything (Fable compile + client bundle)."
+description = "Build everything: type-check (.NET) and Fable-compile the Session Process host."
 depends = ["restore"]
-run = "dotnet build Yession.slnx"
+run = [
+  "dotnet build Yession.slnx",
+  "dotnet fable app/main/Yession.Host.Main.fsproj -o app/out",
+]
 
 [tasks.start]
-description = "Start the Session Process locally."
-run = "echo 'TODO: wired up in plan step 03/04 (transport + bootstrap).'"
+description = "Start the Session Process locally (http://127.0.0.1:8080)."
+depends = ["build"]
+run = "node app/out/Main.js"
 
 [tasks.dev]
-description = "Run the Session Process and client in watch mode."
-run = "echo 'TODO: wired up once the client and process projects exist (step 04).'"
+description = "Run the Session Process in watch mode (recompiles and restarts on change)."
+depends = ["restore"]
+run = "dotnet fable watch app/main/Yession.Host.Main.fsproj -o app/out --runWatch node app/out/Main.js"
 
 [tasks.test]
-description = "Run the automated test suite (model/protocol + E2E)."
+description = "Run the automated test suite (.NET model/protocol + WebRTC E2E on Node)."
 depends = ["restore"]
-run = "dotnet test Yession.slnx"
+run = [
+  "dotnet test Yession.slnx",
+  "dotnet fable tests/Yession.Host.Tests/Yession.Host.Tests.fsproj -o tests/Yession.Host.Tests/out",
+  "node tests/Yession.Host.Tests/run-e2e.mjs tests/Yession.Host.Tests/out/E2E.js 30000",
+]
 
 [tasks.clean]
 description = "Remove build artifacts and installed dependencies."
 run = [
   "rm -rf node_modules",
+  "rm -rf app/out tests/Yession.Host.Tests/out",
   "find . -type d -name bin -prune -exec rm -rf {} +",
   "find . -type d -name obj -prune -exec rm -rf {} +",
+  "find . -type d -name fable_modules -prune -exec rm -rf {} +",
 ]

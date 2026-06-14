@@ -11,8 +11,8 @@
   <ItemGroup>
     <!-- Ylmish: the Elmish <-> Yjs sync boundary (Fable + FSharp.Data.Adaptive). -->
     <PackageVersion Include="Ylmish" Version="1.0.0-beta0177" />
-    <!-- Async page streaming for the event log (Session Process side). -->
-    <PackageVersion Include="FSharp.Control.AsyncSeq" Version="4.15.0" />
+    <!-- Fable interop core (Node host + browser client). -->
+    <PackageVersion Include="Fable.Core" Version="5.0.0" />
     <!-- JSON wire-format codec for the domain (isomorphic: Fable + .NET). The Fable
          build uses Thoth.Json; the .NET build uses the Thoth.Json.Net backend. -->
     <PackageVersion Include="Thoth.Json" Version="10.5.1" />

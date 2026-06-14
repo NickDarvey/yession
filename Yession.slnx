@@ -1,4 +1,10 @@
 <Solution>
+  <Folder Name="/app/">
+    <Project Path="app/Yession.Host.fsproj" />
+  </Folder>
+  <Folder Name="/app/main/">
+    <Project Path="app/main/Yession.Host.Main.fsproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Yession.Client/Yession.Client.fsproj" />
     <Project Path="src/Yession.Domain/Yession.Domain.fsproj" />
@@ -6,6 +12,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Yession.Domain.Tests/Yession.Domain.Tests.fsproj" />
+    <Project Path="tests/Yession.Host.Tests/Yession.Host.Tests.fsproj" />
     <Project Path="tests/Yession.SessionProcess.Tests/Yession.SessionProcess.Tests.fsproj" />
   </Folder>
 </Solution>

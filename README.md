@@ -53,9 +53,14 @@ mise tasks       # list every available task
 
 Core tasks: `restore`, `build`, `start`, `dev`, `test`, `clean`. Prefer
 `mise run <task>` (or `mise exec -- <cmd>`) over invoking `node`/`dotnet` directly so
-the pinned versions are always used. `restore`, `build`, and `test` are live; `start`
-and `dev` are wired up as their delivery steps land (see the
-[tracker](docs/plans/TODO.md)).
+the pinned versions are always used. `restore`, `build`, `start`, `dev`, and `test` are
+all live. `build` type-checks the F# solution and Fable-compiles the Session Process
+host; `start` runs it (serving http://127.0.0.1:8080); `test` runs the .NET model/protocol
+suites and an event-driven WebRTC end-to-end test on Node.
+
+The Session Process is F# compiled to JavaScript by [Fable](https://fable.io) and run on
+Node (the `app/` host). Its WebRTC transport uses
+[node-datachannel](https://github.com/murat-dogan/node-datachannel).
 
 Dependency versions are pinned centrally: npm packages in [package.json](package.json)
 and NuGet packages (including [Ylmish](Directory.Packages.props), the Elmish↔Yjs sync
@@ -74,6 +79,9 @@ the schemas/interfaces it introduces, and automated verification.
 
 ## Status
 
-Implementation under way. Delivery step 00 (foundations & shared domain types) is
-complete: the F# solution builds and the domain test suite is green. See the
-[tracker](docs/plans/TODO.md) for the current step and any blockers.
+Implementation under way. Phase 1 steps 00–03 are complete: the shared domain, the
+append-only event log, the process model & conversation projection, and the multiplexed
+WebRTC transport (real libdatachannel data channel + HTTP bootstrap/signalling) with a
+token-gated handshake and presence events. The .NET model/protocol suites and an
+event-driven WebRTC E2E are green. See the [tracker](docs/plans/TODO.md) for the current
+step and any blockers.

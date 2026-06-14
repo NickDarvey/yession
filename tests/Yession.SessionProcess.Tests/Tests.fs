@@ -1,7 +1,6 @@
 ﻿module Yession.SessionProcess.Tests
 
 open System
-open FSharp.Control
 open Xunit
 open Yession.Domain
 open Yession.SessionProcess
@@ -14,20 +13,33 @@ let private expect =
 let private sessionId = SessionId.create "session-log" |> expect
 let private fixedClock () = DateTimeOffset(2026, 6, 14, 0, 0, 0, TimeSpan.Zero)
 
-/// A fresh log with a small page size so paging behaviour is exercised by the tests.
-let private newLog pageSize : EventLog<SessionEvent> =
-    InMemoryEventLog.create sessionId fixedClock pageSize
+let private newLog () : EventLog<SessionEvent> =
+    InMemoryEventLog.create sessionId fixedClock
 
 let private sampleEvent () = SessionCreated { SessionCreated.SessionId = sessionId }
 
-let private readAll (log: EventLog<SessionEvent>) (after: EventOffset option) =
-    log.Read after |> AsyncSeq.toListAsync |> Async.RunSynchronously
+/// Page through the whole log from `after`, `limit` events at a time, until the tail.
+/// Returns the list of pages, exercising the caller-driven paging loop.
+let private pagesFrom (log: EventLog<SessionEvent>) (after: EventOffset option) (limit: int) =
+    let rec loop after acc =
+        async {
+            let! page = log.Read after limit
+            let acc = page :: acc
+            if page.IsEnd then return List.rev acc
+            else return! loop page.LastOffset acc
+        }
+    loop after [] |> Async.RunSynchronously
+
+/// All events after `after`, read in a single unbounded page.
+let private allEventsAfter (log: EventLog<SessionEvent>) (after: EventOffset option) =
+    let page = log.Read after Int32.MaxValue |> Async.RunSynchronously
+    page.Events
 
 module ``Append assigns monotonic offsets`` =
 
     [<Fact>]
     let ``sequential appends produce contiguous offsets from zero`` () =
-        let log = newLog InMemoryEventLog.DefaultPageSize
+        let log = newLog ()
         let offsets =
             [ for _ in 1..5 ->
                   log.Append System (sampleEvent ())
@@ -37,7 +49,7 @@ module ``Append assigns monotonic offsets`` =
 
     [<Fact>]
     let ``interleaved concurrent appends yield a gapless, unique offset set`` () =
-        let log = newLog InMemoryEventLog.DefaultPageSize
+        let log = newLog ()
         let count = 200
         let offsets =
             Array.init count (fun _ -> log.Append Agent (sampleEvent ()))
@@ -55,17 +67,17 @@ module ``Read pages deterministically`` =
 
     [<Fact>]
     let ``identical inputs against identical state return identical pages`` () =
-        let log = newLog 3
+        let log = newLog ()
         appendN log 7
-        let first = readAll log None
-        let second = readAll log None
+        let first = pagesFrom log None 3
+        let second = pagesFrom log None 3
         Assert.Equal<EventPage<SessionEvent> list>(first, second)
 
     [<Fact>]
-    let ``pages chunk by page size and only the final page is the end`` () =
-        let log = newLog 3
+    let ``paging by limit chunks events and only the final page is the end`` () =
+        let log = newLog ()
         appendN log 7
-        let pages = readAll log None
+        let pages = pagesFrom log None 3
         Assert.Equal(3, pages.Length)
         Assert.Equal<int list>([ 3; 3; 1 ], pages |> List.map (fun p -> p.Events.Length))
         Assert.Equal<bool list>([ false; false; true ], pages |> List.map (fun p -> p.IsEnd))
@@ -73,33 +85,28 @@ module ``Read pages deterministically`` =
 
     [<Fact>]
     let ``after excludes already-seen offsets`` () =
-        let log = newLog InMemoryEventLog.DefaultPageSize
+        let log = newLog ()
         appendN log 5
-        let pages = readAll log (Some (EventOffset.create 2L |> expect))
         let offsets =
-            pages
-            |> List.collect (fun p -> p.Events)
+            allEventsAfter log (Some (EventOffset.create 2L |> expect))
             |> List.map (fun e -> EventOffset.value e.Offset)
         Assert.Equal<int64 list>([ 3L; 4L ], offsets)
 
     [<Fact>]
-    let ``reading past the tail yields a single empty end page`` () =
-        let log = newLog InMemoryEventLog.DefaultPageSize
+    let ``reading past the tail yields an empty end page`` () =
+        let log = newLog ()
         appendN log 3
-        let pages = readAll log (Some (EventOffset.create 2L |> expect))
-        Assert.Equal(1, pages.Length)
-        let page = List.head pages
+        let page = log.Read (Some (EventOffset.create 2L |> expect)) Int32.MaxValue |> Async.RunSynchronously
         Assert.Empty page.Events
         Assert.True page.IsEnd
         Assert.True page.LastOffset.IsNone
 
     [<Fact>]
-    let ``reading an empty log yields a single empty end page`` () =
-        let log = newLog InMemoryEventLog.DefaultPageSize
-        let pages = readAll log None
-        Assert.Equal(1, pages.Length)
-        Assert.True (List.head pages).IsEnd
-        Assert.Empty (List.head pages).Events
+    let ``reading an empty log yields an empty end page`` () =
+        let log = newLog ()
+        let page = log.Read None Int32.MaxValue |> Async.RunSynchronously
+        Assert.True page.IsEnd
+        Assert.Empty page.Events
 
 module ``Process model`` =
 
@@ -150,7 +157,7 @@ module ``Peer handshake and presence`` =
         (sendToken: string)
         (client: FrameChannel<unit> -> Async<unit>)
         : SessionEvent list =
-        let log = newLog InMemoryEventLog.DefaultPageSize
+        let log = newLog ()
         let clientEnd, serverEnd = InMemoryChannel.createPair<unit> ()
         async {
             let! server = Async.StartChild (PeerSession.run sessionId sendToken log serverEnd)
@@ -158,8 +165,7 @@ module ``Peer handshake and presence`` =
             do! server
         }
         |> Async.RunSynchronously
-        let pages = readAll log None
-        pages |> List.collect (fun p -> p.Events) |> List.map (fun e -> e.Event)
+        allEventsAfter log None |> List.map (fun e -> e.Event)
 
     [<Fact>]
     let ``a valid hello is accepted and appends PeerJoined`` () =
