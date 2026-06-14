@@ -2,18 +2,6 @@ namespace Yession.SessionProcess
 
 open Yession.Domain
 
-/// An abstract, bidirectional channel of session frames. The real carrier is a WebRTC
-/// data channel (with HTTP used only for static bootstrap and temporary signalling); this
-/// abstraction lets the handshake and frame-pump logic be written and tested without the
-/// Node/WebRTC IO. The WebRTC adapter is a thin shell that implements this interface.
-/// See docs/design.md §2.3 and docs/plans/00-init/03-*.
-///
-/// `Receive` returns `None` once the channel is closed by the remote end.
-type FrameChannel<'State> =
-    { Send : SessionFrame<'State> -> Async<unit>
-      Receive : unit -> Async<SessionFrame<'State> option>
-      Close : unit -> Async<unit> }
-
 /// The Session Process side of a single peer connection: the token-gated hello/accept
 /// handshake, presence events, and the receive pump. Frame *handlers* for State/Command/
 /// EventLog frames arrive in later steps; here they are simply drained.

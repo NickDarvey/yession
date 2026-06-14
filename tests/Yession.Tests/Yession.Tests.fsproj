@@ -15,6 +15,7 @@
     <Compile Include="Domain.fs" />
     <Compile Include="SessionProcess.fs" />
     <Compile Include="E2E.fs" />
+    <Compile Include="Client.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 
@@ -26,6 +27,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Yession.Domain\Yession.Domain.fsproj" />
     <ProjectReference Include="..\..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
+    <ProjectReference Include="..\..\src\Yession.Client\Yession.Client.fsproj" />
     <ProjectReference Include="..\..\app\Yession.Host.fsproj" />
   </ItemGroup>
 

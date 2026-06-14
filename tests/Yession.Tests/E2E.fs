@@ -87,6 +87,5 @@ let tests =
                 match host with
                 | Some h -> do! h.Stop ()
                 | None -> ()
-                Interop.cleanup ()
             }
     ]

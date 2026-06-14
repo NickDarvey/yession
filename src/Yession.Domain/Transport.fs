@@ -50,3 +50,15 @@ type SessionFrame<'State> =
     | Command of CommandFrame
     | EventLog of EventLogFrame
     | Control of ControlFrame
+
+/// An abstract, bidirectional channel of session frames shared by both peers (Session
+/// Process and Browser Client). The real carrier is a WebRTC data channel (with HTTP used
+/// only for static bootstrap and temporary signalling); this abstraction lets the
+/// handshake and frame-pump logic be written and tested without the Node/WebRTC IO. The
+/// WebRTC adapter is a thin shell that implements this interface.
+///
+/// `Receive` returns `None` once the channel is closed by the remote end.
+type FrameChannel<'State> =
+    { Send : SessionFrame<'State> -> Async<unit>
+      Receive : unit -> Async<SessionFrame<'State> option>
+      Close : unit -> Async<unit> }

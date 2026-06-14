@@ -16,6 +16,7 @@ let all =
         Domain.tests
         SessionProcess.tests
         E2E.tests
+        Client.tests
     ]
 
 [<EntryPoint>]

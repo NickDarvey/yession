@@ -5,14 +5,22 @@ module Yession.Host.Signalling
 // Session Process's answer; the established data channel becomes a session `FrameChannel`.
 
 open Fable.Core.JsInterop
+open Yession.Domain
 open Yession.SessionProcess
 open Yession.Host.Interop
 open Yession.Host.WebRtc
+open Yession.Client
 
+/// The static bootstrap page is the client shell itself, rendered from the initial model.
+/// The browser hydrates it and connects back over WebRTC; serving the same `View` keeps a
+/// single source of truth for the shell markup. The local display name is assigned
+/// randomly in the browser, so the server-rendered placeholder is left blank.
 let private bootstrapHtml =
-    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Yession</title></head>"
-    + "<body><main id=\"app\">Yession Session Process is running. "
-    + "The browser client shell arrives in delivery step 04.</main></body></html>"
+    let placeholderPeer =
+        match PeerId.create "browser" with
+        | Ok peerId -> { PeerId = peerId; DisplayName = "" }
+        | Error e -> failwith e
+    View.page (ClientModel.init placeholderPeer)
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""

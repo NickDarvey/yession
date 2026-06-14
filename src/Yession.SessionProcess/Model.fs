@@ -7,25 +7,6 @@ open Yession.Domain
 /// the conversation projection, and the agent runtime state. See docs/design.md §1
 /// "Reactive", §2.2 and docs/plans/00-init/02-*.
 
-type DraftStatus =
-    | Active
-    | Sending
-    | Sent
-
-type DraftState =
-    { DraftId : DraftId
-      Author  : PeerId
-      Body    : string
-      Status  : DraftStatus }
-
-type SharedBrief = { Body : string }
-
-/// Collaborative state owned by the model and synced via Ylmish in Step 05. Defined here
-/// as the model shape; the Yjs encoding is out of scope until Step 05.
-type SyncedSessionState =
-    { Drafts      : Map<DraftId, DraftState>
-      SharedBrief : SharedBrief option }
-
 /// The model's view of the event log: how far the projection has consumed.
 type EventLogState = { LatestOffset : EventOffset option }
 
@@ -52,7 +33,7 @@ module ProcessModel =
     /// The model for a freshly created session: nothing synced, nothing consumed, idle.
     let initial (sessionId: SessionId) : ProcessModel =
         { SessionId = sessionId
-          Synced = { Drafts = Map.empty; SharedBrief = None }
+          Synced = SyncedSessionState.empty
           EventLog = { LatestOffset = None }
           Peers = Map.empty
           Conversation = ConversationProjection.empty
