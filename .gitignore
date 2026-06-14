@@ -19,6 +19,7 @@ app/out/
 tests/**/out/
 app/**/*.js
 src/**/*.js
+tests/**/*.js
 
 # Local env / secrets
 .env

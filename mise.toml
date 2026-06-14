@@ -41,19 +41,19 @@ depends = ["restore"]
 run = "dotnet fable watch app/main/Yession.Host.Main.fsproj -o app/out --runWatch node app/out/Main.js"
 
 [tasks.test]
-description = "Run the automated test suite (.NET model/protocol + WebRTC E2E on Node)."
+description = "Run the full test suite (Pyxpecto, compiled by Fable, on Node)."
 depends = ["restore"]
 run = [
-  "dotnet test Yession.slnx",
-  "dotnet fable tests/Yession.Host.Tests/Yession.Host.Tests.fsproj -o tests/Yession.Host.Tests/out",
-  "node tests/Yession.Host.Tests/run-e2e.mjs tests/Yession.Host.Tests/out/E2E.js 30000",
+  "dotnet build Yession.slnx",
+  "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
+  "node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 60000",
 ]
 
 [tasks.clean]
 description = "Remove build artifacts and installed dependencies."
 run = [
   "rm -rf node_modules",
-  "rm -rf app/out tests/Yession.Host.Tests/out",
+  "rm -rf app/out tests/Yession.Tests/out",
   "find . -type d -name bin -prune -exec rm -rf {} +",
   "find . -type d -name obj -prune -exec rm -rf {} +",
   "find . -type d -name fable_modules -prune -exec rm -rf {} +",

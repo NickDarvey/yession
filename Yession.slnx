@@ -11,8 +11,6 @@
     <Project Path="src/Yession.SessionProcess/Yession.SessionProcess.fsproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/Yession.Domain.Tests/Yession.Domain.Tests.fsproj" />
-    <Project Path="tests/Yession.Host.Tests/Yession.Host.Tests.fsproj" />
-    <Project Path="tests/Yession.SessionProcess.Tests/Yession.SessionProcess.Tests.fsproj" />
+    <Project Path="tests/Yession.Tests/Yession.Tests.fsproj" />
   </Folder>
 </Solution>

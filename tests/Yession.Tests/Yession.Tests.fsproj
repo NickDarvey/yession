@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The single test project for the repo. F# compiled by Fable to JS and run on Node;
+    `dotnet build` only type-checks it. Pyxpecto (Expecto-style) is the one test runner.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Pyxpecto pulls Fable.Python transitively (pinned to an older Fable.Core). We only
+         compile to JS, so the version skew is irrelevant. -->
+    <NoWarn>$(NoWarn);NU1608</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Domain.fs" />
+    <Compile Include="SessionProcess.fs" />
+    <Compile Include="E2E.fs" />
+    <Compile Include="Main.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+    <PackageReference Include="Fable.Pyxpecto" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Yession.Domain\Yession.Domain.fsproj" />
+    <ProjectReference Include="..\..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
+    <ProjectReference Include="..\..\app\Yession.Host.fsproj" />
+  </ItemGroup>
+
+</Project>

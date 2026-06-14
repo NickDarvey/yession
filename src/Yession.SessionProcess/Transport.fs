@@ -1,8 +1,5 @@
 namespace Yession.SessionProcess
 
-#if !FABLE_COMPILER
-open System.Threading.Channels
-#endif
 open Yession.Domain
 
 /// An abstract, bidirectional channel of session frames. The real carrier is a WebRTC
@@ -68,46 +65,51 @@ module PeerSession =
                 do! channel.Close ()
         }
 
-#if !FABLE_COMPILER
 /// An in-memory, fully connected pair of frame channels. Used to exercise the handshake
 /// and presence logic deterministically without WebRTC. The two ends behave like a
 /// loopback transport: frames written to one end are read from the other.
 ///
-/// .NET-only (uses System.Threading.Channels): this is test scaffolding. The Fable/Node
-/// runtime uses the real WebRTC frame channel instead.
+/// Runtime-agnostic (works on both .NET and the single-threaded Fable/Node runtime): a
+/// one-directional pipe is a queue plus at most one pending reader continuation, matching
+/// the single-consumer `FrameChannel.Receive` contract.
 module InMemoryChannel =
+
+    /// A one-directional, single-consumer pipe of frames with an end-of-stream signal.
+    type private Pipe<'State>() =
+        let queue = System.Collections.Generic.Queue<SessionFrame<'State>>()
+        let mutable closed = false
+        let mutable pending : (SessionFrame<'State> option -> unit) option = None
+
+        /// Hand the next item to a waiting reader, or buffer it.
+        member _.Write(frame: SessionFrame<'State>) =
+            match pending with
+            | Some cont -> pending <- None; cont (Some frame)
+            | None -> queue.Enqueue frame
+
+        /// Signal end-of-stream; a waiting reader is completed with `None`.
+        member _.Close() =
+            if not closed then
+                closed <- true
+                match pending with
+                | Some cont -> pending <- None; cont None
+                | None -> ()
+
+        /// Read the next frame, `None` once drained and closed.
+        member _.Read() : Async<SessionFrame<'State> option> =
+            Async.FromContinuations(fun (cont, _, _) ->
+                if queue.Count > 0 then cont (Some(queue.Dequeue()))
+                elif closed then cont None
+                else pending <- Some cont)
 
     /// Create a connected (clientEnd, serverEnd) pair.
     let createPair<'State> () : FrameChannel<'State> * FrameChannel<'State> =
-        let toServer = Channel.CreateUnbounded<SessionFrame<'State>>()
-        let toClient = Channel.CreateUnbounded<SessionFrame<'State>>()
+        let clientToServer = Pipe<'State>()
+        let serverToClient = Pipe<'State>()
 
-        let make (outbound: Channel<SessionFrame<'State>>) (inbound: Channel<SessionFrame<'State>>) : FrameChannel<'State> =
-            { Send =
-                fun frame ->
-                    async {
-                        // Sending on a closed channel is a no-op rather than an error.
-                        outbound.Writer.TryWrite frame |> ignore
-                    }
-              Receive =
-                fun () ->
-                    async {
-                        // WaitToReadAsync returns false once the channel is completed and
-                        // drained, so the closed case is signalled without exceptions.
-                        let! canRead = inbound.Reader.WaitToReadAsync().AsTask() |> Async.AwaitTask
-                        if canRead then
-                            match inbound.Reader.TryRead() with
-                            | true, frame -> return Some frame
-                            | false, _ -> return None
-                        else
-                            return None
-                    }
-              Close =
-                fun () ->
-                    async {
-                        // Completing the outbound side signals the remote that we have left.
-                        outbound.Writer.TryComplete() |> ignore
-                    } }
+        let make (outbound: Pipe<'State>) (inbound: Pipe<'State>) : FrameChannel<'State> =
+            { Send = fun frame -> async { outbound.Write frame }
+              Receive = fun () -> inbound.Read()
+              // Closing our outbound pipe signals the remote that we have left.
+              Close = fun () -> async { outbound.Close() } }
 
-        make toServer toClient, make toClient toServer
-#endif
+        make clientToServer serverToClient, make serverToClient clientToServer

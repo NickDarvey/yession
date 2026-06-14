@@ -1,9 +1,10 @@
-// Watchdog runner: executes the Fable-compiled E2E with a hard timeout so a failed
-// WebRTC connection can never hang. Exits non-zero if the E2E fails or times out.
+// Watchdog runner for the Pyxpecto test suite. Runs the Fable-compiled tests on Node with
+// a hard timeout so a failed WebRTC connection (or any hang) can never block CI. Forwards
+// Pyxpecto's exit code (0 = all passed); exits 124 on timeout.
 import { spawn } from 'node:child_process';
 
 const target = process.argv[2];
-const timeoutMs = Number(process.argv[3] ?? 20000);
+const timeoutMs = Number(process.argv[3] ?? 30000);
 
 const child = spawn(process.execPath, [target], { stdio: 'inherit' });
 
