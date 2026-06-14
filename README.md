@@ -53,8 +53,9 @@ mise tasks       # list every available task
 
 Core tasks: `restore`, `build`, `start`, `dev`, `test`, `clean`. Prefer
 `mise run <task>` (or `mise exec -- <cmd>`) over invoking `node`/`dotnet` directly so
-the pinned versions are always used. Tasks beyond `restore` are wired up as their
-delivery steps land (see the [tracker](docs/plans/TODO.md)).
+the pinned versions are always used. `restore`, `build`, and `test` are live; `start`
+and `dev` are wired up as their delivery steps land (see the
+[tracker](docs/plans/TODO.md)).
 
 Dependency versions are pinned centrally: npm packages in [package.json](package.json)
 and NuGet packages (including [Ylmish](Directory.Packages.props), the Elmish↔Yjs sync
@@ -73,5 +74,6 @@ the schemas/interfaces it introduces, and automated verification.
 
 ## Status
 
-Pre-implementation. Planning and design only. See the
+Implementation under way. Delivery step 00 (foundations & shared domain types) is
+complete: the F# solution builds and the domain test suite is green. See the
 [tracker](docs/plans/TODO.md) for the current step and any blockers.

@@ -11,5 +11,14 @@
   <ItemGroup>
     <!-- Ylmish: the Elmish <-> Yjs sync boundary (Fable + FSharp.Data.Adaptive). -->
     <PackageVersion Include="Ylmish" Version="1.0.0-beta0177" />
+    <!-- JSON wire-format codec for the domain (isomorphic: Fable + .NET). The Fable
+         build uses Thoth.Json; the .NET build uses the Thoth.Json.Net backend. -->
+    <PackageVersion Include="Thoth.Json" Version="10.5.1" />
+    <PackageVersion Include="Thoth.Json.Net" Version="12.0.0" />
+    <!-- Test stack (versions taken from the dotnet xunit template for net10.0). -->
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
   </ItemGroup>
 </Project>

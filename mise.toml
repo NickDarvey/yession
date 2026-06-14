@@ -25,7 +25,7 @@ run = [
 [tasks.build]
 description = "Build everything (Fable compile + client bundle)."
 depends = ["restore"]
-run = "echo 'TODO: wired up in plan step 00 (foundations) / 04 (client bootstrap).'"
+run = "dotnet build Yession.slnx"
 
 [tasks.start]
 description = "Start the Session Process locally."
@@ -37,7 +37,8 @@ run = "echo 'TODO: wired up once the client and process projects exist (step 04)
 
 [tasks.test]
 description = "Run the automated test suite (model/protocol + E2E)."
-run = "echo 'TODO: wired up in plan step 09 (Phase 1 E2E acceptance).'"
+depends = ["restore"]
+run = "dotnet test Yession.slnx"
 
 [tasks.clean]
 description = "Remove build artifacts and installed dependencies."

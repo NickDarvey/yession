@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Yession.Client/Yession.Client.fsproj" />
+    <Project Path="src/Yession.Domain/Yession.Domain.fsproj" />
+    <Project Path="src/Yession.SessionProcess/Yession.SessionProcess.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Yession.Domain.Tests/Yession.Domain.Tests.fsproj" />
+  </Folder>
+</Solution>
