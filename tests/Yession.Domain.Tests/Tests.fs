@@ -69,3 +69,52 @@ module ``Envelope serialization`` =
         match Codec.fromString Codec.sessionEventEnvelope "{ not valid json " with
         | Ok _ -> Assert.Fail "expected malformed JSON to fail decoding"
         | Error _ -> ()
+
+module ``Conversation projection`` =
+
+    let private sessionId = SessionId.create "session-proj" |> expect
+
+    /// Build an ordered envelope sequence with offsets 0..n-1, all SessionCreated.
+    let private envelopes (offsets: int64 list) : EventEnvelope<SessionEvent> list =
+        offsets
+        |> List.map (fun n ->
+            { EventId = EventId.fresh ()
+              SessionId = sessionId
+              Offset = EventOffset.create n |> expect
+              Actor = SessionProcess
+              Timestamp = DateTimeOffset(2026, 6, 14, 0, 0, 0, TimeSpan.Zero)
+              Event = SessionCreated { SessionCreated.SessionId = sessionId } })
+
+    [<Fact>]
+    let ``folding a fixed ordered sequence is deterministic`` () =
+        let events = envelopes [ 0L; 1L; 2L; 3L ]
+        let first = ConversationProjection.applyEvents None events ConversationProjection.empty
+        let second = ConversationProjection.applyEvents None events ConversationProjection.empty
+        Assert.Equal(first, second)
+
+    [<Fact>]
+    let ``high-water offset advances to the last applied offset`` () =
+        let events = envelopes [ 0L; 1L; 2L ]
+        let _, highWater = ConversationProjection.applyEvents None events ConversationProjection.empty
+        Assert.Equal(Some 2L, highWater |> Option.map EventOffset.value)
+
+    [<Fact>]
+    let ``re-applying an overlapping page does not advance past the tail or duplicate items`` () =
+        let firstPage = envelopes [ 0L; 1L; 2L ]
+        let proj1, hw1 = ConversationProjection.applyEvents None firstPage ConversationProjection.empty
+        // Overlapping page repeats offsets 1 and 2, then introduces 3.
+        let overlapping = envelopes [ 1L; 2L; 3L ]
+        let proj2, hw2 = ConversationProjection.applyEvents hw1 overlapping proj1
+        Assert.Equal(Some 3L, hw2 |> Option.map EventOffset.value)
+        // No SessionCreated event contributes an item, so the projection stays empty and
+        // never duplicates regardless of overlap.
+        Assert.Equal(proj1, proj2)
+        Assert.Empty proj2.Items
+
+    [<Fact>]
+    let ``re-applying the identical page is a no-op`` () =
+        let page = envelopes [ 0L; 1L; 2L ]
+        let proj1, hw1 = ConversationProjection.applyEvents None page ConversationProjection.empty
+        let proj2, hw2 = ConversationProjection.applyEvents hw1 page proj1
+        Assert.Equal(proj1, proj2)
+        Assert.Equal(hw1, hw2)

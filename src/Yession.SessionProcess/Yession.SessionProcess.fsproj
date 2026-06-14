@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <Compile Include="EventLog.fs" />
+    <Compile Include="Model.fs" />
     <Compile Include="Library.fs" />
   </ItemGroup>
 

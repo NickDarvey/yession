@@ -100,3 +100,38 @@ module ``Read pages deterministically`` =
         Assert.Equal(1, pages.Length)
         Assert.True (List.head pages).IsEnd
         Assert.Empty (List.head pages).Events
+
+module ``Process model`` =
+
+    let private envelope (offset: int64) : EventEnvelope<SessionEvent> =
+        { EventId = EventId.fresh ()
+          SessionId = sessionId
+          Offset = EventOffset.create offset |> expect
+          Actor = SessionProcess
+          Timestamp = fixedClock ()
+          Event = SessionCreated { SessionCreated.SessionId = sessionId } }
+
+    [<Fact>]
+    let ``initial model is empty and idle`` () =
+        let model = ProcessModel.initial sessionId
+        Assert.Equal(sessionId, model.SessionId)
+        Assert.True model.EventLog.LatestOffset.IsNone
+        Assert.Empty model.Conversation.Items
+        Assert.Empty model.Peers
+        Assert.Equal(Idle, model.Agent)
+
+    [<Fact>]
+    let ``applying events advances the event-log read position`` () =
+        let model =
+            ProcessModel.initial sessionId
+            |> ProcessModel.applyEvents [ envelope 0L; envelope 1L; envelope 2L ]
+        Assert.Equal(Some 2L, model.EventLog.LatestOffset |> Option.map EventOffset.value)
+
+    [<Fact>]
+    let ``applying overlapping pages is idempotent on offset`` () =
+        let model =
+            ProcessModel.initial sessionId
+            |> ProcessModel.applyEvents [ envelope 0L; envelope 1L ]
+            |> ProcessModel.applyEvents [ envelope 1L; envelope 2L ]
+        Assert.Equal(Some 2L, model.EventLog.LatestOffset |> Option.map EventOffset.value)
+        Assert.Empty model.Conversation.Items
