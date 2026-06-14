@@ -23,7 +23,7 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 | #  | Step | Outcome | Status | Notes / Blockers |
 |----|------|---------|--------|------------------|
 | 00 | [Foundations & domain types](00-init/00-foundations-and-domain-types.md) | Solution builds; identity, envelope, `SessionEvent` exist | Done | Solution + domain library + tests green (`mise run test`) |
-| 01 | [Append-only event log](00-init/01-event-log.md) | Monotonic offsets; deterministic paged reads | Todo | |
+| 01 | [Append-only event log](00-init/01-event-log.md) | Monotonic offsets; deterministic paged reads | Done | In-memory log behind `EventLog<'event>`; 7 model tests green |
 | 02 | [Process model & projection](00-init/02-session-process-model-and-projection.md) | Conversation projected purely from events | Todo | |
 | 03 | [WebRTC transport & frames](00-init/03-webrtc-transport-and-frames.md) | Multiplexed `SessionFrame`; handshake; presence | Todo | |
 | 04 | [Web app bootstrap & client shell](00-init/04-web-app-bootstrap-and-client-shell.md) | App connects; connection + offset UI | Todo | |
@@ -62,3 +62,4 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 | 2026-06-14 | Principles & system design in [docs/design.md](../design.md); product intent in root README. |
 | 2026-06-14 | Solution uses the `.slnx` format; layout is `src/` (Domain, SessionProcess, Client) + `tests/`. |
 | 2026-06-14 | Wire format = hand-written Thoth.Json codecs (Fable) / Thoth.Json.Net (.NET) selected via `#if FABLE_COMPILER`; private constructors are honoured, no auto-coders. |
+| 2026-06-14 | Event log is the function-shaped `EventLog<'event>` capability (Append/Read) in the Session Process; in-memory impl assigns offsets = append count; reads stream `AsyncSeq<EventPage>` over a locked snapshot. `EventPage`/`AppendResult` live in Domain (shared/Fable-safe). |

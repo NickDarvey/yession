@@ -1,0 +1,102 @@
+﻿module Yession.SessionProcess.Tests
+
+open System
+open FSharp.Control
+open Xunit
+open Yession.Domain
+open Yession.SessionProcess
+
+let private expect =
+    function
+    | Ok v -> v
+    | Error e -> failwith e
+
+let private sessionId = SessionId.create "session-log" |> expect
+let private fixedClock () = DateTimeOffset(2026, 6, 14, 0, 0, 0, TimeSpan.Zero)
+
+/// A fresh log with a small page size so paging behaviour is exercised by the tests.
+let private newLog pageSize : EventLog<SessionEvent> =
+    InMemoryEventLog.create sessionId fixedClock pageSize
+
+let private sampleEvent () = SessionCreated { SessionCreated.SessionId = sessionId }
+
+let private readAll (log: EventLog<SessionEvent>) (after: EventOffset option) =
+    log.Read after |> AsyncSeq.toListAsync |> Async.RunSynchronously
+
+module ``Append assigns monotonic offsets`` =
+
+    [<Fact>]
+    let ``sequential appends produce contiguous offsets from zero`` () =
+        let log = newLog InMemoryEventLog.DefaultPageSize
+        let offsets =
+            [ for _ in 1..5 ->
+                  log.Append System (sampleEvent ())
+                  |> Async.RunSynchronously
+                  |> fun r -> EventOffset.value r.Offset ]
+        Assert.Equal<int64 list>([ 0L; 1L; 2L; 3L; 4L ], offsets)
+
+    [<Fact>]
+    let ``interleaved concurrent appends yield a gapless, unique offset set`` () =
+        let log = newLog InMemoryEventLog.DefaultPageSize
+        let count = 200
+        let offsets =
+            Array.init count (fun _ -> log.Append Agent (sampleEvent ()))
+            |> Async.Parallel
+            |> Async.RunSynchronously
+            |> Array.map (fun r -> EventOffset.value r.Offset)
+            |> Array.sort
+        Assert.Equal<int64[]>([| 0L .. int64 count - 1L |], offsets)
+
+module ``Read pages deterministically`` =
+
+    let private appendN (log: EventLog<SessionEvent>) n =
+        for _ in 1..n do
+            log.Append System (sampleEvent ()) |> Async.RunSynchronously |> ignore
+
+    [<Fact>]
+    let ``identical inputs against identical state return identical pages`` () =
+        let log = newLog 3
+        appendN log 7
+        let first = readAll log None
+        let second = readAll log None
+        Assert.Equal<EventPage<SessionEvent> list>(first, second)
+
+    [<Fact>]
+    let ``pages chunk by page size and only the final page is the end`` () =
+        let log = newLog 3
+        appendN log 7
+        let pages = readAll log None
+        Assert.Equal(3, pages.Length)
+        Assert.Equal<int list>([ 3; 3; 1 ], pages |> List.map (fun p -> p.Events.Length))
+        Assert.Equal<bool list>([ false; false; true ], pages |> List.map (fun p -> p.IsEnd))
+        Assert.Equal(6L, pages |> List.last |> fun p -> EventOffset.value p.LastOffset.Value)
+
+    [<Fact>]
+    let ``after excludes already-seen offsets`` () =
+        let log = newLog InMemoryEventLog.DefaultPageSize
+        appendN log 5
+        let pages = readAll log (Some (EventOffset.create 2L |> expect))
+        let offsets =
+            pages
+            |> List.collect (fun p -> p.Events)
+            |> List.map (fun e -> EventOffset.value e.Offset)
+        Assert.Equal<int64 list>([ 3L; 4L ], offsets)
+
+    [<Fact>]
+    let ``reading past the tail yields a single empty end page`` () =
+        let log = newLog InMemoryEventLog.DefaultPageSize
+        appendN log 3
+        let pages = readAll log (Some (EventOffset.create 2L |> expect))
+        Assert.Equal(1, pages.Length)
+        let page = List.head pages
+        Assert.Empty page.Events
+        Assert.True page.IsEnd
+        Assert.True page.LastOffset.IsNone
+
+    [<Fact>]
+    let ``reading an empty log yields a single empty end page`` () =
+        let log = newLog InMemoryEventLog.DefaultPageSize
+        let pages = readAll log None
+        Assert.Equal(1, pages.Length)
+        Assert.True (List.head pages).IsEnd
+        Assert.Empty (List.head pages).Events
