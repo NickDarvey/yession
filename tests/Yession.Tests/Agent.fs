@@ -266,6 +266,52 @@ let private liveTests =
                     | AgentTurnFailed f -> failwithf "live agent turn failed: %s" f.Reason
                     | other -> failwithf "expected a completed agent message, got %A" other
                 }
+
+            testCaseAsync "the live agent runs a real command through its MCP tools" <|
+                async {
+                    let m =
+                        Manager.create
+                            (Some Agent.run)
+                            (Some (Backends.LocalProcessBackend.create ()))
+                            8135
+                    let! _ =
+                        m.StartSession
+                            { SessionId = SessionId.create "live-tools" |> expect
+                              SessionToken = "live-tools-token" }
+                    let managed = (m.Registered ()) |> List.head
+                    let! a = connectClient (managed.BootstrapUri + "signal") "live-tools-token" "ada" "Ada"
+                    let draftId = DraftId.create "live-tools-draft" |> expect
+                    a.Runner.Dispatch (user (StartDraftMsg draftId))
+                    a.Runner.Dispatch (
+                        user (
+                            editBody
+                                draftId
+                                (Text.insert 0 "Use your execute_command tool to run the executable `node` with arguments `-e` and `console.log(6*7)`, then reply with just the number it printed.")
+                                (a.Runner.Model ())))
+                    a.Connection.SendDraft draftId
+
+                    do! a.Runner.WaitFor (fun model ->
+                            model.Conversation.Items
+                            |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "42"))
+
+                    // The command ran through the scoped capability: its lifecycle is
+                    // in the event log and the environment started lazily for it.
+                    let! page = managed.Host.Log.Read None Int32.MaxValue
+                    let sawCommand =
+                        page.Events
+                        |> List.exists (fun e ->
+                            match e.Event with
+                            | CommandCompleted c -> c.Result = CommandSucceeded 0
+                            | _ -> false)
+                    let sawEnvironment =
+                        page.Events
+                        |> List.exists (fun e -> match e.Event with EnvironmentStarted _ -> true | _ -> false)
+                    Expect.isTrue sawCommand "the command lifecycle is events"
+                    Expect.isTrue sawEnvironment "the environment started lazily for the tool call"
+
+                    do! a.Channel.Close ()
+                    do! m.Stop ()
+                }
         ]
     else
         testList "Agent live SDK" [

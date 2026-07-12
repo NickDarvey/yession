@@ -14,9 +14,9 @@ module SessionEnvironment =
           /// turn id (when the need comes from an agent turn) is recorded on the event.
           Ensure : AgentTurnId option -> string -> Async<EnsureEnvironmentResult>
           /// Run a command in the running environment, streaming output into the event
-          /// log (Step 13). The whole lifecycle is events; per-command output ordering
-          /// is preserved.
-          Execute : CommandRequest -> Async<CommandResult>
+          /// log and to the caller (Step 13). The whole lifecycle is events; per-command
+          /// output ordering is preserved.
+          Execute : CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult>
           /// Stop the environment if it is running (recorded as events).
           Stop : unit -> Async<unit>
           /// The running container's handle, if any.
@@ -26,7 +26,7 @@ module SessionEnvironment =
     /// without any container authority existing in the Process.
     let unavailable : SessionEnvironment =
         { Ensure = fun _ _ -> async { return EnvironmentUnavailable "this session has no environment capability" }
-          Execute = fun _ -> async { return CommandExecutionFailed "this session has no environment capability" }
+          Execute = fun _ _ -> async { return CommandExecutionFailed "this session has no environment capability" }
           Stop = fun () -> async { return () }
           CurrentHandle = fun () -> None }
 
@@ -68,7 +68,7 @@ module SessionEnvironment =
                         return EnvironmentUnavailable reason
             }
 
-        let execute (request: CommandRequest) : Async<CommandResult> =
+        let execute (request: CommandRequest) (onCallerChunk: CommandOutputChunk -> unit) : Async<CommandResult> =
             async {
                 do! append (CommandRequested
                                 { CommandId = request.CommandId
@@ -82,6 +82,7 @@ module SessionEnvironment =
                 | Some handle ->
                     do! append (CommandStarted { CommandId = request.CommandId })
                     let onChunk (chunk: CommandOutputChunk) =
+                        onCallerChunk chunk
                         Async.StartImmediate (
                             append (CommandOutputReceived
                                         { CommandId = chunk.CommandId

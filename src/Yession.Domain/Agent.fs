@@ -30,8 +30,9 @@ type EnsureEnvironmentResult =
 type EnsureEnvironment = string -> Async<EnsureEnvironmentResult>
 
 /// Run a command in the session's environment (Step 13). Typed and pre-scoped — the
-/// agent never sees container handles or engines.
-type ExecuteCommand = CommandRequest -> Async<CommandResult>
+/// agent never sees container handles or engines. Output streams through the chunk
+/// callback (it is also recorded as events by the Session Process).
+type ExecuteCommand = CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult>
 
 /// The typed capabilities an agent turn may use. No raw Docker, no handles, no session
 /// ids — everything is already scoped by the Session Process and, beneath it, the
@@ -45,7 +46,7 @@ module AgentCapabilities =
     /// A turn with no environment authority at all (Phase 1 behaviour).
     let none : AgentCapabilities =
         { EnsureEnvironment = fun _ -> async { return EnvironmentUnavailable "no environment capability" }
-          ExecuteCommand = fun _ -> async { return CommandExecutionFailed "no environment capability" } }
+          ExecuteCommand = fun _ _ -> async { return CommandExecutionFailed "no environment capability" } }
 
 /// Run one agent turn: `onChunk` is invoked with each streamed chunk in order, and the
 /// async resolves with the final result once the stream ends. Implementations must not

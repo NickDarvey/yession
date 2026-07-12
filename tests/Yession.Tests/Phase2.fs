@@ -431,7 +431,7 @@ let private commandTests =
                 let! _ = environment.Ensure None "run a command"
 
                 let! result =
-                    environment.Execute (nodeCommand "cmd-real" "console.log('alpha'); console.error('warn'); console.log('beta')")
+                    environment.Execute (nodeCommand "cmd-real" "console.log('alpha'); console.error('warn'); console.log('beta')") ignore
                 Expect.equal result (CommandSucceeded 0) "the command succeeded"
 
                 let! page = log.Read None Int32.MaxValue
@@ -448,7 +448,7 @@ let private commandTests =
                 Expect.equal (textOf Stderr) "warn\n" "stderr streamed"
 
                 // Exit codes and lifecycle ordering are events too.
-                let! failed = environment.Execute (nodeCommand "cmd-fail" "process.exit(3)")
+                let! failed = environment.Execute (nodeCommand "cmd-fail" "process.exit(3)") ignore
                 Expect.equal failed (CommandFailed 3) "non-zero exit is a value"
                 let! after = log.Read None Int32.MaxValue
                 let kinds =
@@ -472,7 +472,7 @@ let private commandTests =
                         async {
                             let! _ = capabilities.EnsureEnvironment "need to run a command"
                             let! result =
-                                capabilities.ExecuteCommand (nodeCommand "cmd-e2e" "console.log('hello from the env')")
+                                capabilities.ExecuteCommand (nodeCommand "cmd-e2e" "console.log('hello from the env')") ignore
                             match result with
                             | CommandSucceeded 0 ->
                                 onChunk { Text = "ran it" }
@@ -571,7 +571,7 @@ let private acceptanceTests =
                     fun _ capabilities onChunk ->
                         async {
                             let! _ = capabilities.EnsureEnvironment "work to do"
-                            let! _ = capabilities.ExecuteCommand (nodeCommand "cmd-catchup" "console.log('made progress')")
+                            let! _ = capabilities.ExecuteCommand (nodeCommand "cmd-catchup" "console.log('made progress')") ignore
                             onChunk { Text = "done" }
                             return AgentCompleted "done"
                         }
