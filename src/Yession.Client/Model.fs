@@ -43,6 +43,9 @@ type ClientMsg =
     | ConnectedMsg of PeerAcceptedPayload
     | RejectedMsg of reason: string
     | EventsAvailableMsg of latestOffset: EventOffset
+    /// A read-only event page from the Session Process (Step 07): the conversation is
+    /// built by folding pages through the shared projection; offsets track progress.
+    | EventsPageMsg of EventPage<SessionEvent>
     | DisconnectedMsg
     /// Start a draft under an app-minted id (unique keys make concurrent — even
     /// offline — creation safe; see docs/design.md §1 "Ylmish is the sync boundary").
@@ -117,6 +120,21 @@ module ClientModel =
             { model with Connection = Disconnected }
         | EventsAvailableMsg latest ->
             { model with EventConsumer = withLatestKnown (Some latest) model.EventConsumer }
+        | EventsPageMsg page ->
+            // The offset-gated projection fold makes overlapping/duplicate pages
+            // idempotent: events at or below the processed offset are skipped.
+            let conversation, highWater =
+                ConversationProjection.applyEvents
+                    model.EventConsumer.LastProcessedOffset
+                    page.Events
+                    model.Conversation
+            let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
+            { model with
+                Conversation = conversation
+                EventConsumer =
+                    { LastProcessedOffset = highWater
+                      LatestKnownOffset = latestKnown
+                      IsCatchingUp = isBehind highWater latestKnown } }
         | DisconnectedMsg ->
             { model with Connection = Reconnecting }
         | StartDraftMsg draftId ->

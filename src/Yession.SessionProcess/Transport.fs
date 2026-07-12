@@ -70,8 +70,15 @@ module PeerSession =
                             let! result = handlers.OnCommand hello.PeerId command
                             do! channel.Send (Command (Response (requestId, result)))
                             return! pump ()
+                        | Some (EventLog (ReadEventsAfter (requestId, after, limit))) ->
+                            // Clients are read-only consumers: reads are served, and no
+                            // frame exists that appends — peers cannot write the log.
+                            let! page = log.Read after limit
+                            do! channel.Send (EventLog (EventsPage (requestId, page)))
+                            return! pump ()
                         | Some _ ->
-                            // EventLog handlers land in Step 07.
+                            // Anything else a peer sends (e.g. spoofed pages or
+                            // availability hints) is drained without effect.
                             return! pump ()
                         | None -> return ()
                     }

@@ -16,12 +16,14 @@ module Connection =
     /// when the Session Process advertises a new latest offset, and `DisconnectedMsg`
     /// when the remote end closes the channel. `State` frame payloads are handed to
     /// `onState` (the sync boundary applies them to the local Yjs doc); command
-    /// responses are handed to `onResponse` (the driver correlates them to requests).
+    /// responses go to `onResponse` and event pages to `onEventsPage` (the driver
+    /// correlates both to their requests).
     let run
         (hello: PeerHelloPayload)
         (dispatch: ClientMsg -> unit)
         (onState: 'State -> unit)
         (onResponse: RequestId -> SessionCommandResult -> unit)
+        (onEventsPage: RequestId -> EventPage<SessionEvent> -> unit)
         (channel: FrameChannel<'State>)
         : Async<unit> =
         async {
@@ -46,9 +48,12 @@ module Connection =
                     | Some (Command (Response (requestId, result))) ->
                         onResponse requestId result
                         return! pump ()
+                    | Some (EventLog (EventsPage (requestId, page))) ->
+                        onEventsPage requestId page
+                        return! pump ()
                     | Some _ ->
-                        // Remaining frames (inbound command requests, event pages) are
-                        // handled in later steps.
+                        // Anything else (e.g. inbound command requests) is not part of
+                        // the client's protocol surface and is drained.
                         return! pump ()
                     | None ->
                         dispatch DisconnectedMsg

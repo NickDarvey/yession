@@ -46,6 +46,24 @@ module View =
                 (escapeHtml (Ylmish.Text.toString draft.Body)))
         |> String.concat ""
 
+    let private authorLabel =
+        function
+        | HumanPeer p -> PeerId.value p
+        | ActorRef.Agent -> "agent"
+        | ActorRef.SessionProcess -> "session-process"
+        | ActorRef.System -> "system"
+
+    /// The conversation timeline — rendered from the event projection only, never from
+    /// the synced draft state (docs/design.md §1 "Durable facts are events").
+    let private conversation (projection: ConversationProjection) : string =
+        projection.Items
+        |> List.map (fun item ->
+            sprintf "<article class=\"message\" data-message-id=\"%s\" data-message-author=\"%s\">%s</article>"
+                (MessageId.value item.MessageId)
+                (authorLabel item.Author)
+                (escapeHtml item.Body))
+        |> String.concat ""
+
     /// Render the client shell as an HTML fragment (the contents of `#app`).
     let render (model: ClientModel) : string =
         let consumer = model.EventConsumer
@@ -65,7 +83,7 @@ module View =
             "</section>"
             // Drafts are the synced collaborative state (Step 05); send lands in Step 06.
             sprintf "<section class=\"draft\" data-draft-editor>%s</section>" (drafts model.Synced)
-            "<section class=\"timeline\" data-conversation></section>"
+            sprintf "<section class=\"timeline\" data-conversation>%s</section>" (conversation model.Conversation)
             "<section class=\"agent\" data-agent-stream></section>"
         ]
 

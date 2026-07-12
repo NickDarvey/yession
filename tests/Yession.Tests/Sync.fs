@@ -229,6 +229,33 @@ let private sendCommandTests =
                     Body = "ship it"
                     Status = Complete } ]
                 "the sent message is a complete conversation item"
+
+        testCase "duplicate event pages do not duplicate conversation items" <| fun () ->
+            let ada = PeerId.create "ada" |> expect
+            let envelope =
+                { EventId = EventId.fresh ()
+                  SessionId = SessionId.create "send-tests" |> expect
+                  Offset = EventOffset.zero
+                  Actor = HumanPeer ada
+                  Timestamp = DateTimeOffset.UtcNow
+                  Event =
+                    MessageSent
+                        { MessageId = MessageId.create "msg-1" |> expect
+                          DraftId = None
+                          Author = HumanPeer ada
+                          Body = "once only" } }
+            let page : EventPage<SessionEvent> =
+                { Events = [ envelope ]; LastOffset = Some envelope.Offset; IsEnd = true }
+            let model =
+                ClientModel.init (peer "ada" "Ada")
+                |> ClientModel.update (EventsPageMsg page)
+                |> ClientModel.update (EventsPageMsg page)
+            Expect.equal
+                (model.Conversation.Items |> List.map (fun i -> i.Body))
+                [ "once only" ]
+                "re-applying an overlapping page adds nothing"
+            Expect.equal model.EventConsumer.LastProcessedOffset (Some EventOffset.zero) "progress recorded"
+            Expect.isFalse model.EventConsumer.IsCatchingUp "caught up after consuming the page"
     ]
 
 // -----------------------------------------------------------------------------
@@ -247,7 +274,9 @@ let mutable private host : Host.SessionHost option = None
 type private Client =
     { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
       Connection : App.Connection
-      Channel : FrameChannel<string> }
+      Channel : FrameChannel<string>
+      Doc : Y.Doc
+      Hello : PeerHelloPayload }
 
 /// Connect one full client: WebRTC channel, its own Yjs doc, the withYlmish program,
 /// and the connection driver. Resolves once the model reaches `Connected`.
@@ -258,10 +287,24 @@ let private connectClient (id: string) (name: string) : Async<Client> =
         let local = peer id name
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
-        let connection = App.connect doc hello (user >> runner.Dispatch) channel
+        let connection = App.connect App.ConnectOptions.defaults doc hello (user >> runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
-        return { Runner = runner; Connection = connection; Channel = channel }
+        return { Runner = runner; Connection = connection; Channel = channel; Doc = doc; Hello = hello }
+    }
+
+/// Reconnect an existing client on a fresh channel, resuming event consumption from its
+/// model's processed offset (E2E-4's catch-up path). Small pages force multi-page reads.
+let private reconnectClient (client: Client) : Async<Client> =
+    async {
+        let! channel = WebRtc.connect signalUrl
+        let options =
+            { App.ConnectOptions.ResumeAfter = (client.Runner.Model ()).EventConsumer.LastProcessedOffset
+              App.ConnectOptions.PageSize = 2 }
+        let connection = App.connect options client.Doc client.Hello (user >> client.Runner.Dispatch) channel
+        Async.StartImmediate connection.Run
+        do! client.Runner.WaitFor (fun m -> m.Connection = Connected)
+        return { client with Connection = connection; Channel = channel }
     }
 
 let private e2eTests =
@@ -371,6 +414,107 @@ let private e2eTests =
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()
+            }
+
+        testCaseAsync "a disconnected client catches up by offset on reconnect; the timeline renders only projected events (E2E-4/E2E-7)" <|
+            async {
+                let! a = connectClient "ada" "Ada"
+                let! b = connectClient "grace" "Grace"
+
+                // Both consume the log so far (it already holds "ship it" from E2E-2).
+                let caughtUp (m: ClientModel) =
+                    not m.EventConsumer.IsCatchingUp
+                    && (m.Conversation.Items |> List.exists (fun i -> i.Body = "ship it"))
+                do! a.Runner.WaitFor caughtUp
+                do! b.Runner.WaitFor caughtUp
+
+                // Grace disconnects; the session continues without her.
+                do! b.Channel.Close ()
+                do! b.Runner.WaitFor (fun m -> m.Connection = Reconnecting)
+
+                let missedId = DraftId.create "draft-3" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg missedId))
+                a.Runner.Dispatch (user (editBody missedId (Text.insert 0 "while you were away") (a.Runner.Model ())))
+                a.Connection.SendDraft missedId
+                do! a.Runner.WaitFor (fun m ->
+                        m.Conversation.Items |> List.exists (fun i -> i.Body = "while you were away"))
+
+                // Grace reconnects and catches up from her processed offset (E2E-4);
+                // the page size of 2 forces the catch-up across multiple reads.
+                let! b = reconnectClient b
+                do! b.Runner.WaitFor (fun m ->
+                        not m.EventConsumer.IsCatchingUp
+                        && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "ship it"; "while you were away" ])
+
+                // E2E-7: unsent draft edits render in the draft editor, never in the
+                // timeline — the conversation comes from the projection alone.
+                a.Runner.Dispatch (user (editBody missedId (Text.insert 0 "UNSENT ") (a.Runner.Model ())))
+                do! b.Runner.WaitFor (fun m -> bodyOf missedId m = Some "UNSENT while you were away")
+                let html = View.render (b.Runner.Model ())
+                let timeline = html.Substring (html.IndexOf "data-conversation")
+                Expect.isTrue (timeline.Contains "while you were away") "the sent message is in the timeline"
+                Expect.isFalse (timeline.Contains "UNSENT") "unsent draft edits never appear in the timeline"
+                Expect.isTrue (html.Contains "UNSENT while you were away") "the live draft renders in the editor"
+
+                do! a.Channel.Close ()
+                do! b.Channel.Close ()
+            }
+
+        testCaseAsync "clients are read-only event consumers: spoofed frames never append (E2E-6)" <|
+            async {
+                let mallory = PeerId.create "mallory" |> expect
+                let! channel = WebRtc.connect signalUrl
+                do! channel.Send (Control (PeerHello { PeerId = mallory; DisplayName = "Mallory"; Token = token }))
+                let rec awaitAccepted () =
+                    async {
+                        match! channel.Receive () with
+                        | Some (Control (PeerAccepted _)) -> return ()
+                        | Some _ -> return! awaitAccepted ()
+                        | None -> return failwith "channel closed before accept"
+                    }
+                do! awaitAccepted ()
+
+                // Forge a MessageSent inside an EventsPage plus an availability hint.
+                // No frame appends: the Session Process drains both without effect.
+                let forged =
+                    { EventId = EventId.fresh ()
+                      SessionId = sessionId
+                      Offset = EventOffset.create 999L |> expect
+                      Actor = HumanPeer mallory
+                      Timestamp = DateTimeOffset.UtcNow
+                      Event =
+                        MessageSent
+                            { MessageId = MessageId.create "forged" |> expect
+                              DraftId = None
+                              Author = HumanPeer mallory
+                              Body = "forged message" } }
+                do! channel.Send (
+                        EventLog (
+                            EventsPage (
+                                RequestId.fresh (),
+                                { Events = [ forged ]; LastOffset = Some forged.Offset; IsEnd = true })))
+                do! channel.Send (EventLog (EventsAvailable forged.Offset))
+
+                // A real read after the spoofed frames (ordered channel => they were
+                // already processed) shows the log untouched by them.
+                let requestId = RequestId.fresh ()
+                do! channel.Send (EventLog (ReadEventsAfter (requestId, None, 1000)))
+                let rec awaitPage () =
+                    async {
+                        match! channel.Receive () with
+                        | Some (EventLog (EventsPage (r, page))) when r = requestId -> return page
+                        | Some _ -> return! awaitPage ()
+                        | None -> return failwith "channel closed before the events page"
+                    }
+                let! page = awaitPage ()
+                let forgedInLog =
+                    page.Events
+                    |> List.exists (fun e ->
+                        match e.Event with
+                        | MessageSent m -> m.Body = "forged message"
+                        | _ -> false)
+                Expect.isFalse forgedInLog "no spoofed event reaches the log"
+                do! channel.Close ()
             }
 
         testCaseAsync "stop the Session Process host" <|

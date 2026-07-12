@@ -80,6 +80,12 @@ module EventOffset =
     /// The first offset in any event log.
     let zero = EventOffset 0L
     let value (EventOffset n) = n
+    /// The later of two optional offsets (`None` = nothing known/processed yet).
+    let maxOption (a: EventOffset option) (b: EventOffset option) : EventOffset option =
+        match a, b with
+        | Some (EventOffset x), Some (EventOffset y) -> Some (EventOffset (max x y))
+        | Some x, None -> Some x
+        | None, b -> b
 
 /// Who an event or action is attributed to.
 type ActorRef =
