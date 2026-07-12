@@ -49,7 +49,15 @@ let frameChannel (dc: DataChannel) : FrameChannel<string> =
             closed <- true
             deliver None)
 
-    { Send = fun frame -> async { dc.sendMessage (Codec.toString frameCodec frame) |> ignore }
+    { Send =
+        fun frame ->
+            async {
+                // A peer can vanish between frames (e.g. presence broadcasts racing a
+                // disconnect); sending into a closed channel must be a no-op, not a
+                // native throw inside a Node-API callback.
+                if not closed && dc.isOpen () then
+                    dc.sendMessage (Codec.toString frameCodec frame) |> ignore
+            }
       Receive =
         fun () ->
             Async.FromContinuations(fun (cont, _, _) ->

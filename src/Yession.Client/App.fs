@@ -38,17 +38,45 @@ module App =
               Decode = decodeModel
               OnError = Ylmish.Program.OnError.log }
 
-    /// Wire a connected channel to the client's doc and run the connection until it
-    /// closes: locally-originated doc updates (the Ylmish binding's writes) are sent as
-    /// `State` frames, inbound `State` payloads are applied to the doc, and the
-    /// handshake/lifecycle frames drive `dispatch`. The doc listener is registered
+    /// A wired client connection: the frame pump to run, plus the actions that speak
+    /// over it.
+    type Connection =
+        { /// Runs the handshake and frame pump until the channel closes.
+          Run : Async<unit>
+          /// Send a draft: the status moves to `Sending` locally and a `SendDraft`
+          /// command goes to the Session Process; the response comes back as
+          /// `DraftSendAcceptedMsg` / `DraftSendRejectedMsg`.
+          SendDraft : DraftId -> unit }
+
+    /// Wire a connected channel to the client's doc: locally-originated doc updates (the
+    /// Ylmish binding's writes) are sent as `State` frames, inbound `State` payloads are
+    /// applied to the doc, command responses are correlated back to their drafts, and
+    /// the handshake/lifecycle frames drive `dispatch`. The doc listener is registered
     /// before the pump starts so no local update can be missed.
     let connect
         (doc: Y.Doc)
         (hello: PeerHelloPayload)
         (dispatch: ClientMsg -> unit)
         (channel: FrameChannel<string>)
-        : Async<unit> =
+        : Connection =
         DocSync.onLocalUpdate doc (fun payload ->
             Async.StartImmediate (channel.Send (State (StateSync payload))))
-        Connection.run hello dispatch (DocSync.applyRemote doc) channel
+
+        // In-flight SendDraft requests, correlated by request id.
+        let mutable pending : Map<RequestId, DraftId> = Map.empty
+        let onResponse (requestId: RequestId) (result: SessionCommandResult) =
+            match Map.tryFind requestId pending with
+            | Some draftId ->
+                pending <- Map.remove requestId pending
+                match result with
+                | CommandAccepted -> dispatch (DraftSendAcceptedMsg draftId)
+                | CommandRejected reason -> dispatch (DraftSendRejectedMsg (draftId, reason))
+            | None -> ()
+
+        { Run = Connection.run hello dispatch (DocSync.applyRemote doc) onResponse channel
+          SendDraft =
+            fun draftId ->
+                dispatch (SendDraftMsg draftId)
+                let requestId = RequestId.fresh ()
+                pending <- Map.add requestId draftId pending
+                Async.StartImmediate (channel.Send (Command (Request (requestId, SendDraft draftId)))) }

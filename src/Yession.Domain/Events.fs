@@ -17,7 +17,6 @@ type EventEnvelope<'event> =
 /// foundations define only `SessionCreated`.
 ///
 /// Planned additions:
-///   - MessageSent             -> Step 06
 ///   - Agent* events           -> Step 08
 type SessionEvent =
     | SessionCreated of SessionCreated
@@ -27,6 +26,9 @@ type SessionEvent =
     // The durable fact that a draft began (Step 05). The draft's *content* lives in the
     // synced collaborative state (Yjs), never in the event log.
     | DraftStarted of DraftStarted
+    // A draft sent: the body snapshotted at send time by the Session Process (Step 06).
+    // Immutable in Phase 1 — later draft edits never touch it.
+    | MessageSent of MessageSent
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -41,3 +43,10 @@ and PeerLeft =
 and DraftStarted =
     { DraftId : DraftId
       StartedBy : PeerId }
+
+and MessageSent =
+    { MessageId : MessageId
+      /// The draft the message came from; `None` once direct (draftless) sends exist.
+      DraftId : DraftId option
+      Author : ActorRef
+      Body : string }

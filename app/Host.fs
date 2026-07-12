@@ -29,7 +29,6 @@ type SessionHost =
 /// between peers through the doc. Resolves once the server is listening.
 let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
     async {
-        let log = InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
         let doc = Y.Doc.Create ()
 
         // Connected peers' channels, for state relay; keyed per connection.
@@ -41,6 +40,25 @@ let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost
 
         let broadcastExcept (except: int) (payload: string) =
             connections |> Map.iter (fun id channel -> if id <> except then sendState channel payload)
+
+        // Every durable fact is advertised: appends go through a log wrapper that
+        // broadcasts the new latest offset to all connected peers (clients page the
+        // actual events in Step 07).
+        let broadcastEventsAvailable (offset: EventOffset) =
+            connections
+            |> Map.iter (fun _ channel ->
+                Async.StartImmediate (channel.Send (EventLog (EventsAvailable offset))))
+
+        let log =
+            let inner = InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+            { inner with
+                Append =
+                    fun actor event ->
+                        async {
+                            let! appended = inner.Append actor event
+                            broadcastEventsAvailable appended.Offset
+                            return appended
+                        } }
 
         // Process-originated doc writes (none yet — the agent runtime arrives in Step 08)
         // broadcast to every peer; peer payloads are relayed by the receiving connection.
@@ -84,6 +102,14 @@ let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost
                     fun payload ->
                         DocSync.applyRemote doc payload
                         broadcastExcept connectionId payload
+                  OnCommand =
+                    SessionCommands.handle
+                        (fun () -> SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A"))
+                        log
+                        (fun () ->
+                            match MessageId.create (string (Guid.NewGuid ())) with
+                            | Ok id -> id
+                            | Error e -> failwithf "message id invariant violated: %s" e)
                   OnAccepted =
                     fun _ ch ->
                         async {

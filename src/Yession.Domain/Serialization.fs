@@ -117,6 +117,21 @@ module Codec =
                 { DraftStarted.DraftId = get.Required.Field "draftId" draftId.Decode
                   DraftStarted.StartedBy = get.Required.Field "startedBy" peerId.Decode }) }
 
+    let private messageSent : Codec<MessageSent> =
+        { Encode =
+            fun (p: MessageSent) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "draftId", Encode.option draftId.Encode p.DraftId
+                      "author", actor.Encode p.Author
+                      "body", Encode.string p.Body ]
+          Decode =
+            Decode.object (fun get ->
+                { MessageSent.MessageId = get.Required.Field "messageId" messageId.Decode
+                  MessageSent.DraftId = get.Required.Field "draftId" (Decode.option draftId.Decode)
+                  MessageSent.Author = get.Required.Field "author" actor.Decode
+                  MessageSent.Body = get.Required.Field "body" Decode.string }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -128,7 +143,9 @@ module Codec =
                 | PeerLeft p ->
                     Encode.object [ "type", Encode.string "peerLeft"; "payload", peerLeft.Encode p ]
                 | DraftStarted p ->
-                    Encode.object [ "type", Encode.string "draftStarted"; "payload", draftStarted.Encode p ])
+                    Encode.object [ "type", Encode.string "draftStarted"; "payload", draftStarted.Encode p ]
+                | MessageSent p ->
+                    Encode.object [ "type", Encode.string "messageSent"; "payload", messageSent.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -137,6 +154,7 @@ module Codec =
                 | "peerJoined" -> Decode.field "payload" peerJoined.Decode |> Decode.map PeerJoined
                 | "peerLeft" -> Decode.field "payload" peerLeft.Decode |> Decode.map PeerLeft
                 | "draftStarted" -> Decode.field "payload" draftStarted.Decode |> Decode.map DraftStarted
+                | "messageSent" -> Decode.field "payload" messageSent.Decode |> Decode.map MessageSent
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

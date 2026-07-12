@@ -14,3 +14,4 @@ module Bootstrap =
         | PeerJoined _ -> "peer-joined"
         | PeerLeft _ -> "peer-left"
         | DraftStarted _ -> "draft-started"
+        | MessageSent _ -> "message-sent"

@@ -31,6 +31,11 @@ module ConversationProjection =
         | PeerJoined _ -> []     // presence, not a conversation item
         | PeerLeft _ -> []       // presence, not a conversation item
         | DraftStarted _ -> []   // drafts enter the conversation only when sent (Step 06)
+        | MessageSent m ->
+            [ { MessageId = m.MessageId
+                Author = m.Author
+                Body = m.Body
+                Status = Complete } ]
 
     /// Fold ordered event envelopes into a conversation projection.
     ///

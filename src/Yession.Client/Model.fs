@@ -49,6 +49,13 @@ type ClientMsg =
     | StartDraftMsg of DraftId
     /// Replace a draft's body with an edited `Text` (carrying the edit intent).
     | EditDraftBodyMsg of DraftId * Ylmish.Text
+    /// The local user asked to send the draft (Step 06): status moves to `Sending`
+    /// while the `SendDraft` command is in flight (the driver issues the command).
+    | SendDraftMsg of DraftId
+    /// The Session Process accepted the send: the draft is `Sent`.
+    | DraftSendAcceptedMsg of DraftId
+    /// The Session Process rejected the send: the draft returns to `Active`.
+    | DraftSendRejectedMsg of DraftId * reason: string
 
 module ClientModel =
 
@@ -78,6 +85,23 @@ module ClientModel =
         { consumer with
             LatestKnownOffset = latest
             IsCatchingUp = isBehind consumer.LastProcessedOffset latest }
+
+    /// Apply a status transition to a draft, if it exists and `transition` allows it.
+    let private withDraftStatus
+        (draftId: DraftId)
+        (transition: DraftState -> DraftStatus option)
+        (model: ClientModel)
+        : ClientModel =
+        match Map.tryFind draftId model.Synced.Drafts with
+        | Some draft ->
+            match transition draft with
+            | Some status ->
+                { model with
+                    Synced =
+                        { model.Synced with
+                            Drafts = Map.add draftId { draft with Status = status } model.Synced.Drafts } }
+            | None -> model
+        | None -> model
 
     /// Fold a connection-lifecycle message into the model.
     let update (msg: ClientMsg) (model: ClientModel) : ClientModel =
@@ -115,3 +139,9 @@ module ClientModel =
                         { model.Synced with
                             Drafts = Map.add draftId { draft with Body = body } model.Synced.Drafts } }
             | None -> model
+        | SendDraftMsg draftId ->
+            withDraftStatus draftId (fun draft -> if draft.Status = Active then Some Sending else None) model
+        | DraftSendAcceptedMsg draftId ->
+            withDraftStatus draftId (fun _ -> Some Sent) model
+        | DraftSendRejectedMsg (draftId, _) ->
+            withDraftStatus draftId (fun draft -> if draft.Status = Sending then Some Active else None) model

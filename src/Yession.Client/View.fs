@@ -28,14 +28,21 @@ module View =
     let private escapeHtml (s: string) =
         s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
 
+    let private draftStatusLabel =
+        function
+        | Active -> "active"
+        | Sending -> "sending"
+        | Sent -> "sent"
+
     /// The synced drafts, rendered in stable (id) order so the markup is deterministic.
     let private drafts (synced: SyncedSessionState) : string =
         synced.Drafts
         |> Map.toList
         |> List.map (fun (draftId, draft) ->
-            sprintf "<article class=\"draft-item\" data-draft-id=\"%s\" data-draft-author=\"%s\">%s</article>"
+            sprintf "<article class=\"draft-item\" data-draft-id=\"%s\" data-draft-author=\"%s\" data-draft-status=\"%s\">%s</article>"
                 (DraftId.value draftId)
                 (PeerId.value draft.Author)
+                (draftStatusLabel draft.Status)
                 (escapeHtml (Ylmish.Text.toString draft.Body)))
         |> String.concat ""
 
