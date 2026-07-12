@@ -46,7 +46,7 @@ depends = ["restore"]
 run = [
   "dotnet build Yession.slnx",
   "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
-  "node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 60000",
+  "node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 120000",
 ]
 
 [tasks.clean]

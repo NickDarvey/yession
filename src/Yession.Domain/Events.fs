@@ -15,9 +15,6 @@ type EventEnvelope<'event> =
 
 /// The single, append-only session event type. New cases are added per delivery step;
 /// foundations define only `SessionCreated`.
-///
-/// Planned additions:
-///   - Agent* events           -> Step 08
 type SessionEvent =
     | SessionCreated of SessionCreated
     // Control/presence facts appended by the Session Process on connect/disconnect (Step 03).
@@ -29,6 +26,15 @@ type SessionEvent =
     // A draft sent: the body snapshotted at send time by the Session Process (Step 06).
     // Immutable in Phase 1 — later draft edits never touch it.
     | MessageSent of MessageSent
+    // Agent turn lifecycle (Step 08): the agent's response is represented entirely as
+    // events — streamed deltas project as a Streaming conversation item; completion or
+    // failure flips it. Appended only by the Session Process.
+    | AgentTurnStarted of AgentTurnStarted
+    | AgentContextBuilt of AgentContextBuilt
+    | AgentMessageStarted of AgentMessageStarted
+    | AgentMessageDelta of AgentMessageDelta
+    | AgentMessageCompleted of AgentMessageCompleted
+    | AgentTurnFailed of AgentTurnFailed
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -50,3 +56,29 @@ and MessageSent =
       DraftId : DraftId option
       Author : ActorRef
       Body : string }
+
+and AgentTurnStarted =
+    { AgentTurnId : AgentTurnId
+      TriggeredByMessageId : MessageId }
+
+and AgentContextBuilt =
+    { AgentTurnId : AgentTurnId
+      MessageCount : int }
+
+and AgentMessageStarted =
+    { AgentTurnId : AgentTurnId
+      MessageId : MessageId }
+
+and AgentMessageDelta =
+    { AgentTurnId : AgentTurnId
+      MessageId : MessageId
+      Delta : string }
+
+and AgentMessageCompleted =
+    { AgentTurnId : AgentTurnId
+      MessageId : MessageId
+      Body : string }
+
+and AgentTurnFailed =
+    { AgentTurnId : AgentTurnId
+      Reason : string }

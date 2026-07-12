@@ -8,6 +8,7 @@
     <Compile Include="EventLog.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="Commands.fs" />
+    <Compile Include="Agent.fs" />
     <Compile Include="Transport.fs" />
     <Compile Include="Library.fs" />
   </ItemGroup>

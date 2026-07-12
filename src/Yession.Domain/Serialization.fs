@@ -132,6 +132,76 @@ module Codec =
                   MessageSent.Author = get.Required.Field "author" actor.Decode
                   MessageSent.Body = get.Required.Field "body" Decode.string }) }
 
+    let private agentTurnStarted : Codec<AgentTurnStarted> =
+        { Encode =
+            fun (p: AgentTurnStarted) ->
+                Encode.object
+                    [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
+                      "triggeredByMessageId", messageId.Encode p.TriggeredByMessageId ]
+          Decode =
+            Decode.object (fun get ->
+                { AgentTurnStarted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
+                  AgentTurnStarted.TriggeredByMessageId = get.Required.Field "triggeredByMessageId" messageId.Decode }) }
+
+    let private agentContextBuilt : Codec<AgentContextBuilt> =
+        { Encode =
+            fun (p: AgentContextBuilt) ->
+                Encode.object
+                    [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
+                      "messageCount", Encode.int p.MessageCount ]
+          Decode =
+            Decode.object (fun get ->
+                { AgentContextBuilt.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
+                  AgentContextBuilt.MessageCount = get.Required.Field "messageCount" Decode.int }) }
+
+    let private agentMessageStarted : Codec<AgentMessageStarted> =
+        { Encode =
+            fun (p: AgentMessageStarted) ->
+                Encode.object
+                    [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
+                      "messageId", messageId.Encode p.MessageId ]
+          Decode =
+            Decode.object (fun get ->
+                { AgentMessageStarted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
+                  AgentMessageStarted.MessageId = get.Required.Field "messageId" messageId.Decode }) }
+
+    let private agentMessageDelta : Codec<AgentMessageDelta> =
+        { Encode =
+            fun (p: AgentMessageDelta) ->
+                Encode.object
+                    [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
+                      "messageId", messageId.Encode p.MessageId
+                      "delta", Encode.string p.Delta ]
+          Decode =
+            Decode.object (fun get ->
+                { AgentMessageDelta.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
+                  AgentMessageDelta.MessageId = get.Required.Field "messageId" messageId.Decode
+                  AgentMessageDelta.Delta = get.Required.Field "delta" Decode.string }) }
+
+    let private agentMessageCompleted : Codec<AgentMessageCompleted> =
+        { Encode =
+            fun (p: AgentMessageCompleted) ->
+                Encode.object
+                    [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
+                      "messageId", messageId.Encode p.MessageId
+                      "body", Encode.string p.Body ]
+          Decode =
+            Decode.object (fun get ->
+                { AgentMessageCompleted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
+                  AgentMessageCompleted.MessageId = get.Required.Field "messageId" messageId.Decode
+                  AgentMessageCompleted.Body = get.Required.Field "body" Decode.string }) }
+
+    let private agentTurnFailed : Codec<AgentTurnFailed> =
+        { Encode =
+            fun (p: AgentTurnFailed) ->
+                Encode.object
+                    [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
+                      "reason", Encode.string p.Reason ]
+          Decode =
+            Decode.object (fun get ->
+                { AgentTurnFailed.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
+                  AgentTurnFailed.Reason = get.Required.Field "reason" Decode.string }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -145,7 +215,19 @@ module Codec =
                 | DraftStarted p ->
                     Encode.object [ "type", Encode.string "draftStarted"; "payload", draftStarted.Encode p ]
                 | MessageSent p ->
-                    Encode.object [ "type", Encode.string "messageSent"; "payload", messageSent.Encode p ])
+                    Encode.object [ "type", Encode.string "messageSent"; "payload", messageSent.Encode p ]
+                | AgentTurnStarted p ->
+                    Encode.object [ "type", Encode.string "agentTurnStarted"; "payload", agentTurnStarted.Encode p ]
+                | AgentContextBuilt p ->
+                    Encode.object [ "type", Encode.string "agentContextBuilt"; "payload", agentContextBuilt.Encode p ]
+                | AgentMessageStarted p ->
+                    Encode.object [ "type", Encode.string "agentMessageStarted"; "payload", agentMessageStarted.Encode p ]
+                | AgentMessageDelta p ->
+                    Encode.object [ "type", Encode.string "agentMessageDelta"; "payload", agentMessageDelta.Encode p ]
+                | AgentMessageCompleted p ->
+                    Encode.object [ "type", Encode.string "agentMessageCompleted"; "payload", agentMessageCompleted.Encode p ]
+                | AgentTurnFailed p ->
+                    Encode.object [ "type", Encode.string "agentTurnFailed"; "payload", agentTurnFailed.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -155,6 +237,12 @@ module Codec =
                 | "peerLeft" -> Decode.field "payload" peerLeft.Decode |> Decode.map PeerLeft
                 | "draftStarted" -> Decode.field "payload" draftStarted.Decode |> Decode.map DraftStarted
                 | "messageSent" -> Decode.field "payload" messageSent.Decode |> Decode.map MessageSent
+                | "agentTurnStarted" -> Decode.field "payload" agentTurnStarted.Decode |> Decode.map AgentTurnStarted
+                | "agentContextBuilt" -> Decode.field "payload" agentContextBuilt.Decode |> Decode.map AgentContextBuilt
+                | "agentMessageStarted" -> Decode.field "payload" agentMessageStarted.Decode |> Decode.map AgentMessageStarted
+                | "agentMessageDelta" -> Decode.field "payload" agentMessageDelta.Decode |> Decode.map AgentMessageDelta
+                | "agentMessageCompleted" -> Decode.field "payload" agentMessageCompleted.Decode |> Decode.map AgentMessageCompleted
+                | "agentTurnFailed" -> Decode.field "payload" agentTurnFailed.Decode |> Decode.map AgentTurnFailed
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

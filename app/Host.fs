@@ -26,8 +26,10 @@ type SessionHost =
 /// Start a Session Process: create the event log and the session's Yjs document, start
 /// HTTP bootstrap + signalling, and run a peer session for every connection. Each
 /// accepted peer receives the full doc state, then incremental updates are relayed
-/// between peers through the doc. Resolves once the server is listening.
-let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
+/// between peers through the doc. When `runAgent` is given, every human `MessageSent`
+/// triggers exactly one agent turn whose lifecycle is appended as events (Step 08).
+/// Resolves once the server is listening.
+let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
     async {
         let doc = Y.Doc.Create ()
 
@@ -49,6 +51,9 @@ let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost
             |> Map.iter (fun _ channel ->
                 Async.StartImmediate (channel.Send (EventLog (EventsAvailable offset))))
 
+        // Filled in below (the trigger needs the wrapped log, which needs the trigger).
+        let mutable onAppended : SessionEvent -> unit = ignore
+
         let log =
             let inner = InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
             { inner with
@@ -57,10 +62,38 @@ let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost
                         async {
                             let! appended = inner.Append actor event
                             broadcastEventsAvailable appended.Offset
+                            onAppended event
                             return appended
                         } }
 
-        // Process-originated doc writes (none yet — the agent runtime arrives in Step 08)
+        // A human MessageSent triggers exactly one agent turn (Step 08). The agent's
+        // context is projected from the event log alone; its own events carry
+        // ActorRef.Agent authorship, so they can never re-trigger a turn.
+        match runAgent with
+        | Some agent ->
+            onAppended <-
+                fun event ->
+                    match event with
+                    | MessageSent message when (match message.Author with HumanPeer _ -> true | _ -> false) ->
+                        Async.StartImmediate (
+                            async {
+                                let! page = log.Read None Int32.MaxValue
+                                let projection, _ =
+                                    ConversationProjection.applyEvents None page.Events ConversationProjection.empty
+                                let mintTurnId () =
+                                    match AgentTurnId.create (string (Guid.NewGuid ())) with
+                                    | Ok id -> id
+                                    | Error e -> failwithf "agent turn id invariant violated: %s" e
+                                let mintMessageId () =
+                                    match MessageId.create (string (Guid.NewGuid ())) with
+                                    | Ok id -> id
+                                    | Error e -> failwithf "message id invariant violated: %s" e
+                                do! AgentTurn.run log agent mintTurnId mintMessageId sessionId projection.Items message
+                            })
+                    | _ -> ()
+        | None -> ()
+
+        // Process-originated doc writes (none yet — the Process is doc-read-only)
         // broadcast to every peer; peer payloads are relayed by the receiving connection.
         DocSync.onLocalUpdate doc (fun payload ->
             connections |> Map.iter (fun _ channel -> sendState channel payload))
@@ -152,3 +185,7 @@ let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost
               WaitForNextSessionEnd = waitForNextSessionEnd
               Stop = fun () -> async { server.close ignore } }
     }
+
+/// `startWith` without an agent — transport/draft/send scenarios that predate Step 08.
+let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
+    startWith None sessionId token port

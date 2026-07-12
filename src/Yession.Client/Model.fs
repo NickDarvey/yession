@@ -128,9 +128,24 @@ module ClientModel =
                     model.EventConsumer.LastProcessedOffset
                     page.Events
                     model.Conversation
+            let agent =
+                let appliedThrough = model.EventConsumer.LastProcessedOffset |> Option.map EventOffset.value
+                page.Events
+                |> List.filter (fun e ->
+                    match appliedThrough with
+                    | Some n -> EventOffset.value e.Offset > n
+                    | None -> true)
+                |> List.fold
+                    (fun (agent: AgentViewState) e ->
+                        match e.Event with
+                        | AgentTurnStarted a -> { agent with ActiveTurn = Some a.AgentTurnId }
+                        | AgentMessageCompleted _ | AgentTurnFailed _ -> { agent with ActiveTurn = None }
+                        | _ -> agent)
+                    model.Agent
             let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
             { model with
                 Conversation = conversation
+                Agent = agent
                 EventConsumer =
                     { LastProcessedOffset = highWater
                       LatestKnownOffset = latestKnown

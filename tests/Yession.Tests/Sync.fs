@@ -14,7 +14,6 @@ module Yession.Tests.Sync
 // Elmish `setState` — no sleeps or polling.
 
 open System
-open Elmish
 open Fable.Pyxpecto
 open Yjs
 open Ylmish
@@ -22,53 +21,9 @@ open Yession.Domain
 open Yession.SessionProcess
 open Yession.Client
 open Yession.Host
-
-let private expect =
-    function
-    | Ok v -> v
-    | Error e -> failwith e
-
-let private user msg = Ylmish.Program.Message.User msg
-
-/// Run an Elmish program headlessly, exposing the latest model, dispatch, and an
-/// event-driven `WaitFor` that resolves the first time the model satisfies a predicate.
-module private Harness =
-
-    type Runner<'model, 'msg> =
-        { Model : unit -> 'model
-          Dispatch : 'msg -> unit
-          WaitFor : ('model -> bool) -> Async<unit> }
-
-    let run (program: Program<unit, 'model, 'msg, unit>) : Runner<'model, 'msg> =
-        let mutable model = Unchecked.defaultof<'model>
-        let mutable dispatch : 'msg -> unit = ignore
-        let mutable waiters : (('model -> bool) * (unit -> unit)) list = []
-        let setState m d =
-            model <- m
-            dispatch <- d
-            let fire, keep = waiters |> List.partition (fun (predicate, _) -> predicate m)
-            waiters <- keep
-            fire |> List.iter (fun (_, resume) -> resume ())
-        Program.withSetState setState program |> Program.run
-        { Model = fun () -> model
-          Dispatch = fun msg -> dispatch msg
-          WaitFor =
-            fun predicate ->
-                Async.FromContinuations (fun (cont, _, _) ->
-                    if predicate model then cont ()
-                    else waiters <- (predicate, fun () -> cont ()) :: waiters) }
-
-let private peer (id: string) (name: string) : PeerState =
-    { PeerId = PeerId.create id |> expect; DisplayName = name }
+open Yession.Tests.Support
 
 let private draftId1 = DraftId.create "draft-1" |> expect
-
-let private bodyOf (draftId: DraftId) (m: ClientModel) : string option =
-    m.Synced.Drafts |> Map.tryFind draftId |> Option.map (fun d -> Text.toString d.Body)
-
-let private editBody (draftId: DraftId) (edit: Text -> Text) (m: ClientModel) : ClientMsg =
-    let current = (Map.find draftId m.Synced.Drafts).Body
-    EditDraftBodyMsg (draftId, edit current)
 
 let private syncBoth (a: Y.Doc) (b: Y.Doc) =
     Y.applyUpdate (b, Y.encodeStateAsUpdate a)
@@ -106,7 +61,8 @@ let private codecTests =
                     [ { MessageId = messageId
                         Author = ActorRef.System
                         Body = "secret history"
-                        Status = Complete } ] }
+                        Status = Complete } ]
+                  ActiveAgentMessages = Map.empty }
             let initial = { ClientModel.init (peer "ada" "Ada") with Conversation = conversation }
             let p = Harness.run (App.makeProgram doc initial)
             p.Dispatch (user (StartDraftMsg draftId1))
@@ -271,41 +227,8 @@ let private signalUrl = sprintf "http://127.0.0.1:%d/signal" port
 
 let mutable private host : Host.SessionHost option = None
 
-type private Client =
-    { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
-      Connection : App.Connection
-      Channel : FrameChannel<string>
-      Doc : Y.Doc
-      Hello : PeerHelloPayload }
-
-/// Connect one full client: WebRTC channel, its own Yjs doc, the withYlmish program,
-/// and the connection driver. Resolves once the model reaches `Connected`.
-let private connectClient (id: string) (name: string) : Async<Client> =
-    async {
-        let! channel = WebRtc.connect signalUrl
-        let doc = Y.Doc.Create ()
-        let local = peer id name
-        let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
-        let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
-        let connection = App.connect App.ConnectOptions.defaults doc hello (user >> runner.Dispatch) channel
-        Async.StartImmediate connection.Run
-        do! runner.WaitFor (fun m -> m.Connection = Connected)
-        return { Runner = runner; Connection = connection; Channel = channel; Doc = doc; Hello = hello }
-    }
-
-/// Reconnect an existing client on a fresh channel, resuming event consumption from its
-/// model's processed offset (E2E-4's catch-up path). Small pages force multi-page reads.
-let private reconnectClient (client: Client) : Async<Client> =
-    async {
-        let! channel = WebRtc.connect signalUrl
-        let options =
-            { App.ConnectOptions.ResumeAfter = (client.Runner.Model ()).EventConsumer.LastProcessedOffset
-              App.ConnectOptions.PageSize = 2 }
-        let connection = App.connect options client.Doc client.Hello (user >> client.Runner.Dispatch) channel
-        Async.StartImmediate connection.Run
-        do! client.Runner.WaitFor (fun m -> m.Connection = Connected)
-        return { client with Connection = connection; Channel = channel }
-    }
+let private connect = connectClient signalUrl token
+let private reconnect = reconnectClient signalUrl
 
 let private e2eTests =
     testList "Draft sync E2E" [
@@ -317,8 +240,8 @@ let private e2eTests =
 
         testCaseAsync "two clients collaboratively edit one draft and converge (E2E-1)" <|
             async {
-                let! a = connectClient "ada" "Ada"
-                let! b = connectClient "grace" "Grace"
+                let! a = connect "ada" "Ada"
+                let! b = connect "grace" "Grace"
 
                 // Ada starts the draft (app-minted id) and seeds the body.
                 a.Runner.Dispatch (user (StartDraftMsg draftId1))
@@ -357,8 +280,8 @@ let private e2eTests =
                 let sendDraftId = DraftId.create "draft-2" |> expect
                 let statusOf (m: ClientModel) =
                     m.Synced.Drafts |> Map.tryFind sendDraftId |> Option.map (fun d -> d.Status)
-                let! a = connectClient "ada" "Ada"
-                let! b = connectClient "grace" "Grace"
+                let! a = connect "ada" "Ada"
+                let! b = connect "grace" "Grace"
 
                 // Ada drafts "ship it" and both replicas converge on it.
                 a.Runner.Dispatch (user (StartDraftMsg sendDraftId))
@@ -418,8 +341,8 @@ let private e2eTests =
 
         testCaseAsync "a disconnected client catches up by offset on reconnect; the timeline renders only projected events (E2E-4/E2E-7)" <|
             async {
-                let! a = connectClient "ada" "Ada"
-                let! b = connectClient "grace" "Grace"
+                let! a = connect "ada" "Ada"
+                let! b = connect "grace" "Grace"
 
                 // Both consume the log so far (it already holds "ship it" from E2E-2).
                 let caughtUp (m: ClientModel) =
@@ -441,7 +364,7 @@ let private e2eTests =
 
                 // Grace reconnects and catches up from her processed offset (E2E-4);
                 // the page size of 2 forces the catch-up across multiple reads.
-                let! b = reconnectClient b
+                let! b = reconnect b
                 do! b.Runner.WaitFor (fun m ->
                         not m.EventConsumer.IsCatchingUp
                         && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "ship it"; "while you were away" ])

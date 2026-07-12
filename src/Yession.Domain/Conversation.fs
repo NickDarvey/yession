@@ -2,7 +2,7 @@ namespace Yession.Domain
 
 /// The conversation is a *projection* of the event log — never read from Yjs/draft state.
 /// The projection type and its fold live in the shared Domain library because both the
-/// Session Process and (later) the Browser Client derive the conversation the same way.
+/// Session Process and the Browser Client derive the conversation the same way.
 /// See docs/design.md §1 "Reactive", §2.2 and docs/plans/00-init/02-*.
 
 type ConversationItemStatus =
@@ -16,26 +16,76 @@ type ConversationItem =
       Body      : string
       Status    : ConversationItemStatus }
 
-type ConversationProjection = { Items : ConversationItem list }
+type ConversationProjection =
+    { Items : ConversationItem list
+      /// Agent messages currently streaming, by turn — so a turn failure (which carries
+      /// only the turn id) can mark its item `Failed`. Projection-internal bookkeeping.
+      ActiveAgentMessages : Map<AgentTurnId, MessageId> }
 
 module ConversationProjection =
 
-    let empty : ConversationProjection = { Items = [] }
+    let empty : ConversationProjection = { Items = []; ActiveAgentMessages = Map.empty }
 
-    /// The conversation items contributed by a single event. The match is total over
-    /// `SessionEvent`, so adding a case (MessageSent in Step 06, Agent* in Step 08)
-    /// forces this projection to account for it.
-    let private itemsFrom (envelope: EventEnvelope<SessionEvent>) : ConversationItem list =
+    let private updateItem (messageId: MessageId) (f: ConversationItem -> ConversationItem) (items: ConversationItem list) =
+        items |> List.map (fun item -> if item.MessageId = messageId then f item else item)
+
+    /// Fold one event into the projection. The match is total over `SessionEvent`, so
+    /// adding a case forces this projection to account for it.
+    let private applyEvent (proj: ConversationProjection) (envelope: EventEnvelope<SessionEvent>) : ConversationProjection =
         match envelope.Event with
-        | SessionCreated _ -> [] // session lifecycle, not a conversation item
-        | PeerJoined _ -> []     // presence, not a conversation item
-        | PeerLeft _ -> []       // presence, not a conversation item
-        | DraftStarted _ -> []   // drafts enter the conversation only when sent (Step 06)
+        | SessionCreated _ -> proj // session lifecycle, not a conversation item
+        | PeerJoined _ -> proj     // presence, not a conversation item
+        | PeerLeft _ -> proj       // presence, not a conversation item
+        | DraftStarted _ -> proj   // drafts enter the conversation only when sent (Step 06)
         | MessageSent m ->
-            [ { MessageId = m.MessageId
-                Author = m.Author
-                Body = m.Body
-                Status = Complete } ]
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = m.MessageId
+                          Author = m.Author
+                          Body = m.Body
+                          Status = Complete } ] }
+        | AgentTurnStarted _ -> proj   // lifecycle; the item appears at AgentMessageStarted
+        | AgentContextBuilt _ -> proj  // lifecycle
+        | AgentMessageStarted a ->
+            { Items =
+                proj.Items
+                @ [ { MessageId = a.MessageId
+                      Author = ActorRef.Agent
+                      Body = ""
+                      Status = Streaming } ]
+              ActiveAgentMessages = Map.add a.AgentTurnId a.MessageId proj.ActiveAgentMessages }
+        | AgentMessageDelta a ->
+            { proj with
+                Items =
+                    proj.Items
+                    |> updateItem a.MessageId (fun item ->
+                        if item.Status = Streaming then { item with Body = item.Body + a.Delta } else item) }
+        | AgentMessageCompleted a ->
+            { Items =
+                proj.Items
+                |> updateItem a.MessageId (fun item -> { item with Body = a.Body; Status = Complete })
+              ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
+        | AgentTurnFailed a ->
+            match Map.tryFind a.AgentTurnId proj.ActiveAgentMessages with
+            | Some messageId ->
+                // The streaming item keeps whatever partial body it accumulated.
+                { Items = proj.Items |> updateItem messageId (fun item -> { item with Status = Failed })
+                  ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
+            | None ->
+                // The turn failed before its message started: the failure still shows in
+                // the conversation, under an id derived deterministically from the turn.
+                let messageId =
+                    match MessageId.create (sprintf "agent-turn-%s-failed" (AgentTurnId.value a.AgentTurnId)) with
+                    | Ok id -> id
+                    | Error e -> failwithf "derived message id invariant violated: %s" e
+                { proj with
+                    Items =
+                        proj.Items
+                        @ [ { MessageId = messageId
+                              Author = ActorRef.Agent
+                              Body = a.Reason
+                              Status = Failed } ] }
 
     /// Fold ordered event envelopes into a conversation projection.
     ///
@@ -58,7 +108,7 @@ module ConversationProjection =
                     | Some o -> EventOffset.value envelope.Offset > EventOffset.value o
                     | None -> true
                 if beyondApplied then
-                    { proj with Items = proj.Items @ itemsFrom envelope }, Some envelope.Offset
+                    applyEvent proj envelope, Some envelope.Offset
                 else
                     proj, highWater)
             (projection, appliedThrough)

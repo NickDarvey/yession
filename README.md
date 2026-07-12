@@ -81,14 +81,17 @@ the schemas/interfaces it introduces, and automated verification.
 
 ## Status
 
-Implementation under way. Phase 1 steps 00–07 are complete: the shared domain, the
+Implementation under way. Phase 1 steps 00–08 are complete: the shared domain, the
 append-only event log, the process model & conversation projection, the multiplexed
 WebRTC transport (real libdatachannel data channel + HTTP bootstrap/signalling) with a
 token-gated handshake and presence events, the client Elmish shell, collaborative draft
 sync through the Ylmish/Yjs boundary (two clients converge on one draft over real
 WebRTC; `DraftStarted` is appended as the durable fact), and the send flow (`SendDraft`
 snapshots the body into an immutable `MessageSent`; every append is advertised to all
-peers), and read-only client event consumption (offset-paged catch-up, including after a
-reconnect; the conversation timeline renders from the event projection alone). The
+peers), read-only client event consumption (offset-paged catch-up, including after a
+reconnect; the conversation timeline renders from the event projection alone), and the
+agent turn (a human `MessageSent` triggers one agent turn whose streamed response is
+represented entirely as events; the Claude Agent SDK adapter is exercised by a
+key-gated live smoke test while the deterministic suite injects scripted runners). The
 model/protocol suites and the event-driven WebRTC E2Es are green. See the
 [tracker](docs/plans/TODO.md) for the current step and any blockers.

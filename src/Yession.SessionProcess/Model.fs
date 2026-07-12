@@ -39,12 +39,30 @@ module ProcessModel =
           Conversation = ConversationProjection.empty
           Agent = Idle }
 
-    /// Advance the model by folding new event envelopes into the conversation projection
-    /// and the event-log read position. Idempotent on offset via the shared projection
-    /// fold, so overlapping pages do not double-apply.
+    /// Fold one event into the agent runtime state (Step 08): a started turn is
+    /// `Running` until its message completes (`Idle`) or the turn fails (`Failed`).
+    let private applyAgentEvent (state: AgentRuntimeState) (event: SessionEvent) : AgentRuntimeState =
+        match event with
+        | SessionEvent.AgentTurnStarted a -> Running a.AgentTurnId
+        | SessionEvent.AgentMessageCompleted _ -> Idle
+        | SessionEvent.AgentTurnFailed a -> Failed (a.AgentTurnId, a.Reason)
+        | _ -> state
+
+    /// Advance the model by folding new event envelopes into the conversation projection,
+    /// the agent runtime state, and the event-log read position. Idempotent on offset via
+    /// the shared projection fold, so overlapping pages do not double-apply.
     let applyEvents (events: EventEnvelope<SessionEvent> list) (model: ProcessModel) : ProcessModel =
         let conversation, highWater =
             ConversationProjection.applyEvents model.EventLog.LatestOffset events model.Conversation
+        let agent =
+            let appliedThrough = model.EventLog.LatestOffset |> Option.map EventOffset.value
+            events
+            |> List.filter (fun e ->
+                match appliedThrough with
+                | Some n -> EventOffset.value e.Offset > n
+                | None -> true)
+            |> List.fold (fun state e -> applyAgentEvent state e.Event) model.Agent
         { model with
             Conversation = conversation
+            Agent = agent
             EventLog = { LatestOffset = highWater } }

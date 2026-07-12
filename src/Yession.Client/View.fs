@@ -53,16 +53,28 @@ module View =
         | ActorRef.SessionProcess -> "session-process"
         | ActorRef.System -> "system"
 
+    let private messageStatusLabel =
+        function
+        | Complete -> "complete"
+        | Streaming -> "streaming"
+        | ConversationItemStatus.Failed -> "failed"
+
     /// The conversation timeline — rendered from the event projection only, never from
     /// the synced draft state (docs/design.md §1 "Durable facts are events").
     let private conversation (projection: ConversationProjection) : string =
         projection.Items
         |> List.map (fun item ->
-            sprintf "<article class=\"message\" data-message-id=\"%s\" data-message-author=\"%s\">%s</article>"
+            sprintf "<article class=\"message\" data-message-id=\"%s\" data-message-author=\"%s\" data-message-status=\"%s\">%s</article>"
                 (MessageId.value item.MessageId)
                 (authorLabel item.Author)
+                (messageStatusLabel item.Status)
                 (escapeHtml item.Body))
         |> String.concat ""
+
+    let private agentStream (agent: AgentViewState) : string =
+        match agent.ActiveTurn with
+        | Some turn -> sprintf "<span data-agent-turn=\"%s\">Agent is responding…</span>" (AgentTurnId.value turn)
+        | None -> ""
 
     /// Render the client shell as an HTML fragment (the contents of `#app`).
     let render (model: ClientModel) : string =
@@ -84,7 +96,7 @@ module View =
             // Drafts are the synced collaborative state (Step 05); send lands in Step 06.
             sprintf "<section class=\"draft\" data-draft-editor>%s</section>" (drafts model.Synced)
             sprintf "<section class=\"timeline\" data-conversation>%s</section>" (conversation model.Conversation)
-            "<section class=\"agent\" data-agent-stream></section>"
+            sprintf "<section class=\"agent\" data-agent-stream>%s</section>" (agentStream model.Agent)
         ]
 
     /// Render a full HTML document hosting the client shell. Used by the Session Process
