@@ -15,6 +15,7 @@
     <Compile Include="Signalling.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="Host.fs" />
+    <Compile Include="Backends.fs" />
     <Compile Include="Manager.fs" />
   </ItemGroup>
 

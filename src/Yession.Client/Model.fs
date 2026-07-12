@@ -33,7 +33,9 @@ type ClientModel =
       EventConsumer : EventConsumerState
       Agent         : AgentViewState
       /// The session environment's UI status, folded from lifecycle events (Step 12).
-      Environment   : EnvironmentStatus }
+      Environment   : EnvironmentStatus
+      /// The read-only command log, folded from command events (Step 13).
+      Commands      : CommandLog }
 
 /// Messages that drive the client model. Connection-lifecycle messages are produced by
 /// the connection driver (Connection.fs); the suffix avoids clashing with the
@@ -84,7 +86,8 @@ module ClientModel =
               LatestKnownOffset = None
               IsCatchingUp = false }
           Agent = { ActiveTurn = None }
-          Environment = EnvironmentNotStarted }
+          Environment = EnvironmentNotStarted
+          Commands = CommandLog.empty }
 
     /// Advance the latest-known offset and recompute the catch-up indicator.
     let private withLatestKnown (latest: EventOffset option) (consumer: EventConsumerState) : EventConsumerState =
@@ -150,11 +153,15 @@ module ClientModel =
             let environment =
                 freshEvents
                 |> List.fold (fun status e -> EnvironmentStatus.applyEvent status e.Event) model.Environment
+            let commands =
+                freshEvents
+                |> List.fold (fun log e -> CommandLog.applyEvent log e.Event) model.Commands
             let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
             { model with
                 Conversation = conversation
                 Agent = agent
                 Environment = environment
+                Commands = commands
                 EventConsumer =
                     { LastProcessedOffset = highWater
                       LatestKnownOffset = latestKnown

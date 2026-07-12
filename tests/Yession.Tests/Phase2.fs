@@ -376,9 +376,163 @@ let private lazyLifecycleTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Step 13 — command execution: streamed into events, rendered read-only.
+// -----------------------------------------------------------------------------
+
+let private commandPort = 8120
+
+let private nodeCommand (id: string) (script: string) : CommandRequest =
+    { CommandId = CommandId.create id |> expect
+      Executable = "node"
+      Arguments = [ "-e"; script ]
+      WorkingDirectory = None
+      Environment = Map.empty
+      Timeout = None }
+
+let private commandTests =
+    testList "Command execution" [
+        testCase "command output ordering is preserved per command (interleaved commands)" <| fun () ->
+            let idA = CommandId.create "cmd-a" |> expect
+            let idB = CommandId.create "cmd-b" |> expect
+            let events =
+                [ CommandRequested { CommandId = idA; Executable = "a"; Arguments = [] }
+                  CommandRequested { CommandId = idB; Executable = "b"; Arguments = [] }
+                  CommandStarted { CommandId = idA }
+                  CommandStarted { CommandId = idB }
+                  CommandOutputReceived { CommandId = idA; Stream = Stdout; Text = "a1" }
+                  CommandOutputReceived { CommandId = idB; Stream = Stdout; Text = "b1" }
+                  CommandOutputReceived { CommandId = idA; Stream = Stderr; Text = "a2" }
+                  CommandOutputReceived { CommandId = idA; Stream = Stdout; Text = "a3" }
+                  CommandOutputReceived { CommandId = idB; Stream = Stdout; Text = "b2" }
+                  CommandCompleted { CommandId = idA; Result = CommandSucceeded 0 }
+                  CommandCompleted { CommandId = idB; Result = CommandFailed 2 } ]
+            let log = events |> List.fold CommandLog.applyEvent CommandLog.empty
+            let entry id = log.Entries |> List.find (fun e -> e.CommandId = id)
+            Expect.equal
+                ((entry idA).Output)
+                [ Stdout, "a1"; Stderr, "a2"; Stdout, "a3" ]
+                "command A's output, in order, uncontaminated by B"
+            Expect.equal ((entry idB).Output) [ Stdout, "b1"; Stdout, "b2" ] "command B's output, in order"
+            Expect.equal ((entry idA).Status) (CommandFinished (CommandSucceeded 0)) "A finished"
+            Expect.equal ((entry idB).Status) (CommandFinished (CommandFailed 2)) "B failed with its exit code"
+            // Determinism: re-folding the same events yields the same log.
+            Expect.equal (events |> List.fold CommandLog.applyEvent CommandLog.empty) log "deterministic fold"
+
+        testCaseAsync "a real command streams its output into the event log (integration)" <|
+            async {
+                let registry = Authority.ContainerRegistry ()
+                let sessionId = SessionId.create "cmd-int" |> expect
+                let capabilities = Authority.grant registry (Backends.LocalProcessBackend.create ()) sessionId
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create log capabilities EnvironmentSpec.localProcess "env-cmd"
+                let! _ = environment.Ensure None "run a command"
+
+                let! result =
+                    environment.Execute (nodeCommand "cmd-real" "console.log('alpha'); console.error('warn'); console.log('beta')")
+                Expect.equal result (CommandSucceeded 0) "the command succeeded"
+
+                let! page = log.Read None Int32.MaxValue
+                let commandLog =
+                    page.Events |> List.fold (fun l e -> CommandLog.applyEvent l e.Event) CommandLog.empty
+                let entry = commandLog.Entries |> List.exactlyOne
+                Expect.equal entry.Status (CommandFinished (CommandSucceeded 0)) "completed in the log"
+                let textOf stream =
+                    entry.Output
+                    |> List.filter (fun (s, _) -> s = stream)
+                    |> List.map snd
+                    |> String.concat ""
+                Expect.equal (textOf Stdout) "alpha\nbeta\n" "stdout streamed, in order"
+                Expect.equal (textOf Stderr) "warn\n" "stderr streamed"
+
+                // Exit codes and lifecycle ordering are events too.
+                let! failed = environment.Execute (nodeCommand "cmd-fail" "process.exit(3)")
+                Expect.equal failed (CommandFailed 3) "non-zero exit is a value"
+                let! after = log.Read None Int32.MaxValue
+                let kinds =
+                    after.Events
+                    |> List.choose (fun e ->
+                        match e.Event with
+                        | CommandRequested c -> Some (CommandId.value c.CommandId, "requested")
+                        | CommandStarted c -> Some (CommandId.value c.CommandId, "started")
+                        | CommandCompleted c -> Some (CommandId.value c.CommandId, "completed")
+                        | _ -> None)
+                    |> List.filter (fun (id, _) -> id = "cmd-fail")
+                    |> List.map snd
+                Expect.equal kinds [ "requested"; "started"; "completed" ] "the lifecycle, in order"
+            }
+
+        testCaseAsync "an agent-run command reaches browser clients as a read-only log (E2E-3/E2E-4)" <|
+            async {
+                // The agent ensures an environment, runs a real command, and answers.
+                let devAgent : RunAgent =
+                    fun _ capabilities onChunk ->
+                        async {
+                            let! _ = capabilities.EnsureEnvironment "need to run a command"
+                            let! result =
+                                capabilities.ExecuteCommand (nodeCommand "cmd-e2e" "console.log('hello from the env')")
+                            match result with
+                            | CommandSucceeded 0 ->
+                                onChunk { Text = "ran it" }
+                                return AgentCompleted "ran it"
+                            | other -> return AgentFailed (sprintf "%A" other)
+                        }
+                let m = Manager.create (Some devAgent) (Some (Backends.LocalProcessBackend.create ())) commandPort
+                let! _ =
+                    m.StartSession
+                        { SessionId = SessionId.create "cmd-e2e-session" |> expect
+                          SessionToken = "cmd-token" }
+                let managed = (m.Registered ()) |> List.head
+
+                // Two clients: the sender, and a second browser that must see the same
+                // command log purely through event pages.
+                let! a = connectClient (managed.BootstrapUri + "signal") "cmd-token" "ada" "Ada"
+                let! b = connectClient (managed.BootstrapUri + "signal") "cmd-token" "grace" "Grace"
+                let draftId = DraftId.create "cmd-draft" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg draftId))
+                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "run the thing") (a.Runner.Model ())))
+                a.Connection.SendDraft draftId
+
+                let sawCommand (model: ClientModel) =
+                    model.Commands.Entries
+                    |> List.exists (fun e ->
+                        e.Status = CommandFinished (CommandSucceeded 0)
+                        && (e.Output |> List.exists (fun (_, text) -> text.Contains "hello from the env")))
+                do! a.Runner.WaitFor sawCommand
+                do! b.Runner.WaitFor sawCommand
+
+                // E2E-3: the lifecycle events are in the log, in order.
+                let! page = managed.Host.Log.Read None Int32.MaxValue
+                let kinds =
+                    page.Events
+                    |> List.choose (fun e ->
+                        match e.Event with
+                        | CommandRequested _ -> Some "requested"
+                        | CommandStarted _ -> Some "started"
+                        | CommandOutputReceived _ -> Some "output"
+                        | CommandCompleted _ -> Some "completed"
+                        | _ -> None)
+                Expect.equal kinds [ "requested"; "started"; "output"; "completed" ] "Started/OutputReceived/Completed appended"
+
+                // E2E-4: the UI renders the read-only command log from events.
+                let html = View.render (b.Runner.Model ())
+                Expect.isTrue (html.Contains "data-command-log") "the command log section renders"
+                Expect.isTrue (html.Contains "data-command-status=\"succeeded:0\"") "the command status renders"
+                Expect.isTrue (html.Contains "hello from the env") "the streamed output renders"
+                Expect.isFalse (html.Contains "data-command-input") "no input surface exists — read-only by construction"
+
+                do! a.Channel.Close ()
+                do! b.Channel.Close ()
+                do! m.Stop ()
+            }
+    ]
+
 let tests =
     testList "Phase2" [
         launchTests
         authorityTests
         lazyLifecycleTests
+        commandTests
     ]

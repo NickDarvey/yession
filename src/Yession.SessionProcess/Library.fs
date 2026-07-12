@@ -27,3 +27,7 @@ module Bootstrap =
         | EnvironmentStartFailed _ -> "environment-start-failed"
         | EnvironmentStopRequested _ -> "environment-stop-requested"
         | EnvironmentStopped _ -> "environment-stopped"
+        | CommandRequested _ -> "command-requested"
+        | CommandStarted _ -> "command-started"
+        | CommandOutputReceived _ -> "command-output-received"
+        | CommandCompleted _ -> "command-completed"

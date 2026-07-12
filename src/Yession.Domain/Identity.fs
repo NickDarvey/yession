@@ -87,6 +87,13 @@ module EventOffset =
         | Some x, None -> Some x
         | None, b -> b
 
+type CommandId = private CommandId of string
+
+module CommandId =
+    let create (raw: string) : Result<CommandId, string> =
+        normalize "CommandId" raw |> Result.map CommandId
+    let value (CommandId s) = s
+
 /// Who an event or action is attributed to.
 type ActorRef =
     | HumanPeer of PeerId

@@ -113,8 +113,7 @@ let startWithCapabilities
                                     | Error e -> failwithf "message id invariant violated: %s" e
                                 let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
                                     { EnsureEnvironment = environment.Ensure (Some turnId)
-                                      ExecuteCommand =
-                                        fun _ -> async { return CommandExecutionFailed "command execution lands in Step 13" } }
+                                      ExecuteCommand = environment.Execute }
                                 do! AgentTurn.run log agent capabilitiesFor mintTurnId mintMessageId sessionId projection.Items message
                             })
                     | _ -> ()

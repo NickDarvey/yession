@@ -262,6 +262,81 @@ module Codec =
             Decode.object (fun get ->
                 { EnvironmentStopped.EnvironmentId = get.Required.Field "environmentId" Decode.string }) }
 
+    let commandId : Codec<CommandId> =
+        { Encode = CommandId.value >> Encode.string
+          Decode = viaSmartCtor CommandId.create Decode.string }
+
+    let private outputStream : Codec<OutputStream> =
+        { Encode =
+            (fun s -> Encode.string (match s with Stdout -> "stdout" | Stderr -> "stderr"))
+          Decode =
+            Decode.string
+            |> Decode.andThen (function
+                | "stdout" -> Decode.succeed Stdout
+                | "stderr" -> Decode.succeed Stderr
+                | other -> Decode.fail (sprintf "Unknown output stream: %s" other)) }
+
+    let private commandResult : Codec<CommandResult> =
+        { Encode =
+            (fun r ->
+                match r with
+                | CommandSucceeded code -> Encode.object [ "kind", Encode.string "succeeded"; "exitCode", Encode.int code ]
+                | CommandFailed code -> Encode.object [ "kind", Encode.string "failed"; "exitCode", Encode.int code ]
+                | CommandTimedOut -> Encode.object [ "kind", Encode.string "timedOut" ]
+                | CommandExecutionFailed reason ->
+                    Encode.object [ "kind", Encode.string "executionFailed"; "reason", Encode.string reason ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "succeeded" -> Decode.field "exitCode" Decode.int |> Decode.map CommandSucceeded
+                | "failed" -> Decode.field "exitCode" Decode.int |> Decode.map CommandFailed
+                | "timedOut" -> Decode.succeed CommandTimedOut
+                | "executionFailed" -> Decode.field "reason" Decode.string |> Decode.map CommandExecutionFailed
+                | other -> Decode.fail (sprintf "Unknown command result: %s" other)) }
+
+    let private commandRequested : Codec<CommandRequested> =
+        { Encode =
+            fun (p: CommandRequested) ->
+                Encode.object
+                    [ "commandId", commandId.Encode p.CommandId
+                      "executable", Encode.string p.Executable
+                      "arguments", p.Arguments |> List.map Encode.string |> Encode.list ]
+          Decode =
+            Decode.object (fun get ->
+                { CommandRequested.CommandId = get.Required.Field "commandId" commandId.Decode
+                  CommandRequested.Executable = get.Required.Field "executable" Decode.string
+                  CommandRequested.Arguments = get.Required.Field "arguments" (Decode.list Decode.string) }) }
+
+    let private commandStarted : Codec<CommandStarted> =
+        { Encode = fun (p: CommandStarted) -> Encode.object [ "commandId", commandId.Encode p.CommandId ]
+          Decode =
+            Decode.object (fun get ->
+                { CommandStarted.CommandId = get.Required.Field "commandId" commandId.Decode }) }
+
+    let private commandOutputReceived : Codec<CommandOutputReceived> =
+        { Encode =
+            fun (p: CommandOutputReceived) ->
+                Encode.object
+                    [ "commandId", commandId.Encode p.CommandId
+                      "stream", outputStream.Encode p.Stream
+                      "text", Encode.string p.Text ]
+          Decode =
+            Decode.object (fun get ->
+                { CommandOutputReceived.CommandId = get.Required.Field "commandId" commandId.Decode
+                  CommandOutputReceived.Stream = get.Required.Field "stream" outputStream.Decode
+                  CommandOutputReceived.Text = get.Required.Field "text" Decode.string }) }
+
+    let private commandCompleted : Codec<CommandCompleted> =
+        { Encode =
+            fun (p: CommandCompleted) ->
+                Encode.object
+                    [ "commandId", commandId.Encode p.CommandId
+                      "result", commandResult.Encode p.Result ]
+          Decode =
+            Decode.object (fun get ->
+                { CommandCompleted.CommandId = get.Required.Field "commandId" commandId.Decode
+                  CommandCompleted.Result = get.Required.Field "result" commandResult.Decode }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -299,7 +374,15 @@ module Codec =
                 | EnvironmentStopRequested p ->
                     Encode.object [ "type", Encode.string "environmentStopRequested"; "payload", environmentStopRequested.Encode p ]
                 | EnvironmentStopped p ->
-                    Encode.object [ "type", Encode.string "environmentStopped"; "payload", environmentStopped.Encode p ])
+                    Encode.object [ "type", Encode.string "environmentStopped"; "payload", environmentStopped.Encode p ]
+                | CommandRequested p ->
+                    Encode.object [ "type", Encode.string "commandRequested"; "payload", commandRequested.Encode p ]
+                | CommandStarted p ->
+                    Encode.object [ "type", Encode.string "commandStarted"; "payload", commandStarted.Encode p ]
+                | CommandOutputReceived p ->
+                    Encode.object [ "type", Encode.string "commandOutputReceived"; "payload", commandOutputReceived.Encode p ]
+                | CommandCompleted p ->
+                    Encode.object [ "type", Encode.string "commandCompleted"; "payload", commandCompleted.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -321,6 +404,10 @@ module Codec =
                 | "environmentStartFailed" -> Decode.field "payload" environmentStartFailed.Decode |> Decode.map EnvironmentStartFailed
                 | "environmentStopRequested" -> Decode.field "payload" environmentStopRequested.Decode |> Decode.map EnvironmentStopRequested
                 | "environmentStopped" -> Decode.field "payload" environmentStopped.Decode |> Decode.map EnvironmentStopped
+                | "commandRequested" -> Decode.field "payload" commandRequested.Decode |> Decode.map CommandRequested
+                | "commandStarted" -> Decode.field "payload" commandStarted.Decode |> Decode.map CommandStarted
+                | "commandOutputReceived" -> Decode.field "payload" commandOutputReceived.Decode |> Decode.map CommandOutputReceived
+                | "commandCompleted" -> Decode.field "payload" commandCompleted.Decode |> Decode.map CommandCompleted
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

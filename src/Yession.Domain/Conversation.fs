@@ -54,6 +54,11 @@ module ConversationProjection =
         | EnvironmentStartFailed _
         | EnvironmentStopRequested _
         | EnvironmentStopped _ -> proj
+        // Command lifecycle (Step 13) projects into the command log, not the conversation.
+        | CommandRequested _
+        | CommandStarted _
+        | CommandOutputReceived _
+        | CommandCompleted _ -> proj
         | AgentMessageStarted a ->
             { Items =
                 proj.Items

@@ -13,15 +13,20 @@ module SessionEnvironment =
         { /// Make sure an environment is available, recording the identified need. The
           /// turn id (when the need comes from an agent turn) is recorded on the event.
           Ensure : AgentTurnId option -> string -> Async<EnsureEnvironmentResult>
+          /// Run a command in the running environment, streaming output into the event
+          /// log (Step 13). The whole lifecycle is events; per-command output ordering
+          /// is preserved.
+          Execute : CommandRequest -> Async<CommandResult>
           /// Stop the environment if it is running (recorded as events).
           Stop : unit -> Async<unit>
-          /// The running container's handle, if any (for command execution, Step 13).
+          /// The running container's handle, if any.
           CurrentHandle : unit -> ContainerHandle option }
 
     /// A session with no environment capability: needs are recorded as unavailable
     /// without any container authority existing in the Process.
     let unavailable : SessionEnvironment =
         { Ensure = fun _ _ -> async { return EnvironmentUnavailable "this session has no environment capability" }
+          Execute = fun _ -> async { return CommandExecutionFailed "this session has no environment capability" }
           Stop = fun () -> async { return () }
           CurrentHandle = fun () -> None }
 
@@ -63,6 +68,30 @@ module SessionEnvironment =
                         return EnvironmentUnavailable reason
             }
 
+        let execute (request: CommandRequest) : Async<CommandResult> =
+            async {
+                do! append (CommandRequested
+                                { CommandId = request.CommandId
+                                  Executable = request.Executable
+                                  Arguments = request.Arguments })
+                match running with
+                | None ->
+                    let result = CommandExecutionFailed "no running environment"
+                    do! append (CommandCompleted { CommandId = request.CommandId; Result = result })
+                    return result
+                | Some handle ->
+                    do! append (CommandStarted { CommandId = request.CommandId })
+                    let onChunk (chunk: CommandOutputChunk) =
+                        Async.StartImmediate (
+                            append (CommandOutputReceived
+                                        { CommandId = chunk.CommandId
+                                          Stream = chunk.Stream
+                                          Text = chunk.Text }))
+                    let! result = capabilities.Execute handle request onChunk
+                    do! append (CommandCompleted { CommandId = request.CommandId; Result = result })
+                    return result
+            }
+
         let stop () : Async<unit> =
             async {
                 match running with
@@ -79,5 +108,6 @@ module SessionEnvironment =
             }
 
         { Ensure = ensure
+          Execute = execute
           Stop = stop
           CurrentHandle = fun () -> running }

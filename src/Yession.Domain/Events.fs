@@ -13,6 +13,19 @@ type EventEnvelope<'event> =
       Timestamp : DateTimeOffset
       Event     : 'event }
 
+/// Command output streams and results (Step 13). Defined with the events because the
+/// command lifecycle is recorded as events; the request/execution shapes live with the
+/// capability surface in Environment.fs.
+type OutputStream =
+    | Stdout
+    | Stderr
+
+type CommandResult =
+    | CommandSucceeded of exitCode: int
+    | CommandFailed of exitCode: int
+    | CommandTimedOut
+    | CommandExecutionFailed of reason: string
+
 /// The single, append-only session event type. New cases are added per delivery step;
 /// foundations define only `SessionCreated`.
 type SessionEvent =
@@ -44,6 +57,13 @@ type SessionEvent =
     | EnvironmentStartFailed of EnvironmentStartFailed
     | EnvironmentStopRequested of EnvironmentStopRequested
     | EnvironmentStopped of EnvironmentStopped
+    // Command lifecycle (Step 13): commands run in the session environment through the
+    // scoped capability; output streams into the log so the command log is event-derived
+    // and read-only everywhere.
+    | CommandRequested of CommandRequested
+    | CommandStarted of CommandStarted
+    | CommandOutputReceived of CommandOutputReceived
+    | CommandCompleted of CommandCompleted
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -113,3 +133,20 @@ and EnvironmentStopRequested =
 
 and EnvironmentStopped =
     { EnvironmentId : string }
+
+and CommandRequested =
+    { CommandId : CommandId
+      Executable : string
+      Arguments : string list }
+
+and CommandStarted =
+    { CommandId : CommandId }
+
+and CommandOutputReceived =
+    { CommandId : CommandId
+      Stream : OutputStream
+      Text : string }
+
+and CommandCompleted =
+    { CommandId : CommandId
+      Result : CommandResult }

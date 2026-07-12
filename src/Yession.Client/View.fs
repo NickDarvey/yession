@@ -86,6 +86,34 @@ module View =
         | EnvironmentFailed _ -> "failed"
         | EnvironmentDown -> "stopped"
 
+    let private commandStatusLabel =
+        function
+        | CommandPending -> "pending"
+        | CommandRunning -> "running"
+        | CommandFinished (CommandSucceeded code) -> sprintf "succeeded:%d" code
+        | CommandFinished (CommandFailed code) -> sprintf "failed:%d" code
+        | CommandFinished CommandTimedOut -> "timed-out"
+        | CommandFinished (CommandExecutionFailed _) -> "execution-failed"
+
+    /// The read-only command log — derived from events only; there is no input surface.
+    let private commandLog (log: CommandLog) : string =
+        log.Entries
+        |> List.map (fun entry ->
+            let output =
+                entry.Output
+                |> List.map (fun (stream, text) ->
+                    sprintf "<pre data-stream=\"%s\">%s</pre>"
+                        (match stream with Stdout -> "stdout" | Stderr -> "stderr")
+                        (escapeHtml text))
+                |> String.concat ""
+            sprintf "<article class=\"command\" data-command-id=\"%s\" data-command-status=\"%s\"><code>%s %s</code>%s</article>"
+                (CommandId.value entry.CommandId)
+                (commandStatusLabel entry.Status)
+                (escapeHtml entry.Executable)
+                (escapeHtml (String.concat " " entry.Arguments))
+                output)
+        |> String.concat ""
+
     let private agentStream (agent: AgentViewState) : string =
         match agent.ActiveTurn with
         | Some turn -> sprintf "<span data-agent-turn=\"%s\">Agent is responding…</span>" (AgentTurnId.value turn)
@@ -113,6 +141,7 @@ module View =
             sprintf "<section class=\"timeline\" data-conversation>%s</section>" (conversation model.Conversation)
             sprintf "<section class=\"agent\" data-agent-stream>%s</section>" (agentStream model.Agent)
             sprintf "<section class=\"environment\" data-environment=\"%s\"></section>" (environmentLabel model.Environment)
+            sprintf "<section class=\"commands\" data-command-log>%s</section>" (commandLog model.Commands)
         ]
 
     /// Render a full HTML document hosting the client shell. Used by the Session Process
