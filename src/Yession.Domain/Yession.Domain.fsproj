@@ -13,6 +13,7 @@
     <Compile Include="SessionState.fs" />
     <Compile Include="Transport.fs" />
     <Compile Include="Launch.fs" />
+    <Compile Include="Environment.fs" />
     <Compile Include="Serialization.fs" />
     <Compile Include="Sync.fs" />
   </ItemGroup>

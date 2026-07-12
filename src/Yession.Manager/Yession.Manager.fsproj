@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Session Manager's authority layer: session/container ownership enforcement over
+    an injected container backend. The Session Process never references this project —
+    it only ever receives the pre-scoped capability record from Yession.Domain.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Authority.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Yession.Domain\Yession.Domain.fsproj" />
+  </ItemGroup>
+
+</Project>
