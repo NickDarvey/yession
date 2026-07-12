@@ -1,0 +1,73 @@
+name: release
+
+# Trunk-based delivery: master is always production. Every push to master runs the full
+# verification gate and, when green, publishes a GitHub release with self-contained
+# executables for Linux and macOS. Versions are GitVersion-style continuous delivery:
+# 1.0.0-beta.<number of commits on master>, auto-incrementing with every merge.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - name: Install Chromium for the browser E2E
+        run: npx --yes playwright@1.61.1 install --with-deps chromium
+      - name: Full verification gate
+        run: mise run test
+
+  package:
+    needs: test
+    if: github.ref == 'refs/heads/master'
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the commit count IS the version
+      - uses: jdx/mise-action@v2
+      - name: Compute version (1.0.0-beta.<commit count>)
+        id: version
+        run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: mise run build
+      - name: Package
+        run: node scripts/package.mjs ${{ steps.version.outputs.version }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: dist/*.tar.gz
+
+  release:
+    needs: package
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Compute version
+        id: version
+        run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Yession ${{ steps.version.outputs.version }}
+          prerelease: true
+          generate_release_notes: true
+          files: dist/*.tar.gz

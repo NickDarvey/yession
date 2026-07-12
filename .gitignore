@@ -30,3 +30,6 @@ tests/**/*.js
 
 # Browser E2E scratch data
 tests/browser/.data*
+
+# Release packaging output
+dist/
