@@ -78,6 +78,7 @@ the schemas/interfaces it introduces, and automated verification.
 - **Design fundamentals:** [docs/design.md](docs/design.md)
 - **Delivery plan (Phase 1 + Phase 2 steps):** [docs/plans/00-init/](docs/plans/00-init/)
 - **Progress & blockers tracker:** [docs/plans/TODO.md](docs/plans/TODO.md)
+- **Known gaps (honest inventory):** [docs/GAPS.md](docs/GAPS.md)
 
 ## Status
 
