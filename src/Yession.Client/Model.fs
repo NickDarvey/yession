@@ -31,7 +31,9 @@ type ClientModel =
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
       EventConsumer : EventConsumerState
-      Agent         : AgentViewState }
+      Agent         : AgentViewState
+      /// The session environment's UI status, folded from lifecycle events (Step 12).
+      Environment   : EnvironmentStatus }
 
 /// Messages that drive the client model. Connection-lifecycle messages are produced by
 /// the connection driver (Connection.fs); the suffix avoids clashing with the
@@ -81,7 +83,8 @@ module ClientModel =
             { LastProcessedOffset = None
               LatestKnownOffset = None
               IsCatchingUp = false }
-          Agent = { ActiveTurn = None } }
+          Agent = { ActiveTurn = None }
+          Environment = EnvironmentNotStarted }
 
     /// Advance the latest-known offset and recompute the catch-up indicator.
     let private withLatestKnown (latest: EventOffset option) (consumer: EventConsumerState) : EventConsumerState =
@@ -128,13 +131,15 @@ module ClientModel =
                     model.EventConsumer.LastProcessedOffset
                     page.Events
                     model.Conversation
-            let agent =
+            let freshEvents =
                 let appliedThrough = model.EventConsumer.LastProcessedOffset |> Option.map EventOffset.value
                 page.Events
                 |> List.filter (fun e ->
                     match appliedThrough with
                     | Some n -> EventOffset.value e.Offset > n
                     | None -> true)
+            let agent =
+                freshEvents
                 |> List.fold
                     (fun (agent: AgentViewState) e ->
                         match e.Event with
@@ -142,10 +147,14 @@ module ClientModel =
                         | AgentMessageCompleted _ | AgentTurnFailed _ -> { agent with ActiveTurn = None }
                         | _ -> agent)
                     model.Agent
+            let environment =
+                freshEvents
+                |> List.fold (fun status e -> EnvironmentStatus.applyEvent status e.Event) model.Environment
             let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
             { model with
                 Conversation = conversation
                 Agent = agent
+                Environment = environment
                 EventConsumer =
                     { LastProcessedOffset = highWater
                       LatestKnownOffset = latestKnown

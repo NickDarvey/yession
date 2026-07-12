@@ -47,6 +47,13 @@ module ConversationProjection =
                           Status = Complete } ] }
         | AgentTurnStarted _ -> proj   // lifecycle; the item appears at AgentMessageStarted
         | AgentContextBuilt _ -> proj  // lifecycle
+        // Environment lifecycle (Step 12) is session state, not conversation content.
+        | EnvironmentNeedIdentified _
+        | EnvironmentStartRequested _
+        | EnvironmentStarted _
+        | EnvironmentStartFailed _
+        | EnvironmentStopRequested _
+        | EnvironmentStopped _ -> proj
         | AgentMessageStarted a ->
             { Items =
                 proj.Items

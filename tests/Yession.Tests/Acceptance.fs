@@ -46,7 +46,8 @@ let private representativeModel : ClientModel =
         { LastProcessedOffset = Some (EventOffset.create 5L |> expect)
           LatestKnownOffset = Some (EventOffset.create 7L |> expect)
           IsCatchingUp = true }
-      Agent = { ActiveTurn = Some turnId } }
+      Agent = { ActiveTurn = Some turnId }
+      Environment = EnvironmentNotStarted }
 
 let private uiChecklistTests =
     testList "UI checklist" [

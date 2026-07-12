@@ -67,7 +67,7 @@ let private turnTests =
             async {
                 let log = newLog ()
                 let scripted : RunAgent =
-                    fun context onChunk ->
+                    fun context _capabilities onChunk ->
                         async {
                             Expect.equal context.CurrentMessage triggerItem "the context's current message is the trigger"
                             Expect.equal context.SessionId sessionId "the context carries the session"
@@ -75,7 +75,7 @@ let private turnTests =
                             onChunk { Text = "lo!" }
                             return AgentCompleted "Hello!"
                         }
-                do! AgentTurn.run log scripted mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                do! AgentTurn.run log scripted (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 Expect.equal
                     events
@@ -91,8 +91,8 @@ let private turnTests =
         testCaseAsync "a failed run produces AgentTurnFailed" <|
             async {
                 let log = newLog ()
-                let failing : RunAgent = fun _ _ -> async { return AgentFailed "boom" }
-                do! AgentTurn.run log failing mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                let failing : RunAgent = fun _ _ _ -> async { return AgentFailed "boom" }
+                do! AgentTurn.run log failing (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 Expect.equal
                     (List.last events)
@@ -103,8 +103,8 @@ let private turnTests =
         testCaseAsync "a throwing run produces AgentTurnFailed, not an exception" <|
             async {
                 let log = newLog ()
-                let throwing : RunAgent = fun _ _ -> failwith "runner exploded"
-                do! AgentTurn.run log throwing mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                let throwing : RunAgent = fun _ _ _ -> failwith "runner exploded"
+                do! AgentTurn.run log throwing (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 match List.last events with
                 | AgentTurnFailed f -> Expect.equal f.Reason "runner exploded" "the thrown reason is captured"
@@ -184,7 +184,7 @@ let private e2eTests =
         testCaseAsync "start the Session Process host (scripted agent)" <|
             async {
                 let scripted : RunAgent =
-                    fun context onChunk ->
+                    fun context _capabilities onChunk ->
                         async {
                             onChunk { Text = "You said: " }
                             onChunk { Text = context.CurrentMessage.Body }
@@ -258,7 +258,7 @@ let private liveTests =
                     let log = newLog ()
                     let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
                     let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                    do! AgentTurn.run log Agent.run mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
+                    do! AgentTurn.run log Agent.run (fun _ -> AgentCapabilities.none) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
                     let! events = eventsOf log
                     match List.last events with
                     | AgentMessageCompleted completed ->

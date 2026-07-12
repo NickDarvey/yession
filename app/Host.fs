@@ -17,6 +17,8 @@ type SessionHost =
       /// The session's Yjs document. The Session Process owns it; peers hold replicas
       /// synced over `State` frames.
       Doc : Y.Doc
+      /// The session's lazily-started environment (Step 12).
+      Environment : SessionEnvironment.SessionEnvironment
       /// Resolves when the next peer session ends. Register (call) it *before* triggering
       /// the disconnect you want to observe, then await it — this avoids any reliance on
       /// timing to see the resulting `PeerLeft`.
@@ -28,8 +30,16 @@ type SessionHost =
 /// accepted peer receives the full doc state, then incremental updates are relayed
 /// between peers through the doc. When `runAgent` is given, every human `MessageSent`
 /// triggers exactly one agent turn whose lifecycle is appended as events (Step 08).
-/// Resolves once the server is listening.
-let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
+/// When `environmentCapabilities` is given (granted by the Session Manager, Step 11),
+/// the session gets a lazily-started environment (Step 12). Resolves once the server
+/// is listening.
+let startWithCapabilities
+    (runAgent: RunAgent option)
+    (environmentCapabilities: SessionEnvironmentCapabilities option)
+    (sessionId: SessionId)
+    (token: string)
+    (port: int)
+    : Async<SessionHost> =
     async {
         let doc = Y.Doc.Create ()
 
@@ -66,9 +76,22 @@ let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string)
                             return appended
                         } }
 
+        // The session's environment: lazily started through the Manager-granted scoped
+        // capability; absent capability, needs are recorded as unavailable.
+        let environment =
+            match environmentCapabilities with
+            | Some capabilities ->
+                SessionEnvironment.create
+                    log
+                    capabilities
+                    EnvironmentSpec.localProcess
+                    (sprintf "env-%s" (SessionId.value sessionId))
+            | None -> SessionEnvironment.unavailable
+
         // A human MessageSent triggers exactly one agent turn (Step 08). The agent's
         // context is projected from the event log alone; its own events carry
-        // ActorRef.Agent authorship, so they can never re-trigger a turn.
+        // ActorRef.Agent authorship, so they can never re-trigger a turn. The turn's
+        // typed capabilities (Step 12) route through the session environment.
         match runAgent with
         | Some agent ->
             onAppended <-
@@ -88,7 +111,11 @@ let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string)
                                     match MessageId.create (string (Guid.NewGuid ())) with
                                     | Ok id -> id
                                     | Error e -> failwithf "message id invariant violated: %s" e
-                                do! AgentTurn.run log agent mintTurnId mintMessageId sessionId projection.Items message
+                                let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
+                                    { EnsureEnvironment = environment.Ensure (Some turnId)
+                                      ExecuteCommand =
+                                        fun _ -> async { return CommandExecutionFailed "command execution lands in Step 13" } }
+                                do! AgentTurn.run log agent capabilitiesFor mintTurnId mintMessageId sessionId projection.Items message
                             })
                     | _ -> ()
         | None -> ()
@@ -182,9 +209,14 @@ let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string)
               Port = port
               Log = log
               Doc = doc
+              Environment = environment
               WaitForNextSessionEnd = waitForNextSessionEnd
               Stop = fun () -> async { server.close ignore } }
     }
+
+/// `startWithCapabilities` without an environment — Step 08-era topology.
+let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
+    startWithCapabilities runAgent None sessionId token port
 
 /// `startWith` without an agent — transport/draft/send scenarios that predate Step 08.
 let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =

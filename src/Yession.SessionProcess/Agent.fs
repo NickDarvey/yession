@@ -8,12 +8,17 @@ open Yession.Domain
 /// is the only writer; the agent itself never touches the log or the Yjs doc.
 module AgentTurn =
 
-    /// The Phase 1 system prompt: the agent is a conversational participant with no
-    /// tools and no environment.
+    /// The product-authored system prompt (Step 12): the agent distinguishes one-shot
+    /// conversation from work that needs an environment, and starts one only then.
     let systemPrompt =
-        "You are the agent participant in a shared working session. "
+        "You are participating in a collaborative engineering session. "
         + "Reply to the latest message, using the conversation so far as context. "
-        + "Be concise and concrete. You have no tools and no environment access."
+        + "Be concise and concrete. "
+        + "You may answer conversationally without starting an environment. "
+        + "Start an environment only when repository or command execution is needed. "
+        + "Use command execution deliberately. "
+        + "Prefer high-signal investigation over noisy exploration. "
+        + "Explain meaningful progress to the session."
 
     /// Run one agent turn for a human `MessageSent`, appending the lifecycle events:
     ///
@@ -25,6 +30,7 @@ module AgentTurn =
     let run
         (log: EventLog<SessionEvent>)
         (runAgent: RunAgent)
+        (capabilitiesFor: AgentTurnId -> AgentCapabilities)
         (mintTurnId: unit -> AgentTurnId)
         (mintMessageId: unit -> MessageId)
         (sessionId: SessionId)
@@ -64,7 +70,7 @@ module AgentTurn =
                     Async.StartImmediate (
                         append (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = chunk.Text }))
 
-                let! result = runAgent context onChunk
+                let! result = runAgent context (capabilitiesFor turnId) onChunk
                 match result with
                 | AgentCompleted body ->
                     do! append (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = body })

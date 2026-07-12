@@ -78,6 +78,14 @@ module View =
                 (escapeHtml item.Body))
         |> String.concat ""
 
+    let private environmentLabel =
+        function
+        | EnvironmentNotStarted -> "not-started"
+        | EnvironmentStarting -> "starting"
+        | EnvironmentRunning _ -> "running"
+        | EnvironmentFailed _ -> "failed"
+        | EnvironmentDown -> "stopped"
+
     let private agentStream (agent: AgentViewState) : string =
         match agent.ActiveTurn with
         | Some turn -> sprintf "<span data-agent-turn=\"%s\">Agent is responding…</span>" (AgentTurnId.value turn)
@@ -104,6 +112,7 @@ module View =
             sprintf "<section class=\"draft\" data-draft-editor>%s</section>" (drafts model.Synced)
             sprintf "<section class=\"timeline\" data-conversation>%s</section>" (conversation model.Conversation)
             sprintf "<section class=\"agent\" data-agent-stream>%s</section>" (agentStream model.Agent)
+            sprintf "<section class=\"environment\" data-environment=\"%s\"></section>" (environmentLabel model.Environment)
         ]
 
     /// Render a full HTML document hosting the client shell. Used by the Session Process

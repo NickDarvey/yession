@@ -35,6 +35,15 @@ type SessionEvent =
     | AgentMessageDelta of AgentMessageDelta
     | AgentMessageCompleted of AgentMessageCompleted
     | AgentTurnFailed of AgentTurnFailed
+    // Environment lifecycle (Step 12): environments start lazily — a need is identified
+    // (usually by the agent), then the Session Process starts one through its scoped
+    // capability. Every transition is a durable fact.
+    | EnvironmentNeedIdentified of EnvironmentNeedIdentified
+    | EnvironmentStartRequested of EnvironmentStartRequested
+    | EnvironmentStarted of EnvironmentStarted
+    | EnvironmentStartFailed of EnvironmentStartFailed
+    | EnvironmentStopRequested of EnvironmentStopRequested
+    | EnvironmentStopped of EnvironmentStopped
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -82,3 +91,25 @@ and AgentMessageCompleted =
 and AgentTurnFailed =
     { AgentTurnId : AgentTurnId
       Reason : string }
+
+and EnvironmentNeedIdentified =
+    { Reason : string
+      AgentTurnId : AgentTurnId option }
+
+and EnvironmentStartRequested =
+    { EnvironmentId : string
+      SpecSummary : string }
+
+and EnvironmentStarted =
+    { EnvironmentId : string
+      ContainerRef : string }
+
+and EnvironmentStartFailed =
+    { EnvironmentId : string
+      Reason : string }
+
+and EnvironmentStopRequested =
+    { EnvironmentId : string }
+
+and EnvironmentStopped =
+    { EnvironmentId : string }

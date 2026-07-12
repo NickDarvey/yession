@@ -8,6 +8,7 @@ module Yession.Host.Manager
 // phases, and nothing in the authority contract depends on it. See docs/design.md §3.
 
 open Yession.Domain
+open Yession.Manager
 open Yession.SessionProcess
 
 /// A Session Process the Manager has launched and registered.
@@ -26,13 +27,17 @@ type SessionManager =
       Registered : unit -> ManagedSession list
       /// Look up one registration.
       TryFind : SessionId -> ManagedSession option
+      /// The Manager-owned container ownership registry (observability for tests/ops).
+      Containers : Authority.ContainerRegistry
       /// Stop every launched Process.
       Stop : unit -> Async<unit> }
 
 /// Create a Session Manager. Ports are allocated from `basePort` upward; `runAgent`
-/// is passed through to each launched Process (the agent capability set grows in
-/// Steps 11–13).
-let create (runAgent: RunAgent option) (basePort: int) : SessionManager =
+/// is passed through to each launched Process. When a `ContainerBackend` is given, each
+/// launched Process receives environment capabilities already scoped to its session
+/// (Step 11) — the Manager owns the ownership registry.
+let create (runAgent: RunAgent option) (backend: ContainerBackend option) (basePort: int) : SessionManager =
+    let containers = Authority.ContainerRegistry ()
     let mutable nextPort = basePort
     let mutable nextProcessNumber = 0
     let mutable registry : Map<string, ManagedSession> = Map.empty
@@ -47,9 +52,13 @@ let create (runAgent: RunAgent option) (basePort: int) : SessionManager =
                 nextPort <- nextPort + 1
                 let processId = sprintf "session-process-%d" nextProcessNumber
                 nextProcessNumber <- nextProcessNumber + 1
-                // Launch. `Host.startWith` resolves once the Process is listening —
-                // that resolution is the Process's registration back to the Manager.
-                let! host = Host.startWith runAgent request.SessionId request.SessionToken port
+                // Launch. The host's listening resolution is the Process's
+                // registration back to the Manager. Environment capabilities are
+                // granted here — pre-scoped to the launched session.
+                let environmentCapabilities =
+                    backend |> Option.map (fun b -> Authority.grant containers b request.SessionId)
+                let! host =
+                    Host.startWithCapabilities runAgent environmentCapabilities request.SessionId request.SessionToken port
                 let bootstrapUri = sprintf "http://127.0.0.1:%d/" port
                 let managed =
                     { SessionId = request.SessionId
@@ -65,6 +74,7 @@ let create (runAgent: RunAgent option) (basePort: int) : SessionManager =
         }
 
     { StartSession = startSession
+      Containers = containers
       Registered = fun () -> registry |> Map.toList |> List.map snd
       TryFind = fun sessionId -> Map.tryFind (SessionId.value sessionId) registry
       Stop =

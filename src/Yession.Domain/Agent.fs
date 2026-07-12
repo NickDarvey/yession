@@ -20,8 +20,35 @@ type AgentRunResult =
     | AgentCompleted of body: string
     | AgentFailed of reason: string
 
+type EnsureEnvironmentResult =
+    | EnvironmentAvailable
+    | EnvironmentUnavailable of reason: string
+
+/// Ask the Session Process to make sure an environment exists for the session (Step 12).
+/// Lazy by design: calling this is the agent *signalling need*; a conversational answer
+/// never calls it, so a one-shot never starts a container.
+type EnsureEnvironment = string -> Async<EnsureEnvironmentResult>
+
+/// Run a command in the session's environment (Step 13). Typed and pre-scoped — the
+/// agent never sees container handles or engines.
+type ExecuteCommand = CommandRequest -> Async<CommandResult>
+
+/// The typed capabilities an agent turn may use. No raw Docker, no handles, no session
+/// ids — everything is already scoped by the Session Process and, beneath it, the
+/// Session Manager.
+type AgentCapabilities =
+    { EnsureEnvironment : EnsureEnvironment
+      ExecuteCommand : ExecuteCommand }
+
+module AgentCapabilities =
+
+    /// A turn with no environment authority at all (Phase 1 behaviour).
+    let none : AgentCapabilities =
+        { EnsureEnvironment = fun _ -> async { return EnvironmentUnavailable "no environment capability" }
+          ExecuteCommand = fun _ -> async { return CommandExecutionFailed "no environment capability" } }
+
 /// Run one agent turn: `onChunk` is invoked with each streamed chunk in order, and the
 /// async resolves with the final result once the stream ends. Implementations must not
 /// throw for agent-level errors — failures are values (`AgentFailed`), because the
 /// Session Process represents them as events, not exceptions.
-type RunAgent = AgentContextPack -> (AgentResponseChunk -> unit) -> Async<AgentRunResult>
+type RunAgent = AgentContextPack -> AgentCapabilities -> (AgentResponseChunk -> unit) -> Async<AgentRunResult>

@@ -83,7 +83,10 @@ let private promptOf (context: AgentContextPack) : string =
 /// The Claude Agent SDK–backed `RunAgent`. Streams text deltas as chunks; failures are
 /// values, never exceptions.
 let run : RunAgent =
-    fun context onChunk ->
+    // The typed capabilities are not yet exposed to the live SDK as tools (that needs
+    // MCP tool wiring); the live agent is conversational, which by construction never
+    // starts an environment — consistent with the lazy-start contract.
+    fun context _capabilities onChunk ->
         async {
             let! outcome =
                 runQuery context.SystemPrompt (promptOf context) (fun text -> onChunk { Text = text }) (claudePath ())

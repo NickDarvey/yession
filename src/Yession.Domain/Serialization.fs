@@ -202,6 +202,66 @@ module Codec =
                 { AgentTurnFailed.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
                   AgentTurnFailed.Reason = get.Required.Field "reason" Decode.string }) }
 
+    let private environmentNeedIdentified : Codec<EnvironmentNeedIdentified> =
+        { Encode =
+            fun (p: EnvironmentNeedIdentified) ->
+                Encode.object
+                    [ "reason", Encode.string p.Reason
+                      "agentTurnId", Encode.option agentTurnId.Encode p.AgentTurnId ]
+          Decode =
+            Decode.object (fun get ->
+                { EnvironmentNeedIdentified.Reason = get.Required.Field "reason" Decode.string
+                  EnvironmentNeedIdentified.AgentTurnId = get.Required.Field "agentTurnId" (Decode.option agentTurnId.Decode) }) }
+
+    let private environmentStartRequested : Codec<EnvironmentStartRequested> =
+        { Encode =
+            fun (p: EnvironmentStartRequested) ->
+                Encode.object
+                    [ "environmentId", Encode.string p.EnvironmentId
+                      "specSummary", Encode.string p.SpecSummary ]
+          Decode =
+            Decode.object (fun get ->
+                { EnvironmentStartRequested.EnvironmentId = get.Required.Field "environmentId" Decode.string
+                  EnvironmentStartRequested.SpecSummary = get.Required.Field "specSummary" Decode.string }) }
+
+    let private environmentStarted : Codec<EnvironmentStarted> =
+        { Encode =
+            fun (p: EnvironmentStarted) ->
+                Encode.object
+                    [ "environmentId", Encode.string p.EnvironmentId
+                      "containerRef", Encode.string p.ContainerRef ]
+          Decode =
+            Decode.object (fun get ->
+                { EnvironmentStarted.EnvironmentId = get.Required.Field "environmentId" Decode.string
+                  EnvironmentStarted.ContainerRef = get.Required.Field "containerRef" Decode.string }) }
+
+    let private environmentStartFailed : Codec<EnvironmentStartFailed> =
+        { Encode =
+            fun (p: EnvironmentStartFailed) ->
+                Encode.object
+                    [ "environmentId", Encode.string p.EnvironmentId
+                      "reason", Encode.string p.Reason ]
+          Decode =
+            Decode.object (fun get ->
+                { EnvironmentStartFailed.EnvironmentId = get.Required.Field "environmentId" Decode.string
+                  EnvironmentStartFailed.Reason = get.Required.Field "reason" Decode.string }) }
+
+    let private environmentStopRequested : Codec<EnvironmentStopRequested> =
+        { Encode =
+            fun (p: EnvironmentStopRequested) ->
+                Encode.object [ "environmentId", Encode.string p.EnvironmentId ]
+          Decode =
+            Decode.object (fun get ->
+                { EnvironmentStopRequested.EnvironmentId = get.Required.Field "environmentId" Decode.string }) }
+
+    let private environmentStopped : Codec<EnvironmentStopped> =
+        { Encode =
+            fun (p: EnvironmentStopped) ->
+                Encode.object [ "environmentId", Encode.string p.EnvironmentId ]
+          Decode =
+            Decode.object (fun get ->
+                { EnvironmentStopped.EnvironmentId = get.Required.Field "environmentId" Decode.string }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -227,7 +287,19 @@ module Codec =
                 | AgentMessageCompleted p ->
                     Encode.object [ "type", Encode.string "agentMessageCompleted"; "payload", agentMessageCompleted.Encode p ]
                 | AgentTurnFailed p ->
-                    Encode.object [ "type", Encode.string "agentTurnFailed"; "payload", agentTurnFailed.Encode p ])
+                    Encode.object [ "type", Encode.string "agentTurnFailed"; "payload", agentTurnFailed.Encode p ]
+                | EnvironmentNeedIdentified p ->
+                    Encode.object [ "type", Encode.string "environmentNeedIdentified"; "payload", environmentNeedIdentified.Encode p ]
+                | EnvironmentStartRequested p ->
+                    Encode.object [ "type", Encode.string "environmentStartRequested"; "payload", environmentStartRequested.Encode p ]
+                | EnvironmentStarted p ->
+                    Encode.object [ "type", Encode.string "environmentStarted"; "payload", environmentStarted.Encode p ]
+                | EnvironmentStartFailed p ->
+                    Encode.object [ "type", Encode.string "environmentStartFailed"; "payload", environmentStartFailed.Encode p ]
+                | EnvironmentStopRequested p ->
+                    Encode.object [ "type", Encode.string "environmentStopRequested"; "payload", environmentStopRequested.Encode p ]
+                | EnvironmentStopped p ->
+                    Encode.object [ "type", Encode.string "environmentStopped"; "payload", environmentStopped.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -243,6 +315,12 @@ module Codec =
                 | "agentMessageDelta" -> Decode.field "payload" agentMessageDelta.Decode |> Decode.map AgentMessageDelta
                 | "agentMessageCompleted" -> Decode.field "payload" agentMessageCompleted.Decode |> Decode.map AgentMessageCompleted
                 | "agentTurnFailed" -> Decode.field "payload" agentTurnFailed.Decode |> Decode.map AgentTurnFailed
+                | "environmentNeedIdentified" -> Decode.field "payload" environmentNeedIdentified.Decode |> Decode.map EnvironmentNeedIdentified
+                | "environmentStartRequested" -> Decode.field "payload" environmentStartRequested.Decode |> Decode.map EnvironmentStartRequested
+                | "environmentStarted" -> Decode.field "payload" environmentStarted.Decode |> Decode.map EnvironmentStarted
+                | "environmentStartFailed" -> Decode.field "payload" environmentStartFailed.Decode |> Decode.map EnvironmentStartFailed
+                | "environmentStopRequested" -> Decode.field "payload" environmentStopRequested.Decode |> Decode.map EnvironmentStopRequested
+                | "environmentStopped" -> Decode.field "payload" environmentStopped.Decode |> Decode.map EnvironmentStopped
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

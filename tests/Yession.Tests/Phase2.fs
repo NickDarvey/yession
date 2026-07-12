@@ -29,7 +29,7 @@ let private launchTests =
     testList "Session Manager launch" [
         testCaseAsync "launching a session registers a Session Process and returns its bootstrap URI" <|
             async {
-                let m = Manager.create None basePort
+                let m = Manager.create None None basePort
                 manager <- Some m
                 let request =
                     { SessionId = SessionId.create "managed-1" |> expect
@@ -215,8 +215,170 @@ let private authorityTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Step 12 — lazy environment lifecycle: one-shots start nothing; a signalled
+// need starts (or restarts) the session's one environment, all as events.
+// -----------------------------------------------------------------------------
+
+let private lazyEnvironmentPort = 8115
+
+let private environmentEventsOf (log: Yession.SessionProcess.EventLog<SessionEvent>) =
+    async {
+        let! page = log.Read None Int32.MaxValue
+        return
+            page.Events
+            |> List.choose (fun e ->
+                match e.Event with
+                | EnvironmentNeedIdentified _ -> Some "need"
+                | EnvironmentStartRequested _ -> Some "start-requested"
+                | EnvironmentStarted _ -> Some "started"
+                | EnvironmentStartFailed _ -> Some "start-failed"
+                | EnvironmentStopRequested _ -> Some "stop-requested"
+                | EnvironmentStopped _ -> Some "stopped"
+                | _ -> None)
+    }
+
+let private lazyLifecycleTests =
+    testList "Lazy environment lifecycle" [
+        testCase "environment events project deterministically into UI state" <| fun () ->
+            let step status event = EnvironmentStatus.applyEvent status event
+            let s0 = EnvironmentNotStarted
+            let s1 = step s0 (EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None })
+            Expect.equal s1 EnvironmentNotStarted "a need alone changes nothing"
+            let s2 = step s1 (EnvironmentStartRequested { EnvironmentId = "env-1"; SpecSummary = "local-process" })
+            Expect.equal s2 EnvironmentStarting "start requested"
+            let s3 = step s2 (EnvironmentStarted { EnvironmentId = "env-1"; ContainerRef = "ctr-1" })
+            Expect.equal s3 (EnvironmentRunning "ctr-1") "running"
+            let s4 = step s3 (EnvironmentStopped { EnvironmentId = "env-1" })
+            Expect.equal s4 EnvironmentDown "stopped"
+            let s5 = step s2 (EnvironmentStartFailed { EnvironmentId = "env-1"; Reason = "no image" })
+            Expect.equal s5 (EnvironmentFailed "no image") "failure surfaces"
+
+        testCaseAsync "a conversational one-shot does not start an environment (E2E-1)" <|
+            async {
+                let recorder = InMemoryBackend.Recorder ()
+                let backend = InMemoryBackend.create recorder echoExec
+                // A conversational agent: answers from context, never signals need.
+                let conversational : RunAgent =
+                    fun _ _ onChunk ->
+                        async {
+                            onChunk { Text = "just an answer" }
+                            return AgentCompleted "just an answer"
+                        }
+                let m = Manager.create (Some conversational) (Some backend) lazyEnvironmentPort
+                let! _ =
+                    m.StartSession
+                        { SessionId = SessionId.create "lazy-1" |> expect
+                          SessionToken = "lazy-token" }
+                let managed = (m.Registered ()) |> List.head
+
+                let! a = connectClient (managed.BootstrapUri + "signal") "lazy-token" "ada" "Ada"
+                let draftId = DraftId.create "oneshot" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg draftId))
+                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "what is a monad?") (a.Runner.Model ())))
+                a.Connection.SendDraft draftId
+                do! a.Runner.WaitFor (fun model ->
+                        model.Conversation.Items |> List.exists (fun i -> i.Body = "just an answer"))
+
+                Expect.equal recorder.Started 0 "no container started for a one-shot"
+                let! envEvents = environmentEventsOf managed.Host.Log
+                Expect.isEmpty envEvents "no environment events for a one-shot"
+
+                do! a.Channel.Close ()
+                do! m.Stop ()
+            }
+
+        testCaseAsync "a development task identifies need and starts the environment (E2E-2)" <|
+            async {
+                let recorder = InMemoryBackend.Recorder ()
+                let backend = InMemoryBackend.create recorder echoExec
+                // A task agent: signals need through the typed capability, twice — the
+                // second need must reuse the running environment.
+                let taskAgent : RunAgent =
+                    fun _ capabilities onChunk ->
+                        async {
+                            let! first = capabilities.EnsureEnvironment "need to inspect the repository"
+                            let! second = capabilities.EnsureEnvironment "and to run the tests"
+                            match first, second with
+                            | EnvironmentAvailable, EnvironmentAvailable ->
+                                onChunk { Text = "environment is up" }
+                                return AgentCompleted "environment is up"
+                            | other -> return AgentFailed (sprintf "%A" other)
+                        }
+                let m = Manager.create (Some taskAgent) (Some backend) (lazyEnvironmentPort + 1)
+                let! _ =
+                    m.StartSession
+                        { SessionId = SessionId.create "lazy-2" |> expect
+                          SessionToken = "lazy-token" }
+                let managed = (m.Registered ()) |> List.head
+
+                let! a = connectClient (managed.BootstrapUri + "signal") "lazy-token" "ada" "Ada"
+                let draftId = DraftId.create "devtask" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg draftId))
+                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "please run the tests") (a.Runner.Model ())))
+                a.Connection.SendDraft draftId
+                do! a.Runner.WaitFor (fun model ->
+                        model.Conversation.Items |> List.exists (fun i -> i.Body = "environment is up")
+                        && (match model.Environment with EnvironmentRunning _ -> true | _ -> false))
+
+                Expect.equal recorder.Started 1 "exactly one container started across two needs"
+                let! envEvents = environmentEventsOf managed.Host.Log
+                Expect.equal
+                    envEvents
+                    [ "need"; "start-requested"; "started"; "need" ]
+                    "need -> start -> started, then the second need reuses the environment"
+
+                // The client's UI reflects the running environment from events alone.
+                let html = View.render (a.Runner.Model ())
+                Expect.isTrue (html.Contains "data-environment=\"running\"") "the environment status renders"
+
+                do! a.Channel.Close ()
+                do! m.Stop ()
+            }
+
+        testCaseAsync "a stopped environment is restarted by the next need, under the same id (E2E-7)" <|
+            async {
+                let recorder = InMemoryBackend.Recorder ()
+                let backend = InMemoryBackend.create recorder echoExec
+                let registry = Authority.ContainerRegistry ()
+                let sessionId = SessionId.create "lazy-3" |> expect
+                let capabilities = Authority.grant registry backend sessionId
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create log capabilities EnvironmentSpec.localProcess "env-lazy-3"
+
+                let! first = environment.Ensure None "initial task"
+                Expect.equal first EnvironmentAvailable "first ensure starts"
+                do! environment.Stop ()
+                Expect.equal (environment.CurrentHandle ()) None "stopped"
+                let! second = environment.Ensure None "back for more"
+                Expect.equal second EnvironmentAvailable "the next need restarts"
+                Expect.equal recorder.Started 2 "two starts across the stop"
+
+                let! envEvents = environmentEventsOf log
+                Expect.equal
+                    envEvents
+                    [ "need"; "start-requested"; "started"; "stop-requested"; "stopped"; "need"; "start-requested"; "started" ]
+                    "the full lifecycle is events, environment id preserved"
+                let! page = log.Read None Int32.MaxValue
+                let ids =
+                    page.Events
+                    |> List.choose (fun e ->
+                        match e.Event with
+                        | EnvironmentStartRequested p -> Some p.EnvironmentId
+                        | EnvironmentStarted p -> Some p.EnvironmentId
+                        | EnvironmentStopRequested p -> Some p.EnvironmentId
+                        | EnvironmentStopped p -> Some p.EnvironmentId
+                        | _ -> None)
+                    |> List.distinct
+                Expect.equal ids [ "env-lazy-3" ] "one environment identity across restart"
+            }
+    ]
+
 let tests =
     testList "Phase2" [
         launchTests
         authorityTests
+        lazyLifecycleTests
     ]

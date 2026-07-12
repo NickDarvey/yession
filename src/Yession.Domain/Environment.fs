@@ -137,3 +137,24 @@ type SessionEnvironmentCapabilities =
     { StartContainer : StartSessionContainer
       StopContainer : StopSessionContainer
       Execute : ExecuteInSessionContainer }
+
+// --- Environment UI state, projected from events (Step 12) ---------------------------
+
+type EnvironmentStatus =
+    | EnvironmentNotStarted
+    | EnvironmentStarting
+    | EnvironmentRunning of containerRef: string
+    | EnvironmentFailed of reason: string
+    | EnvironmentDown
+
+module EnvironmentStatus =
+
+    /// Fold one event into the environment's UI status. Deterministic: the status is a
+    /// pure function of the ordered event sequence.
+    let applyEvent (status: EnvironmentStatus) (event: SessionEvent) : EnvironmentStatus =
+        match event with
+        | SessionEvent.EnvironmentStartRequested _ -> EnvironmentStarting
+        | SessionEvent.EnvironmentStarted e -> EnvironmentRunning e.ContainerRef
+        | SessionEvent.EnvironmentStartFailed e -> EnvironmentFailed e.Reason
+        | SessionEvent.EnvironmentStopped _ -> EnvironmentDown
+        | _ -> status
