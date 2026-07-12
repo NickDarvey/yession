@@ -82,6 +82,10 @@ let bufferToString (chunk: obj) : string = jsNative
 [<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 }).then(r => r.text())")>]
 let postText (url: string) (body: string) : JS.Promise<string> = jsNative
 
+/// GET a URL and resolve with the response text.
+[<Emit("fetch($0).then(r => r.text())")>]
+let getText (url: string) : JS.Promise<string> = jsNative
+
 /// Extract the `sdp` field from a `{ type, sdp }` JSON message.
 [<Emit("JSON.parse($0).sdp")>]
 let sdpField (json: string) : string = jsNative
