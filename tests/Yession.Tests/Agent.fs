@@ -251,7 +251,7 @@ let private e2eTests =
 // -----------------------------------------------------------------------------
 
 let private liveTests =
-    if Interop.envOr "ANTHROPIC_API_KEY" "" <> "" then
+    if Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> "" then
         testList "Agent live SDK" [
             testCaseAsync "the real adapter completes a turn with a non-empty streamed body" <|
                 async {
@@ -269,7 +269,7 @@ let private liveTests =
         ]
     else
         testList "Agent live SDK" [
-            testCase "skipped: ANTHROPIC_API_KEY is not set in this environment" <| fun () ->
+            testCase "skipped: no agent credentials (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN) in this environment" <| fun () ->
                 Expect.isTrue true "gated live test skipped"
         ]
 

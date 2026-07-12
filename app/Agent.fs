@@ -24,7 +24,8 @@ type private RunOutcome =
         allowedTools: [],
         maxTurns: 1,
         settingSources: [],
-        includePartialMessages: true
+        includePartialMessages: true,
+        ...($3 ? { pathToClaudeCodeExecutable: $3 } : {})
       }
     })
     let body = ''
@@ -47,8 +48,17 @@ type private RunOutcome =
     return { ok: false, body: '', reason: String((err && err.message) || err) }
   }
 })()""")>]
-let private runQuery (systemPrompt: string) (prompt: string) (onChunk: string -> unit) : JS.Promise<RunOutcome> =
+let private runQuery
+    (systemPrompt: string)
+    (prompt: string)
+    (onChunk: string -> unit)
+    (claudePath: string)
+    : JS.Promise<RunOutcome> =
     jsNative
+
+/// Some sandboxes disallow the SDK's own vendored executable; `YESSION_CLAUDE_PATH`
+/// points the SDK at a system Claude Code install instead. Empty = SDK default.
+let private claudePath () = Interop.envOr "YESSION_CLAUDE_PATH" ""
 
 /// One prompt per turn: the completed conversation as a transcript plus the message to
 /// answer. Built from the projection only — draft/Yjs state never appears here.
@@ -76,7 +86,7 @@ let run : RunAgent =
     fun context onChunk ->
         async {
             let! outcome =
-                runQuery context.SystemPrompt (promptOf context) (fun text -> onChunk { Text = text })
+                runQuery context.SystemPrompt (promptOf context) (fun text -> onChunk { Text = text }) (claudePath ())
                 |> Async.AwaitPromise
             return if outcome.ok then AgentCompleted outcome.body else AgentFailed outcome.reason
         }

@@ -18,7 +18,7 @@ let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local
 // The real agent runs only when the process has credentials; without them the session
 // still works as a human-only collaborative session.
 let private runAgent =
-    if Interop.envOr "ANTHROPIC_API_KEY" "" <> "" then Some Agent.run else None
+    if Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> "" then Some Agent.run else None
 
 Async.StartImmediate(
     async {
