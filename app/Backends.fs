@@ -41,6 +41,71 @@ let private spawnRun
     : JS.Promise<SpawnOutcome> =
     jsNative
 
+/// Docker-backed environments: session-labelled containers, exec through `docker exec`.
+/// Exercised by a smoke test gated on daemon availability; the authority layer above is
+/// engine-independent, so scoping guarantees do not depend on this adapter.
+module DockerBackend =
+
+    let private docker (args: string list) (onStdout: string -> unit) (onStderr: string -> unit) =
+        spawnRun "docker" (List.toArray args) "" (createObj []) 0.0 onStdout onStderr
+        |> Async.AwaitPromise
+
+    /// Is a Docker daemon reachable? (Gates the smoke test.)
+    let daemonAvailable () : Async<bool> =
+        async {
+            try
+                let! outcome = docker [ "info"; "--format"; "ok" ] ignore ignore
+                return outcome.kind = "exit" && outcome.code = 0
+            with _ -> return false
+        }
+
+    let create () : ContainerBackend =
+        { Start =
+            fun sessionId spec ->
+                async {
+                    let image =
+                        match spec.Image with
+                        | Some i -> i.Name + (i.Tag |> Option.map ((+) ":") |> Option.defaultValue "")
+                        | None -> "alpine:3"
+                    let mutable stdout = ""
+                    let! outcome =
+                        docker
+                            [ "run"; "-d"
+                              "--label"; sprintf "yession-session=%s" (SessionId.value sessionId)
+                              image; "tail"; "-f"; "/dev/null" ]
+                            (fun s -> stdout <- stdout + s)
+                            ignore
+                    if outcome.kind = "exit" && outcome.code = 0 then
+                        return Ok (stdout.Trim ())
+                    else
+                        return Error (sprintf "docker run failed (%s %d %s)" outcome.kind outcome.code outcome.reason)
+                }
+          Stop =
+            fun containerId ->
+                async {
+                    let! outcome = docker [ "rm"; "-f"; containerId ] ignore ignore
+                    if outcome.kind = "exit" && outcome.code = 0 then return Ok ()
+                    else return Error "docker rm failed"
+                }
+          Execute =
+            fun containerId request onChunk ->
+                async {
+                    let chunk stream text =
+                        onChunk { CommandId = request.CommandId; Stream = stream; Text = text }
+                    let! outcome =
+                        docker
+                            ([ "exec"; containerId; request.Executable ] @ request.Arguments)
+                            (chunk Stdout)
+                            (chunk Stderr)
+                    return
+                        match outcome.kind with
+                        | "exit" when outcome.code = 0 -> CommandSucceeded 0
+                        | "exit" -> CommandFailed outcome.code
+                        | "timeout" -> CommandTimedOut
+                        | _ -> CommandExecutionFailed outcome.reason
+                }
+        }
+
 /// Commands as local child processes. "Containers" are logical session workspaces (no
 /// OS-level isolation — acceptable for local-first development; the Docker adapter
 /// provides isolation where available). The authority layer above this backend is

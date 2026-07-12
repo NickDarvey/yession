@@ -68,7 +68,9 @@ let private uiChecklistTests =
                   "active agent turn", "data-agent-turn"
                   "last processed event offset", "data-last-processed-offset>5<"
                   "latest known event offset", "data-latest-known-offset>7<"
-                  "catch-up status", "data-catch-up>Catching up<" ]
+                  "catch-up status", "data-catch-up>Catching up<"
+                  "environment status (Phase 2)", "data-environment"
+                  "read-only command log (Phase 2)", "data-command-log" ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
 

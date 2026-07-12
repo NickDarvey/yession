@@ -529,10 +529,129 @@ let private commandTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Step 14 — acceptance-gate additions: mixed-event offsets, mixed-event catch-up
+// (E2E-8), and the Docker adapter smoke (gated on daemon availability).
+// -----------------------------------------------------------------------------
+
+let private acceptancePort = 8125
+
+let private acceptanceTests =
+    testList "Phase 2 acceptance" [
+        testCaseAsync "event offsets remain monotonic across message, agent, environment, and command events" <|
+            async {
+                let sessionId = SessionId.create "mixed-offsets" |> expect
+                let log = Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let ada = PeerId.create "ada" |> expect
+                let mixed : SessionEvent list =
+                    [ MessageSent
+                        { MessageId = MessageId.create "m1" |> expect
+                          DraftId = None
+                          Author = HumanPeer ada
+                          Body = "hi" }
+                      AgentTurnStarted
+                        { AgentTurnId = AgentTurnId.create "t1" |> expect
+                          TriggeredByMessageId = MessageId.create "m1" |> expect }
+                      EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None }
+                      EnvironmentStarted { EnvironmentId = "env"; ContainerRef = "ctr" }
+                      CommandRequested { CommandId = CommandId.create "c1" |> expect; Executable = "node"; Arguments = [] }
+                      CommandOutputReceived { CommandId = CommandId.create "c1" |> expect; Stream = Stdout; Text = "x" }
+                      CommandCompleted { CommandId = CommandId.create "c1" |> expect; Result = CommandSucceeded 0 } ]
+                for event in mixed do
+                    let! _ = log.Append ActorRef.SessionProcess event
+                    ()
+                let! page = log.Read None Int32.MaxValue
+                let offsets = page.Events |> List.map (fun e -> EventOffset.value e.Offset)
+                Expect.equal offsets [ 0L .. int64 (List.length mixed - 1) ] "offsets are dense and monotonic across event kinds"
+            }
+
+        testCaseAsync "a disconnected client catches up on environment and command events (E2E-8)" <|
+            async {
+                let devAgent : RunAgent =
+                    fun _ capabilities onChunk ->
+                        async {
+                            let! _ = capabilities.EnsureEnvironment "work to do"
+                            let! _ = capabilities.ExecuteCommand (nodeCommand "cmd-catchup" "console.log('made progress')")
+                            onChunk { Text = "done" }
+                            return AgentCompleted "done"
+                        }
+                let m = Manager.create (Some devAgent) (Some (Backends.LocalProcessBackend.create ())) acceptancePort
+                let! _ =
+                    m.StartSession
+                        { SessionId = SessionId.create "catchup-session" |> expect
+                          SessionToken = "catchup-token" }
+                let managed = (m.Registered ()) |> List.head
+                let signalUrl = managed.BootstrapUri + "signal"
+
+                let! a = connectClient signalUrl "catchup-token" "ada" "Ada"
+                let! b = connectClient signalUrl "catchup-token" "grace" "Grace"
+                do! b.Runner.WaitFor (fun model -> not model.EventConsumer.IsCatchingUp)
+
+                // Grace leaves; the agent works while she is away.
+                do! b.Channel.Close ()
+                do! b.Runner.WaitFor (fun model -> model.Connection = Reconnecting)
+
+                let draftId = DraftId.create "catchup-draft" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg draftId))
+                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "do the work") (a.Runner.Model ())))
+                a.Connection.SendDraft draftId
+                let caughtUp (model: ClientModel) =
+                    (model.Conversation.Items |> List.exists (fun i -> i.Body = "done"))
+                    && (match model.Environment with EnvironmentRunning _ -> true | _ -> false)
+                    && (model.Commands.Entries
+                        |> List.exists (fun e ->
+                            e.Status = CommandFinished (CommandSucceeded 0)
+                            && (e.Output |> List.exists (fun (_, t) -> t.Contains "made progress"))))
+                do! a.Runner.WaitFor caughtUp
+
+                // Grace reconnects and catches up on the mixed message + environment +
+                // command events by offset.
+                let! b = reconnectClient signalUrl b
+                do! b.Runner.WaitFor caughtUp
+
+                do! a.Channel.Close ()
+                do! b.Channel.Close ()
+                do! m.Stop ()
+            }
+
+        testCaseAsync "Docker adapter smoke (runs where a daemon exists; reported skipped otherwise)" <|
+            async {
+                match! Backends.DockerBackend.daemonAvailable () with
+                | false ->
+                    // No daemon in this environment: the authority layer is verified
+                    // engine-independently; this smoke runs wherever Docker exists.
+                    ()
+                | true ->
+                    let registry = Authority.ContainerRegistry ()
+                    let sessionId = SessionId.create "docker-smoke" |> expect
+                    let capabilities = Authority.grant registry (Backends.DockerBackend.create ()) sessionId
+                    match! capabilities.StartContainer EnvironmentSpec.localProcess with
+                    | ContainerStartFailed reason -> failwithf "docker start failed: %s" reason
+                    | ContainerStarted handle ->
+                        let mutable output = ""
+                        let! result =
+                            capabilities.Execute
+                                handle
+                                { CommandId = CommandId.create "docker-echo" |> expect
+                                  Executable = "echo"
+                                  Arguments = [ "hello-from-docker" ]
+                                  WorkingDirectory = None
+                                  Environment = Map.empty
+                                  Timeout = None }
+                                (fun c -> output <- output + c.Text)
+                        Expect.equal result (CommandSucceeded 0) "docker exec succeeded"
+                        Expect.isTrue (output.Contains "hello-from-docker") "docker exec streamed"
+                        match! capabilities.StopContainer handle with
+                        | ContainerStopped -> ()
+                        | ContainerStopFailed reason -> failwithf "docker stop failed: %s" reason
+            }
+    ]
+
 let tests =
     testList "Phase2" [
         launchTests
         authorityTests
         lazyLifecycleTests
         commandTests
+        acceptanceTests
     ]

@@ -166,7 +166,22 @@ let private frameSerializationTests =
                   AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId }
                   AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "d" }
                   AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = "done" }
-                  AgentTurnFailed { AgentTurnId = turnId; Reason = "overloaded" } ]
+                  AgentTurnFailed { AgentTurnId = turnId; Reason = "overloaded" }
+                  EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = Some turnId }
+                  EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None }
+                  EnvironmentStartRequested { EnvironmentId = "env-1"; SpecSummary = "local-process" }
+                  EnvironmentStarted { EnvironmentId = "env-1"; ContainerRef = "ctr-1" }
+                  EnvironmentStartFailed { EnvironmentId = "env-1"; Reason = "no image" }
+                  EnvironmentStopRequested { EnvironmentId = "env-1" }
+                  EnvironmentStopped { EnvironmentId = "env-1" }
+                  CommandRequested { CommandId = CommandId.create "cmd-1" |> expect; Executable = "node"; Arguments = [ "-e"; "1" ] }
+                  CommandStarted { CommandId = CommandId.create "cmd-1" |> expect }
+                  CommandOutputReceived { CommandId = CommandId.create "cmd-1" |> expect; Stream = Stdout; Text = "hi" }
+                  CommandOutputReceived { CommandId = CommandId.create "cmd-1" |> expect; Stream = Stderr; Text = "err" }
+                  CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandSucceeded 0 }
+                  CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandFailed 3 }
+                  CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandTimedOut }
+                  CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandExecutionFailed "denied" } ]
             for event in everyCase do
                 let env = { sampleEnvelope with Event = event }
                 let roundTripped =

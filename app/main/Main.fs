@@ -20,12 +20,16 @@ let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local
 let private runAgent =
     if Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> "" then Some Agent.run else None
 
+// The product topology (Phase 2): a Session Manager launches the default session's
+// Process with scoped environment capabilities over the local-process backend.
 Async.StartImmediate(
     async {
-        let! host = Host.startWith runAgent sessionId token port
+        let manager = Manager.create runAgent (Some (Backends.LocalProcessBackend.create ())) port
+        let! launched = manager.StartSession { SessionId = sessionId; SessionToken = token }
         printfn
-            "Yession Session Process listening on http://127.0.0.1:%d  (session=%s, agent=%s)"
-            host.Port
-            (SessionId.value host.SessionId)
+            "Yession Session Manager: session %s launched at %s  (process=%s, agent=%s)"
+            (SessionId.value launched.SessionId)
+            launched.LocalBootstrapUri
+            launched.ProcessId
             (if Option.isSome runAgent then "on" else "off")
     })

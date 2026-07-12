@@ -81,7 +81,7 @@ the schemas/interfaces it introduces, and automated verification.
 
 ## Status
 
-**Phase 1 is complete and accepted** (steps 00–09): the shared domain, the
+**Phases 1 and 2 are complete and accepted** (steps 00–14). Phase 1 (00–09): the shared domain, the
 append-only event log, the process model & conversation projection, the multiplexed
 WebRTC transport (real libdatachannel data channel + HTTP bootstrap/signalling) with a
 token-gated handshake and presence events, the client Elmish shell, collaborative draft
@@ -93,8 +93,17 @@ reconnect; the conversation timeline renders from the event projection alone), a
 agent turn (a human `MessageSent` triggers one agent turn whose streamed response is
 represented entirely as events; the Claude Agent SDK adapter is exercised by a
 key-gated live smoke test while the deterministic suite injects scripted runners). The
-model/protocol suites and the event-driven WebRTC E2Es are green: the acceptance gate
-(Step 09) certifies all seven required E2E scenarios, the protocol invariants, and the
-UI checklist from the single `mise run test` entry point, repeatably. Next up: Phase 2
-(Session Manager & scoped environment capability). See the
-[tracker](docs/plans/TODO.md) for the current step and any blockers.
+model/protocol suites and the event-driven WebRTC E2Es are green: the Step 09 gate
+certifies all seven required E2E scenarios, the protocol invariants, and the UI
+checklist from the single `mise run test` entry point, repeatably.
+
+Phase 2 (10–14) adds the authority model: a Session Manager owns launch and grants each
+Session Process environment capabilities already scoped to its session (validated
+container handles; forged or cross-session operations are rejected before any engine is
+reached); environments start lazily — a conversational one-shot never starts a
+container — and restart on need; the agent runs commands only through the delegated
+capability, with output streamed into the event log and rendered as a read-only command
+log; disconnected clients catch up on mixed message/environment/command events by
+offset. The Step 14 gate certifies E2E-1…8, the integration and model suites, and the
+Phase 1 regression, from the same entry point. See the
+[tracker](docs/plans/TODO.md) for details and the decisions log.
