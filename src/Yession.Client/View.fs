@@ -41,6 +41,15 @@ module View =
         synced.Drafts
         |> Map.toList
         |> List.map (fun (draftId, draft) ->
+            let body =
+                match draft.Status with
+                // Active drafts are editable in the browser; the textarea drives
+                // EditDraftBodyMsg through the shell's event delegation.
+                | Active ->
+                    sprintf "<textarea data-draft-input=\"%s\">%s</textarea>"
+                        (DraftId.value draftId)
+                        (escapeHtml (Ylmish.Text.toString draft.Body))
+                | Sending | Sent -> escapeHtml (Ylmish.Text.toString draft.Body)
             let sendButton =
                 match draft.Status with
                 | Active -> sprintf "<button type=\"button\" data-send-draft=\"%s\">Send</button>" (DraftId.value draftId)
@@ -49,9 +58,10 @@ module View =
                 (DraftId.value draftId)
                 (PeerId.value draft.Author)
                 (draftStatusLabel draft.Status)
-                (escapeHtml (Ylmish.Text.toString draft.Body))
+                body
                 sendButton)
         |> String.concat ""
+        |> fun items -> "<button type=\"button\" data-start-draft>Start draft</button>" + items
 
     let private authorLabel =
         function
@@ -152,5 +162,6 @@ module View =
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             "<title>Yession</title></head><body>"
             sprintf "<main id=\"app\">%s</main>" (render model)
+            "<script type=\"module\" src=\"/client.js\"></script>"
             "</body></html>"
         ]

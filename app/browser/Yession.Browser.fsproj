@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The browser client entry: Fable-compiled to app/out/browser, then bundled by esbuild
+    into app/out/public/client.js, which the Session Process serves at /client.js.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Browser.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+    <PackageReference Include="Fable.Elmish" />
+    <PackageReference Include="Ylmish" />
+    <PackageReference Include="Fable.Yjs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Yession.Domain\Yession.Domain.fsproj" />
+    <ProjectReference Include="..\..\src\Yession.Client\Yession.Client.fsproj" />
+  </ItemGroup>
+
+</Project>

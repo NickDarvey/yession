@@ -27,3 +27,6 @@ tests/**/*.js
 
 # OS / editor
 .DS_Store
+
+# Browser E2E scratch data
+tests/browser/.data*

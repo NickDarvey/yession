@@ -22,6 +22,16 @@ let private bootstrapHtml =
         | Error e -> failwith e
     View.page (ClientModel.init placeholderPeer)
 
+let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
+
+[<Fable.Core.Emit("(() => { try { const fs = $0; return fs.existsSync($1) ? fs.readFileSync($1, 'utf8') : null } catch { return null } })()")>]
+let private tryReadFile (fs: obj) (path: string) : string option = Fable.Core.Util.jsNative
+
+[<Fable.Core.ImportAll("node:fs")>]
+let private fs : obj = Fable.Core.Util.jsNative
+
+let private readBundle () : string option = tryReadFile fs bundlePath
+
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
     req.on ("data", fun chunk -> acc <- acc + bufferToString chunk) |> ignore
@@ -47,6 +57,15 @@ let start (onConnection: FrameChannel<string> -> unit) (port: int) : Async<HttpS
         | "GET", "/" ->
             res.writeHead (200, createObj [ "content-type", box "text/html; charset=utf-8" ]) |> ignore
             res.``end`` bootstrapHtml
+        | "GET", "/client.js" ->
+            // The browser client bundle, built by `mise run build` (esbuild output).
+            match readBundle () with
+            | Some js ->
+                res.writeHead (200, createObj [ "content-type", box "text/javascript; charset=utf-8" ]) |> ignore
+                res.``end`` js
+            | None ->
+                res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "client bundle not built (run: mise run build)"
         | _ ->
             res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
             res.``end`` "not found"

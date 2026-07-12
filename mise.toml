@@ -23,11 +23,13 @@ run = [
 ]
 
 [tasks.build]
-description = "Build everything: type-check (.NET) and Fable-compile the Session Process host."
+description = "Build everything: type-check (.NET), Fable-compile the host, bundle the browser client."
 depends = ["restore"]
 run = [
   "dotnet build Yession.slnx",
   "dotnet fable app/main/Yession.Host.Main.fsproj -o app/out",
+  "dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser",
+  "esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=app/out/public/client.js",
 ]
 
 [tasks.start]
@@ -41,12 +43,16 @@ depends = ["restore"]
 run = "dotnet fable watch app/main/Yession.Host.Main.fsproj -o app/out --runWatch node app/out/Main.js"
 
 [tasks.test]
-description = "Run the full test suite (Pyxpecto, compiled by Fable, on Node)."
+description = "Run the full test suite (Pyxpecto on Node + the real-browser E2E)."
 depends = ["restore"]
 run = [
   "dotnet build Yession.slnx",
   "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
   "node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 120000",
+  "dotnet fable app/main/Yession.Host.Main.fsproj -o app/out",
+  "dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser",
+  "esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=app/out/public/client.js",
+  "node tests/browser/run.mjs",
 ]
 
 [tasks.clean]

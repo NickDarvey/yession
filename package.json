@@ -12,6 +12,10 @@
     "node-datachannel": "^0.32.3",
     "y-webrtc": "^10.3.0",
     "yjs": "^13.6.31",
-    "zod": "^3.25.0"
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "playwright-core": "^1.61.1"
   }
 }

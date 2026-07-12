@@ -11,7 +11,7 @@ let private expect =
     | Ok v -> v
     | Error e -> failwith e
 
-let private port = Interop.envOr "YESSION_PORT" "8080" |> int
+let private port = Interop.envOr "YESSION_PORT" "80" |> int
 let private token = Interop.envOr "YESSION_TOKEN" "local-dev-token"
 let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local-session") |> expect
 
