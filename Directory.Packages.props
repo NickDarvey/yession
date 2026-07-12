@@ -10,7 +10,7 @@
 
   <ItemGroup>
     <!-- Ylmish: the Elmish <-> Yjs sync boundary (Fable + FSharp.Data.Adaptive). -->
-    <PackageVersion Include="Ylmish" Version="1.0.0-beta0177" />
+    <PackageVersion Include="Ylmish" Version="1.0.0-beta0190" />
     <!-- Fable interop core (Node host + browser client). -->
     <PackageVersion Include="Fable.Core" Version="5.0.0" />
     <!-- Single test framework: Expecto-style tests compiled by Fable and run on Node. -->
