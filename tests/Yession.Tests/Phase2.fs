@@ -647,6 +647,61 @@ let private acceptanceTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Durable event log: history survives a Session Process restart.
+// -----------------------------------------------------------------------------
+
+let private persistencePort = 8130
+
+let private persistenceTests =
+    testList "Durable event log" [
+        testCaseAsync "a restarted session keeps its history and continues its offsets" <|
+            async {
+                let dir = "tests/Yession.Tests/out/.data"
+                let path = sprintf "%s/persist-%d.events.jsonl" dir (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 100000)
+                let sessionId = SessionId.create "persist-session" |> expect
+                let makeLog (id: SessionId) = EventStore.openLog path id (fun () -> DateTimeOffset.UtcNow)
+
+                // First life: a client drafts and sends a message.
+                let m1 = Manager.createWith None None (Some makeLog) persistencePort
+                let! _ = m1.StartSession { SessionId = sessionId; SessionToken = "persist-token" }
+                let managed1 = (m1.Registered ()) |> List.head
+                let! a = connectClient (managed1.BootstrapUri + "signal") "persist-token" "ada" "Ada"
+                let draftId = DraftId.create "persist-draft" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg draftId))
+                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "remember me") (a.Runner.Model ())))
+                a.Connection.SendDraft draftId
+                do! a.Runner.WaitFor (fun model ->
+                        model.Conversation.Items |> List.exists (fun i -> i.Body = "remember me"))
+                let! before = managed1.Host.Log.Read None Int32.MaxValue
+                do! a.Channel.Close ()
+                do! m1.Stop ()
+
+                // Second life: a fresh Manager + Process over the same file.
+                let m2 = Manager.createWith None None (Some makeLog) (persistencePort + 1)
+                let! _ = m2.StartSession { SessionId = sessionId; SessionToken = "persist-token" }
+                let managed2 = (m2.Registered ()) |> List.head
+                let! after = managed2.Host.Log.Read None Int32.MaxValue
+                Expect.equal
+                    (after.Events |> List.map (fun e -> e.Offset, e.Event))
+                    (before.Events |> List.map (fun e -> e.Offset, e.Event))
+                    "the reopened log replays the identical history"
+
+                // A reconnecting client catches up on the persisted conversation, and
+                // new appends continue the offset sequence.
+                let! b = connectClient (managed2.BootstrapUri + "signal") "persist-token" "grace" "Grace"
+                do! b.Runner.WaitFor (fun model ->
+                        (model.Conversation.Items |> List.exists (fun i -> i.Body = "remember me"))
+                        && not model.EventConsumer.IsCatchingUp)
+                let! page = managed2.Host.Log.Read None Int32.MaxValue
+                let offsets = page.Events |> List.map (fun e -> EventOffset.value e.Offset)
+                Expect.equal offsets [ 0L .. int64 (List.length page.Events - 1) ] "offsets continue densely across the restart"
+
+                do! b.Channel.Close ()
+                do! m2.Stop ()
+            }
+    ]
+
 let tests =
     testList "Phase2" [
         launchTests
@@ -654,4 +709,5 @@ let tests =
         lazyLifecycleTests
         commandTests
         acceptanceTests
+        persistenceTests
     ]

@@ -36,6 +36,7 @@ type SessionHost =
 let startWithCapabilities
     (runAgent: RunAgent option)
     (environmentCapabilities: SessionEnvironmentCapabilities option)
+    (baseLog: EventLog<SessionEvent> option)
     (sessionId: SessionId)
     (token: string)
     (port: int)
@@ -65,7 +66,12 @@ let startWithCapabilities
         let mutable onAppended : SessionEvent -> unit = ignore
 
         let log =
-            let inner = InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+            // Durable storage is injected (file-backed in the product); the in-memory
+            // log remains the deterministic default.
+            let inner =
+                match baseLog with
+                | Some injected -> injected
+                | None -> InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
             { inner with
                 Append =
                     fun actor event ->
@@ -215,7 +221,7 @@ let startWithCapabilities
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
-    startWithCapabilities runAgent None sessionId token port
+    startWithCapabilities runAgent None None sessionId token port
 
 /// `startWith` without an agent — transport/draft/send scenarios that predate Step 08.
 let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =

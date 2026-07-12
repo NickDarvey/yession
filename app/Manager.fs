@@ -36,7 +36,12 @@ type SessionManager =
 /// is passed through to each launched Process. When a `ContainerBackend` is given, each
 /// launched Process receives environment capabilities already scoped to its session
 /// (Step 11) — the Manager owns the ownership registry.
-let create (runAgent: RunAgent option) (backend: ContainerBackend option) (basePort: int) : SessionManager =
+let createWith
+    (runAgent: RunAgent option)
+    (backend: ContainerBackend option)
+    (makeLog: (SessionId -> Yession.SessionProcess.EventLog<SessionEvent>) option)
+    (basePort: int)
+    : SessionManager =
     let containers = Authority.ContainerRegistry ()
     let mutable nextPort = basePort
     let mutable nextProcessNumber = 0
@@ -57,8 +62,9 @@ let create (runAgent: RunAgent option) (backend: ContainerBackend option) (baseP
                 // granted here — pre-scoped to the launched session.
                 let environmentCapabilities =
                     backend |> Option.map (fun b -> Authority.grant containers b request.SessionId)
+                let baseLog = makeLog |> Option.map (fun make -> make request.SessionId)
                 let! host =
-                    Host.startWithCapabilities runAgent environmentCapabilities request.SessionId request.SessionToken port
+                    Host.startWithCapabilities runAgent environmentCapabilities baseLog request.SessionId request.SessionToken port
                 let bootstrapUri = sprintf "http://127.0.0.1:%d/" port
                 let managed =
                     { SessionId = request.SessionId
@@ -84,3 +90,7 @@ let create (runAgent: RunAgent option) (backend: ContainerBackend option) (baseP
                     do! managed.Host.Stop ()
                 registry <- Map.empty
             } }
+
+/// `createWith` without durable storage — the deterministic in-memory default.
+let create (runAgent: RunAgent option) (backend: ContainerBackend option) (basePort: int) : SessionManager =
+    createWith runAgent backend None basePort
