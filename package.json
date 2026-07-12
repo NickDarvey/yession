@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.177",
+    "lib0": "^0.2.99",
     "node-datachannel": "^0.32.3",
     "y-webrtc": "^10.3.0",
     "yjs": "^13.6.31"

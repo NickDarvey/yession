@@ -18,6 +18,8 @@
 
   <ItemGroup>
     <PackageReference Include="Fable.Core" />
+    <PackageReference Include="Fable.Yjs" />
+    <PackageReference Include="Ylmish" />
   </ItemGroup>
 
   <ItemGroup>

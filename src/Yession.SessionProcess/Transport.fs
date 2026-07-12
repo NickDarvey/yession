@@ -3,14 +3,33 @@ namespace Yession.SessionProcess
 open Yession.Domain
 
 /// The Session Process side of a single peer connection: the token-gated hello/accept
-/// handshake, presence events, and the receive pump. Frame *handlers* for State/Command/
-/// EventLog frames arrive in later steps; here they are simply drained.
+/// handshake, presence events, and the receive pump. `State` frames are handed to the
+/// injected handlers (the sync boundary, Step 05); Command/EventLog handlers arrive in
+/// later steps and are still drained.
 module PeerSession =
+
+    /// The per-peer hooks the composition root injects into a session's pump.
+    type PeerHandlers<'State> =
+        { /// Called with every `State` frame payload the accepted peer sends.
+          OnState : 'State -> unit
+          /// Called once after `PeerAccepted` is sent, with the peer's channel (e.g. to
+          /// send the initial state and register the peer for relay). Returns the
+          /// cleanup to run when the peer disconnects.
+          OnAccepted : PeerId -> FrameChannel<'State> -> Async<unit -> unit> }
+
+    module PeerHandlers =
+
+        /// No state handling: frames are drained, nothing is set up or torn down.
+        let none<'State> : PeerHandlers<'State> =
+            { OnState = ignore
+              OnAccepted = fun _ _ -> async { return fun () -> () } }
 
     /// Run a peer session over a connected channel until the peer disconnects.
     ///
     /// - On a valid `PeerHello` (matching `token`): append `PeerJoined`, reply with
-    ///   `PeerAccepted`, drain frames until the channel closes, then append `PeerLeft`.
+    ///   `PeerAccepted`, run `handlers.OnAccepted`, pump frames until the channel closes
+    ///   (`State` payloads go to `handlers.OnState`), run the cleanup, then append
+    ///   `PeerLeft`.
     /// - On an invalid token or an unexpected first frame: reply `PeerRejected` and close.
     ///
     /// Side effects (appends) go through the injected `EventLog`, honouring "the Session
@@ -19,6 +38,7 @@ module PeerSession =
         (sessionId: SessionId)
         (token: string)
         (log: EventLog<SessionEvent>)
+        (handlers: PeerHandlers<'State>)
         (channel: FrameChannel<'State>)
         : Async<unit> =
         async {
@@ -33,16 +53,22 @@ module PeerSession =
                       AssignedDisplayName = hello.DisplayName
                       LatestOffset = Some joined.Offset }
                 do! channel.Send (Control (PeerAccepted accepted))
+                let! cleanup = handlers.OnAccepted hello.PeerId channel
 
-                // Drain frames until the peer disconnects. Real handlers land in later steps.
                 let rec pump () =
                     async {
                         match! channel.Receive () with
-                        | Some _ -> return! pump ()
+                        | Some (State (StateSync payload)) ->
+                            handlers.OnState payload
+                            return! pump ()
+                        | Some _ ->
+                            // Command/EventLog handlers land in later steps.
+                            return! pump ()
                         | None -> return ()
                     }
                 do! pump ()
 
+                cleanup ()
                 let! _ = log.Append actor (PeerLeft { PeerId = hello.PeerId })
                 return ()
             | Some (Control (PeerHello _)) ->

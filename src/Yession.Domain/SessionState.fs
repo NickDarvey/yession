@@ -13,7 +13,7 @@ type DraftStatus =
 type DraftState =
     { DraftId : DraftId
       Author  : PeerId
-      Body    : string
+      Body    : Ylmish.Text
       Status  : DraftStatus }
 
 type SharedBrief = { Body : string }

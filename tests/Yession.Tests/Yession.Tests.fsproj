@@ -14,6 +14,7 @@
   <ItemGroup>
     <Compile Include="Domain.fs" />
     <Compile Include="SessionProcess.fs" />
+    <Compile Include="Sync.fs" />
     <Compile Include="E2E.fs" />
     <Compile Include="Client.fs" />
     <Compile Include="Main.fs" />
@@ -22,6 +23,9 @@
   <ItemGroup>
     <PackageReference Include="Fable.Core" />
     <PackageReference Include="Fable.Pyxpecto" />
+    <PackageReference Include="Fable.Elmish" />
+    <PackageReference Include="Ylmish" />
+    <PackageReference Include="Fable.Yjs" />
   </ItemGroup>
 
   <ItemGroup>

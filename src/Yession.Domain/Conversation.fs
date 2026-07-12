@@ -30,6 +30,7 @@ module ConversationProjection =
         | SessionCreated _ -> [] // session lifecycle, not a conversation item
         | PeerJoined _ -> []     // presence, not a conversation item
         | PeerLeft _ -> []       // presence, not a conversation item
+        | DraftStarted _ -> []   // drafts enter the conversation only when sent (Step 06)
 
     /// Fold ordered event envelopes into a conversation projection.
     ///

@@ -25,6 +25,20 @@ module View =
     let private catchUpText (consumer: EventConsumerState) =
         if consumer.IsCatchingUp then "Catching up" else "Up to date"
 
+    let private escapeHtml (s: string) =
+        s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
+
+    /// The synced drafts, rendered in stable (id) order so the markup is deterministic.
+    let private drafts (synced: SyncedSessionState) : string =
+        synced.Drafts
+        |> Map.toList
+        |> List.map (fun (draftId, draft) ->
+            sprintf "<article class=\"draft-item\" data-draft-id=\"%s\" data-draft-author=\"%s\">%s</article>"
+                (DraftId.value draftId)
+                (PeerId.value draft.Author)
+                (escapeHtml (Ylmish.Text.toString draft.Body)))
+        |> String.concat ""
+
     /// Render the client shell as an HTML fragment (the contents of `#app`).
     let render (model: ClientModel) : string =
         let consumer = model.EventConsumer
@@ -42,8 +56,8 @@ module View =
                 (offsetText consumer.LatestKnownOffset)
             sprintf "<span class=\"catch-up\" data-catch-up>%s</span>" (catchUpText consumer)
             "</section>"
-            // Placeholders filled by later steps (05 draft editor + send, 07 timeline, 08 agent).
-            "<section class=\"draft\" data-draft-editor></section>"
+            // Drafts are the synced collaborative state (Step 05); send lands in Step 06.
+            sprintf "<section class=\"draft\" data-draft-editor>%s</section>" (drafts model.Synced)
             "<section class=\"timeline\" data-conversation></section>"
             "<section class=\"agent\" data-agent-stream></section>"
         ]

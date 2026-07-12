@@ -17,7 +17,6 @@ type EventEnvelope<'event> =
 /// foundations define only `SessionCreated`.
 ///
 /// Planned additions:
-///   - DraftStarted            -> Step 05/06
 ///   - MessageSent             -> Step 06
 ///   - Agent* events           -> Step 08
 type SessionEvent =
@@ -25,6 +24,9 @@ type SessionEvent =
     // Control/presence facts appended by the Session Process on connect/disconnect (Step 03).
     | PeerJoined of PeerJoined
     | PeerLeft of PeerLeft
+    // The durable fact that a draft began (Step 05). The draft's *content* lives in the
+    // synced collaborative state (Yjs), never in the event log.
+    | DraftStarted of DraftStarted
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -35,3 +37,7 @@ and PeerJoined =
 
 and PeerLeft =
     { PeerId : PeerId }
+
+and DraftStarted =
+    { DraftId : DraftId
+      StartedBy : PeerId }

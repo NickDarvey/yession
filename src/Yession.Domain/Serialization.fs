@@ -108,6 +108,15 @@ module Codec =
             Decode.object (fun get ->
                 { PeerLeft.PeerId = get.Required.Field "peerId" peerId.Decode }) }
 
+    let private draftStarted : Codec<DraftStarted> =
+        { Encode =
+            fun (p: DraftStarted) ->
+                Encode.object [ "draftId", draftId.Encode p.DraftId; "startedBy", peerId.Encode p.StartedBy ]
+          Decode =
+            Decode.object (fun get ->
+                { DraftStarted.DraftId = get.Required.Field "draftId" draftId.Decode
+                  DraftStarted.StartedBy = get.Required.Field "startedBy" peerId.Decode }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -117,7 +126,9 @@ module Codec =
                 | PeerJoined p ->
                     Encode.object [ "type", Encode.string "peerJoined"; "payload", peerJoined.Encode p ]
                 | PeerLeft p ->
-                    Encode.object [ "type", Encode.string "peerLeft"; "payload", peerLeft.Encode p ])
+                    Encode.object [ "type", Encode.string "peerLeft"; "payload", peerLeft.Encode p ]
+                | DraftStarted p ->
+                    Encode.object [ "type", Encode.string "draftStarted"; "payload", draftStarted.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -125,6 +136,7 @@ module Codec =
                 | "sessionCreated" -> Decode.field "payload" sessionCreated.Decode |> Decode.map SessionCreated
                 | "peerJoined" -> Decode.field "payload" peerJoined.Decode |> Decode.map PeerJoined
                 | "peerLeft" -> Decode.field "payload" peerLeft.Decode |> Decode.map PeerLeft
+                | "draftStarted" -> Decode.field "payload" draftStarted.Decode |> Decode.map DraftStarted
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

@@ -14,10 +14,12 @@ module Connection =
     /// Sends `PeerHello`, then dispatches: `ConnectingMsg` immediately, `ConnectedMsg` on
     /// `PeerAccepted`, `RejectedMsg` on `PeerRejected` (and stops), `EventsAvailableMsg`
     /// when the Session Process advertises a new latest offset, and `DisconnectedMsg`
-    /// when the remote end closes the channel.
+    /// when the remote end closes the channel. `State` frame payloads are handed to
+    /// `onState` (the sync boundary applies them to the local Yjs doc).
     let run
         (hello: PeerHelloPayload)
         (dispatch: ClientMsg -> unit)
+        (onState: 'State -> unit)
         (channel: FrameChannel<'State>)
         : Async<unit> =
         async {
@@ -36,8 +38,11 @@ module Connection =
                     | Some (EventLog (EventsAvailable latest)) ->
                         dispatch (EventsAvailableMsg latest)
                         return! pump ()
+                    | Some (State (StateSync payload)) ->
+                        onState payload
+                        return! pump ()
                     | Some _ ->
-                        // State/Command/other control frames are handled in later steps.
+                        // Command/other control frames are handled in later steps.
                         return! pump ()
                     | None ->
                         dispatch DisconnectedMsg

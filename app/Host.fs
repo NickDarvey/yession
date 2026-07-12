@@ -5,6 +5,7 @@ module Yession.Host.Host
 // for the running process (design.md §1 "Composition at the top", §2.1).
 
 open System
+open Yjs
 open Yession.Domain
 open Yession.SessionProcess
 
@@ -13,17 +14,61 @@ type SessionHost =
       Token : string
       Port : int
       Log : EventLog<SessionEvent>
+      /// The session's Yjs document. The Session Process owns it; peers hold replicas
+      /// synced over `State` frames.
+      Doc : Y.Doc
       /// Resolves when the next peer session ends. Register (call) it *before* triggering
       /// the disconnect you want to observe, then await it — this avoids any reliance on
       /// timing to see the resulting `PeerLeft`.
       WaitForNextSessionEnd : unit -> Async<unit>
       Stop : unit -> Async<unit> }
 
-/// Start a Session Process: create the event log, start HTTP bootstrap + signalling, and
-/// run a peer session for every connection. Resolves once the server is listening.
+/// Start a Session Process: create the event log and the session's Yjs document, start
+/// HTTP bootstrap + signalling, and run a peer session for every connection. Each
+/// accepted peer receives the full doc state, then incremental updates are relayed
+/// between peers through the doc. Resolves once the server is listening.
 let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
     async {
         let log = InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+        let doc = Y.Doc.Create ()
+
+        // Connected peers' channels, for state relay; keyed per connection.
+        let mutable connections : Map<int, FrameChannel<string>> = Map.empty
+        let mutable nextConnectionId = 0
+
+        let sendState (channel: FrameChannel<string>) (payload: string) =
+            Async.StartImmediate (channel.Send (State (StateSync payload)))
+
+        let broadcastExcept (except: int) (payload: string) =
+            connections |> Map.iter (fun id channel -> if id <> except then sendState channel payload)
+
+        // Process-originated doc writes (none yet — the agent runtime arrives in Step 08)
+        // broadcast to every peer; peer payloads are relayed by the receiving connection.
+        DocSync.onLocalUpdate doc (fun payload ->
+            connections |> Map.iter (fun _ channel -> sendState channel payload))
+
+        // Durable facts from collaborative state: the first appearance of a draft in the
+        // doc appends `DraftStarted` exactly once. Content stays in Yjs; the log records
+        // only the fact (docs/design.md §1 "Durable facts are events").
+        let mutable knownDrafts : Set<string> = Set.empty
+        DocSync.onAnyUpdate doc (fun () ->
+            match SyncedStateSync.ofDoc doc with
+            | Ok synced ->
+                synced.Drafts
+                |> Map.iter (fun draftId draft ->
+                    let key = DraftId.value draftId
+                    if not (Set.contains key knownDrafts) then
+                        knownDrafts <- Set.add key knownDrafts
+                        Async.StartImmediate (
+                            async {
+                                let! _ =
+                                    log.Append
+                                        (HumanPeer draft.Author)
+                                        (DraftStarted { DraftId = draftId; StartedBy = draft.Author })
+                                return ()
+                            }))
+            // Schema drift in the doc must not break relay; decode errors are ignored here.
+            | Error _ -> ())
 
         let mutable endWaiters : (unit -> unit) list = []
         let signalSessionEnded () =
@@ -32,9 +77,23 @@ let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost
             waiters |> List.iter (fun w -> w ())
 
         let onConnection (channel: FrameChannel<string>) =
+            let connectionId = nextConnectionId
+            nextConnectionId <- nextConnectionId + 1
+            let handlers : PeerSession.PeerHandlers<string> =
+                { OnState =
+                    fun payload ->
+                        DocSync.applyRemote doc payload
+                        broadcastExcept connectionId payload
+                  OnAccepted =
+                    fun _ ch ->
+                        async {
+                            connections <- Map.add connectionId ch connections
+                            do! ch.Send (State (StateSync (DocSync.fullState doc)))
+                            return fun () -> connections <- Map.remove connectionId connections
+                        } }
             Async.StartImmediate(
                 async {
-                    do! PeerSession.run sessionId token log channel
+                    do! PeerSession.run sessionId token log handlers channel
                     signalSessionEnded ()
                 })
 
@@ -63,6 +122,7 @@ let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost
               Token = token
               Port = port
               Log = log
+              Doc = doc
               WaitForNextSessionEnd = waitForNextSessionEnd
               Stop = fun () -> async { server.close ignore } }
     }

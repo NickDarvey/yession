@@ -35,13 +35,20 @@ type ClientModel =
 
 /// Messages that drive the client model. Connection-lifecycle messages are produced by
 /// the connection driver (Connection.fs); the suffix avoids clashing with the
-/// `ConnectionState` cases and the transport frame DU cases.
+/// `ConnectionState` cases and the transport frame DU cases. Draft messages (Step 05)
+/// mutate only the synced collaborative state; the Ylmish binding turns those model
+/// changes into CRDT deltas.
 type ClientMsg =
     | ConnectingMsg
     | ConnectedMsg of PeerAcceptedPayload
     | RejectedMsg of reason: string
     | EventsAvailableMsg of latestOffset: EventOffset
     | DisconnectedMsg
+    /// Start a draft under an app-minted id (unique keys make concurrent — even
+    /// offline — creation safe; see docs/design.md §1 "Ylmish is the sync boundary").
+    | StartDraftMsg of DraftId
+    /// Replace a draft's body with an edited `Text` (carrying the edit intent).
+    | EditDraftBodyMsg of DraftId * Ylmish.Text
 
 module ClientModel =
 
@@ -88,3 +95,23 @@ module ClientModel =
             { model with EventConsumer = withLatestKnown (Some latest) model.EventConsumer }
         | DisconnectedMsg ->
             { model with Connection = Reconnecting }
+        | StartDraftMsg draftId ->
+            // Starting an already-present draft is a no-op: ids are app-minted and unique.
+            if Map.containsKey draftId model.Synced.Drafts then
+                model
+            else
+                let draft =
+                    { DraftId = draftId
+                      Author = model.Peer.PeerId
+                      Body = Ylmish.Text.empty
+                      Status = Active }
+                { model with
+                    Synced = { model.Synced with Drafts = Map.add draftId draft model.Synced.Drafts } }
+        | EditDraftBodyMsg (draftId, body) ->
+            match Map.tryFind draftId model.Synced.Drafts with
+            | Some draft ->
+                { model with
+                    Synced =
+                        { model.Synced with
+                            Drafts = Map.add draftId { draft with Body = body } model.Synced.Drafts } }
+            | None -> model

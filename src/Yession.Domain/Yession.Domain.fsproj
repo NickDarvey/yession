@@ -12,11 +12,16 @@
     <Compile Include="SessionState.fs" />
     <Compile Include="Transport.fs" />
     <Compile Include="Serialization.fs" />
+    <Compile Include="Sync.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Thoth.Json" />
     <PackageReference Include="Thoth.Json.Net" />
+    <PackageReference Include="Fable.Core" />
+    <PackageReference Include="FSharp.Data.Adaptive" />
+    <PackageReference Include="Fable.Yjs" />
+    <PackageReference Include="Ylmish" />
   </ItemGroup>
 
 </Project>

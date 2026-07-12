@@ -9,6 +9,13 @@
     <Compile Include="Connection.fs" />
     <Compile Include="PeerName.fs" />
     <Compile Include="View.fs" />
+    <Compile Include="App.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Elmish" />
+    <PackageReference Include="Ylmish" />
+    <PackageReference Include="Fable.Yjs" />
   </ItemGroup>
 
   <ItemGroup>

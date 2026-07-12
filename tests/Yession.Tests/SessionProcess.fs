@@ -160,7 +160,7 @@ let private handshakeTests =
         async {
             let log = newLog ()
             let clientEnd, serverEnd = InMemoryChannel.createPair<unit> ()
-            let! server = Async.StartChild (PeerSession.run sessionId sendToken log serverEnd)
+            let! server = Async.StartChild (PeerSession.run sessionId sendToken log PeerSession.PeerHandlers.none serverEnd)
             do! client clientEnd
             do! server
             let! events = allEventsAfter log None

@@ -15,6 +15,7 @@ let all =
     testList "Yession" [
         Domain.tests
         SessionProcess.tests
+        Sync.tests
         E2E.tests
         Client.tests
     ]

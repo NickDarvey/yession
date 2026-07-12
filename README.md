@@ -81,9 +81,11 @@ the schemas/interfaces it introduces, and automated verification.
 
 ## Status
 
-Implementation under way. Phase 1 steps 00–03 are complete: the shared domain, the
-append-only event log, the process model & conversation projection, and the multiplexed
+Implementation under way. Phase 1 steps 00–05 are complete: the shared domain, the
+append-only event log, the process model & conversation projection, the multiplexed
 WebRTC transport (real libdatachannel data channel + HTTP bootstrap/signalling) with a
-token-gated handshake and presence events. The .NET model/protocol suites and an
-event-driven WebRTC E2E are green. See the [tracker](docs/plans/TODO.md) for the current
-step and any blockers.
+token-gated handshake and presence events, the client Elmish shell, and collaborative
+draft sync through the Ylmish/Yjs boundary (two clients converge on one draft over real
+WebRTC; `DraftStarted` is appended as the durable fact). The model/protocol suites and
+the event-driven WebRTC E2Es are green. See the [tracker](docs/plans/TODO.md) for the
+current step and any blockers.
