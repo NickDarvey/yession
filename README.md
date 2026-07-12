@@ -81,7 +81,7 @@ the schemas/interfaces it introduces, and automated verification.
 
 ## Status
 
-Implementation under way. Phase 1 steps 00–08 are complete: the shared domain, the
+**Phase 1 is complete and accepted** (steps 00–09): the shared domain, the
 append-only event log, the process model & conversation projection, the multiplexed
 WebRTC transport (real libdatachannel data channel + HTTP bootstrap/signalling) with a
 token-gated handshake and presence events, the client Elmish shell, collaborative draft
@@ -93,5 +93,8 @@ reconnect; the conversation timeline renders from the event projection alone), a
 agent turn (a human `MessageSent` triggers one agent turn whose streamed response is
 represented entirely as events; the Claude Agent SDK adapter is exercised by a
 key-gated live smoke test while the deterministic suite injects scripted runners). The
-model/protocol suites and the event-driven WebRTC E2Es are green. See the
+model/protocol suites and the event-driven WebRTC E2Es are green: the acceptance gate
+(Step 09) certifies all seven required E2E scenarios, the protocol invariants, and the
+UI checklist from the single `mise run test` entry point, repeatably. Next up: Phase 2
+(Session Manager & scoped environment capability). See the
 [tracker](docs/plans/TODO.md) for the current step and any blockers.

@@ -147,6 +147,33 @@ let private frameSerializationTests =
                     |> Codec.fromString Codec.sessionEventEnvelope
                     |> expect
                 Expect.equal roundTripped env "event round-trip"
+
+        testCase "every SessionEvent case round-trips through the envelope codec" <| fun () ->
+            let messageId = MessageId.create "msg-1" |> expect
+            let turnId = AgentTurnId.create "turn-1" |> expect
+            // One value per union case; extending SessionEvent without extending this
+            // list is caught by the exhaustive-match warning in the projection instead,
+            // so keep the two in step when adding events.
+            let everyCase : SessionEvent list =
+                [ SessionCreated { SessionCreated.SessionId = sessionId }
+                  PeerJoined { PeerId = peerId; DisplayName = "Ada" }
+                  PeerLeft { PeerId = peerId }
+                  DraftStarted { DraftId = draftId; StartedBy = peerId }
+                  MessageSent { MessageId = messageId; DraftId = Some draftId; Author = HumanPeer peerId; Body = "hi" }
+                  MessageSent { MessageId = messageId; DraftId = None; Author = ActorRef.System; Body = "" }
+                  AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = messageId }
+                  AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }
+                  AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId }
+                  AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "d" }
+                  AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = "done" }
+                  AgentTurnFailed { AgentTurnId = turnId; Reason = "overloaded" } ]
+            for event in everyCase do
+                let env = { sampleEnvelope with Event = event }
+                let roundTripped =
+                    Codec.toString Codec.sessionEventEnvelope env
+                    |> Codec.fromString Codec.sessionEventEnvelope
+                    |> expect
+                Expect.equal roundTripped env "event round-trip"
     ]
 
 let tests =

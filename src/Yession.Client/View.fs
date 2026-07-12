@@ -35,15 +35,22 @@ module View =
         | Sent -> "sent"
 
     /// The synced drafts, rendered in stable (id) order so the markup is deterministic.
+    /// Each active draft carries its send button (wired to `SendDraft` by the browser
+    /// shell; the markup is the single source of truth either way).
     let private drafts (synced: SyncedSessionState) : string =
         synced.Drafts
         |> Map.toList
         |> List.map (fun (draftId, draft) ->
-            sprintf "<article class=\"draft-item\" data-draft-id=\"%s\" data-draft-author=\"%s\" data-draft-status=\"%s\">%s</article>"
+            let sendButton =
+                match draft.Status with
+                | Active -> sprintf "<button type=\"button\" data-send-draft=\"%s\">Send</button>" (DraftId.value draftId)
+                | Sending | Sent -> ""
+            sprintf "<article class=\"draft-item\" data-draft-id=\"%s\" data-draft-author=\"%s\" data-draft-status=\"%s\">%s%s</article>"
                 (DraftId.value draftId)
                 (PeerId.value draft.Author)
                 (draftStatusLabel draft.Status)
-                (escapeHtml (Ylmish.Text.toString draft.Body)))
+                (escapeHtml (Ylmish.Text.toString draft.Body))
+                sendButton)
         |> String.concat ""
 
     let private authorLabel =

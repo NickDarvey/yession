@@ -19,6 +19,7 @@
     <Compile Include="Agent.fs" />
     <Compile Include="E2E.fs" />
     <Compile Include="Client.fs" />
+    <Compile Include="Acceptance.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 

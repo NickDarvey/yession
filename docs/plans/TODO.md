@@ -34,9 +34,9 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 | 06 | [Send draft & MessageSent](00-init/06-send-draft-and-message-events.md) | Send snapshots body; immutable sent message | Done | `SessionCommands.handle` on the Process (snapshot at send, reject unknown/already-sent); client send flow (`Active→Sending→Sent` over the sync boundary); `EventsAvailable` broadcast after every append; E2E-2/E2E-3 + rejection tests green |
 | 07 | [Client event consumption](00-init/07-client-event-consumption.md) | Offset paging; reconnect catch-up; read-only | Done | `ReadEventsAfter` served by `PeerSession`; client paging driver in `App.connect` (hints trigger reads, pages are truth, resume-after for reconnect); timeline rendered from the projection only; E2E-4/6/7 + duplicate-page idempotency green |
 | 08 | [Claude agent turn](00-init/08-claude-agent-turn.md) | Real streamed agent response as events | Done | `AgentTurn.run` orchestrates the lifecycle events over an injected `RunAgent`; Claude Agent SDK adapter in the host (`app/Agent.fs`); deterministic E2E-5 via scripted runner + key-gated live SDK smoke; failure + streaming-projection tests green |
-| 09 | [Phase 1 E2E acceptance](00-init/09-phase-1-e2e-acceptance.md) | Full E2E + model suite green | Todo | |
+| 09 | [Phase 1 E2E acceptance](00-init/09-phase-1-e2e-acceptance.md) | Full E2E + model suite green | Done | One entry point (`mise run test`): E2E-1…7 named in test titles, all required model/protocol invariants (incl. every-`SessionEvent`-case wire round-trip), UI checklist pinned by `Acceptance.fs`; 5 consecutive deterministic runs 63/63 + one credentialed run 63/63 (live agent turn executed) |
 
-**Phase 1 acceptance:** not started.
+**Phase 1 acceptance:** **Accepted 2026-07-12.** The full suite (7 required E2E scenarios over real WebRTC, all required model/protocol invariants, UI checklist) runs from `mise run test` and passed 5 consecutive deterministic runs (63/63) plus one credentialed run with the live agent turn executing (63/63). The live Claude Agent SDK smoke test self-gates on credentials so acceptance is reproducible with or without them.
 
 ## Phase 2 — Session Manager & scoped lazy environment capability
 
