@@ -59,9 +59,10 @@ writeFileSync(
   `${stage}/yession`,
   `#!/bin/sh
 # Yession ${version} — local-first collaborative sessions.
+# Runs from YOUR working directory: session data lands in ./.yession/data, so separate
+# directories are separate instances.
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export YESSION_CLIENT_BUNDLE="$DIR/app/out/public/client.js"
-cd "$DIR"
 exec "$DIR/bin/node" "$DIR/app/out/Main.js" "$@"
 `)
 chmodSync(`${stage}/yession`, 0o755)

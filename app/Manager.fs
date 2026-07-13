@@ -53,8 +53,10 @@ let createWith
             if Map.containsKey key registry then
                 return failwithf "session %s is already launched" key
             else
-                let port = nextPort
-                nextPort <- nextPort + 1
+                // basePort 0 = an OS-assigned free port per session (the default);
+                // a fixed basePort allocates sequentially for deterministic tests.
+                let port = if basePort = 0 then 0 else nextPort
+                if basePort <> 0 then nextPort <- nextPort + 1
                 let processId = sprintf "session-process-%d" nextProcessNumber
                 nextProcessNumber <- nextProcessNumber + 1
                 // Launch. The host's listening resolution is the Process's
@@ -65,11 +67,11 @@ let createWith
                 let baseLog = makeLog |> Option.map (fun make -> make request.SessionId)
                 let! host =
                     Host.startWithCapabilities runAgent environmentCapabilities baseLog request.SessionId request.SessionToken port
-                let bootstrapUri = sprintf "http://127.0.0.1:%d/" port
+                let bootstrapUri = sprintf "http://127.0.0.1:%d/" host.Port
                 let managed =
                     { SessionId = request.SessionId
                       ProcessId = processId
-                      Port = port
+                      Port = host.Port
                       BootstrapUri = bootstrapUri
                       Host = host }
                 registry <- Map.add key managed registry

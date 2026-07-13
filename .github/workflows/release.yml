@@ -23,6 +23,9 @@ jobs:
       - name: Install Chromium for the browser E2E
         run: npx --yes playwright@1.61.1 install --with-deps chromium
       - name: Full verification gate
+        env:
+          # Testing-scoped credential; enables the live agent smoke tests.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: mise run test
 
   package:

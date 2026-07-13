@@ -11,7 +11,8 @@ let private expect =
     | Ok v -> v
     | Error e -> failwith e
 
-let private port = Interop.envOr "YESSION_PORT" "80" |> int
+// Default 0 = a random OS-assigned port, so multiple instances coexist.
+let private port = Interop.envOr "YESSION_PORT" "0" |> int
 let private token = Interop.envOr "YESSION_TOKEN" "local-dev-token"
 let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local-session") |> expect
 

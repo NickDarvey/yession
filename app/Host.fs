@@ -189,6 +189,9 @@ let startWithCapabilities
                 })
 
         let! server = Signalling.start onConnection port
+        // Port 0 asks the OS for a free port, so any number of instances/sessions
+        // coexist; report the port actually bound.
+        let port = Interop.serverPort server
 
         let waitForNextSessionEnd () : Async<unit> =
             // Register eagerly at call time so a session that ends before the await still

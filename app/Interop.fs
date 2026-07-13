@@ -66,6 +66,10 @@ type [<AllowNullLiteral>] HttpServer =
     abstract listen : int * string * (unit -> unit) -> HttpServer
     abstract close : (obj -> unit) -> unit
 
+/// The actual bound port (differs from the requested one when listening on 0).
+[<Emit("$0.address().port")>]
+let serverPort (server: HttpServer) : int = jsNative
+
 [<Import("createServer", "node:http")>]
 let private createServerRaw : System.Func<IncomingMessage, ServerResponse, unit> -> HttpServer = jsNative
 
