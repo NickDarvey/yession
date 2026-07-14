@@ -77,7 +77,9 @@ they matter.
   no windowing, summarisation, or token budgeting; long sessions will eventually
   overflow the model context.
 - **One agent turn at a time is assumed, not enforced**: rapid successive human
-  messages start overlapping turns. Queueing/cancellation policy is undecided.
+  messages start overlapping turns, and there is no cancellation. Policy now decided
+  and planned — queue-by-default with explicit interrupt, Cursor-style: see
+  [plans/01-turn-scheduling.md](plans/01-turn-scheduling.md) (Phase 3, steps 15–18).
 - **No repository integration** (`.yession.yml`, clone, commit/push) — explicitly later
   phases per the delivery plan.
 - **Live-path verification is credential-gated by design.** Without

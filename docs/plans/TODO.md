@@ -50,6 +50,21 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 
 **Phase 2 acceptance:** **Accepted 2026-07-12.** The Manager owns launch and grants pre-scoped capabilities; environments start lazily (a conversational one-shot starts nothing) and restart on need after a stop; commands run only through the delegated capability with the log rendered read-only from events; authority (forged/stolen/re-minted handles, cross-session stop) is rejected before any backend is reached; disconnected clients catch up on mixed message/environment/command events by offset. All from `mise run test`: 5 consecutive deterministic runs (83/83) plus one credentialed run (83/83, live agent turn executed). The Phase 1 suite passes unchanged in the same run — the Elmish/Ylmish/WebRTC/event-log split is preserved. Docker smoke self-gates on daemon availability (no daemon in the dev container; the authority layer is verified engine-independently).
 
+## Phase 3 — Agent turn scheduling (planned)
+
+Plan: [01-turn-scheduling.md](01-turn-scheduling.md) — queue-by-default (Cursor-style),
+explicit interrupt. Resolves the paired GAPS.md items: overlapping turns and the
+undecided queueing/cancellation policy.
+
+| #  | Step | Outcome | Status | Notes / Blockers |
+|----|------|---------|--------|------------------|
+| 15 | Abort seam & `AgentInterrupted` | `RunAgent` abort signal; interrupted turns are events, partial body kept | Todo | |
+| 16 | `TurnScheduler` | Single-flight; queued messages coalesce into one follow-up turn | Todo | |
+| 17 | Interrupt command + UI | Validated `InterruptAgentTurn`; queued indicators + interrupt button | Todo | |
+| 18 | Live SDK abort + acceptance | Real `AbortController` path; Phase 3 acceptance recorded | Todo | |
+
+**Phase 3 acceptance:** not started.
+
 ## Blockers log
 
 | Date | Step | Blocker | Owner | Resolution |
