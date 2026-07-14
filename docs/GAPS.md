@@ -1,7 +1,7 @@
 # Known gaps
 
-An honest inventory of what Yession does **not** do yet, as of `1.0.0-beta.*`. Phases 1
-and 2 are accepted ([tracker](plans/TODO.md)); everything below is deliberate scope,
+An honest inventory of what Yession does **not** do yet, as of `1.0.0-beta.*`. Phases
+1–3 are accepted ([tracker](plans/TODO.md)); everything below is deliberate scope,
 recorded so nobody discovers it in production. Items are roughly ordered by how much
 they matter.
 
@@ -33,25 +33,26 @@ they matter.
 - **One session per product launch.** `Main.fs` starts a single default session; the
   Manager API supports many, but there is no session-management UI/CLI (create, list,
   join by URL) yet.
-- **Port 80 by default** requires elevated privileges (or `CAP_NET_BIND_SERVICE`) on
-  most systems; `YESSION_PORT` overrides. The bind failure message is Node's raw
-  `EACCES`.
+- **The default port is OS-assigned (random)** so instances coexist; there is no
+  stable well-known address without setting `YESSION_PORT`, and no port-conflict
+  message beyond Node's raw error when a fixed port is taken.
 - **Peer-to-peer is star-shaped through the Process.** Clients sync Yjs state via the
   Session Process relay, not directly with each other; y-webrtc-style meshes are not
   used.
 
 ## Persistence & data
 
-- **The event log is durable; the Yjs document is not.** Draft/collaborative state
-  lives only in memory across the Process and clients — a full restart keeps the
-  conversation (events) but loses unsent draft content. Persisting doc updates
-  (or snapshotting `SyncedSessionState`) is the natural companion to the JSONL log.
-- **The JSONL log loads fully into memory** and has no compaction, rotation, or
-  checksumming; a corrupt line fails the whole open (loud by design).
-- **The requested IndexedDB/localStorage persistence was re-scoped**: those are browser
-  APIs, and the log lives in the Session Process on Node. Browser-side offline cache
-  (IndexedDB for replayed events + doc snapshots) would enable faster cold loads and
-  true offline reads; not built.
+- **Everything durable is now persisted** (Phase 3): the event log and the Yjs
+  document both survive Process restarts (sidecar `*.doc.jsonl`, compacted at open),
+  and browser clients keep the document in IndexedDB (`y-indexeddb`) — but the
+  **event log has no browser-side cache**: a cold client replays the conversation
+  over the wire every load.
+- **The JSONL event log loads fully into memory** and has no compaction, rotation, or
+  checksumming; a corrupt line fails the whole open (loud by design). The doc store
+  compacts only at open — a very long-lived Process grows its sidecar until restart.
+- **The browser doc store is keyed by host + path**, not session id (the client only
+  learns the session id after connecting, and persistence must load before/without the
+  network). Multiple sessions served from one origin+path would share a store.
 
 ## Browser client
 
@@ -62,7 +63,8 @@ they matter.
 - **One draft textarea UX**: no presence cursors, no per-peer selections, no rich text.
 - **Reconnect is manual** (reload). The model reaches `Reconnecting`, but the browser
   shell does not yet redial and resume (the protocol supports it — E2E-4 proves resume
-  works — the browser wiring doesn't).
+  works, and the client now pushes its full local state on every accept — the browser
+  redial wiring is what's missing).
 - **The session token defaults to `local-dev-token`** or a `?token=` query parameter.
 - **No browser support matrix**: verified on Chromium (headless, in CI); the ICE
   gathering settle-fallback should cover Safari/Firefox mDNS behaviour, but they are
@@ -76,10 +78,12 @@ they matter.
 - **The context pack is a flat transcript** rebuilt per turn from the full projection —
   no windowing, summarisation, or token budgeting; long sessions will eventually
   overflow the model context.
-- **One agent turn at a time is assumed, not enforced**: rapid successive human
-  messages start overlapping turns, and there is no cancellation. Policy now decided
-  and planned — queue-by-default with explicit interrupt, Cursor-style: see
-  [plans/01-turn-scheduling.md](plans/01-turn-scheduling.md) (Phase 3, steps 15–18).
+- **Turn discipline is done** (Phase 3): single-flight is enforced by the queue drain,
+  interrupt is explicit, and the invariants are property-tested — but the queue has
+  **no size cap**, a drain coalesces any backlog into ONE turn (no per-message turns
+  option), and the queued-message UI has no "locked" visual during the drain broadcast
+  window (a peer can briefly type into an entry that is about to vanish — the edit is
+  safely discarded, but the UX flickers).
 - **No repository integration** (`.yession.yml`, clone, commit/push) — explicitly later
   phases per the delivery plan.
 - **Live-path verification is credential-gated by design.** Without
@@ -105,7 +109,9 @@ they matter.
 ## Testing debt
 
 - Browser E2E runs on Chromium only, and drives one host platform per CI run.
-- The Yjs relay trusts ordered delivery per data channel; cross-peer pathological
-  orderings are covered by Yjs's own guarantees plus the full-state initial exchange,
-  but no fault-injection tests exist (dropped/duplicated frames).
+- The Yjs relay trusts ordered delivery per data channel; the Phase 3 property
+  schedules cover arbitrary *delivery timing* (staleness, partitions, restarts) but
+  not corrupted/duplicated *frames* on the wire.
+- The vendored Hedgehog does no shrinking: a failing property prints the whole
+  schedule, not a minimal one.
 - Load/scale characteristics (many peers, large logs, long drafts) are unmeasured.

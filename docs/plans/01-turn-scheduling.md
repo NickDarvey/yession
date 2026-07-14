@@ -1,5 +1,8 @@
 # Plan 01 (rev 2) — Collaborative message queue: edit/reorder until the agent takes it
 
+> **Status: delivered.** Steps 15–20 implemented and accepted — see the
+> [tracker](TODO.md) Phase 3 table for evidence per step.
+>
 > Phase 3 · Turn discipline
 > Addresses the paired gaps from [GAPS.md § Agent](../GAPS.md): overlapping turns and
 > the undecided queueing/cancellation policy — now with an **editable, reorderable

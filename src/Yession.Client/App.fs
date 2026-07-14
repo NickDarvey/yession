@@ -120,6 +120,11 @@ module App =
             dispatch msg
             match msg with
             | ConnectedMsg accepted ->
+                // The client's half of the initial full-state exchange: state restored
+                // from local persistence (Step 20) — or carried across a reconnect —
+                // predates the update listener, so push it explicitly. Full-state
+                // updates are idempotent, so this is always safe.
+                Async.StartImmediate (channel.Send (State (StateSync (DocSync.fullState doc))))
                 latestKnown <- EventOffset.maxOption latestKnown accepted.LatestOffset
                 requestIfBehind ()
             | EventsAvailableMsg latest ->

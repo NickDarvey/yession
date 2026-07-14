@@ -112,6 +112,20 @@ let private delegate' (el: obj) (eventName: string) (attribute: string) (handler
 [<Emit("new URLSearchParams(window.location.search).get($0) || $1")>]
 let private queryParam (name: string) (fallback: string) : string = jsNative
 
+// --- Client-side doc persistence (Step 20): IndexedDB via y-indexeddb ------------------
+
+[<Import("IndexeddbPersistence", "y-indexeddb")>]
+let private indexeddbPersistence : obj = jsNative
+
+[<Emit("new $0($1, $2)")>]
+let private newPersistence (ctor: obj) (name: string) (doc: Y.Doc) : obj = jsNative
+
+[<Emit("new Promise((resolve) => $0.once('synced', resolve))")>]
+let private whenSynced (persistence: obj) : JS.Promise<unit> = jsNative
+
+[<Emit("'yession/' + window.location.host + window.location.pathname")>]
+let private persistenceKey () : string = jsNative
+
 [<Emit("String(window.location.origin) + '/signal'")>]
 let private signalUrl () : string = jsNative
 
@@ -152,6 +166,13 @@ let private start () =
         App.makeProgram doc initial
         |> Program.withSetState setState
         |> Program.run
+
+        // Local-first: the doc persists in IndexedDB keyed by the session's address.
+        // Cold loads render local state (drafts, queued messages) before — and without
+        // — the network; on reconnect the full-state exchange reconciles, and entries
+        // the Process consumed meanwhile meet its removal tombstones and converge.
+        let persistence = newPersistence indexeddbPersistence (persistenceKey ()) doc
+        do! whenSynced persistence |> Async.AwaitPromise
 
         let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
         let channel = frameChannel dc

@@ -1,7 +1,8 @@
 // Real-browser E2E: the shipped browser client, in actual Chromium, against a real
 // Session Process — two browser peers converge on a draft over native WebRTC and see
-// the sent message in both timelines. Event-driven throughout (waitForFunction), with
-// one overall watchdog.
+// the sent message in both timelines; then the client-side IndexedDB persistence is
+// proven by wiping the server's data and reloading (the draft can only come back from
+// the browser). Event-driven throughout (waitForFunction), with one overall watchdog.
 //
 // Requires a Chromium install; CHROMIUM_PATH overrides discovery. Exits non-zero on
 // any failure so `mise run test` fails loudly.
@@ -12,7 +13,7 @@ import { existsSync, rmSync } from 'node:fs'
 
 const PORT = 8180
 const BASE = `http://127.0.0.1:${PORT}/`
-const WATCHDOG_MS = 90_000
+const WATCHDOG_MS = 120_000
 
 const watchdog = setTimeout(() => {
   console.error(`browser E2E watchdog fired after ${WATCHDOG_MS}ms`)
@@ -42,14 +43,19 @@ const dataDir = 'tests/browser/.data'
 rmSync(dataDir, { recursive: true, force: true })
 
 // Start the real product entry (Manager topology) on a test port.
-const host = spawn('node', ['app/out/Main.js'], {
-  env: { ...process.env, YESSION_PORT: String(PORT), YESSION_DATA_DIR: dataDir },
-  stdio: ['ignore', 'pipe', 'inherit'],
-})
-await new Promise((resolve, reject) => {
-  host.stdout.on('data', (d) => { if (String(d).includes('launched at')) resolve() })
-  host.on('exit', (code) => reject(new Error(`host exited early (${code})`)))
-})
+function startHost() {
+  const host = spawn('node', ['app/out/Main.js'], {
+    env: { ...process.env, YESSION_PORT: String(PORT), YESSION_DATA_DIR: dataDir },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  })
+  const ready = new Promise((resolve, reject) => {
+    host.stdout.on('data', (d) => { if (String(d).includes('launched at')) resolve() })
+    host.on('exit', (code) => { if (code !== null && code !== 0) reject(new Error(`host exited early (${code})`)) })
+  })
+  return { host, ready }
+}
+let { host, ready } = startHost()
+await ready
 
 const browser = await chromium.launch({
   executablePath: chromiumPath(),
@@ -83,6 +89,37 @@ try {
   await pageB.waitForFunction(inTimeline)
 
   console.log('browser E2E: two real browser peers converged and saw the sent message')
+
+  // Client-side persistence (Step 20): A types a NEW draft, then the server is killed
+  // and its data wiped. After A reloads against the fresh server, the draft can only
+  // have come back from the browser's IndexedDB — and it re-syncs to B via the server.
+  await pageA.click('[data-start-draft]')
+  await pageA.waitForFunction(
+    `document.querySelectorAll('textarea[data-draft-input]').length === 1`)
+  await pageA.fill('textarea[data-draft-input]', 'persisted in the browser')
+  await pageA.waitForFunction(
+    `document.querySelector('textarea[data-draft-input]')?.value === 'persisted in the browser'`)
+
+  const exited = new Promise((resolve) => host.on('exit', resolve))
+  host.kill('SIGKILL')
+  await exited
+  rmSync(dataDir, { recursive: true, force: true })
+  ;({ host, ready } = startHost())
+  await ready
+
+  await pageA.reload()
+  await pageA.waitForFunction(connected)
+  await pageA.waitForFunction(
+    `[...document.querySelectorAll('textarea[data-draft-input]')]` +
+    `.some(t => t.value === 'persisted in the browser')`)
+
+  await pageB.reload()
+  await pageB.waitForFunction(connected)
+  await pageB.waitForFunction(
+    `[...document.querySelectorAll('textarea[data-draft-input]')]` +
+    `.some(t => t.value === 'persisted in the browser')`)
+
+  console.log('browser E2E: the draft survived a full server wipe via the browser doc store')
 } finally {
   await browser.close()
   host.kill('SIGKILL')
