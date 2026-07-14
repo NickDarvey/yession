@@ -116,27 +116,59 @@ For any schedule of operations and any delivery order:
 7. **Single-flight**: `AgentTurnStarted` events never overlap (started_n+1 only after
    terminal event of turn_n).
 
-## Verification: property tests
+## Verification: Hedgehog property tests
 
-Following Ylmish's proven differential-harness pattern (its Harness.fs + Stress.fs)
-rather than betting on a Fable-compatible QuickCheck port: **seeded random schedules
-against a sequential oracle** — property testing with repo-grade repeatability
-(deterministic seeds, pinned Yjs clientIDs; failures print the seed; a failing seed
-becomes a pinned regression test).
+Property tests use **Hedgehog, the way Ylmish does it**: the upstream Hedgehog package
+is broken under Fable 5 in both available versions (0.13's `ArgumentException` ctor,
+2.0's packaging bug — documented in Ylmish's `tests/Ylmish.Tests/Hedgehog.fs` header),
+so Ylmish vendors a minimal, Fable-compatible reimplementation of the `gen {}` /
+`property {}` surface with a **deterministic Park-Miller PRNG** and no shrinking. We
+vendor that same module (same `Hedgehog` namespace/API, attribution comment) into
+`tests/Yession.Tests/Hedgehog.fs` — real property syntax, repo-grade determinism, and
+a straight upgrade path to the real package when its Fable support is fixed.
 
-- **Generator**: a seeded PRNG produces N-peer schedules over
+- **Generators** (`gen {}`): N-peer schedules over
   `Enqueue | EditQueued | Reorder | DeleteQueued | Deliver(peer↔process, subset) |
-  TurnCompletes | Interrupt`, under delivery policies (immediate / hold-all /
-  random-partial delivery to model partitions).
+  TurnCompletes | Interrupt | PeerOffline/Rejoin | ProcessRestart`, under delivery
+  policies (immediate / hold-all / random-partial to model partitions). Yjs clientIDs
+  pinned per replica, as in Ylmish's Stress.fs.
 - **System under test**: real client programs (withYlmish) + the real drain/scheduler
-  over in-memory channels — the same machinery production runs, no WebRTC in the loop.
+  over in-memory channels — the same machinery production runs, no WebRTC in the loop;
+  `ProcessRestart` replays the persisted doc + log (Step 19) so recovery is inside the
+  property space, not a separate hope.
 - **Oracle**: a ~50-line sequential model applying the linearization rule ("the
   Process's delivered-set at drain wins"), from which invariants 1, 2, 5 are computed;
-  3, 4, 6, 7 are checked structurally on the SUT.
-- Volume: a few hundred schedules per suite run (bounded seconds); the two
+  3, 4, 6, 7 are checked structurally on the SUT. Each invariant is one
+  `property {}` block; a failing case prints its seed and becomes a pinned regression.
+- Volume: a few hundred cases per property per suite run (bounded seconds); the two
   user-named races — *delete-when-accepted* and *reorder-when-accepted* — also get
   explicit, named example tests (both orderings each) plus a browser E2E for the
   delete race so the UX (entry jumps to timeline, delete no-ops) is pinned visibly.
+
+## Doc persistence (in scope: Process AND clients)
+
+Queued messages are user-visible content living in the doc, so doc durability joins
+this phase on both sides:
+
+- **Process side (Step 19)**: a sidecar `<session>.doc.jsonl` next to the event log —
+  every doc update (already base64 via `DocSync`) appended write+fsync like the event
+  log; replayed at open (Yjs updates are idempotent and order-tolerant), then
+  **compacted**: one merged `encodeStateAsUpdate` snapshot line rewrites the file.
+  Same torn-tail recovery discipline as the event log. Restart ordering: replay doc,
+  open log, run the drain dedup/repair — the crash-between-append-and-remove window is
+  now *guaranteed* to be exercised (persisted doc still holds consumed entries), which
+  the log-anchored dedup exists for; `ProcessRestart` in the property schedules covers
+  it continuously.
+- **Client side (Step 20)**: **IndexedDB via `y-indexeddb`** — the canonical Yjs
+  provider, attached to the client doc keyed by session id. Cold loads render local
+  state instantly and offline reads work; on reconnect the existing full-state
+  exchange reconciles. Offline coherence falls out of the CRDT: a stale client
+  re-syncing an entry the Process already consumed meets the Process's *removal
+  tombstones* and converges to removed (its offline edits to that entry discard —
+  the same edit-vs-accept semantics); offline-created entries have fresh keys and
+  drain normally. These rejoin-after-drain cases are property-schedule cases
+  (`PeerOffline/Rejoin`), plus a Playwright test: type a draft, reload the page,
+  the draft is still there before the network reconnects.
 
 ## Delivery steps (tracker Phase 3, revised)
 
@@ -145,17 +177,11 @@ becomes a pinned regression test).
 | 15 | Queue in synced state | `QueuedMessage` map + codec; send = enqueue (SendDraft retired); edit/reorder/delete ops + UI (queue list, drag = fractional index) | Codec round-trip; two-client converge on edit/reorder/delete; wire-compat for `MessageSent.QueueId` |
 | 16 | Drain & scheduler | `removeQueued` boundary write; atomic drain with log-anchored dedup; single-flight scheduler with while-idle trigger | Named race tests (delete-vs-accept ×2 orderings, reorder-vs-accept ×2); crash-replay dedup test; liveness test |
 | 17 | Abort seam & interrupt | `AgentAbortSignal` on `RunAgent`; `InterruptAgentTurn` command → `AgentTurnInterrupted` (+ `Interrupted` projection status); interrupt ⇒ immediate drain | Held-turn interrupt tests; interrupt-vs-completion race; UI button + queued indicators |
-| 18 | Property harness & acceptance | Seeded schedule generator + oracle; invariants 1–7; browser E2E for the delete race; live SDK abort | Hundreds of seeded schedules green and repeatable; 5 deterministic suite runs; Phase 3 acceptance recorded |
+| 18 | Hedgehog harness | Vendored Fable-compatible Hedgehog (Ylmish's module); schedule generators + oracle; invariants 1–7 as `property {}` blocks | Hundreds of cases per property, deterministic by seed; failing seeds pinned as regressions |
+| 19 | Process doc persistence | Sidecar doc-update file, replay + compaction, torn-tail recovery; restart drains correctly (dedup) | Restart tests incl. consumed-but-not-removed repair; `ProcessRestart` joins the property schedules |
+| 20 | Client doc persistence & acceptance | `y-indexeddb` provider in the browser client; offline rejoin coherence; live SDK abort | Playwright reload-persistence test; rejoin-after-drain properties; 5 deterministic suite runs; Phase 3 acceptance recorded |
 
 ## Risks & open questions
-
-- **Doc durability now matters more** (GAPS: the Yjs doc is not persisted). Queued
-  messages are user-visible content that survives *peers* leaving but not a Process
-  restart — unless a peer replica re-syncs it back on reconnect (full-state exchange
-  does this if any peer was online across the restart). Recommendation: pull doc
-  persistence (append Yjs updates to a sidecar file, compact on load) into this phase
-  as step 19 if the loss window is unacceptable; otherwise record it as an accepted,
-  sharpened gap.
 - **Drain atomicity depends on the single-threaded Process tick** — the snapshot,
   appends, and removal must not yield to IO between them. With the file log's
   synchronous append this holds today; if the log ever goes async-batched, the drain

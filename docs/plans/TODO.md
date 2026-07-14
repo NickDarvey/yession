@@ -63,7 +63,9 @@ property schedules against a sequential oracle.
 | 15 | Queue in synced state | `QueuedMessage` keyed map + `Order` fractional index; send = enqueue; edit/reorder/delete converge | Todo | |
 | 16 | Drain & scheduler | Atomic snapshot→append→remove with log-anchored exactly-once; while-idle drain trigger; named race tests (delete/reorder vs accept) | Todo | |
 | 17 | Abort seam & interrupt | `AgentAbortSignal`; `AgentTurnInterrupted` + `Interrupted` status; interrupt drains immediately | Todo | |
-| 18 | Property harness & acceptance | Seeded schedules + oracle for invariants 1–7; browser E2E for the delete race; live SDK abort | Todo | |
+| 18 | Hedgehog property harness | Vendored Fable-compatible Hedgehog (per Ylmish); invariants 1–7 as `property {}` over schedule generators + oracle | Todo | |
+| 19 | Process doc persistence | Sidecar doc-update file (replay, compaction, torn-tail recovery); restart inside the property space | Todo | |
+| 20 | Client doc persistence & acceptance | `y-indexeddb` in the browser client; offline rejoin coherence; Phase 3 acceptance | Todo | |
 
 **Phase 3 acceptance:** not started.
 
