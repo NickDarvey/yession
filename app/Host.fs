@@ -32,18 +32,28 @@ type SessionHost =
 /// message queue: when the agent is idle it drains the queue into `MessageSent` events
 /// and — when `runAgent` is given — starts one coalesced turn per batch (Phase 3).
 /// When `environmentCapabilities` is given (granted by the Session Manager, Step 11),
-/// the session gets a lazily-started environment (Step 12). Resolves once the server
-/// is listening.
-let startWithCapabilities
+/// the session gets a lazily-started environment (Step 12). When `docStore` is given
+/// (Step 19), the persisted doc is replayed at boot — unsent queue entries and drafts
+/// survive restarts — and every subsequent update is durably appended. Resolves once
+/// the server is listening.
+let startFull
     (runAgent: RunAgent option)
     (environmentCapabilities: SessionEnvironmentCapabilities option)
     (baseLog: EventLog<SessionEvent> option)
+    (docStore: DocStore.DocStore option)
     (sessionId: SessionId)
     (token: string)
     (port: int)
     : Async<SessionHost> =
     async {
         let doc = Y.Doc.Create ()
+        // Restart ordering (Step 19): replay the persisted doc FIRST — before any
+        // observer registers — then open the log, then the boot drain repairs the
+        // crash-between-append-and-removal window via the log-anchored dedup.
+        docStore |> Option.iter (fun store -> store.ReplayInto doc)
+        // The persistence tap registers before every other observer, so an update is
+        // durable before anything acts on it.
+        docStore |> Option.iter (fun store -> DocSync.onAnyUpdatePayload doc store.Append)
 
         // Connected peers' channels, for state relay; keyed per connection.
         let mutable connections : Map<int, FrameChannel<string>> = Map.empty
@@ -125,7 +135,15 @@ let startWithCapabilities
         // Durable facts from collaborative state: the first appearance of a draft in the
         // doc appends `DraftStarted` exactly once. Content stays in Yjs; the log records
         // only the fact (docs/design.md §1 "Durable facts are events").
-        let mutable knownDrafts : Set<string> = Set.empty
+        // Seeded from the replayed log so drafts restored by doc replay (Step 19) are
+        // not re-announced as started.
+        let mutable knownDrafts : Set<string> =
+            replayed.Events
+            |> List.choose (fun e ->
+                match e.Event with
+                | DraftStarted d -> Some (DraftId.value d.DraftId)
+                | _ -> None)
+            |> Set.ofList
         DocSync.onAnyUpdate doc (fun () ->
             match SyncedStateSync.ofDoc doc with
             | Ok synced ->
@@ -148,6 +166,11 @@ let startWithCapabilities
             // can never be missed (liveness; recursion during a drain's own removal is
             // cut by the single-flight guard).
             drain ())
+
+        // The boot drain (Step 19): a replayed doc may hold entries that were pending
+        // at the crash (consume them now) or already consumed but not yet removed (the
+        // crash window — the log-anchored dedup repairs them without re-consuming).
+        drain ()
 
         let mutable endWaiters : (unit -> unit) list = []
         let signalSessionEnded () =
@@ -210,6 +233,17 @@ let startWithCapabilities
               WaitForNextSessionEnd = waitForNextSessionEnd
               Stop = fun () -> async { server.close ignore } }
     }
+
+/// `startFull` without doc persistence — collaborative state is memory-only.
+let startWithCapabilities
+    (runAgent: RunAgent option)
+    (environmentCapabilities: SessionEnvironmentCapabilities option)
+    (baseLog: EventLog<SessionEvent> option)
+    (sessionId: SessionId)
+    (token: string)
+    (port: int)
+    : Async<SessionHost> =
+    startFull runAgent environmentCapabilities baseLog None sessionId token port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =

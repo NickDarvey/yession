@@ -23,17 +23,21 @@ let private runAgent =
 
 // The product topology (Phase 2): a Session Manager launches the default session's
 // Process with scoped environment capabilities over the local-process backend.
-// Durable facts survive restarts: each session's log is an append-only JSONL file
-// under the data directory.
+// Everything durable survives restarts: each session's event log AND its collaborative
+// document (unsent queue entries, drafts) are append-only JSONL files under the data
+// directory (Step 19).
 let private dataDir = Interop.envOr "YESSION_DATA_DIR" ".yession/data"
 
 let private makeLog (id: SessionId) =
     EventStore.openLog (sprintf "%s/%s.events.jsonl" dataDir (SessionId.value id)) id (fun () -> System.DateTimeOffset.UtcNow)
 
+let private makeDocStore (id: SessionId) =
+    DocStore.openStore (sprintf "%s/%s.doc.jsonl" dataDir (SessionId.value id))
+
 Async.StartImmediate(
     async {
         let manager =
-            Manager.createWith runAgent (Some (Backends.LocalProcessBackend.create ())) (Some makeLog) port
+            Manager.createFull runAgent (Some (Backends.LocalProcessBackend.create ())) (Some makeLog) (Some makeDocStore) port
         let! launched = manager.StartSession { SessionId = sessionId; SessionToken = token }
         printfn
             "Yession Session Manager: session %s launched at %s  (process=%s, agent=%s)"

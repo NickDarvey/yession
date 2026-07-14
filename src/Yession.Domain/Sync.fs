@@ -213,3 +213,9 @@ module DocSync =
     /// Invoke `handle` after every doc update, however it originated.
     let onAnyUpdate (doc: Y.Doc) (handle: unit -> unit) : unit =
         onUpdate doc (fun _ _ -> handle ())
+
+    /// Invoke `persist` with every update applied to the doc, however it originated —
+    /// the doc-persistence tap (Step 19). Register it before the observers that act on
+    /// updates, so durability precedes visibility.
+    let onAnyUpdatePayload (doc: Y.Doc) (persist: string -> unit) : unit =
+        onUpdate doc (fun update _ -> persist (toBase64 update))

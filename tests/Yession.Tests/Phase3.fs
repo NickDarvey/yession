@@ -408,9 +408,138 @@ let private interruptTests =
             }
     ]
 
+// --- Step 19: process doc persistence (sidecar doc JSONL) -------------------------------
+
+[<Fable.Core.ImportAll("node:fs")>]
+let private nodeFs : obj = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("$0.appendFileSync($1, $2)")>]
+let private appendFileSync (fs: obj) (path: string) (text: string) : unit = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("$0.readFileSync($1, 'utf8')")>]
+let private readFileSync (fs: obj) (path: string) : string = Fable.Core.Util.jsNative
+
+let private docPersistenceTests =
+    let freshPaths (name: string) =
+        let dir = "tests/Yession.Tests/out/.data"
+        let stamp = int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000
+        sprintf "%s/%s-%d.events.jsonl" dir name stamp, sprintf "%s/%s-%d.doc.jsonl" dir name stamp
+
+    testList "Process doc persistence (Step 19)" [
+        testCaseAsync "a restart replays the persisted doc: pending entries drain exactly once at boot; drafts survive and are not re-announced" <|
+            async {
+                let logPath, docPath = freshPaths "phase3-docstore"
+                let sessionId = SessionId.create "phase3-docstore" |> expect
+                let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
+
+                // First life: a held turn consumes e1; e2 stays pending; a plain draft
+                // is typed but never sent.
+                let runner1, _release1 = heldAgent ()
+                let! h1 = Host.startFull (Some runner1) None (Some (openLog ())) (Some (DocStore.openStore docPath)) sessionId "t" 0
+                let o = offlinePeer 21.0 "olive" "Olive"
+                let q1 = enqueue o "d-1" "q-1" "consumed before crash"
+                deliver o.Doc h1.Doc
+                let q2 = enqueue o "d-2" "q-2" "pending at crash"
+                deliver o.Doc h1.Doc
+                let keptDraft = DraftId.create "d-keep" |> expect
+                o.Runner.Dispatch (user (StartDraftMsg keptDraft))
+                o.Runner.Dispatch (user (editBody keptDraft (Text.insert 0 "durable words") (o.Runner.Model ())))
+                deliver o.Doc h1.Doc
+                let! firstLife = sentMessages h1.Log
+                Expect.equal (firstLife |> List.map (fun m -> m.QueueId)) [ Some q1 ] "only e1 consumed; e2 waits behind the held turn"
+                do! h1.Stop () // crash: the held turn never finishes
+
+                // Second life: replay doc + log. The boot drain consumes e2 exactly
+                // once; the draft is intact and not announced again.
+                let runner2, release2 = heldAgent ()
+                let! h2 = Host.startFull (Some runner2) None (Some (openLog ())) (Some (DocStore.openStore docPath)) sessionId "t" 0
+                let! secondLife = sentMessages h2.Log
+                Expect.equal
+                    (secondLife |> List.map (fun m -> m.QueueId, m.Body))
+                    [ Some q1, "consumed before crash"; Some q2, "pending at crash" ]
+                    "the pending entry survived the restart and drained exactly once at boot"
+                Expect.isTrue (Map.isEmpty (hostQueue h2)) "the queue is empty after the boot drain"
+                release2 ()
+
+                let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
+                Expect.equal
+                    (synced.Drafts |> Map.tryFind keptDraft |> Option.map (fun d -> Text.toString d.Body))
+                    (Some "durable words")
+                    "the unsent draft survived the restart"
+                // A later doc update triggers the draft scan; the replayed draft must
+                // not produce a second DraftStarted (knownDrafts seeds from the log).
+                o.Runner.Dispatch (user (editBody keptDraft (Text.insert 13 "!") (o.Runner.Model ())))
+                deliver o.Doc h2.Doc
+                let! page = h2.Log.Read None Int32.MaxValue
+                let announcements =
+                    page.Events
+                    |> List.filter (fun e ->
+                        match e.Event with
+                        | DraftStarted d -> d.DraftId = keptDraft
+                        | _ -> false)
+                Expect.equal (List.length announcements) 1 "DraftStarted appended exactly once across both lives"
+                do! h2.Stop ()
+
+                // Compaction: the second open collapsed the history to one snapshot
+                // line (plus any updates appended after boot).
+                let lineCount =
+                    (readFileSync nodeFs docPath).Split '\n'
+                    |> Array.filter (fun l -> l.Trim().Length > 0)
+                    |> Array.length
+                Expect.isTrue (lineCount <= 3) (sprintf "the store is compacted at open (found %d lines)" lineCount)
+            }
+
+        testCaseAsync "a torn final line in the doc store is dropped; the acknowledged state is intact" <|
+            async {
+                let logPath, docPath = freshPaths "phase3-torn"
+                let sessionId = SessionId.create "phase3-torn" |> expect
+                let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
+
+                let! h1 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) sessionId "t" 0
+                let o = offlinePeer 22.0 "olive" "Olive"
+                let draftId = DraftId.create "d-1" |> expect
+                o.Runner.Dispatch (user (StartDraftMsg draftId))
+                o.Runner.Dispatch (user (editBody draftId (Text.insert 0 "acknowledged") (o.Runner.Model ())))
+                deliver o.Doc h1.Doc
+                do! h1.Stop ()
+
+                // A crash tore the final append: an unparseable half-line, no newline.
+                appendFileSync nodeFs docPath "////////"
+
+                let! h2 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) sessionId "t" 0
+                let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
+                Expect.equal
+                    (synced.Drafts |> Map.tryFind draftId |> Option.map (fun d -> Text.toString d.Body))
+                    (Some "acknowledged")
+                    "every acknowledged update survived; only the torn tail was dropped"
+                do! h2.Stop ()
+            }
+
+        testCaseAsync "real corruption (a torn line that is NOT the unacknowledged tail) fails loudly" <|
+            async {
+                let logPath, docPath = freshPaths "phase3-corrupt"
+                let sessionId = SessionId.create "phase3-corrupt" |> expect
+                let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
+
+                let! h1 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) sessionId "t" 0
+                do! h1.Stop ()
+                // A garbage line WITH a trailing newline claims to be acknowledged:
+                // that is corruption, and it must never be silently dropped.
+                appendFileSync nodeFs docPath "////////\n"
+
+                let mutable failedLoudly = false
+                try
+                    let store = DocStore.openStore docPath
+                    store.ReplayInto (Y.Doc.Create ())
+                with _ -> failedLoudly <- true
+                Expect.isTrue failedLoudly "a corrupt acknowledged line fails the open"
+            }
+    ]
+
 let tests =
     testList "Phase3" [
         raceTests
         interruptTests
         crashRepairTests
+        docPersistenceTests
     ]

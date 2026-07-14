@@ -148,29 +148,12 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
             MessageId.create (sprintf "message-%d" n) |> expect
 
     // The process side: doc + scheduler + the shadow-replica oracle, all rebuilt on
-    // ProcessRestart (fresh docs — doc persistence is Step 19; the log is durable).
+    // ProcessRestart. Restart recovers the persisted doc (Step 19): the sidecar store
+    // replays the merged update history, which IS the crashed process's doc state —
+    // modelled here by carrying that state into the fresh doc. The log is durable.
     let mutable processDoc = Unchecked.defaultof<Y.Doc>
     let mutable shadowDoc = Unchecked.defaultof<Y.Doc>
     let mutable scheduler = Unchecked.defaultof<Scheduler.SessionScheduler>
-    let bootProcess () =
-        processDoc <- Y.Doc.Create ()
-        processDoc.clientID <- 101.0
-        shadowDoc <- Y.Doc.Create ()
-        shadowDoc.clientID <- 102.0
-        let sched =
-            Scheduler.create sessionId processDoc log (Some runner)
-                (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId (consumedNow ())
-        scheduler <- sched
-        let thisProcess = processDoc
-        let thisShadow = shadowDoc
-        // The process's own writes (drain removals) reach the shadow like any peer's.
-        DocSync.onLocalUpdate thisProcess (fun payload ->
-            if System.Object.ReferenceEquals (thisProcess, processDoc) then
-                DocSync.applyRemote thisShadow payload)
-        // The while-idle trigger, exactly as the Host wires it.
-        DocSync.onAnyUpdate thisProcess (fun () ->
-            if System.Object.ReferenceEquals (thisProcess, processDoc) then sched.Drain ())
-    bootProcess ()
 
     let drainRecords = ResizeArray<DrainRecord> ()
     let restartMarks = ResizeArray<int> ()
@@ -191,6 +174,33 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
         action ()
         let actual = sentAll () |> List.skip before
         drainRecords.Add { Expected = expected; Actual = actual }
+
+    let bootProcess (recovered: string option) =
+        processDoc <- Y.Doc.Create ()
+        processDoc.clientID <- 101.0
+        shadowDoc <- Y.Doc.Create ()
+        shadowDoc.clientID <- 102.0
+        recovered
+        |> Option.iter (fun payload ->
+            DocSync.applyRemote processDoc payload
+            DocSync.applyRemote shadowDoc payload)
+        let sched =
+            Scheduler.create sessionId processDoc log (Some runner)
+                (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId (consumedNow ())
+        scheduler <- sched
+        let thisProcess = processDoc
+        let thisShadow = shadowDoc
+        // The process's own writes (drain removals) reach the shadow like any peer's.
+        DocSync.onLocalUpdate thisProcess (fun payload ->
+            if System.Object.ReferenceEquals (thisProcess, processDoc) then
+                DocSync.applyRemote thisShadow payload)
+        // The while-idle trigger, exactly as the Host wires it.
+        DocSync.onAnyUpdate thisProcess (fun () ->
+            if System.Object.ReferenceEquals (thisProcess, processDoc) then sched.Drain ())
+        // The boot drain (Step 19): recovered pending entries consume now; recovered
+        // consumed-but-not-removed leftovers repair via the log-anchored dedup.
+        checkedDrain (expectedBatch ()) sched.Drain
+    bootProcess None
 
     let deliverToProcess (i: int) =
         let payload = DocSync.fullState (peerDoc i)
@@ -262,10 +272,12 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
         | TurnCompletes -> turnCompletes ()
         | Interrupt i -> interrupt i
         | ProcessRestart ->
+            // The crashed process's persisted doc — replayed into the next life.
+            let persisted = DocSync.fullState processDoc
             epoch <- epoch + 1
             pendingRelease <- None
             restartMarks.Add recorded.Count
-            bootProcess ()
+            bootProcess (Some persisted)
 
     ops |> List.iter apply
 

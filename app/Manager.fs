@@ -35,11 +35,13 @@ type SessionManager =
 /// Create a Session Manager. Ports are allocated from `basePort` upward; `runAgent`
 /// is passed through to each launched Process. When a `ContainerBackend` is given, each
 /// launched Process receives environment capabilities already scoped to its session
-/// (Step 11) — the Manager owns the ownership registry.
-let createWith
+/// (Step 11) — the Manager owns the ownership registry. `makeLog`/`makeDocStore` give
+/// each session its durable event log and doc store (Step 19).
+let createFull
     (runAgent: RunAgent option)
     (backend: ContainerBackend option)
     (makeLog: (SessionId -> Yession.SessionProcess.EventLog<SessionEvent>) option)
+    (makeDocStore: (SessionId -> DocStore.DocStore) option)
     (basePort: int)
     : SessionManager =
     let containers = Authority.ContainerRegistry ()
@@ -65,8 +67,9 @@ let createWith
                 let environmentCapabilities =
                     backend |> Option.map (fun b -> Authority.grant containers b request.SessionId)
                 let baseLog = makeLog |> Option.map (fun make -> make request.SessionId)
+                let docStore = makeDocStore |> Option.map (fun make -> make request.SessionId)
                 let! host =
-                    Host.startWithCapabilities runAgent environmentCapabilities baseLog request.SessionId request.SessionToken port
+                    Host.startFull runAgent environmentCapabilities baseLog docStore request.SessionId request.SessionToken port
                 let bootstrapUri = sprintf "http://127.0.0.1:%d/" host.Port
                 let managed =
                     { SessionId = request.SessionId
@@ -92,6 +95,15 @@ let createWith
                     do! managed.Host.Stop ()
                 registry <- Map.empty
             } }
+
+/// `createFull` without doc persistence.
+let createWith
+    (runAgent: RunAgent option)
+    (backend: ContainerBackend option)
+    (makeLog: (SessionId -> Yession.SessionProcess.EventLog<SessionEvent>) option)
+    (basePort: int)
+    : SessionManager =
+    createFull runAgent backend makeLog None basePort
 
 /// `createWith` without durable storage — the deterministic in-memory default.
 let create (runAgent: RunAgent option) (backend: ContainerBackend option) (basePort: int) : SessionManager =
