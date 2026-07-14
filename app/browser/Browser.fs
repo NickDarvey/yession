@@ -85,14 +85,23 @@ let private appRoot () : obj = jsNative
 [<Emit("$0.innerHTML = $1")>]
 let private setHtml (el: obj) (html: string) : unit = jsNative
 
-[<Emit("document.activeElement && document.activeElement.getAttribute && document.activeElement.getAttribute('data-draft-input')")>]
-let private focusedDraftInput () : string option = jsNative
+[<Emit("""(() => {
+  const el = document.activeElement
+  if (!el || !el.getAttribute) return null
+  const draft = el.getAttribute('data-draft-input')
+  if (draft) return 'data-draft-input:' + draft
+  const queued = el.getAttribute('data-queue-input')
+  if (queued) return 'data-queue-input:' + queued
+  return null
+})()""")>]
+let private focusedEditor () : string option = jsNative
 
 [<Emit("""(() => {
-  const el = document.querySelector(`[data-draft-input="${$0}"]`)
+  const idx = $0.indexOf(':')
+  const el = document.querySelector(`[${$0.slice(0, idx)}="${$0.slice(idx + 1)}"]`)
   if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length) }
 })()""")>]
-let private refocusDraftInput (draftId: string) : unit = jsNative
+let private refocusEditor (key: string) : unit = jsNative
 
 [<Emit("""$0.addEventListener($1, (e) => {
   const target = e.target.closest ? e.target.closest(`[${$2}]`) : null
@@ -128,16 +137,16 @@ let private start () =
         let mutable dispatchRef : (ClientMsg -> unit) = ignore
         let mutable currentModel = initial
 
-        // Render the pure view on every model change. If a draft textarea is focused,
-        // its element is re-created by the render — restore focus and caret so typing
-        // is uninterrupted (the model already holds the text being typed).
+        // Render the pure view on every model change. If a draft or queue textarea is
+        // focused, its element is re-created by the render — restore focus and caret so
+        // typing is uninterrupted (the model already holds the text being typed).
         let setState (model: ClientModel) (dispatch: Ylmish.Program.Message<ClientModel, ClientMsg> -> unit) =
             currentModel <- model
             dispatchRef <- fun msg -> dispatch (Ylmish.Program.Message.User msg)
-            let focused = focusedDraftInput ()
+            let focused = focusedEditor ()
             setHtml root (View.render model)
             match focused with
-            | Some draftId when not (isNull (box draftId)) -> refocusDraftInput draftId
+            | Some key when not (isNull (box key)) -> refocusEditor key
             | _ -> ()
 
         App.makeProgram doc initial
@@ -168,6 +177,34 @@ let private start () =
                 // instead of clobbering concurrent edits.
                 match Map.tryFind id currentModel.Synced.Drafts with
                 | Some draft -> dispatchRef (EditDraftBodyMsg (id, Ylmish.Text.edit value draft.Body))
+                | None -> ()
+            | Error _ -> ())
+
+        // Queue controls (Phase 3): queued messages stay editable, reorderable, and
+        // deletable by any peer until the agent takes them.
+        delegate' root "input" "data-queue-input" (fun queueId value ->
+            match QueueId.create queueId with
+            | Ok id ->
+                match Map.tryFind id currentModel.Synced.Queue with
+                | Some entry -> dispatchRef (EditQueuedBodyMsg (id, Ylmish.Text.edit value entry.Body))
+                | None -> ()
+            | Error _ -> ())
+        delegate' root "click" "data-queue-delete" (fun queueId _ ->
+            match QueueId.create queueId with
+            | Ok id -> dispatchRef (DeleteQueuedMsg id)
+            | Error _ -> ())
+        delegate' root "click" "data-queue-up" (fun queueId _ ->
+            match QueueId.create queueId with
+            | Ok id ->
+                match QueueOrder.moveUp currentModel.Synced.Queue id with
+                | Some order -> dispatchRef (ReorderQueuedMsg (id, order))
+                | None -> ()
+            | Error _ -> ())
+        delegate' root "click" "data-queue-down" (fun queueId _ ->
+            match QueueId.create queueId with
+            | Ok id ->
+                match QueueOrder.moveDown currentModel.Synced.Queue id with
+                | Some order -> dispatchRef (ReorderQueuedMsg (id, order))
                 | None -> ()
             | Error _ -> ())
 

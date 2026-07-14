@@ -547,6 +547,7 @@ let private acceptanceTests =
                     [ MessageSent
                         { MessageId = MessageId.create "m1" |> expect
                           DraftId = None
+                          QueueId = None
                           Author = HumanPeer ada
                           Body = "hi" }
                       AgentTurnStarted

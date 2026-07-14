@@ -37,6 +37,13 @@ module DraftId =
         normalize "DraftId" raw |> Result.map DraftId
     let value (DraftId s) = s
 
+type QueueId = private QueueId of string
+
+module QueueId =
+    let create (raw: string) : Result<QueueId, string> =
+        normalize "QueueId" raw |> Result.map QueueId
+    let value (QueueId s) = s
+
 type MessageId = private MessageId of string
 
 module MessageId =

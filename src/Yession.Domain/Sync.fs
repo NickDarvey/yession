@@ -1,21 +1,23 @@
 namespace Yession.Domain
 
-// The Ylmish sync boundary (Step 05). `SyncedSessionState` is the only state that
-// crosses it: the codec below names exactly the fields that sync and how each merges
-// (docs/design.md §1 "Ylmish is the sync boundary"). The conversation projection is
-// deliberately never mentioned, so it can never enter the Yjs document. `DocSync` is
-// the transport adapter that moves Yjs updates over the opaque `State` frame.
+// The Ylmish sync boundary (Step 05, extended by Phase 3's message queue).
+// `SyncedSessionState` is the only state that crosses it: the codec below names exactly
+// the fields that sync and how each merges (docs/design.md §1 "Ylmish is the sync
+// boundary"). The conversation projection is deliberately never mentioned, so it can
+// never enter the Yjs document. `DocSync` is the transport adapter that moves Yjs
+// updates over the opaque `State` frame.
 
 open FSharp.Data.Adaptive
 open Ylmish
 open Ylmish.Codec
 
 /// The adaptive companion of `SyncedSessionState`, hand-written in place of Adaptify
-/// codegen (the model is small and Adaptify would add a build step). Drafts are keyed
-/// by their app-minted `DraftId` so concurrent — even offline — creation is safe:
-/// different keys never conflict.
+/// codegen (the model is small and Adaptify would add a build step). Drafts and queue
+/// entries are keyed by their app-minted ids so concurrent — even offline — creation is
+/// safe: different keys never conflict.
 type AdaptiveSyncedState =
     { Drafts : cmap<string, DraftState>
+      Queue : cmap<string, QueuedMessage>
       SharedBrief : cval<SharedBrief option> }
 
 module SyncedStateSync =
@@ -23,38 +25,36 @@ module SyncedStateSync =
     let private draftsByKey (m: SyncedSessionState) : HashMap<string, DraftState> =
         m.Drafts |> Map.toSeq |> Seq.map (fun (k, v) -> DraftId.value k, v) |> HashMap.ofSeq
 
+    let private queueByKey (m: SyncedSessionState) : HashMap<string, QueuedMessage> =
+        m.Queue |> Map.toSeq |> Seq.map (fun (k, v) -> QueueId.value k, v) |> HashMap.ofSeq
+
     /// `Create` for Ylmish's options: build the adaptive companion from a model.
     let create (m: SyncedSessionState) : AdaptiveSyncedState =
         { Drafts = cmap (draftsByKey m)
+          Queue = cmap (queueByKey m)
           SharedBrief = cval m.SharedBrief }
 
     /// `Update` for Ylmish's options: fold the next model into the companion. Setting
-    /// `cmap.Value` yields keyed deltas, so only changed drafts re-encode.
+    /// `cmap.Value` yields keyed deltas, so only changed entries re-encode.
     let update (a: AdaptiveSyncedState) (m: SyncedSessionState) : unit =
         a.Drafts.Value <- draftsByKey m
+        a.Queue.Value <- queueByKey m
         a.SharedBrief.Value <- m.SharedBrief
 
-    let private statusKey =
-        function
-        | Active -> "active"
-        | Sending -> "sending"
-        | Sent -> "sent"
-
-    /// Total on purpose: an unknown status written by a newer schema reads as `Active`
-    /// rather than failing the whole decode.
-    let private statusOf =
-        function
-        | "sending" -> Sending
-        | "sent" -> Sent
-        | _ -> Active
-
-    /// Per-draft encoding: author/status are honest LWW registers, the body is
+    /// Per-draft encoding: the author is an honest LWW register, the body is
     /// collaborative text — concurrent edits to the same body interleave and merge.
     let private encodeDraft (d: DraftState) : Encoded =
         Encode.object
             [ "author", Encode.string (AVal.constant (PeerId.value d.Author))
-              "body", Encode.text (AVal.constant d.Body)
-              "status", Encode.string (AVal.constant (statusKey d.Status)) ]
+              "body", Encode.text (AVal.constant d.Body) ]
+
+    /// Per-queue-entry encoding: body is collaborative text; order is an LWW float
+    /// register, so reorder = one register write (never a structural move).
+    let private encodeQueued (q: QueuedMessage) : Encoded =
+        Encode.object
+            [ "author", Encode.string (AVal.constant (PeerId.value q.Author))
+              "body", Encode.text (AVal.constant q.Body)
+              "order", Encode.float (AVal.constant q.Order) ]
 
     let private encodeBrief (b: aval<SharedBrief>) : Encoded =
         Encode.object [ "body", Encode.string (b |> AVal.map (fun x -> x.Body)) ]
@@ -64,23 +64,37 @@ module SyncedStateSync =
     let encode (a: AdaptiveSyncedState) : Encoded =
         Encode.object
             [ "drafts", Encode.map encodeDraft (a.Drafts :> amap<_, _>)
+              "queue", Encode.map encodeQueued (a.Queue :> amap<_, _>)
               "sharedBrief", Encode.option encodeBrief a.SharedBrief ]
 
     /// The doc-side field shapes, before identifier validation.
     type private DraftFields =
         { Author : string
+          Body : Text }
+
+    type private QueuedFields =
+        { Author : string
           Body : Text
-          Status : string }
+          Order : float }
 
     let private decodeDraft<'m> : Decoder<'m, DraftFields> =
         Decode.object {
             let! author = Decode.object.required "author" Decode.string
             let! body = Decode.object.optional "body" Decode.text
-            let! status = Decode.object.optional "status" Decode.string
+            return
+                { Author = author
+                  Body = defaultArg body Text.empty }
+        }
+
+    let private decodeQueued<'m> : Decoder<'m, QueuedFields> =
+        Decode.object {
+            let! author = Decode.object.required "author" Decode.string
+            let! body = Decode.object.optional "body" Decode.text
+            let! order = Decode.object.optional "order" Decode.float
             return
                 { Author = author
                   Body = defaultArg body Text.empty
-                  Status = defaultArg status "active" }
+                  Order = defaultArg order 0.0 }
         }
 
     let private decodeBrief<'m> : Decoder<'m, SharedBrief> =
@@ -92,12 +106,20 @@ module SyncedStateSync =
     /// Entries whose identifiers fail the smart constructors are skipped rather than
     /// failing the decode: the doc is shared with peers we don't control, and a decode
     /// must stay total.
-    let private toDomain (h: HashMap<string, DraftFields>) : Map<DraftId, DraftState> =
+    let private draftsToDomain (h: HashMap<string, DraftFields>) : Map<DraftId, DraftState> =
         (Map.empty, HashMap.toSeq h)
         ||> Seq.fold (fun acc (key, f) ->
             match DraftId.create key, PeerId.create f.Author with
             | Ok id, Ok author ->
-                acc |> Map.add id { DraftId = id; Author = author; Body = f.Body; Status = statusOf f.Status }
+                acc |> Map.add id { DraftId = id; Author = author; Body = f.Body }
+            | _ -> acc)
+
+    let private queueToDomain (h: HashMap<string, QueuedFields>) : Map<QueueId, QueuedMessage> =
+        (Map.empty, HashMap.toSeq h)
+        ||> Seq.fold (fun acc (key, f) ->
+            match QueueId.create key, PeerId.create f.Author with
+            | Ok id, Ok author ->
+                acc |> Map.add id { QueueId = id; Author = author; Body = f.Body; Order = f.Order }
             | _ -> acc)
 
     /// Decode the synced state out of a doc. Total, and decode-empty = init: on an empty
@@ -105,9 +127,11 @@ module SyncedStateSync =
     let decode<'m> : Decoder<'m, SyncedSessionState> =
         Decode.object {
             let! drafts = Decode.object.optional "drafts" (Decode.map decodeDraft)
+            let! queue = Decode.object.optional "queue" (Decode.map decodeQueued)
             let! brief = Decode.object.optional "sharedBrief" decodeBrief
             return
-                { Drafts = drafts |> Option.map toDomain |> Option.defaultValue Map.empty
+                { Drafts = drafts |> Option.map draftsToDomain |> Option.defaultValue Map.empty
+                  Queue = queue |> Option.map queueToDomain |> Option.defaultValue Map.empty
                   SharedBrief = brief }
         }
 
@@ -121,13 +145,30 @@ module SyncedStateSync =
     /// them. Type the codec's roots (and only those that exist) before reading.
     let private materializeRoots (doc: Yjs.Y.Doc) : unit =
         if shareHas doc "drafts" then (doc.getMap "drafts" : Yjs.Y.Map<obj>) |> ignore
+        if shareHas doc "queue" then (doc.getMap "queue" : Yjs.Y.Map<obj>) |> ignore
         if shareHas doc "sharedBrief" then (doc.getMap "sharedBrief" : Yjs.Y.Map<obj>) |> ignore
 
     /// Read the synced state currently in a doc (the decode direction alone — used by the
-    /// Session Process, which observes the doc without running its own Ylmish binding yet).
+    /// Session Process, which observes the doc without running its own Ylmish binding).
     let ofDoc (doc: Yjs.Y.Doc) : Result<SyncedSessionState, Error list> =
         materializeRoots doc
         Decode.run SyncedSessionState.empty decode doc
+
+    /// The origin tag on the Session Process's own doc writes (the drain's removals),
+    /// distinct from the remote-apply origin so they broadcast like any local update.
+    let processOrigin : obj = box "yession-process-drain"
+
+    /// The Session Process's one structural doc write: remove consumed queue entries, in
+    /// a single transaction under the process origin (Phase 3 drain, step 2 — the doc
+    /// removal after the durable append). Boundary code may touch Y types; application
+    /// logic still never does. Removing an already-removed key merges as a CRDT no-op.
+    let removeQueued (doc: Yjs.Y.Doc) (ids: QueueId list) : unit =
+        if not (List.isEmpty ids) then
+            doc.transact (
+                (fun _ ->
+                    let queue : Yjs.Y.Map<obj> = doc.getMap "queue"
+                    ids |> List.iter (fun id -> queue.delete (QueueId.value id))),
+                processOrigin)
 
 /// Moves Yjs updates over the transport's opaque `State` frame. The wire payload is a
 /// base64-encoded Yjs update; lib0 (a yjs dependency) provides base64 in both Node and

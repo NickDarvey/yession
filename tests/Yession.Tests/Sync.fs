@@ -74,6 +74,56 @@ let private codecTests =
             Expect.isFalse ((doc.getMap () : Y.Map<obj>).has "conversation") "no conversation key in the root map"
             Expect.equal (p.Model ()).Conversation conversation "conversation history survives, app-only"
 
+        testCase "enqueueing round-trips through the codec (draft moves into the queue)" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            p.Dispatch (user (StartDraftMsg draftId1))
+            p.Dispatch (user (editBody draftId1 (Text.insert 0 "queued words") (p.Model ())))
+            let queueId = QueueId.create "q-1" |> expect
+            p.Dispatch (user (SendDraftMsg (draftId1, queueId)))
+
+            let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+            Expect.equal decoded (p.Model ()).Synced "the doc decodes back to exactly the model's synced state"
+            Expect.isFalse (Map.containsKey draftId1 decoded.Drafts) "the draft left the drafts map"
+            let entry = decoded.Queue |> Map.find queueId
+            Expect.equal (Text.toString entry.Body) "queued words" "the body moved with it"
+            Expect.equal entry.Order 1.0 "first entry lands at order 1"
+
+        testCase "two in-memory clients converge on queue edit, reorder, and delete" <| fun () ->
+            let docA = Y.Doc.Create ()
+            let docB = Y.Doc.Create ()
+            docA.clientID <- 1.0
+            docB.clientID <- 2.0
+            let pA = Harness.run (App.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
+            let pB = Harness.run (App.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
+            let q1 = QueueId.create "q-1" |> expect
+            let q2 = QueueId.create "q-2" |> expect
+
+            // Ada enqueues two messages.
+            for draftKey, text, queueId in [ "d-1", "first", q1; "d-2", "second", q2 ] do
+                let draftId = DraftId.create draftKey |> expect
+                pA.Dispatch (user (StartDraftMsg draftId))
+                pA.Dispatch (user (editBody draftId (Text.insert 0 text) (pA.Model ())))
+                pA.Dispatch (user (SendDraftMsg (draftId, queueId)))
+            syncBoth docA docB
+            Expect.equal (queueView (pB.Model ())) [ "q-1", "first"; "q-2", "second" ] "B sees the queue in order"
+
+            // Concurrent: Grace edits q1's body while Ada moves q2 to the front.
+            pB.Dispatch (user (editQueued q1 (Text.insert 5 " draft") (pB.Model ())))
+            match QueueOrder.moveUp (pA.Model ()).Synced.Queue q2 with
+            | Some order -> pA.Dispatch (user (ReorderQueuedMsg (q2, order)))
+            | None -> failwith "q2 should be movable"
+            syncBoth docA docB
+
+            Expect.equal (queueView (pA.Model ())) [ "q-2", "second"; "q-1", "first draft" ] "edit and reorder both survive on A"
+            Expect.equal (queueView (pB.Model ())) (queueView (pA.Model ())) "replicas converge"
+
+            // Delete propagates and wins over nothing else pending.
+            pB.Dispatch (user (DeleteQueuedMsg q2))
+            syncBoth docA docB
+            Expect.equal (queueView (pA.Model ())) [ "q-1", "first draft" ] "the deleted entry is gone on A"
+            Expect.equal (queueView (pB.Model ())) (queueView (pA.Model ())) "replicas converge after delete"
+
         testCase "two in-memory clients converge on one draft (drafts merge, bodies interleave)" <| fun () ->
             let docA = Y.Doc.Create ()
             let docB = Y.Doc.Create ()
@@ -98,69 +148,59 @@ let private codecTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Step 06 unit tests — SendDraft decisions and the conversation projection.
+// Phase 3 unit tests — the queue's total order, the drain plan's pure decision
+// core, the retired send command, and the conversation projection.
 // -----------------------------------------------------------------------------
 
-let private sendCommandTests =
+let private queueUnitTests =
     let ada = PeerId.create "ada" |> expect
-    let mintMessageId () = MessageId.create "msg-1" |> expect
-    let newLog () =
-        InMemoryEventLog.create (SessionId.create "send-tests" |> expect) (fun () -> DateTimeOffset.UtcNow)
-    let eventsOf (log: EventLog<SessionEvent>) =
-        async {
-            let! page = log.Read None Int32.MaxValue
-            return page.Events |> List.map (fun e -> e.Event)
-        }
-    let draftWith (status: DraftStatus) (body: string) : SyncedSessionState =
-        { Drafts =
-            Map.ofList
-                [ draftId1,
-                  { DraftId = draftId1; Author = ada; Body = Text.ofString body; Status = status } ]
-          SharedBrief = None }
+    let qid (s: string) = QueueId.create s |> expect
+    let entry (id: string) (order: float) (body: string) : QueuedMessage =
+        { QueueId = qid id; Author = ada; Body = Text.ofString body; Order = order }
+    let queueOf (entries: QueuedMessage list) : Map<QueueId, QueuedMessage> =
+        entries |> List.map (fun e -> e.QueueId, e) |> Map.ofList
 
-    testList "Send command" [
-        testCaseAsync "SendDraft snapshots the body and appends exactly one MessageSent" <|
-            async {
-                let log = newLog ()
-                let! result =
-                    SessionCommands.handle (fun () -> Ok (draftWith Active "ship it")) log mintMessageId ada
-                        (SendDraft draftId1)
-                Expect.equal result CommandAccepted "the send is accepted"
-                let! events = eventsOf log
-                Expect.equal
-                    events
-                    [ MessageSent
-                        { MessageId = mintMessageId ()
-                          DraftId = Some draftId1
-                          Author = HumanPeer ada
-                          Body = "ship it" } ]
-                    "one MessageSent with the snapshotted body"
-            }
+    testList "Queue order and drain plan" [
+        testCase "the queue order is (Order, QueueId): total and deterministic under ties" <| fun () ->
+            let queue = queueOf [ entry "b" 2.0 "second-by-id"; entry "a" 2.0 "first-by-id"; entry "c" 1.0 "first" ]
+            Expect.equal
+                (QueueOrder.sorted queue |> List.map (fun m -> QueueId.value m.QueueId))
+                [ "c"; "a"; "b" ]
+                "order ascending, QueueId breaks ties"
 
-        testCaseAsync "SendDraft on an unknown draft is rejected and appends nothing" <|
+        testCase "enqueue lands at the tail; moveUp/moveDown are one register write between neighbours" <| fun () ->
+            let queue = queueOf [ entry "a" 1.0 ""; entry "b" 2.0 ""; entry "c" 3.0 "" ]
+            Expect.equal (QueueOrder.next queue) 4.0 "next appends after the tail"
+            Expect.equal (QueueOrder.moveUp queue (qid "c")) (Some 1.5) "c moves between a and b"
+            Expect.equal (QueueOrder.moveUp queue (qid "a")) None "the head cannot move up"
+            Expect.equal (QueueOrder.moveDown queue (qid "a")) (Some 2.5) "a moves between b and c"
+            Expect.equal (QueueOrder.moveDown queue (qid "c")) None "the tail cannot move down"
+            Expect.equal (QueueOrder.next Map.empty) 1.0 "an empty queue starts at 1"
+
+        testCase "the drain plan consumes in order and dedups against the log-derived consumed set" <| fun () ->
+            let queue = queueOf [ entry "q2" 2.0 "two"; entry "q1" 1.0 "one"; entry "q3" 3.0 "three" ]
+            // q2 was already consumed (a crash between append and removal left it in
+            // the doc): it must be repaired out, never consumed twice.
+            let plan = QueueDrain.plan (Set.ofList [ "q2" ]) queue
+            Expect.equal
+                (plan.Batch |> List.map (fun m -> Text.toString m.Body))
+                [ "one"; "three" ]
+                "the batch is the snapshot in order, minus consumed"
+            Expect.equal
+                (plan.Removals |> List.map QueueId.value)
+                [ "q1"; "q2"; "q3" ]
+                "every snapshot key leaves the doc, including the repair"
+
+        testCase "a deleted entry is simply absent from the snapshot: never consumed" <| fun () ->
+            let plan = QueueDrain.plan Set.empty (queueOf [ entry "kept" 1.0 "kept" ])
+            Expect.equal (plan.Batch |> List.map (fun m -> QueueId.value m.QueueId)) [ "kept" ] "only present entries consume"
+
+        testCaseAsync "the retired SendDraft command is rejected as superseded" <|
             async {
-                let log = newLog ()
-                let! result =
-                    SessionCommands.handle (fun () -> Ok SyncedSessionState.empty) log mintMessageId ada
-                        (SendDraft draftId1)
+                let! result = SessionCommands.handle ada (SendDraft draftId1)
                 match result with
-                | CommandRejected _ -> ()
+                | CommandRejected reason -> Expect.isTrue (reason.Contains "superseded") "named as superseded"
                 | other -> failwithf "expected CommandRejected, got %A" other
-                let! events = eventsOf log
-                Expect.isEmpty events "nothing appended"
-            }
-
-        testCaseAsync "SendDraft on an already-sent draft is rejected and appends nothing" <|
-            async {
-                let log = newLog ()
-                let! result =
-                    SessionCommands.handle (fun () -> Ok (draftWith Sent "ship it")) log mintMessageId ada
-                        (SendDraft draftId1)
-                match result with
-                | CommandRejected _ -> ()
-                | other -> failwithf "expected CommandRejected, got %A" other
-                let! events = eventsOf log
-                Expect.isEmpty events "nothing appended"
             }
 
         testCase "MessageSent projects into the conversation" <| fun () ->
@@ -168,6 +208,7 @@ let private sendCommandTests =
             let message =
                 { MessageId = MessageId.create "msg-1" |> expect
                   DraftId = Some draftId1
+                  QueueId = Some (qid "q-1")
                   Author = HumanPeer ada
                   Body = "ship it" }
             let envelope =
@@ -198,6 +239,7 @@ let private sendCommandTests =
                     MessageSent
                         { MessageId = MessageId.create "msg-1" |> expect
                           DraftId = None
+                          QueueId = None
                           Author = HumanPeer ada
                           Body = "once only" } }
             let page : EventPage<SessionEvent> =
@@ -275,11 +317,9 @@ let private e2eTests =
                 do! b.Channel.Close ()
             }
 
-        testCaseAsync "sending a draft appends one snapshotted MessageSent, visible to both clients; later edits never mutate it (E2E-2/E2E-3)" <|
+        testCaseAsync "sending enqueues, the Process drains exactly one snapshotted MessageSent, and the entry leaves the queue on both clients (E2E-2/E2E-3)" <|
             async {
                 let sendDraftId = DraftId.create "draft-2" |> expect
-                let statusOf (m: ClientModel) =
-                    m.Synced.Drafts |> Map.tryFind sendDraftId |> Option.map (fun d -> d.Status)
                 let! a = connect "ada" "Ada"
                 let! b = connect "grace" "Grace"
 
@@ -288,51 +328,39 @@ let private e2eTests =
                 a.Runner.Dispatch (user (editBody sendDraftId (Text.insert 0 "ship it") (a.Runner.Model ())))
                 do! b.Runner.WaitFor (fun m -> bodyOf sendDraftId m = Some "ship it")
 
-                // Send: status walks Active -> Sending -> Sent on the sender, and the
-                // Sent status syncs to the other client.
+                // Send = enqueue: the draft becomes a queue entry (pure CRDT write); the
+                // idle Process drains it into the timeline, and the entry leaves the
+                // queue on every replica.
                 a.Connection.SendDraft sendDraftId
-                do! a.Runner.WaitFor (fun m -> statusOf m = Some Sent)
-                do! b.Runner.WaitFor (fun m -> statusOf m = Some Sent)
+                let settled (m: ClientModel) =
+                    Map.isEmpty m.Synced.Queue
+                    && not (Map.containsKey sendDraftId m.Synced.Drafts)
+                    && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "ship it" ]
+                do! a.Runner.WaitFor settled
+                do! b.Runner.WaitFor settled
 
-                // E2E-2: exactly one MessageSent, with the body snapshotted at send time.
+                // E2E-2: exactly one MessageSent — body snapshotted at consumption,
+                // attributed to the sender, and anchored to its queue entry.
                 let h = host.Value
                 let messagesIn (events: EventEnvelope<SessionEvent> list) =
                     events
                     |> List.choose (fun e ->
                         match e.Event with
-                        | MessageSent m when m.DraftId = Some sendDraftId -> Some (m, e.Offset)
+                        | MessageSent m -> Some m
                         | _ -> None)
                 let! page = h.Log.Read None Int32.MaxValue
-                let sent = messagesIn page.Events
-                match sent with
-                | [ message, offset ] ->
-                    Expect.equal message.Body "ship it" "the body is the send-time snapshot"
+                match messagesIn page.Events with
+                | [ message ] ->
+                    Expect.equal message.Body "ship it" "the body is the consumption-time snapshot"
                     Expect.equal message.Author (HumanPeer (PeerId.create "ada" |> expect)) "authored by the sender"
-                    // Both clients learn the log advanced (EventsAvailable broadcast).
-                    let sawOffset (m: ClientModel) =
-                        match m.EventConsumer.LatestKnownOffset with
-                        | Some latest -> EventOffset.value latest >= EventOffset.value offset
-                        | None -> false
-                    do! a.Runner.WaitFor sawOffset
-                    do! b.Runner.WaitFor sawOffset
-                | other -> failwithf "expected exactly one MessageSent for the draft, got %A" other
+                    Expect.isTrue message.QueueId.IsSome "anchored to its queue entry (the dedup key)"
+                | other -> failwithf "expected exactly one MessageSent, got %A" other
 
-                // The Process-side conversation projection contains the sent message.
-                let projection, _ =
-                    ConversationProjection.applyEvents None page.Events ConversationProjection.empty
-                Expect.equal
-                    (projection.Items |> List.map (fun i -> i.Body))
-                    [ "ship it" ]
-                    "the conversation projects exactly the sent message"
-
-                // E2E-3: keep editing the draft after the send; the sent message is immutable.
-                a.Runner.Dispatch (user (editBody sendDraftId (Text.insert 7 " tomorrow") (a.Runner.Model ())))
-                do! b.Runner.WaitFor (fun m -> bodyOf sendDraftId m = Some "ship it tomorrow")
-
+                // E2E-3: the terminal transition is immutable — the event log holds the
+                // one snapshot (the edit/delete-vs-accept races are pinned in Phase3.fs).
                 let! after = h.Log.Read None Int32.MaxValue
                 match messagesIn after.Events with
-                | [ message, _ ] ->
-                    Expect.equal message.Body "ship it" "later draft edits never mutate the sent message"
+                | [ message ] -> Expect.equal message.Body "ship it" "the sent message never mutates"
                 | other -> failwithf "expected the one immutable MessageSent, got %A" other
 
                 do! a.Channel.Close ()
@@ -369,15 +397,17 @@ let private e2eTests =
                         not m.EventConsumer.IsCatchingUp
                         && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "ship it"; "while you were away" ])
 
-                // E2E-7: unsent draft edits render in the draft editor, never in the
+                // E2E-7: unsent draft content renders in the draft editor, never in the
                 // timeline — the conversation comes from the projection alone.
-                a.Runner.Dispatch (user (editBody missedId (Text.insert 0 "UNSENT ") (a.Runner.Model ())))
-                do! b.Runner.WaitFor (fun m -> bodyOf missedId m = Some "UNSENT while you were away")
+                let unsentId = DraftId.create "draft-unsent" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg unsentId))
+                a.Runner.Dispatch (user (editBody unsentId (Text.insert 0 "UNSENT thought") (a.Runner.Model ())))
+                do! b.Runner.WaitFor (fun m -> bodyOf unsentId m = Some "UNSENT thought")
                 let html = View.render (b.Runner.Model ())
                 let timeline = html.Substring (html.IndexOf "data-conversation")
                 Expect.isTrue (timeline.Contains "while you were away") "the sent message is in the timeline"
                 Expect.isFalse (timeline.Contains "UNSENT") "unsent draft edits never appear in the timeline"
-                Expect.isTrue (html.Contains "UNSENT while you were away") "the live draft renders in the editor"
+                Expect.isTrue (html.Contains "UNSENT thought") "the live draft renders in the editor"
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()
@@ -409,6 +439,7 @@ let private e2eTests =
                         MessageSent
                             { MessageId = MessageId.create "forged" |> expect
                               DraftId = None
+                              QueueId = None
                               Author = HumanPeer mallory
                               Body = "forged message" } }
                 do! channel.Send (
@@ -451,6 +482,6 @@ let private e2eTests =
 let tests =
     testList "Sync" [
         codecTests
-        sendCommandTests
+        queueUnitTests
         e2eTests
     ]

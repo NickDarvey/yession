@@ -5,9 +5,7 @@ open Yession.Domain
 /// The Browser Client Elmish model and update loop shell. It holds a single typed
 /// snapshot of what the client knows: the local peer, connection state, synced
 /// collaborative state, the conversation projection, the event-consumer read position,
-/// and the agent view state. Later steps fill the draft editor, send flow, event
-/// consumption, and agent rendering. See docs/design.md §2.1, §2.3 and
-/// docs/plans/00-init/04-*.
+/// and the agent view state. See docs/design.md §2.1, §2.3 and docs/plans/00-init/04-*.
 
 type ConnectionState =
     | Disconnected
@@ -39,9 +37,9 @@ type ClientModel =
 
 /// Messages that drive the client model. Connection-lifecycle messages are produced by
 /// the connection driver (Connection.fs); the suffix avoids clashing with the
-/// `ConnectionState` cases and the transport frame DU cases. Draft messages (Step 05)
+/// `ConnectionState` cases and the transport frame DU cases. Draft and queue messages
 /// mutate only the synced collaborative state; the Ylmish binding turns those model
-/// changes into CRDT deltas.
+/// changes into CRDT deltas — sending needs no command round-trip (Phase 3).
 type ClientMsg =
     | ConnectingMsg
     | ConnectedMsg of PeerAcceptedPayload
@@ -56,13 +54,17 @@ type ClientMsg =
     | StartDraftMsg of DraftId
     /// Replace a draft's body with an edited `Text` (carrying the edit intent).
     | EditDraftBodyMsg of DraftId * Ylmish.Text
-    /// The local user asked to send the draft (Step 06): status moves to `Sending`
-    /// while the `SendDraft` command is in flight (the driver issues the command).
-    | SendDraftMsg of DraftId
-    /// The Session Process accepted the send: the draft is `Sent`.
-    | DraftSendAcceptedMsg of DraftId
-    /// The Session Process rejected the send: the draft returns to `Active`.
-    | DraftSendRejectedMsg of DraftId * reason: string
+    /// Send = enqueue (Phase 3): the draft moves into the shared message queue under
+    /// the app-minted `QueueId`, at the tail. A pure CRDT write; the Session Process
+    /// consumes the queue when the agent is idle.
+    | SendDraftMsg of DraftId * QueueId
+    /// Edit a queued message's body (any peer may, until the agent takes it).
+    | EditQueuedBodyMsg of QueueId * Ylmish.Text
+    /// Reorder a queued message: one fractional-index register write.
+    | ReorderQueuedMsg of QueueId * order: float
+    /// Delete a queued message. Until consumed, deletion wins: a deleted entry never
+    /// becomes an event.
+    | DeleteQueuedMsg of QueueId
 
 module ClientModel =
 
@@ -95,24 +97,10 @@ module ClientModel =
             LatestKnownOffset = latest
             IsCatchingUp = isBehind consumer.LastProcessedOffset latest }
 
-    /// Apply a status transition to a draft, if it exists and `transition` allows it.
-    let private withDraftStatus
-        (draftId: DraftId)
-        (transition: DraftState -> DraftStatus option)
-        (model: ClientModel)
-        : ClientModel =
-        match Map.tryFind draftId model.Synced.Drafts with
-        | Some draft ->
-            match transition draft with
-            | Some status ->
-                { model with
-                    Synced =
-                        { model.Synced with
-                            Drafts = Map.add draftId { draft with Status = status } model.Synced.Drafts } }
-            | None -> model
-        | None -> model
+    let private withSynced (synced: SyncedSessionState) (model: ClientModel) : ClientModel =
+        { model with Synced = synced }
 
-    /// Fold a connection-lifecycle message into the model.
+    /// Fold a message into the model.
     let update (msg: ClientMsg) (model: ClientModel) : ClientModel =
         match msg with
         | ConnectingMsg ->
@@ -176,21 +164,45 @@ module ClientModel =
                 let draft =
                     { DraftId = draftId
                       Author = model.Peer.PeerId
-                      Body = Ylmish.Text.empty
-                      Status = Active }
-                { model with
-                    Synced = { model.Synced with Drafts = Map.add draftId draft model.Synced.Drafts } }
+                      Body = Ylmish.Text.empty }
+                model |> withSynced { model.Synced with Drafts = Map.add draftId draft model.Synced.Drafts }
         | EditDraftBodyMsg (draftId, body) ->
             match Map.tryFind draftId model.Synced.Drafts with
             | Some draft ->
-                { model with
-                    Synced =
-                        { model.Synced with
-                            Drafts = Map.add draftId { draft with Body = body } model.Synced.Drafts } }
+                model
+                |> withSynced
+                    { model.Synced with Drafts = Map.add draftId { draft with Body = body } model.Synced.Drafts }
             | None -> model
-        | SendDraftMsg draftId ->
-            withDraftStatus draftId (fun draft -> if draft.Status = Active then Some Sending else None) model
-        | DraftSendAcceptedMsg draftId ->
-            withDraftStatus draftId (fun _ -> Some Sent) model
-        | DraftSendRejectedMsg (draftId, _) ->
-            withDraftStatus draftId (fun draft -> if draft.Status = Sending then Some Active else None) model
+        | SendDraftMsg (draftId, queueId) ->
+            // Draft -> queue entry, atomically in one model update (one CRDT
+            // transaction): the draft key is deleted and the queue key created. The
+            // sender is the attributed author; the entry lands at the queue tail.
+            match Map.tryFind draftId model.Synced.Drafts with
+            | Some draft when not (Map.containsKey queueId model.Synced.Queue) ->
+                let entry =
+                    { QueueId = queueId
+                      Author = model.Peer.PeerId
+                      Body = draft.Body
+                      Order = QueueOrder.next model.Synced.Queue }
+                model
+                |> withSynced
+                    { model.Synced with
+                        Drafts = Map.remove draftId model.Synced.Drafts
+                        Queue = Map.add queueId entry model.Synced.Queue }
+            | _ -> model
+        | EditQueuedBodyMsg (queueId, body) ->
+            match Map.tryFind queueId model.Synced.Queue with
+            | Some entry ->
+                model
+                |> withSynced
+                    { model.Synced with Queue = Map.add queueId { entry with Body = body } model.Synced.Queue }
+            | None -> model
+        | ReorderQueuedMsg (queueId, order) ->
+            match Map.tryFind queueId model.Synced.Queue with
+            | Some entry ->
+                model
+                |> withSynced
+                    { model.Synced with Queue = Map.add queueId { entry with Order = order } model.Synced.Queue }
+            | None -> model
+        | DeleteQueuedMsg queueId ->
+            model |> withSynced { model.Synced with Queue = Map.remove queueId model.Synced.Queue }

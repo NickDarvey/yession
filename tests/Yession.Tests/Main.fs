@@ -20,6 +20,7 @@ let all =
         E2E.tests
         Client.tests
         Phase2.tests
+        Phase3.tests
         Acceptance.tests
     ]
 

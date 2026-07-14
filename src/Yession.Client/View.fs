@@ -28,40 +28,39 @@ module View =
     let private escapeHtml (s: string) =
         s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
 
-    let private draftStatusLabel =
-        function
-        | Active -> "active"
-        | Sending -> "sending"
-        | Sent -> "sent"
-
     /// The synced drafts, rendered in stable (id) order so the markup is deterministic.
-    /// Each active draft carries its send button (wired to `SendDraft` by the browser
-    /// shell; the markup is the single source of truth either way).
+    /// Every draft is editable and sendable — sending moves it into the shared queue
+    /// (the shell wires the button to `SendDraft`, which enqueues; Phase 3).
     let private drafts (synced: SyncedSessionState) : string =
         synced.Drafts
         |> Map.toList
         |> List.map (fun (draftId, draft) ->
-            let body =
-                match draft.Status with
-                // Active drafts are editable in the browser; the textarea drives
-                // EditDraftBodyMsg through the shell's event delegation.
-                | Active ->
-                    sprintf "<textarea data-draft-input=\"%s\">%s</textarea>"
-                        (DraftId.value draftId)
-                        (escapeHtml (Ylmish.Text.toString draft.Body))
-                | Sending | Sent -> escapeHtml (Ylmish.Text.toString draft.Body)
-            let sendButton =
-                match draft.Status with
-                | Active -> sprintf "<button type=\"button\" data-send-draft=\"%s\">Send</button>" (DraftId.value draftId)
-                | Sending | Sent -> ""
-            sprintf "<article class=\"draft-item\" data-draft-id=\"%s\" data-draft-author=\"%s\" data-draft-status=\"%s\">%s%s</article>"
+            sprintf "<article class=\"draft-item\" data-draft-id=\"%s\" data-draft-author=\"%s\"><textarea data-draft-input=\"%s\">%s</textarea><button type=\"button\" data-send-draft=\"%s\">Send</button></article>"
                 (DraftId.value draftId)
                 (PeerId.value draft.Author)
-                (draftStatusLabel draft.Status)
-                body
-                sendButton)
+                (DraftId.value draftId)
+                (escapeHtml (Ylmish.Text.toString draft.Body))
+                (DraftId.value draftId))
         |> String.concat ""
         |> fun items -> "<button type=\"button\" data-start-draft>Start draft</button>" + items
+
+    /// The shared message queue (Phase 3), in consumption order. Every entry stays
+    /// editable, reorderable (one fractional-index write per move), and deletable by
+    /// any peer until the Session Process drains it into the timeline.
+    let private queue (synced: SyncedSessionState) : string =
+        QueueOrder.sorted synced.Queue
+        |> List.map (fun entry ->
+            let id = QueueId.value entry.QueueId
+            String.concat "" [
+                sprintf "<article class=\"queue-item\" data-queue-id=\"%s\" data-queue-author=\"%s\" data-queue-order=\"%s\">"
+                    id (PeerId.value entry.Author) (string entry.Order)
+                sprintf "<textarea data-queue-input=\"%s\">%s</textarea>" id (escapeHtml (Ylmish.Text.toString entry.Body))
+                sprintf "<button type=\"button\" data-queue-up=\"%s\">Up</button>" id
+                sprintf "<button type=\"button\" data-queue-down=\"%s\">Down</button>" id
+                sprintf "<button type=\"button\" data-queue-delete=\"%s\">Delete</button>" id
+                "</article>"
+            ])
+        |> String.concat ""
 
     let private authorLabel =
         function
@@ -146,8 +145,10 @@ module View =
                 (offsetText consumer.LatestKnownOffset)
             sprintf "<span class=\"catch-up\" data-catch-up>%s</span>" (catchUpText consumer)
             "</section>"
-            // Drafts are the synced collaborative state (Step 05); send lands in Step 06.
+            // Drafts and the message queue are the synced collaborative state; the
+            // queue drains into the timeline when the agent is idle (Phase 3).
             sprintf "<section class=\"draft\" data-draft-editor>%s</section>" (drafts model.Synced)
+            sprintf "<section class=\"queue\" data-message-queue>%s</section>" (queue model.Synced)
             sprintf "<section class=\"timeline\" data-conversation>%s</section>" (conversation model.Conversation)
             sprintf "<section class=\"agent\" data-agent-stream>%s</section>" (agentStream model.Agent)
             sprintf "<section class=\"environment\" data-environment=\"%s\"></section>" (environmentLabel model.Environment)

@@ -60,8 +60,8 @@ property schedules against a sequential oracle.
 
 | #  | Step | Outcome | Status | Notes / Blockers |
 |----|------|---------|--------|------------------|
-| 15 | Queue in synced state | `QueuedMessage` keyed map + `Order` fractional index; send = enqueue; edit/reorder/delete converge | Todo | |
-| 16 | Drain & scheduler | Atomic snapshot→append→remove with log-anchored exactly-once; while-idle drain trigger; named race tests (delete/reorder vs accept) | Todo | |
+| 15 | Queue in synced state | `QueuedMessage` keyed map + `Order` fractional index; send = enqueue; edit/reorder/delete converge | Done | `Queue` in `SyncedSessionState` (Ylmish codec: text body, float order register); `MessageSent.QueueId` (wire-compat: legacy lines decode to `None`); `SendDraft` retired (rejected as superseded; send = pure CRDT draft→queue move); queue UI (edit textarea, up/down = one fractional-index write, delete); two-replica converge on edit/reorder/delete; delivered with Step 16 in one commit — retiring the send command needs the drain for send→timeline |
+| 16 | Drain & scheduler | Atomic snapshot→append→remove with log-anchored exactly-once; while-idle drain trigger; named race tests (delete/reorder vs accept) | Done | `QueueDrain.plan` (pure: `(Order, QueueId)` batch minus log-consumed set, removals incl. crash-leftover repair) + single-flight drain in the Host (append→`removeQueued` transact→one coalesced turn); while-idle re-arm on every doc update; named race tests ×2 orderings each (delete/edit/reorder vs accept), stale-peer-rejoin dedup across a restart on the durable log, liveness + single-flight pinned; suite 94/94 incl. browser E2E |
 | 17 | Abort seam & interrupt | `AgentAbortSignal`; `AgentTurnInterrupted` + `Interrupted` status; interrupt drains immediately | Todo | |
 | 18 | Hedgehog property harness | Vendored Fable-compatible Hedgehog (per Ylmish); invariants 1–7 as `property {}` over schedule generators + oracle | Todo | |
 | 19 | Process doc persistence | Sidecar doc-update file (replay, compaction, torn-tail recovery); restart inside the property space | Todo | |

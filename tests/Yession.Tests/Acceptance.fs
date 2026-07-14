@@ -13,12 +13,12 @@ open Yession.Client
 open Yession.Tests.Support
 
 let private draftId = DraftId.create "draft-ui" |> expect
-let private sentDraftId = DraftId.create "draft-ui-sent" |> expect
+let private queueId = QueueId.create "queue-ui" |> expect
 let private ada = PeerId.create "ada" |> expect
 
-/// A model exercising every UI element at once: connected, mid catch-up, one active
-/// draft (sendable) and one sent, a completed human message, a streaming agent
-/// response, and a running agent turn.
+/// A model exercising every UI element at once: connected, mid catch-up, one draft
+/// (sendable), one queued message (editable/reorderable/deletable), a completed human
+/// message, a streaming agent response, and a running agent turn.
 let private representativeModel : ClientModel =
     let turnId = AgentTurnId.create "turn-ui" |> expect
     { Peer = { PeerId = ada; DisplayName = "swift-heron" }
@@ -27,9 +27,11 @@ let private representativeModel : ClientModel =
         { Drafts =
             Map.ofList
                 [ draftId,
-                  { DraftId = draftId; Author = ada; Body = Ylmish.Text.ofString "half-typed idea"; Status = Active }
-                  sentDraftId,
-                  { DraftId = sentDraftId; Author = ada; Body = Ylmish.Text.ofString "ship it"; Status = Sent } ]
+                  { DraftId = draftId; Author = ada; Body = Ylmish.Text.ofString "half-typed idea" } ]
+          Queue =
+            Map.ofList
+                [ queueId,
+                  { QueueId = queueId; Author = ada; Body = Ylmish.Text.ofString "queued for the agent"; Order = 1.0 } ]
           SharedBrief = None }
       Conversation =
         { Items =
@@ -70,15 +72,15 @@ let private uiChecklistTests =
                   "latest known event offset", "data-latest-known-offset>7<"
                   "catch-up status", "data-catch-up>Catching up<"
                   "environment status (Phase 2)", "data-environment"
-                  "read-only command log (Phase 2)", "data-command-log" ]
+                  "read-only command log (Phase 2)", "data-command-log"
+                  "message queue (Phase 3)", "data-message-queue"
+                  "queued message body", "queued for the agent"
+                  "queued message editor", "data-queue-input=\"queue-ui\""
+                  "queue reorder up", "data-queue-up=\"queue-ui\""
+                  "queue reorder down", "data-queue-down=\"queue-ui\""
+                  "queue delete", "data-queue-delete=\"queue-ui\"" ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
-
-        testCase "a sent draft renders without a send button" <| fun () ->
-            let html = View.render representativeModel
-            Expect.isFalse
-                (html.Contains (sprintf "data-send-draft=\"%s\"" (DraftId.value sentDraftId)))
-                "sent drafts cannot be re-sent from the UI"
 
         testCase "the random peer display name is human-readable" <| fun () ->
             let rng = Random 1234

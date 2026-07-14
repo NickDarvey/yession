@@ -40,6 +40,7 @@ let private eventsOf (log: EventLog<SessionEvent>) =
 let private trigger : MessageSent =
     { MessageId = humanMessageId
       DraftId = None
+      QueueId = None
       Author = HumanPeer ada
       Body = "hi agent" }
 

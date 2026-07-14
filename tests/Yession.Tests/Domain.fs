@@ -159,8 +159,8 @@ let private frameSerializationTests =
                   PeerJoined { PeerId = peerId; DisplayName = "Ada" }
                   PeerLeft { PeerId = peerId }
                   DraftStarted { DraftId = draftId; StartedBy = peerId }
-                  MessageSent { MessageId = messageId; DraftId = Some draftId; Author = HumanPeer peerId; Body = "hi" }
-                  MessageSent { MessageId = messageId; DraftId = None; Author = ActorRef.System; Body = "" }
+                  MessageSent { MessageId = messageId; DraftId = Some draftId; QueueId = None; Author = HumanPeer peerId; Body = "hi" }
+                  MessageSent { MessageId = messageId; DraftId = None; QueueId = Some (QueueId.create "q-1" |> expect); Author = ActorRef.System; Body = "" }
                   AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = messageId }
                   AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }
                   AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId }
@@ -189,6 +189,22 @@ let private frameSerializationTests =
                     |> Codec.fromString Codec.sessionEventEnvelope
                     |> expect
                 Expect.equal roundTripped env "event round-trip"
+
+        testCase "a MessageSent persisted before Phase 3 (no queueId field) still decodes" <| fun () ->
+            // Wire compatibility: event-log lines written by earlier versions carry no
+            // queueId; they must decode to None, not fail the whole log open.
+            let legacy =
+                """{"type":"messageSent","payload":{"messageId":"msg-legacy","draftId":null,"author":{"kind":"system"},"body":"old line"}}"""
+            let decoded = Codec.fromString Codec.sessionEvent legacy |> expect
+            Expect.equal
+                decoded
+                (MessageSent
+                    { MessageId = MessageId.create "msg-legacy" |> expect
+                      DraftId = None
+                      QueueId = None
+                      Author = ActorRef.System
+                      Body = "old line" })
+                "legacy line decodes with QueueId = None"
     ]
 
 let tests =

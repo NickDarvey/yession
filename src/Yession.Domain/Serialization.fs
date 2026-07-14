@@ -39,6 +39,10 @@ module Codec =
         { Encode = DraftId.value >> Encode.string
           Decode = viaSmartCtor DraftId.create Decode.string }
 
+    let queueId : Codec<QueueId> =
+        { Encode = QueueId.value >> Encode.string
+          Decode = viaSmartCtor QueueId.create Decode.string }
+
     let messageId : Codec<MessageId> =
         { Encode = MessageId.value >> Encode.string
           Decode = viaSmartCtor MessageId.create Decode.string }
@@ -123,12 +127,16 @@ module Codec =
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
                       "draftId", Encode.option draftId.Encode p.DraftId
+                      "queueId", Encode.option queueId.Encode p.QueueId
                       "author", actor.Encode p.Author
                       "body", Encode.string p.Body ]
           Decode =
             Decode.object (fun get ->
                 { MessageSent.MessageId = get.Required.Field "messageId" messageId.Decode
                   MessageSent.DraftId = get.Required.Field "draftId" (Decode.option draftId.Decode)
+                  // Optional for wire compatibility: event-log lines persisted before
+                  // Phase 3 have no queueId field and decode to None.
+                  MessageSent.QueueId = get.Optional.Field "queueId" queueId.Decode
                   MessageSent.Author = get.Required.Field "author" actor.Decode
                   MessageSent.Body = get.Required.Field "body" Decode.string }) }
 

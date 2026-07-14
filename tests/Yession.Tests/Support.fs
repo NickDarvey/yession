@@ -67,6 +67,23 @@ let editBody (draftId: DraftId) (edit: Ylmish.Text -> Ylmish.Text) (m: ClientMod
             (DraftId.value draftId)
             (m.Synced.Drafts |> Map.toList |> List.map (fst >> DraftId.value))
 
+let queueBodyOf (queueId: QueueId) (m: ClientModel) : string option =
+    m.Synced.Queue |> Map.tryFind queueId |> Option.map (fun e -> Ylmish.Text.toString e.Body)
+
+let editQueued (queueId: QueueId) (edit: Ylmish.Text -> Ylmish.Text) (m: ClientModel) : ClientMsg =
+    match Map.tryFind queueId m.Synced.Queue with
+    | Some entry -> EditQueuedBodyMsg (queueId, edit entry.Body)
+    | None ->
+        failwithf
+            "editQueued: entry %s not in the model (queue: %A)"
+            (QueueId.value queueId)
+            (m.Synced.Queue |> Map.toList |> List.map (fst >> QueueId.value))
+
+/// The queue as (id, body) in consumption order — the shape most assertions want.
+let queueView (m: ClientModel) : (string * string) list =
+    QueueOrder.sorted m.Synced.Queue
+    |> List.map (fun e -> QueueId.value e.QueueId, Ylmish.Text.toString e.Body)
+
 /// One full connected client against a host.
 type Client =
     { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>

@@ -8,6 +8,9 @@ namespace Yession.Domain
 
 type SessionCommand =
     | StartDraft
+    /// Retired in Phase 3: sending now enqueues via the shared session state (a pure
+    /// CRDT write), so there is nothing to request. The case stays for wire
+    /// compatibility — old clients' requests decode and are rejected as superseded.
     | SendDraft of DraftId
 
 type SessionCommandResult =

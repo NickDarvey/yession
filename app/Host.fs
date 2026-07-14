@@ -28,8 +28,9 @@ type SessionHost =
 /// Start a Session Process: create the event log and the session's Yjs document, start
 /// HTTP bootstrap + signalling, and run a peer session for every connection. Each
 /// accepted peer receives the full doc state, then incremental updates are relayed
-/// between peers through the doc. When `runAgent` is given, every human `MessageSent`
-/// triggers exactly one agent turn whose lifecycle is appended as events (Step 08).
+/// between peers through the doc. The Process is the single consumer of the shared
+/// message queue: when the agent is idle it drains the queue into `MessageSent` events
+/// and — when `runAgent` is given — starts one coalesced turn per batch (Phase 3).
 /// When `environmentCapabilities` is given (granted by the Session Manager, Step 11),
 /// the session gets a lazily-started environment (Step 12). Resolves once the server
 /// is listening.
@@ -62,8 +63,11 @@ let startWithCapabilities
             |> Map.iter (fun _ channel ->
                 Async.StartImmediate (channel.Send (EventLog (EventsAvailable offset))))
 
-        // Filled in below (the trigger needs the wrapped log, which needs the trigger).
-        let mutable onAppended : SessionEvent -> unit = ignore
+        // The drain's log-anchored dedup set: every QueueId already named by a
+        // MessageSent. Seeded from the durable log below (the restart case) and
+        // maintained on every append, so exactly-once is anchored in the log, not the
+        // doc (docs/plans/01-turn-scheduling.md).
+        let mutable consumedQueueIds : Set<string> = Set.empty
 
         let log =
             // Durable storage is injected (file-backed in the product); the in-memory
@@ -77,10 +81,15 @@ let startWithCapabilities
                     fun actor event ->
                         async {
                             let! appended = inner.Append actor event
+                            match QueueDrain.consumedOf event with
+                            | Some key -> consumedQueueIds <- Set.add key consumedQueueIds
+                            | None -> ()
                             broadcastEventsAvailable appended.Offset
-                            onAppended event
                             return appended
                         } }
+
+        let! replayed = log.Read None Int32.MaxValue
+        consumedQueueIds <- replayed.Events |> List.choose (fun e -> QueueDrain.consumedOf e.Event) |> Set.ofList
 
         // The session's environment: lazily started through the Manager-granted scoped
         // capability; absent capability, needs are recorded as unavailable.
@@ -94,39 +103,77 @@ let startWithCapabilities
                     (sprintf "env-%s" (SessionId.value sessionId))
             | None -> SessionEnvironment.unavailable
 
-        // A human MessageSent triggers exactly one agent turn (Step 08). The agent's
-        // context is projected from the event log alone; its own events carry
-        // ActorRef.Agent authorship, so they can never re-trigger a turn. The turn's
-        // typed capabilities (Step 12) route through the session environment.
-        match runAgent with
-        | Some agent ->
-            onAppended <-
-                fun event ->
-                    match event with
-                    | MessageSent message when (match message.Author with HumanPeer _ -> true | _ -> false) ->
+        let mintTurnId () =
+            match AgentTurnId.create (string (Guid.NewGuid ())) with
+            | Ok id -> id
+            | Error e -> failwithf "agent turn id invariant violated: %s" e
+        let mintMessageId () =
+            match MessageId.create (string (Guid.NewGuid ())) with
+            | Ok id -> id
+            | Error e -> failwithf "message id invariant violated: %s" e
+        let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
+            { EnsureEnvironment = environment.Ensure (Some turnId)
+              ExecuteCommand = environment.Execute }
+
+        // The queue drain (Phase 3): the Session Process is the queue's single
+        // consumer, and this drain is the linearization point of "accepted by the
+        // agent". While a turn runs, sends accumulate in the queue (Cursor's default);
+        // when idle, the queue drains: durable append first, doc removal second, then
+        // ONE coalesced turn for the whole batch. `agentBusy` gives single-flight; the
+        // snapshot/append/removal block never yields to IO (synchronous log append), so
+        // the drain is atomic on the process tick.
+        let mutable agentBusy = false
+        let rec drain () =
+            if not agentBusy then
+                match SyncedStateSync.ofDoc doc with
+                | Error _ -> ()
+                | Ok synced when Map.isEmpty synced.Queue -> ()
+                | Ok synced ->
+                    let plan = QueueDrain.plan consumedQueueIds synced.Queue
+                    if List.isEmpty plan.Batch then
+                        // Everything present is already in the log (a crash between
+                        // append and removal): repair the doc, consume nothing twice.
+                        SyncedStateSync.removeQueued doc plan.Removals
+                    else
+                        agentBusy <- true
                         Async.StartImmediate (
                             async {
-                                let! page = log.Read None Int32.MaxValue
-                                let projection, _ =
-                                    ConversationProjection.applyEvents None page.Events ConversationProjection.empty
-                                let mintTurnId () =
-                                    match AgentTurnId.create (string (Guid.NewGuid ())) with
-                                    | Ok id -> id
-                                    | Error e -> failwithf "agent turn id invariant violated: %s" e
-                                let mintMessageId () =
-                                    match MessageId.create (string (Guid.NewGuid ())) with
-                                    | Ok id -> id
-                                    | Error e -> failwithf "message id invariant violated: %s" e
-                                let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
-                                    { EnsureEnvironment = environment.Ensure (Some turnId)
-                                      ExecuteCommand = environment.Execute }
-                                do! AgentTurn.run log agent capabilitiesFor mintTurnId mintMessageId sessionId projection.Items message
+                                try
+                                    // 1. Durable: each consumed entry becomes an immutable
+                                    //    MessageSent (body snapshotted from this replica,
+                                    //    QueueId as the exactly-once anchor) BEFORE the doc
+                                    //    removal — a crash here leaves only a repairable
+                                    //    leftover, never a lost or doubled message.
+                                    let mutable lastMessage : MessageSent option = None
+                                    for entry in plan.Batch do
+                                        let message =
+                                            { MessageId = mintMessageId ()
+                                              DraftId = None
+                                              QueueId = Some entry.QueueId
+                                              Author = HumanPeer entry.Author
+                                              Body = Ylmish.Text.toString entry.Body }
+                                        let! _ = log.Append (HumanPeer entry.Author) (MessageSent message)
+                                        lastMessage <- Some message
+                                    // 2. Visible: one transaction under the process origin;
+                                    //    the removal relays to every peer like any update.
+                                    SyncedStateSync.removeQueued doc plan.Removals
+                                    // 3. Run one coalesced turn, triggered by the batch tail.
+                                    match runAgent, lastMessage with
+                                    | Some agent, Some trigger ->
+                                        let! page = log.Read None Int32.MaxValue
+                                        let projection, _ =
+                                            ConversationProjection.applyEvents None page.Events ConversationProjection.empty
+                                        do! AgentTurn.run log agent capabilitiesFor mintTurnId mintMessageId sessionId projection.Items trigger
+                                    | _ -> ()
+                                finally
+                                    agentBusy <- false
+                                // Re-arm: anything enqueued while the turn ran drains now,
+                                // so there are no lost wakeups.
+                                drain ()
                             })
-                    | _ -> ()
-        | None -> ()
 
-        // Process-originated doc writes (none yet — the Process is doc-read-only)
-        // broadcast to every peer; peer payloads are relayed by the receiving connection.
+        // Process-originated doc writes (the drain's queue removals) broadcast to every
+        // peer; peer payloads are relayed by the receiving connection.
         DocSync.onLocalUpdate doc (fun payload ->
             connections |> Map.iter (fun _ channel -> sendState channel payload))
 
@@ -151,7 +198,11 @@ let startWithCapabilities
                                 return ()
                             }))
             // Schema drift in the doc must not break relay; decode errors are ignored here.
-            | Error _ -> ())
+            | Error _ -> ()
+            // The drain re-arms on every doc update observed while idle, so an enqueue
+            // can never be missed (liveness; recursion during a drain's own removal is
+            // cut by the single-flight guard).
+            drain ())
 
         let mutable endWaiters : (unit -> unit) list = []
         let signalSessionEnded () =
@@ -167,14 +218,7 @@ let startWithCapabilities
                     fun payload ->
                         DocSync.applyRemote doc payload
                         broadcastExcept connectionId payload
-                  OnCommand =
-                    SessionCommands.handle
-                        (fun () -> SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A"))
-                        log
-                        (fun () ->
-                            match MessageId.create (string (Guid.NewGuid ())) with
-                            | Ok id -> id
-                            | Error e -> failwithf "message id invariant violated: %s" e)
+                  OnCommand = SessionCommands.handle
                   OnAccepted =
                     fun _ ch ->
                         async {

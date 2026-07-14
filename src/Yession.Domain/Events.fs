@@ -83,6 +83,10 @@ and MessageSent =
     { MessageId : MessageId
       /// The draft the message came from; `None` once direct (draftless) sends exist.
       DraftId : DraftId option
+      /// The queue entry this message was consumed from (Phase 3): the durable link
+      /// from doc-world to event-world, and the drain's exactly-once dedup key.
+      /// `None` for messages that predate the queue.
+      QueueId : QueueId option
       Author : ActorRef
       Body : string }
 

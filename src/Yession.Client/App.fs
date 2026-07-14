@@ -43,9 +43,9 @@ module App =
     type Connection =
         { /// Runs the handshake and frame pump until the channel closes.
           Run : Async<unit>
-          /// Send a draft: the status moves to `Sending` locally and a `SendDraft`
-          /// command goes to the Session Process; the response comes back as
-          /// `DraftSendAcceptedMsg` / `DraftSendRejectedMsg`.
+          /// Send a draft: enqueue it (Phase 3). A pure CRDT model update under a
+          /// freshly minted `QueueId` — no command round-trip; the Session Process
+          /// consumes the queue and the message lands in the timeline as events.
           SendDraft : DraftId -> unit }
 
     /// How a connection consumes the event log (Step 07).
@@ -80,16 +80,9 @@ module App =
         DocSync.onLocalUpdate doc (fun payload ->
             Async.StartImmediate (channel.Send (State (StateSync payload))))
 
-        // In-flight SendDraft requests, correlated by request id.
-        let mutable pendingSends : Map<RequestId, DraftId> = Map.empty
-        let onResponse (requestId: RequestId) (result: SessionCommandResult) =
-            match Map.tryFind requestId pendingSends with
-            | Some draftId ->
-                pendingSends <- Map.remove requestId pendingSends
-                match result with
-                | CommandAccepted -> dispatch (DraftSendAcceptedMsg draftId)
-                | CommandRejected reason -> dispatch (DraftSendRejectedMsg (draftId, reason))
-            | None -> ()
+        // No commands are issued by the client anymore (sending is a CRDT write);
+        // responses to any future commands are currently uncorrelated.
+        let onResponse (_requestId: RequestId) (_result: SessionCommandResult) = ()
 
         // The consumption loop's own read position (seeded for reconnect catch-up).
         let mutable lastProcessed : EventOffset option = options.ResumeAfter
@@ -134,7 +127,8 @@ module App =
             Connection.run hello dispatchAndConsume (DocSync.applyRemote doc) onResponse onEventsPage channel
           SendDraft =
             fun draftId ->
-                dispatch (SendDraftMsg draftId)
-                let requestId = RequestId.fresh ()
-                pendingSends <- Map.add requestId draftId pendingSends
-                Async.StartImmediate (channel.Send (Command (Request (requestId, SendDraft draftId)))) }
+                // Enqueue under a fresh queue id (unique keys make concurrent sends
+                // safe); the model update moves the draft into the shared queue.
+                match QueueId.create (string (System.Guid.NewGuid ())) with
+                | Ok queueId -> dispatch (SendDraftMsg (draftId, queueId))
+                | Error e -> failwithf "queue id invariant violated: %s" e }
