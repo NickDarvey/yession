@@ -10,6 +10,7 @@
     <Compile Include="Commands.fs" />
     <Compile Include="Environment.fs" />
     <Compile Include="Agent.fs" />
+    <Compile Include="Scheduler.fs" />
     <Compile Include="Transport.fs" />
     <Compile Include="Library.fs" />
   </ItemGroup>
