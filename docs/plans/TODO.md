@@ -50,18 +50,20 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 
 **Phase 2 acceptance:** **Accepted 2026-07-12.** The Manager owns launch and grants pre-scoped capabilities; environments start lazily (a conversational one-shot starts nothing) and restart on need after a stop; commands run only through the delegated capability with the log rendered read-only from events; authority (forged/stolen/re-minted handles, cross-session stop) is rejected before any backend is reached; disconnected clients catch up on mixed message/environment/command events by offset. All from `mise run test`: 5 consecutive deterministic runs (83/83) plus one credentialed run (83/83, live agent turn executed). The Phase 1 suite passes unchanged in the same run — the Elmish/Ylmish/WebRTC/event-log split is preserved. Docker smoke self-gates on daemon availability (no daemon in the dev container; the authority layer is verified engine-independently).
 
-## Phase 3 — Agent turn scheduling (planned)
+## Phase 3 — Collaborative message queue & turn scheduling (planned)
 
-Plan: [01-turn-scheduling.md](01-turn-scheduling.md) — queue-by-default (Cursor-style),
-explicit interrupt. Resolves the paired GAPS.md items: overlapping turns and the
-undecided queueing/cancellation policy.
+Plan: [01-turn-scheduling.md](01-turn-scheduling.md) (rev 2) — sends enqueue into
+shared CRDT state (editable/reorderable/deletable until consumed); the Process drains
+the queue into immutable `MessageSent` events at its linearization point; explicit
+interrupt. Concurrency contract = invariants 1–7 in the plan, verified by seeded
+property schedules against a sequential oracle.
 
 | #  | Step | Outcome | Status | Notes / Blockers |
 |----|------|---------|--------|------------------|
-| 15 | Abort seam & `AgentInterrupted` | `RunAgent` abort signal; interrupted turns are events, partial body kept | Todo | |
-| 16 | `TurnScheduler` | Single-flight; queued messages coalesce into one follow-up turn | Todo | |
-| 17 | Interrupt command + UI | Validated `InterruptAgentTurn`; queued indicators + interrupt button | Todo | |
-| 18 | Live SDK abort + acceptance | Real `AbortController` path; Phase 3 acceptance recorded | Todo | |
+| 15 | Queue in synced state | `QueuedMessage` keyed map + `Order` fractional index; send = enqueue; edit/reorder/delete converge | Todo | |
+| 16 | Drain & scheduler | Atomic snapshot→append→remove with log-anchored exactly-once; while-idle drain trigger; named race tests (delete/reorder vs accept) | Todo | |
+| 17 | Abort seam & interrupt | `AgentAbortSignal`; `AgentTurnInterrupted` + `Interrupted` status; interrupt drains immediately | Todo | |
+| 18 | Property harness & acceptance | Seeded schedules + oracle for invariants 1–7; browser E2E for the delete race; live SDK abort | Todo | |
 
 **Phase 3 acceptance:** not started.
 
