@@ -27,9 +27,15 @@ module AgentTurn =
     ///
     /// Failures — result-level and thrown — become `AgentTurnFailed`, never exceptions
     /// surfaced to callers. Id minting is injected so tests are deterministic.
+    ///
+    /// If `signal` fires (Step 17), the Session Process has already appended the
+    /// terminal `AgentTurnInterrupted`: from that point this orchestrator appends
+    /// nothing more — late chunks are dropped and the runner's eventual result is
+    /// discarded. The deltas appended before the interrupt stand as the partial body.
     let run
         (log: EventLog<SessionEvent>)
         (runAgent: RunAgent)
+        (signal: AgentAbortSignal)
         (capabilitiesFor: AgentTurnId -> AgentCapabilities)
         (mintTurnId: unit -> AgentTurnId)
         (mintMessageId: unit -> MessageId)
@@ -67,15 +73,18 @@ module AgentTurn =
                 do! append (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId })
 
                 let onChunk (chunk: AgentResponseChunk) =
-                    Async.StartImmediate (
-                        append (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = chunk.Text }))
+                    if not (signal.IsAborted ()) then
+                        Async.StartImmediate (
+                            append (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = chunk.Text }))
 
-                let! result = runAgent context (capabilitiesFor turnId) onChunk
-                match result with
-                | AgentCompleted body ->
-                    do! append (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = body })
-                | AgentFailed reason ->
-                    do! append (AgentTurnFailed { AgentTurnId = turnId; Reason = reason })
+                let! result = runAgent context (capabilitiesFor turnId) signal onChunk
+                if not (signal.IsAborted ()) then
+                    match result with
+                    | AgentCompleted body ->
+                        do! append (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = body })
+                    | AgentFailed reason ->
+                        do! append (AgentTurnFailed { AgentTurnId = turnId; Reason = reason })
             with e ->
-                do! append (AgentTurnFailed { AgentTurnId = turnId; Reason = e.Message })
+                if not (signal.IsAborted ()) then
+                    do! append (AgentTurnFailed { AgentTurnId = turnId; Reason = e.Message })
         }

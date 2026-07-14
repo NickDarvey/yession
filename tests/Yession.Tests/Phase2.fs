@@ -260,7 +260,7 @@ let private lazyLifecycleTests =
                 let backend = InMemoryBackend.create recorder echoExec
                 // A conversational agent: answers from context, never signals need.
                 let conversational : RunAgent =
-                    fun _ _ onChunk ->
+                    fun _ _ _signal onChunk ->
                         async {
                             onChunk { Text = "just an answer" }
                             return AgentCompleted "just an answer"
@@ -295,7 +295,7 @@ let private lazyLifecycleTests =
                 // A task agent: signals need through the typed capability, twice — the
                 // second need must reuse the running environment.
                 let taskAgent : RunAgent =
-                    fun _ capabilities onChunk ->
+                    fun _ capabilities _signal onChunk ->
                         async {
                             let! first = capabilities.EnsureEnvironment "need to inspect the repository"
                             let! second = capabilities.EnsureEnvironment "and to run the tests"
@@ -468,7 +468,7 @@ let private commandTests =
             async {
                 // The agent ensures an environment, runs a real command, and answers.
                 let devAgent : RunAgent =
-                    fun _ capabilities onChunk ->
+                    fun _ capabilities _signal onChunk ->
                         async {
                             let! _ = capabilities.EnsureEnvironment "need to run a command"
                             let! result =
@@ -569,7 +569,7 @@ let private acceptanceTests =
         testCaseAsync "a disconnected client catches up on environment and command events (E2E-8)" <|
             async {
                 let devAgent : RunAgent =
-                    fun _ capabilities onChunk ->
+                    fun _ capabilities _signal onChunk ->
                         async {
                             let! _ = capabilities.EnsureEnvironment "work to do"
                             let! _ = capabilities.ExecuteCommand (nodeCommand "cmd-catchup" "console.log('made progress')") ignore

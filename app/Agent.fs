@@ -21,6 +21,8 @@ type private RunOutcome =
   try {
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     const { z } = await import('zod')
+    const controller = new AbortController()
+    $6(() => controller.abort())
     const yession = sdk.createSdkMcpServer({
       name: 'yession',
       version: '1.0.0',
@@ -48,6 +50,7 @@ type private RunOutcome =
         includePartialMessages: true,
         mcpServers: { yession },
         allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command'],
+        abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {})
       }
     })
@@ -78,6 +81,7 @@ let private runQuery
     (ensure: string -> JS.Promise<string>)
     (executeCommand: string -> string array -> JS.Promise<string>)
     (onChunk: string -> unit)
+    (registerAbort: (unit -> unit) -> unit)
     : JS.Promise<RunOutcome> =
     jsNative
 
@@ -148,9 +152,11 @@ let private executeFor (capabilities: AgentCapabilities) : string -> string arra
         |> Async.StartAsPromise
 
 /// The Claude Agent SDK–backed `RunAgent`. Streams text deltas as chunks; the typed
-/// capabilities surface as MCP tools; failures are values, never exceptions.
+/// capabilities surface as MCP tools; failures are values, never exceptions. The abort
+/// signal maps onto the SDK's AbortController, so an interrupt cancels the live query
+/// promptly (the returned failure is then discarded by the orchestrator).
 let run : RunAgent =
-    fun context capabilities onChunk ->
+    fun context capabilities signal onChunk ->
         async {
             let! outcome =
                 runQuery
@@ -160,6 +166,7 @@ let run : RunAgent =
                     (ensureFor capabilities)
                     (executeFor capabilities)
                     (fun text -> onChunk { Text = text })
+                    signal.OnAbort
                 |> Async.AwaitPromise
             return if outcome.ok then AgentCompleted outcome.body else AgentFailed outcome.reason
         }

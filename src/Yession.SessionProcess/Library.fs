@@ -21,6 +21,7 @@ module Bootstrap =
         | AgentMessageDelta _ -> "agent-message-delta"
         | AgentMessageCompleted _ -> "agent-message-completed"
         | AgentTurnFailed _ -> "agent-turn-failed"
+        | AgentTurnInterrupted _ -> "agent-turn-interrupted"
         | EnvironmentNeedIdentified _ -> "environment-need-identified"
         | EnvironmentStartRequested _ -> "environment-start-requested"
         | EnvironmentStarted _ -> "environment-started"

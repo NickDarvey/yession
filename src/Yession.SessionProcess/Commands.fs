@@ -3,15 +3,17 @@ namespace Yession.SessionProcess
 open Yession.Domain
 
 /// Handling of `SessionCommand` requests on the Session Process. Commands are how
-/// clients ask for durable facts the CRDT cannot express; anything expressible as
-/// collaborative state is NOT a command. As of Phase 3 both draft creation and sending
-/// are pure CRDT writes, so every remaining command decodes to a rejection — the module
-/// stays because the protocol surface (and Step 17's interrupt) lives here.
+/// clients ask for durable facts the CRDT cannot express: as of Phase 3 that is the
+/// agent-turn interrupt alone — draft creation and sending are pure CRDT writes and
+/// their command shapes decode to rejections.
 module SessionCommands =
 
-    /// Handle one command from an accepted peer.
+    /// Handle one command from an accepted peer. `requestInterrupt` is the scheduler's
+    /// injected authority: it validates the turn is the one currently running (the
+    /// interrupt-vs-completion race resolves here) and performs the cancellation.
     let handle
-        (_peerId: PeerId)
+        (requestInterrupt: PeerId -> AgentTurnId -> Result<unit, string>)
+        (peerId: PeerId)
         (command: SessionCommand)
         : Async<SessionCommandResult> =
         async {
@@ -23,6 +25,10 @@ module SessionCommands =
                 // Retired in Phase 3: sending enqueues via the shared session state; the
                 // Session Process consumes the queue (docs/plans/01-turn-scheduling.md).
                 return CommandRejected "superseded: sending enqueues via the shared session state"
+            | InterruptAgentTurn turnId ->
+                match requestInterrupt peerId turnId with
+                | Ok () -> return CommandAccepted
+                | Error reason -> return CommandRejected reason
         }
 
 /// The queue drain's pure decision core (Phase 3, Step 16). The Session Process is the

@@ -48,8 +48,27 @@ module AgentCapabilities =
         { EnsureEnvironment = fun _ -> async { return EnvironmentUnavailable "no environment capability" }
           ExecuteCommand = fun _ _ -> async { return CommandExecutionFailed "no environment capability" } }
 
+/// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
+/// Session Process owns the signal; the runner observes it — poll `IsAborted` at
+/// yield points and/or register `OnAbort` to cancel promptly (e.g. an SDK
+/// AbortController). Once aborted, the turn's result is ignored: the terminal fact is
+/// the `AgentTurnInterrupted` event the Process already appended.
+type AgentAbortSignal =
+    { IsAborted : unit -> bool
+      /// Register a callback fired when the turn is interrupted; fired immediately if
+      /// it already was.
+      OnAbort : (unit -> unit) -> unit }
+
+module AgentAbortSignal =
+
+    /// A signal that never aborts — for turns nothing can interrupt (tests, one-shots).
+    let none : AgentAbortSignal =
+        { IsAborted = (fun () -> false)
+          OnAbort = ignore }
+
 /// Run one agent turn: `onChunk` is invoked with each streamed chunk in order, and the
 /// async resolves with the final result once the stream ends. Implementations must not
 /// throw for agent-level errors — failures are values (`AgentFailed`), because the
-/// Session Process represents them as events, not exceptions.
-type RunAgent = AgentContextPack -> AgentCapabilities -> (AgentResponseChunk -> unit) -> Async<AgentRunResult>
+/// Session Process represents them as events, not exceptions. The abort signal may end
+/// the turn early; a well-behaved runner returns promptly once it fires.
+type RunAgent = AgentContextPack -> AgentCapabilities -> AgentAbortSignal -> (AgentResponseChunk -> unit) -> Async<AgentRunResult>

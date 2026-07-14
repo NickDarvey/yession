@@ -210,6 +210,17 @@ module Codec =
                 { AgentTurnFailed.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
                   AgentTurnFailed.Reason = get.Required.Field "reason" Decode.string }) }
 
+    let private agentTurnInterrupted : Codec<AgentTurnInterrupted> =
+        { Encode =
+            fun (p: AgentTurnInterrupted) ->
+                Encode.object
+                    [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
+                      "requestedBy", peerId.Encode p.RequestedBy ]
+          Decode =
+            Decode.object (fun get ->
+                { AgentTurnInterrupted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
+                  AgentTurnInterrupted.RequestedBy = get.Required.Field "requestedBy" peerId.Decode }) }
+
     let private environmentNeedIdentified : Codec<EnvironmentNeedIdentified> =
         { Encode =
             fun (p: EnvironmentNeedIdentified) ->
@@ -371,6 +382,8 @@ module Codec =
                     Encode.object [ "type", Encode.string "agentMessageCompleted"; "payload", agentMessageCompleted.Encode p ]
                 | AgentTurnFailed p ->
                     Encode.object [ "type", Encode.string "agentTurnFailed"; "payload", agentTurnFailed.Encode p ]
+                | AgentTurnInterrupted p ->
+                    Encode.object [ "type", Encode.string "agentTurnInterrupted"; "payload", agentTurnInterrupted.Encode p ]
                 | EnvironmentNeedIdentified p ->
                     Encode.object [ "type", Encode.string "environmentNeedIdentified"; "payload", environmentNeedIdentified.Encode p ]
                 | EnvironmentStartRequested p ->
@@ -406,6 +419,7 @@ module Codec =
                 | "agentMessageDelta" -> Decode.field "payload" agentMessageDelta.Decode |> Decode.map AgentMessageDelta
                 | "agentMessageCompleted" -> Decode.field "payload" agentMessageCompleted.Decode |> Decode.map AgentMessageCompleted
                 | "agentTurnFailed" -> Decode.field "payload" agentTurnFailed.Decode |> Decode.map AgentTurnFailed
+                | "agentTurnInterrupted" -> Decode.field "payload" agentTurnInterrupted.Decode |> Decode.map AgentTurnInterrupted
                 | "environmentNeedIdentified" -> Decode.field "payload" environmentNeedIdentified.Decode |> Decode.map EnvironmentNeedIdentified
                 | "environmentStartRequested" -> Decode.field "payload" environmentStartRequested.Decode |> Decode.map EnvironmentStartRequested
                 | "environmentStarted" -> Decode.field "payload" environmentStarted.Decode |> Decode.map EnvironmentStarted
@@ -468,12 +482,15 @@ module Codec =
             (fun c ->
                 match c with
                 | StartDraft -> Encode.object [ "kind", Encode.string "startDraft" ]
-                | SendDraft d -> Encode.object [ "kind", Encode.string "sendDraft"; "draftId", draftId.Encode d ])
+                | SendDraft d -> Encode.object [ "kind", Encode.string "sendDraft"; "draftId", draftId.Encode d ]
+                | InterruptAgentTurn t ->
+                    Encode.object [ "kind", Encode.string "interruptAgentTurn"; "agentTurnId", agentTurnId.Encode t ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "startDraft" -> Decode.succeed StartDraft
                 | "sendDraft" -> Decode.field "draftId" draftId.Decode |> Decode.map SendDraft
+                | "interruptAgentTurn" -> Decode.field "agentTurnId" agentTurnId.Decode |> Decode.map InterruptAgentTurn
                 | other -> Decode.fail (sprintf "Unknown session command: %s" other)) }
 
     let private sessionCommandResult : Codec<SessionCommandResult> =

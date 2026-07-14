@@ -68,7 +68,7 @@ let private turnTests =
             async {
                 let log = newLog ()
                 let scripted : RunAgent =
-                    fun context _capabilities onChunk ->
+                    fun context _capabilities _signal onChunk ->
                         async {
                             Expect.equal context.CurrentMessage triggerItem "the context's current message is the trigger"
                             Expect.equal context.SessionId sessionId "the context carries the session"
@@ -76,7 +76,7 @@ let private turnTests =
                             onChunk { Text = "lo!" }
                             return AgentCompleted "Hello!"
                         }
-                do! AgentTurn.run log scripted (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 Expect.equal
                     events
@@ -92,8 +92,8 @@ let private turnTests =
         testCaseAsync "a failed run produces AgentTurnFailed" <|
             async {
                 let log = newLog ()
-                let failing : RunAgent = fun _ _ _ -> async { return AgentFailed "boom" }
-                do! AgentTurn.run log failing (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                let failing : RunAgent = fun _ _ _ _ -> async { return AgentFailed "boom" }
+                do! AgentTurn.run log failing AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 Expect.equal
                     (List.last events)
@@ -104,8 +104,8 @@ let private turnTests =
         testCaseAsync "a throwing run produces AgentTurnFailed, not an exception" <|
             async {
                 let log = newLog ()
-                let throwing : RunAgent = fun _ _ _ -> failwith "runner exploded"
-                do! AgentTurn.run log throwing (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                let throwing : RunAgent = fun _ _ _ _ -> failwith "runner exploded"
+                do! AgentTurn.run log throwing AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 match List.last events with
                 | AgentTurnFailed f -> Expect.equal f.Reason "runner exploded" "the thrown reason is captured"
@@ -141,6 +141,30 @@ let private turnTests =
                     (events @ [ envelope 4L (AgentMessageCompleted { AgentTurnId = turnId; MessageId = agentMessageId; Body = "Hello!" }) ])
                     completed
             Expect.equal again completed "duplicate agent event pages do not double-apply"
+
+        testCase "an interrupt marks the streaming item Interrupted (partial body kept); late deltas no longer apply" <| fun () ->
+            let interruptedBy = PeerId.create "ada" |> expect
+            let projection, highWater =
+                ConversationProjection.applyEvents
+                    None
+                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                      envelope 1L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "partial" })
+                      envelope 2L (AgentTurnInterrupted { AgentTurnId = turnId; RequestedBy = interruptedBy }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.Body, i.Status))
+                [ "partial", ConversationItemStatus.Interrupted ]
+                "the streaming item is interrupted in place, partial body kept"
+            // A delta that raced past the interrupt cannot mutate the terminal item.
+            let after, _ =
+                ConversationProjection.applyEvents
+                    highWater
+                    [ envelope 3L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = " too late" }) ]
+                    projection
+            Expect.equal
+                (after.Items |> List.map (fun i -> i.Body, i.Status))
+                [ "partial", ConversationItemStatus.Interrupted ]
+                "late deltas are ignored once the item left Streaming"
 
         testCase "a turn failure marks the streaming item Failed (partial body kept)" <| fun () ->
             let projection, _ =
@@ -185,7 +209,7 @@ let private e2eTests =
         testCaseAsync "start the Session Process host (scripted agent)" <|
             async {
                 let scripted : RunAgent =
-                    fun context _capabilities onChunk ->
+                    fun context _capabilities _signal onChunk ->
                         async {
                             onChunk { Text = "You said: " }
                             onChunk { Text = context.CurrentMessage.Body }
@@ -259,7 +283,7 @@ let private liveTests =
                     let log = newLog ()
                     let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
                     let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                    do! AgentTurn.run log Agent.run (fun _ -> AgentCapabilities.none) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
+                    do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
                     let! events = eventsOf log
                     match List.last events with
                     | AgentMessageCompleted completed ->

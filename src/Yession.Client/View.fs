@@ -74,6 +74,7 @@ module View =
         | Complete -> "complete"
         | Streaming -> "streaming"
         | ConversationItemStatus.Failed -> "failed"
+        | ConversationItemStatus.Interrupted -> "interrupted"
 
     /// The conversation timeline — rendered from the event projection only, never from
     /// the synced draft state (docs/design.md §1 "Durable facts are events").
@@ -125,7 +126,12 @@ module View =
 
     let private agentStream (agent: AgentViewState) : string =
         match agent.ActiveTurn with
-        | Some turn -> sprintf "<span data-agent-turn=\"%s\">Agent is responding…</span>" (AgentTurnId.value turn)
+        | Some turn ->
+            // The explicit interrupt (Phase 3): cancel the running turn and drain the
+            // queue immediately. The shell wires the button to `InterruptTurn`.
+            sprintf "<span data-agent-turn=\"%s\">Agent is responding…</span><button type=\"button\" data-interrupt-turn=\"%s\">Interrupt</button>"
+                (AgentTurnId.value turn)
+                (AgentTurnId.value turn)
         | None -> ""
 
     /// Render the client shell as an HTML fragment (the contents of `#app`).

@@ -197,7 +197,8 @@ let private queueUnitTests =
 
         testCaseAsync "the retired SendDraft command is rejected as superseded" <|
             async {
-                let! result = SessionCommands.handle ada (SendDraft draftId1)
+                let noInterrupt _ _ = Error "no turn running"
+                let! result = SessionCommands.handle noInterrupt ada (SendDraft draftId1)
                 match result with
                 | CommandRejected reason -> Expect.isTrue (reason.Contains "superseded") "named as superseded"
                 | other -> failwithf "expected CommandRejected, got %A" other

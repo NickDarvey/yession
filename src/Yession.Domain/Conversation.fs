@@ -9,6 +9,8 @@ type ConversationItemStatus =
     | Complete
     | Streaming
     | Failed
+    /// The turn was explicitly interrupted; the partial body streamed so far is kept.
+    | Interrupted
 
 type ConversationItem =
     { MessageId : MessageId
@@ -78,6 +80,17 @@ module ConversationProjection =
                 proj.Items
                 |> updateItem a.MessageId (fun item -> { item with Body = a.Body; Status = Complete })
               ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
+        | AgentTurnInterrupted a ->
+            match Map.tryFind a.AgentTurnId proj.ActiveAgentMessages with
+            | Some messageId ->
+                // The streaming item keeps its partial body; the status records the
+                // explicit interrupt. Late deltas for it no longer apply (not Streaming).
+                { Items = proj.Items |> updateItem messageId (fun item -> { item with Status = Interrupted })
+                  ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
+            | None ->
+                // Interrupted before any message started: nothing to show — the turn
+                // simply never produced an item.
+                { proj with ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
         | AgentTurnFailed a ->
             match Map.tryFind a.AgentTurnId proj.ActiveAgentMessages with
             | Some messageId ->

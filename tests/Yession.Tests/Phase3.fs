@@ -50,7 +50,7 @@ let private enqueue (p: OfflinePeer) (draftKey: string) (queueKey: string) (text
 let private heldAgent () : RunAgent * (unit -> unit) =
     let mutable pending : (AgentRunResult -> unit) option = None
     let runner : RunAgent =
-        fun _ _ _ -> Async.FromContinuations (fun (cont, _, _) -> pending <- Some cont)
+        fun _ _ _ _ -> Async.FromContinuations (fun (cont, _, _) -> pending <- Some cont)
     let release () =
         match pending with
         | Some cont ->
@@ -75,6 +75,7 @@ let private agentEventKinds (log: EventLog<SessionEvent>) : Async<string list> =
                 | AgentTurnStarted _ -> Some "started"
                 | AgentMessageCompleted _ -> Some "completed"
                 | AgentTurnFailed _ -> Some "failed"
+                | AgentTurnInterrupted _ -> Some "interrupted"
                 | _ -> None)
     }
 
@@ -278,8 +279,138 @@ let private crashRepairTests =
             }
     ]
 
+let private interruptTests =
+    testList "Interrupt (Step 17)" [
+        testCaseAsync "interrupt keeps the partial response, is the turn's terminal event, and drains the waiting queue immediately" <|
+            async {
+                // A runner that streams one chunk, then suspends until aborted or
+                // released — the deterministic shape of a long-running live turn.
+                let mutable pending : (AgentRunResult -> unit) option = None
+                let runner : RunAgent =
+                    fun _ _ signal onChunk ->
+                        Async.FromContinuations (fun (cont, _, _) ->
+                            onChunk { Text = "partial thoughts" }
+                            let mutable resumed = false
+                            let resume result =
+                                if not resumed then
+                                    resumed <- true
+                                    cont result
+                            pending <- Some resume
+                            // A well-behaved runner returns promptly once aborted; the
+                            // orchestrator must discard this result — the Interrupted
+                            // event is already the terminal fact.
+                            signal.OnAbort (fun () -> resume (AgentFailed "aborted mid-flight")))
+                let release () =
+                    match pending with
+                    | Some resume ->
+                        pending <- None
+                        resume (AgentCompleted "second turn done")
+                    | None -> failwith "no held turn to release"
+
+                let! h = Host.startWith (Some runner) (SessionId.create "interrupt-e2e" |> expect) "interrupt-token" 0
+                let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
+                let! a = connectClient signalUrl "interrupt-token" "ada" "Ada"
+
+                // First send: the turn starts and streams its partial response.
+                let d1 = DraftId.create "d-1" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg d1))
+                a.Runner.Dispatch (user (editBody d1 (Text.insert 0 "go research this") (a.Runner.Model ())))
+                a.Connection.SendDraft d1
+                do! a.Runner.WaitFor (fun m ->
+                        m.Agent.ActiveTurn.IsSome
+                        && (m.Conversation.Items |> List.exists (fun i -> i.Status = Streaming && i.Body = "partial thoughts")))
+                let firstTurn = (a.Runner.Model ()).Agent.ActiveTurn.Value
+
+                // A second message queues behind the running turn (Cursor default);
+                // the ordered channel guarantees it reaches the Process before the
+                // interrupt that follows.
+                let d2 = DraftId.create "d-2" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg d2))
+                a.Runner.Dispatch (user (editBody d2 (Text.insert 0 "queued behind") (a.Runner.Model ())))
+                a.Connection.SendDraft d2
+
+                // Interrupt: partial body kept (Interrupted status), and the queued
+                // message drains immediately into a NEW turn.
+                a.Connection.InterruptTurn firstTurn
+                do! a.Runner.WaitFor (fun m ->
+                        (m.Conversation.Items
+                         |> List.exists (fun i -> i.Status = ConversationItemStatus.Interrupted && i.Body = "partial thoughts"))
+                        && (m.Conversation.Items |> List.exists (fun i -> i.Body = "queued behind"))
+                        && (match m.Agent.ActiveTurn with Some t -> t <> firstTurn | None -> false))
+
+                release () // the successor turn completes normally
+                do! a.Runner.WaitFor (fun m ->
+                        m.Agent.ActiveTurn = None
+                        && (m.Conversation.Items |> List.exists (fun i -> i.Body = "second turn done")))
+
+                // The event stream: the interrupt is terminal, single-flight holds,
+                // and the aborted runner's failure result was discarded.
+                let! kinds = agentEventKinds h.Log
+                Expect.equal
+                    kinds
+                    [ "started"; "interrupted"; "started"; "completed" ]
+                    "interrupt terminates the first turn; the drain starts exactly one successor"
+                expectSingleFlight kinds
+
+                do! a.Channel.Close ()
+                do! h.Stop ()
+            }
+
+        testCaseAsync "interrupting a turn that already finished is rejected (interrupt-vs-completion race)" <|
+            async {
+                let scripted : RunAgent = fun _ _ _ _ -> async { return AgentCompleted "instant" }
+                let! h = Host.startWith (Some scripted) (SessionId.create "interrupt-late" |> expect) "late-token" 0
+                let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
+                let! a = connectClient signalUrl "late-token" "ada" "Ada"
+
+                let d1 = DraftId.create "d-1" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg d1))
+                a.Runner.Dispatch (user (editBody d1 (Text.insert 0 "quick one") (a.Runner.Model ())))
+                a.Connection.SendDraft d1
+                do! a.Runner.WaitFor (fun m ->
+                        (m.Conversation.Items |> List.exists (fun i -> i.Body = "instant"))
+                        && m.Agent.ActiveTurn = None)
+                let! page = h.Log.Read None Int32.MaxValue
+                let turnId =
+                    page.Events
+                    |> List.pick (fun e -> match e.Event with AgentTurnStarted t -> Some t.AgentTurnId | _ -> None)
+
+                // A raw channel so the command RESPONSE is observable.
+                let! channel = WebRtc.connect signalUrl
+                do! channel.Send (
+                        Control (PeerHello { PeerId = PeerId.create "raw" |> expect; DisplayName = "Raw"; Token = "late-token" }))
+                let rec awaitAccepted () =
+                    async {
+                        match! channel.Receive () with
+                        | Some (Control (PeerAccepted _)) -> return ()
+                        | Some _ -> return! awaitAccepted ()
+                        | None -> return failwith "channel closed before accept"
+                    }
+                do! awaitAccepted ()
+                let requestId = RequestId.fresh ()
+                do! channel.Send (Command (Request (requestId, InterruptAgentTurn turnId)))
+                let rec awaitResponse () =
+                    async {
+                        match! channel.Receive () with
+                        | Some (Command (Response (rid, result))) when rid = requestId -> return result
+                        | Some _ -> return! awaitResponse ()
+                        | None -> return failwith "channel closed before the response"
+                    }
+                match! awaitResponse () with
+                | CommandRejected reason -> Expect.isTrue (reason.Contains "finished") "rejected as already finished"
+                | other -> failwithf "expected a rejection, got %A" other
+
+                let! kinds = agentEventKinds h.Log
+                Expect.equal kinds [ "started"; "completed" ] "no stray Interrupted event — history unchanged"
+                do! channel.Close ()
+                do! a.Channel.Close ()
+                do! h.Stop ()
+            }
+    ]
+
 let tests =
     testList "Phase3" [
         raceTests
+        interruptTests
         crashRepairTests
     ]

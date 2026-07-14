@@ -207,6 +207,10 @@ let private start () =
                 | Some order -> dispatchRef (ReorderQueuedMsg (id, order))
                 | None -> ()
             | Error _ -> ())
+        delegate' root "click" "data-interrupt-turn" (fun turnId _ ->
+            match AgentTurnId.create turnId with
+            | Ok id -> connection.InterruptTurn id
+            | Error _ -> ())
 
         do! connection.Run
     }

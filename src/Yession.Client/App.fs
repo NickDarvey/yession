@@ -46,7 +46,11 @@ module App =
           /// Send a draft: enqueue it (Phase 3). A pure CRDT model update under a
           /// freshly minted `QueueId` — no command round-trip; the Session Process
           /// consumes the queue and the message lands in the timeline as events.
-          SendDraft : DraftId -> unit }
+          SendDraft : DraftId -> unit
+          /// Ask the Session Process to cancel the running agent turn (Step 17). The
+          /// outcome arrives as events: `AgentTurnInterrupted` on success, or nothing
+          /// if the turn already finished (the request is then rejected).
+          InterruptTurn : AgentTurnId -> unit }
 
     /// How a connection consumes the event log (Step 07).
     type ConnectOptions =
@@ -131,4 +135,8 @@ module App =
                 // safe); the model update moves the draft into the shared queue.
                 match QueueId.create (string (System.Guid.NewGuid ())) with
                 | Ok queueId -> dispatch (SendDraftMsg (draftId, queueId))
-                | Error e -> failwithf "queue id invariant violated: %s" e }
+                | Error e -> failwithf "queue id invariant violated: %s" e
+          InterruptTurn =
+            fun turnId ->
+                Async.StartImmediate (
+                    channel.Send (Command (Request (RequestId.fresh (), InterruptAgentTurn turnId)))) }

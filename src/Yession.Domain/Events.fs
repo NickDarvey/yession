@@ -48,6 +48,9 @@ type SessionEvent =
     | AgentMessageDelta of AgentMessageDelta
     | AgentMessageCompleted of AgentMessageCompleted
     | AgentTurnFailed of AgentTurnFailed
+    // An explicit interrupt (Phase 3, Step 17): the turn's terminal event when a peer
+    // cancels it. The partial response streamed so far is kept.
+    | AgentTurnInterrupted of AgentTurnInterrupted
     // Environment lifecycle (Step 12): environments start lazily — a need is identified
     // (usually by the agent), then the Session Process starts one through its scoped
     // capability. Every transition is a durable fact.
@@ -115,6 +118,10 @@ and AgentMessageCompleted =
 and AgentTurnFailed =
     { AgentTurnId : AgentTurnId
       Reason : string }
+
+and AgentTurnInterrupted =
+    { AgentTurnId : AgentTurnId
+      RequestedBy : PeerId }
 
 and EnvironmentNeedIdentified =
     { Reason : string

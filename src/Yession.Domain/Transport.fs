@@ -12,6 +12,9 @@ type SessionCommand =
     /// CRDT write), so there is nothing to request. The case stays for wire
     /// compatibility — old clients' requests decode and are rejected as superseded.
     | SendDraft of DraftId
+    /// Cancel the running agent turn (Phase 3, Step 17). Rejected if that turn is no
+    /// longer running — the interrupt-vs-completion race resolves at the Process.
+    | InterruptAgentTurn of AgentTurnId
 
 type SessionCommandResult =
     | CommandAccepted

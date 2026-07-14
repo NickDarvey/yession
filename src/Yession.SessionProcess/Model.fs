@@ -45,6 +45,7 @@ module ProcessModel =
         match event with
         | SessionEvent.AgentTurnStarted a -> Running a.AgentTurnId
         | SessionEvent.AgentMessageCompleted _ -> Idle
+        | SessionEvent.AgentTurnInterrupted _ -> Idle
         | SessionEvent.AgentTurnFailed a -> Failed (a.AgentTurnId, a.Reason)
         | _ -> state
 

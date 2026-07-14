@@ -119,6 +119,7 @@ let private frameSerializationTests =
         [ State (StateSync "opaque-sync-payload")
           Command (Request(requestId, StartDraft))
           Command (Request(requestId, SendDraft draftId))
+          Command (Request(requestId, InterruptAgentTurn (AgentTurnId.create "turn-1" |> expect)))
           Command (Response(requestId, CommandAccepted))
           Command (Response(requestId, CommandRejected "nope"))
           EventLog (EventsAvailable offset)
@@ -167,6 +168,7 @@ let private frameSerializationTests =
                   AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "d" }
                   AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = "done" }
                   AgentTurnFailed { AgentTurnId = turnId; Reason = "overloaded" }
+                  AgentTurnInterrupted { AgentTurnId = turnId; RequestedBy = peerId }
                   EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = Some turnId }
                   EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None }
                   EnvironmentStartRequested { EnvironmentId = "env-1"; SpecSummary = "local-process" }

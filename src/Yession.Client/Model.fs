@@ -135,7 +135,8 @@ module ClientModel =
                     (fun (agent: AgentViewState) e ->
                         match e.Event with
                         | AgentTurnStarted a -> { agent with ActiveTurn = Some a.AgentTurnId }
-                        | AgentMessageCompleted _ | AgentTurnFailed _ -> { agent with ActiveTurn = None }
+                        | AgentMessageCompleted _ | AgentTurnFailed _ | AgentTurnInterrupted _ ->
+                            { agent with ActiveTurn = None }
                         | _ -> agent)
                     model.Agent
             let environment =
