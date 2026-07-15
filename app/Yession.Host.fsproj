@@ -16,6 +16,7 @@
     <Compile Include="Agent.fs" />
     <Compile Include="EventStore.fs" />
     <Compile Include="DocStore.fs" />
+    <Compile Include="ManagerStore.fs" />
     <Compile Include="Host.fs" />
     <Compile Include="Backends.fs" />
     <Compile Include="Manager.fs" />

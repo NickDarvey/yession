@@ -22,6 +22,7 @@ let all =
         Phase2.tests
         Phase3.tests
         EventsHttp.tests
+        Phase4.tests
         Properties.tests
         Acceptance.tests
     ]

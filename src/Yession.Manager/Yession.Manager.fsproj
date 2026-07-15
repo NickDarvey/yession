@@ -10,7 +10,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="State.fs" />
     <Compile Include="Authority.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Thoth.Json" />
+    <PackageReference Include="Thoth.Json.Net" />
   </ItemGroup>
 
   <ItemGroup>
