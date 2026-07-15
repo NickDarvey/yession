@@ -1,83 +1,127 @@
 module Yession.Host.ManagerUi
 
-// The management UI (Phase 4, Step 25): a deliberately server-side-rendered admin
-// surface — list sessions with live status, create, launch/resume, stop, open. Pure F#
-// render functions produce full pages and FRAGMENTS; htmx swaps the fragments on
-// hx-post/hx-get, and row status refreshes by polling — no Elmish, no Yjs, no client
-// bundle. htmx itself is vendored and served from this endpoint (local-first: no CDN).
-// This is not the collaborative client; it shares the Manager's 127.0.0.1 endpoint
-// with the control RPC.
+// The management UI (Phase 4, Step 25): a deliberately server-side-rendered admin surface
+// — list sessions with live status, create, launch/resume, stop, open. Pure F# render
+// functions produce full pages and FRAGMENTS from Fable.Lit templates (rendered to strings
+// by our own `Ssr` wrapper — no client bundle, no Elmish, no Yjs); a tiny inline vanilla
+// script swaps the fragments on create/launch/stop and refreshes rows by polling. It
+// shares the session client's `Style` (the same locally served /app.css), and — being
+// online-only — is the natural home for server-side Lit SSR. This is not the collaborative
+// client; it shares the Manager's 127.0.0.1 endpoint with the control RPC.
 
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.App
 open Yession.Host.Interop
+open Lit
 
-// --- Rendering (pure) -------------------------------------------------------------------
+// --- Rendering (pure Lit templates, rendered to strings by Ssr) -------------------------
 
-let private escapeHtml (s: string) =
-    s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;")
-
-let private statusHtml (status: ProcessManager.SessionStatus) : string =
+let private statusView (status: ProcessManager.SessionStatus) : TemplateResult =
     match status with
-    | ProcessManager.NotRunning -> "<span data-status=\"stopped\">stopped</span>"
+    | ProcessManager.NotRunning ->
+        html $"""<span class="{Style.statusFaint}" data-status="{Dom.Manager.statusStopped}">stopped</span>"""
     | ProcessManager.Running (port, pid) ->
-        sprintf "<span data-status=\"running\">running · port %d · pid %d</span>" port pid
+        html $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDot}"></span>running · port {port} · pid {pid}</span>"""
     | ProcessManager.Exited code ->
-        sprintf "<span data-status=\"exited\">exited (%s)</span>"
-            (code |> Option.map string |> Option.defaultValue "signal")
+        let reason = code |> Option.map string |> Option.defaultValue "signal"
+        html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""
 
-/// One session row. The row is the swap unit: every action and the status poll replace
-/// it wholesale (`hx-swap="outerHTML"`), so the markup is always a pure function of
-/// the Manager's current view.
-let sessionRow (view: ProcessManager.SessionView) : string =
+let private actions (view: ProcessManager.SessionView) : TemplateResult =
     let id = SessionId.value view.Record.SessionId
-    let actions =
-        match view.Status with
-        | ProcessManager.Running (port, _) ->
-            String.concat "" [
-                sprintf "<a href=\"http://127.0.0.1:%d/?token=%s\" target=\"_blank\" data-open>open</a> "
-                    port (System.Uri.EscapeDataString view.Record.Token)
-                sprintf "<button hx-post=\"/sessions/%s/stop\" hx-target=\"closest tr\" hx-swap=\"outerHTML\" data-stop>Stop</button>" id
-            ]
-        | ProcessManager.NotRunning
-        | ProcessManager.Exited _ ->
-            sprintf "<button hx-post=\"/sessions/%s/launch\" hx-target=\"closest tr\" hx-swap=\"outerHTML\" data-launch>Launch</button>" id
-    String.concat "" [
-        sprintf "<tr id=\"session-%s\" data-session=\"%s\" hx-get=\"/sessions/%s/row\" hx-trigger=\"every 2s\" hx-swap=\"outerHTML\">" id id id
-        sprintf "<td>%s</td>" (escapeHtml (SessionId.value view.Record.SessionId))
-        sprintf "<td>%s</td>" (escapeHtml view.Record.DisplayName)
-        sprintf "<td>%s</td>" (statusHtml view.Status)
-        sprintf "<td>%s</td>" actions
-        "</tr>"
-    ]
+    match view.Status with
+    | ProcessManager.Running (port, _) ->
+        let openUrl = sprintf "http://127.0.0.1:%d/?token=%s" port (System.Uri.EscapeDataString view.Record.Token)
+        html $"""
+            <a class="{Style.statusRun} mr-3" href="{openUrl}" target="_blank" data-open>open ↗</a>
+            <button type="button" class="{Style.btnDanger}" data-stop="{id}">Stop</button>"""
+    | ProcessManager.NotRunning
+    | ProcessManager.Exited _ ->
+        html $"""<button type="button" class="{Style.btnPrimary}" data-launch="{id}">Launch</button>"""
 
-let sessionsTable (views: ProcessManager.SessionView list) : string =
-    String.concat "" [
-        "<table id=\"sessions\" data-sessions>"
-        "<thead><tr><th>session</th><th>name</th><th>status</th><th>actions</th></tr></thead>"
-        "<tbody>"
-        views |> List.map sessionRow |> String.concat ""
-        "</tbody></table>"
-    ]
+/// One session row — the swap unit: every action and the status poll replace it wholesale,
+/// so the markup is always a pure function of the Manager's current view.
+let private rowTemplate (view: ProcessManager.SessionView) : TemplateResult =
+    let id = SessionId.value view.Record.SessionId
+    html $"""
+        <tr class="border-b border-hair" data-session="{id}">
+          <td class="px-3 py-2 {Style.mono}">{id}</td>
+          <td class="px-3 py-2 {Style.body}">{view.Record.DisplayName}</td>
+          <td class="px-3 py-2">{statusView view.Status}</td>
+          <td class="px-3 py-2">{actions view}</td>
+        </tr>"""
+
+let private tableTemplate (views: ProcessManager.SessionView list) : TemplateResult =
+    html $"""
+        <table class="w-full text-left border-collapse" data-sessions>
+          <thead>
+            <tr class="border-b border-hair">
+              <th class="px-3 py-2 {Style.label}">session</th>
+              <th class="px-3 py-2 {Style.label}">name</th>
+              <th class="px-3 py-2 {Style.label}">status</th>
+              <th class="px-3 py-2 {Style.label}">actions</th>
+            </tr>
+          </thead>
+          <tbody>{views |> List.map rowTemplate}</tbody>
+        </table>"""
+
+/// A rendered fragment (a single row), served to the poll/action swaps.
+let sessionRow (view: ProcessManager.SessionView) : string = Ssr.render (rowTemplate view)
+
+/// A rendered fragment (the whole table), served after a create.
+let sessionsTable (views: ProcessManager.SessionView list) : string = Ssr.render (tableTemplate views)
+
+// The interactivity, without htmx: a tiny vanilla script that swaps fragments on
+// create/launch/stop and refreshes rows by polling. Inline (no external src) so the page
+// is self-contained — local first, no CDN.
+let private script =
+    """
+    const swap = (el, htmlText) => { const t = document.createElement('template'); t.innerHTML = htmlText.trim(); const n = t.content.firstElementChild; if (n && el) el.replaceWith(n) }
+    document.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-launch],[data-stop]'); if (!b) return
+      const id = b.getAttribute('data-launch') || b.getAttribute('data-stop')
+      const action = b.hasAttribute('data-launch') ? 'launch' : 'stop'
+      const row = b.closest('tr')
+      const r = await fetch('/sessions/' + id + '/' + action, { method: 'POST' })
+      if (r.ok) swap(row, await r.text())
+    })
+    document.addEventListener('submit', async (e) => {
+      const f = e.target.closest('[data-create-session]'); if (!f) return
+      e.preventDefault()
+      const r = await fetch('/sessions', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(new FormData(f)) })
+      if (r.ok) { swap(document.querySelector('[data-sessions]'), await r.text()); f.reset() }
+    })
+    setInterval(async () => {
+      for (const row of document.querySelectorAll('[data-session]')) {
+        const id = row.getAttribute('data-session')
+        try { const r = await fetch('/sessions/' + id + '/row'); if (r.ok) swap(row, await r.text()) } catch {}
+      }
+    }, 2000)
+    """
+
+let private bodyTemplate (views: ProcessManager.SessionView list) : TemplateResult =
+    html $"""
+        <main class="max-w-4xl mx-auto px-8 py-10 flex flex-col gap-8">
+          <h1 class="{Style.wordmark}">yession<span class="text-green">.</span> <span class="{Style.label}">manager</span></h1>
+          <form class="flex flex-wrap items-end gap-3" data-create-session>
+            <input name="id" placeholder="session id" required class="bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue">
+            <input name="name" placeholder="display name" class="bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue">
+            <input name="token" placeholder="token" required class="bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue">
+            <button type="submit" class="{Style.btnPrimary}">Create</button>
+          </form>
+          {tableTemplate views}
+        </main>"""
 
 let page (views: ProcessManager.SessionView list) : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>Yession Manager</title>"
-        // Vendored, served by this endpoint — never a CDN.
-        "<script src=\"/htmx.js\"></script>"
-        "</head><body>"
-        "<main><h1>Yession Manager</h1>"
-        // Creating returns the whole refreshed table (the new row rides along).
-        "<form hx-post=\"/sessions\" hx-target=\"#sessions\" hx-swap=\"outerHTML\" data-create-session>"
-        "<input name=\"id\" placeholder=\"session id\" required> "
-        "<input name=\"name\" placeholder=\"display name\"> "
-        "<input name=\"token\" placeholder=\"token\" required> "
-        "<button type=\"submit\">Create</button>"
-        "</form>"
-        sessionsTable views
-        "</main></body></html>"
+        Style.headTags
+        sprintf "</head><body class=\"%s\">" Style.app
+        Ssr.render (bodyTemplate views)
+        sprintf "<script>%s</script>" script
+        "</body></html>"
     ]
 
 // --- Routing ----------------------------------------------------------------------------
@@ -91,7 +135,7 @@ let private formField (body: string) (name: string) : string = Fable.Core.Util.j
 [<Fable.Core.ImportAll("node:fs")>]
 let private fs : obj = Fable.Core.Util.jsNative
 
-let private htmxBundlePath = envOr "YESSION_HTMX_BUNDLE" "node_modules/htmx.org/dist/htmx.min.js"
+let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
@@ -125,11 +169,11 @@ let tryHandle (pm: ProcessManager.ProcessManager) (req: IncomingMessage) (res: S
     | "GET", "/" ->
         html res (page (pm.Sessions ()))
         true
-    | "GET", "/htmx.js" ->
-        // From the package's assets/ when installed; from node_modules in development.
-        match readAsset "htmx.min.js" htmxBundlePath fs with
-        | Some js -> respond res 200 "text/javascript; charset=utf-8" js
-        | None -> respond res 404 "text/plain" "htmx bundle not found (npm install)"
+    | "GET", "/app.css" ->
+        // The same locally built stylesheet the session shell uses — shared style, no CDN.
+        match readAsset "app.css" cssPath fs with
+        | Some css -> respond res 200 "text/css; charset=utf-8" css
+        | None -> respond res 404 "text/plain" "stylesheet not built (run: mise run build)"
         true
     | "POST", "/sessions" ->
         readBody req (fun body ->

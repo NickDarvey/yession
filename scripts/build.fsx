@@ -12,7 +12,7 @@
 // / self-resolving deps kept EXTERNAL — node-datachannel loads its addon, and the Agent
 // SDK resolves its own native `claude` sibling via import.meta.url, both of which only
 // work when they run from their real node_modules, never bundled. Assets (the client
-// bundle, htmx) are copied in and read package-relative at runtime.
+// bundle, the stylesheet) are copied in and read package-relative at runtime.
 
 open System
 open System.Diagnostics
@@ -78,7 +78,6 @@ bundle "app/SessionMain.js" "session.js"
 
 File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
 File.Copy (Path.Combine (repoRoot, "app/out/public/app.css"), Path.Combine (pkg, "assets/app.css"), true)
-File.Copy (Path.Combine (repoRoot, "node_modules/htmx.org/dist/htmx.min.js"), Path.Combine (pkg, "assets/htmx.min.js"), true)
 
 // --- Bin shims ----------------------------------------------------------------------------
 // `yession` points the Manager at the packaged session bundle (both live in one install),

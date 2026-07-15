@@ -308,8 +308,9 @@ let private controlRpcTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Step 25 — the management UI (htmx, server-side rendered). Fragment rendering is
-// pure (cheap tier); the flow over real HTTP + real child processes is verify tier.
+// Step 25 — the management UI (server-side rendered Lit, swapped by a tiny inline
+// script — no htmx). Fragment rendering is pure (cheap tier); the flow over real HTTP +
+// real child processes is verify tier.
 // -----------------------------------------------------------------------------
 
 let private uiRecord : SessionRecord =
@@ -323,21 +324,21 @@ let private uiRenderTests =
     testList "Management UI rendering (Step 25)" [
         testCase "a stopped session's row offers Launch; a running one offers Stop and the open link" <| fun () ->
             let stopped = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.NotRunning }
-            Expect.isTrue (stopped.Contains Dom.Manager.launch) "stopped rows can launch"
-            Expect.isTrue (stopped.Contains "hx-post=\"/sessions/ui-render/launch\"") "launch posts to the session route"
+            Expect.isTrue (stopped.Contains (Dom.attr Dom.Manager.launch "ui-render")) "stopped rows can launch (button carries the session id)"
             Expect.isTrue (stopped.Contains "UI &lt;Render&gt;") "display names are escaped"
             let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
-            Expect.isTrue (running.Contains Dom.Manager.stop) "running rows can stop"
+            Expect.isTrue (running.Contains (Dom.attr Dom.Manager.stop "ui-render")) "running rows can stop"
             Expect.isTrue (running.Contains "http://127.0.0.1:8199/?token=t") "the open link targets the child's port with the token"
-            Expect.isTrue (running.Contains "hx-trigger=\"every 2s\"") "status refreshes by polling"
+            Expect.isTrue (running.Contains (Dom.attr Dom.Manager.session "ui-render")) "the row is a poll unit keyed by session id"
             let crashed = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)) "a crash is visible"
-            Expect.isTrue (crashed.Contains Dom.Manager.launch) "a crashed session can relaunch"
+            Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
-        testCase "the page is self-contained: vendored htmx, no external script sources" <| fun () ->
+        testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
             let html = ManagerUi.page [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
-            Expect.isTrue (html.Contains "<script src=\"/htmx.js\"></script>") "htmx is served by this endpoint"
-            Expect.isFalse (html.Contains "src=\"http") "no CDN scripts (local-first)"
+            Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
+            Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
+            Expect.isFalse (html.Contains "src=\"http") "no external/CDN scripts (local-first)"
             Expect.isTrue (html.Contains Dom.Manager.createSession) "the create form renders"
     ]
 
@@ -365,8 +366,8 @@ let private uiFlowTests =
                 // The page serves, self-contained.
                 let! page = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
                 Expect.isTrue (page.Contains Dom.Manager.createSession) "the create form is served"
-                let! htmx = Interop.getText (baseUrl + "/htmx.js") |> Async.AwaitPromise
-                Expect.isTrue (htmx.Contains "htmx") "the vendored htmx bundle serves from the endpoint"
+                let! css = Interop.getText (baseUrl + "/app.css") |> Async.AwaitPromise
+                Expect.isTrue (css.Length > 500) "the shared local stylesheet serves from the endpoint (no CDN)"
 
                 // Create over the form endpoint.
                 let! created = postForm (baseUrl + "/sessions") "id=ui-1&name=UI+One&token=ui-token" |> Async.AwaitPromise
