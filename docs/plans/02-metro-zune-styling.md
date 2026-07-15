@@ -9,7 +9,7 @@ Give the Browser Client a working-room UX with a classic **Metro / Zune** (pre�
 visual language. The **anatomy is Slack/Cursor** — a session sidebar, a conversation
 column, queued messages stacked above a composer — because the user is *collaborating in
 a session*, not browsing media. The **skin and motion are Zune**: elegant Segoe‑family
-typography with deliberate weights and baselines, flat black surfaces, one vivid accent,
+typography with deliberate weights and baselines, flat black surfaces, a blue/green technocool accent pair,
 and fast directional motion.
 
 Styling is authored **entirely in F#** by composing **Tailwind's own utility classes** into
@@ -21,22 +21,32 @@ it just gains class names.
 
 Zune / early Metro as a *skin discipline*, applied to a workspace shape people already know:
 
-- **Content over chrome.** No borders‑as‑decoration, no bevels, no gradients, no shadows,
-  no rounded corners. Structure comes from type, whitespace, and one hairline where a
-  region genuinely ends.
-- **Typography is the interface.** A thin lowercase wordmark; tiny wide‑tracked ALL‑CAPS
-  labels for metadata (author, section, status); light 300 body for message text.
-  Hierarchy by weight and size, never by fills. Never bold a heading — Metro headings get
-  *bigger and lighter*, not heavier.
-- **Authentically digital.** Zune‑black ground, flat colour, a single orange accent for
-  *your* voice and focus; teal reserved for the agent's voice.
+- **Content over chrome.** No borders‑as‑decoration, no bevels, no shadows, no rounded
+  corners. Structure comes from type, whitespace, and one hairline where a region
+  genuinely ends.
+- **Typography is the interface, on a real grid.** A thin lowercase wordmark; tiny
+  wide‑tracked ALL‑CAPS labels for metadata; light 300 body. Hierarchy by weight and
+  size, never by fills. Never bold a heading. **Everything sits on a 4px baseline
+  rhythm** — type scale `11/16 · 13/16 · 15/24 · 28/32 · 32/36` (size/line‑height, px),
+  all vertical paddings and gaps multiples of 4. The sidebar wordmark and the main
+  header share one 88px header band (flex‑end, common bottom padding) so their
+  baselines align across the hairline.
+- **Affordance is unambiguous.** *Statuses are text*: colored caps with at most a small
+  dot — never filled, never boxed. *Buttons are bordered Metro rectangles*: transparent,
+  hover brightens the border, press fills solid. Nothing else carries a border.
+- **Technocool colour.** Zune‑black ground; **blue** (`#1ba1e2`) is interactive and the
+  agent's voice; **green** (`#a8dd00`) is live/ok and the human pulse. People are
+  identified by **tiny square display pics** (never round; generated two‑tone
+  blue/green‑family checkers until real avatars exist), not by name colours. The
+  **blue→green gradient appears exactly once** — the composer's focus underline —
+  Zune's orange→pink signature, recast.
 - **Motion is directional and fast.** New timeline/queue items arrive with a short
-  translate‑up + fade (~180ms, sharp ease‑out); the composer focus is an accent underline
-  that grows from the left; press states scale down slightly. No idle ambient motion.
+  translate‑up + fade (~180ms, sharp ease‑out); the composer focus underline grows from
+  the left; press states fill. No idle ambient motion; `motion-reduce:` respected.
 
 ### Theme tokens (registered once, from F#)
 
-Registered in the Tailwind theme so semantic utilities resolve (`text-accent`,
+Registered in the Tailwind theme so semantic utilities resolve (`text-blue`,
 `bg-surface`, `font-sans`); the config object is emitted from F#, not a CSS file.
 
 | Token            | Value                          | Utility → role |
@@ -47,22 +57,27 @@ Registered in the Tailwind theme so semantic utilities resolve (`text-accent`,
 | `ink`            | `#ffffff`                      | primary text |
 | `ink-dim`        | `#b4b4b4`                      | secondary text |
 | `ink-faint`      | `#6a6a6a`                      | labels, metadata |
-| `accent`         | `#f09609` (Zune orange)        | your voice, focus, queue affordances |
-| `agent`          | `#00b7c3` (teal)               | the agent's voice & activity |
-| `ok` / `err`     | `#60d060` / `#ff4a4a`          | status pills / destructive hover only |
+| `blue`           | `#1ba1e2` (Metro cyan)         | interactive: buttons, focus rings, agent voice, streaming caret |
+| `green`          | `#a8dd00` (Zune lime)          | live/ok statuses, queue editability edge, wordmark tick |
+| `err`            | `#ff4a4a`                      | failed statuses, destructive hover only |
+| *(gradient)*     | `blue → green`, 90°            | **once**: the composer focus underline (registered as a `bg-` utility) |
 
 Font family (Tailwind `font-sans` override): `"Segoe UI", "Segoe UI Variable", "Segoe WP",
 Frutiger, "Helvetica Neue", system-ui, sans-serif`. Mono (`font-mono` override) for command
 lines: `"Cascadia Code", Consolas, monospace`. Weights: **200** wordmark/headings, **300**
 body & message text, **400** default, **600** caps labels only.
 
-### Type scale
+### Type scale (4px baseline rhythm — sizes paired with explicit line-heights)
 
-- `wordmark` — `font-extralight text-4xl tracking-tight lowercase` → "yession." in the sidebar.
-- `heading` — `font-extralight text-3xl lowercase` → the column header ("session").
-- `body` — `font-light text-[0.9375rem] leading-relaxed` → message text.
-- `label` — `font-semibold text-[0.65rem] tracking-[0.18em] uppercase text-ink-faint` →
-  authors, section labels, offsets; tabular figures (`tabular-nums`) wherever digits align.
+- `wordmark` — `font-extralight text-[32px] leading-[36px] tracking-tight lowercase` → "yession." in the sidebar.
+- `heading` — `font-extralight text-[28px] leading-[32px] lowercase` → the column header (session name).
+- `body` — `font-light text-[15px] leading-6` → message text (15/24).
+- `small` — `font-light text-[13px] leading-4` → hints, ghost drafts, queue inputs.
+- `label` — `font-semibold text-[11px] leading-4 tracking-[0.18em] uppercase text-ink-faint` →
+  authors, section labels, offsets, statuses; tabular figures (`tabular-nums`) wherever digits align.
+
+Message internal rhythm: one 16px meta line + 8px gap + n×24px body lines, on a
+`20px avatar column · 12px gutter · content` grid (avatar nudged −2px to sit on cap height).
 
 ## Layout — a session workspace
 
@@ -81,30 +96,40 @@ body & message text, **400** default, **600** caps labels only.
 │  running        │ ▸ peer   | queued message …            ↑ ↓ ✕    │
 │ COMMANDS        │ ┌ composer ────────────────────────────────────┐ │
 │  mise run test ✓│ │ Message the session…                  [Send] │ │
-│  mise run build⟳│ └ accent underline grows on focus ─────────────┘ │
+│  mise run build⟳│ └ gradient underline grows on focus ────────────┘ │
 └─────────────────┴──────────────────────────────────────────────────┘
 ```
 
 Section mapping (all eight existing `View` sections survive; `data-*` hooks unchanged):
 
 - **Sidebar** (`section.connection` + `.offsets` + `.environment` + `.commands`):
-  wordmark, session name, connection dot + offsets line (a product invariant, styled as a
-  quiet tabular line — not hidden), presence list (you in orange, agent in teal),
-  environment pill, and the command log as compact mono cards. Commands may *also* render
-  inline in the timeline as Cursor‑style cards where they belong to an agent turn (the
-  projection already interleaves by offset; presentation‑only choice).
+  wordmark, connection state + offsets line (a product invariant, styled as a quiet
+  tabular line — not hidden), presence list with tiny square display pics, environment
+  status (text, not a pill), and the command log as compact mono cards. Commands may
+  *also* render inline in the timeline as Cursor‑style cards where they belong to an
+  agent turn (the projection already interleaves by offset; presentation‑only choice).
 - **Timeline** (`section.timeline`): the main scroll, pinned to bottom like every chat
-  surface. Author caps‑label + time, light body text; streaming messages get a teal caret
-  and dimmed body; arrival animation translate‑up + fade.
-- **Agent activity strip** (`section.agent`): a slim bar between timeline and queue —
-  pulse, "agent is responding", turn id, **Interrupt** on the right.
+  surface. Avatar‑column grid, author caps‑label + time, light body text; streaming
+  messages get a blue caret and dimmed body; arrival animation translate‑up + fade.
+- **Agent activity strip** (`section.agent`): a slim 48px bar between timeline and queue
+  — blue pulse square, "agent is responding", turn id, **Interrupt** (bordered, danger
+  hover) on the right.
 - **Queue** (`section.queue`): Cursor's queued‑messages pattern, stacked above the
-  composer. Each row: author label, inline‑editable input, reorder/delete tools revealed
-  on hover/focus. Left edge carries a 2px hairline that turns accent on hover — the one
-  "border" in the design, and it encodes editability.
-- **Composer** (`section.draft`): the primary draft as a flat surface with the growing
-  accent underline on focus; Send in accent; other peers' in‑progress drafts shown as a
-  "X is drafting…" ghost line beneath (their content is already synced state).
+  composer. Each 40px row: tiny avatar, inline‑editable input, reorder/delete icon
+  buttons revealed on hover/focus. Left edge carries a 2px hairline that turns green on
+  hover — it encodes editability.
+- **Composer** (`section.draft`): the primary draft as a flat surface; on focus the
+  underline grows left‑to‑right in the blue→green gradient (the design's one gradient);
+  **Send** is a bordered blue button; other peers' in‑progress drafts shown as an
+  avatar + "X is drafting…" ghost line beneath (their content is already synced state).
+
+### Mobile (≤ 780px)
+
+The workspace collapses to the conversation: the sidebar becomes an off‑canvas drawer
+(translate‑X, scrim, 220ms sharp ease‑out) opened from a menu button in the header;
+header drops to 64px; timeline/queue/composer go full‑width with 16px gutters; the
+composer hint and the activity strip's turn id hide. All breakpoint behaviour is
+Tailwind `max-md:` / `md:` variants — still zero authored CSS.
 
 ## Architecture — compose Tailwind utilities as typed F# values
 
@@ -118,10 +143,12 @@ module Style =
     let cls (groups: string list) : string = String.concat " " groups
 
     // Semantic groups — each is a string of real Tailwind utilities.
-    let label    = "font-semibold text-[0.65rem] tracking-[0.18em] uppercase text-ink-faint"
-    let body     = "font-light text-[0.9375rem] leading-relaxed text-ink"
-    let sidebar  = "w-[280px] shrink-0 bg-panel border-r border-hair flex flex-col px-6 py-7 overflow-y-auto"
-    let queueRow = "flex items-center gap-4 bg-surface px-4 py-2 border-l-2 border-hair hover:border-accent hover:bg-surface-2 transition"
+    let label    = "font-semibold text-[11px] leading-4 tracking-[0.18em] uppercase text-ink-faint"
+    let body     = "font-light text-[15px] leading-6 text-ink"
+    let statusOk = "font-semibold text-[11px] leading-4 tracking-[0.14em] uppercase text-green"    // text, never boxed
+    let btn      = "border border-[#2e2e2e] text-ink-dim hover:border-ink hover:text-ink active:bg-ink active:text-bg font-semibold text-[11px] leading-4 tracking-[0.16em] uppercase px-3.5 py-[7px] transition"
+    let sidebar  = "w-[280px] shrink-0 bg-panel border-r border-hair flex flex-col px-6 pb-5 overflow-y-auto max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:-translate-x-full max-md:transition-transform"
+    let queueRow = "flex items-center gap-3 bg-surface h-10 px-3 border-l-2 border-hair hover:border-green hover:bg-surface-2 transition"
     let arrive   = "animate-arrive motion-reduce:animate-none"   // registered keyframes, see headTags
     // …one value per role: wordmark / heading / timeline / msg / activity / composer / btn / pill.
 
@@ -131,8 +158,8 @@ module Style =
       <script src="https://cdn.tailwindcss.com"></script>
       <script>tailwind.config={theme:{extend:{
         colors:{bg:'#000',panel:'#0a0a0a',surface:'#111','surface-2':'#191919',hair:'#1f1f1f',
-          ink:'#fff','ink-dim':'#b4b4b4','ink-faint':'#6a6a6a',accent:'#f09609',agent:'#00b7c3',
-          ok:'#60d060',err:'#ff4a4a'},
+          ink:'#fff','ink-dim':'#b4b4b4','ink-faint':'#6a6a6a',blue:'#1ba1e2',green:'#a8dd00',err:'#ff4a4a'},
+        backgroundImage:{grad:'linear-gradient(90deg,#1ba1e2,#a8dd00)'},   // the one gradient
         fontFamily:{sans:['Segoe UI','Segoe UI Variable','Segoe WP','Frutiger','Helvetica Neue','system-ui','sans-serif'],
           mono:['Cascadia Code','Consolas','monospace']},
         keyframes:{arrive:{from:{opacity:0,transform:'translateY(10px)'},to:{opacity:1,transform:'none'}},
