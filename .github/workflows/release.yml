@@ -58,8 +58,8 @@ jobs:
         run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
       - name: Build
         run: mise run build
-      - name: Package
-        run: node scripts/package.mjs ${{ steps.version.outputs.version }}
+      - name: Package (two Node SEA single-file executables)
+        run: mise exec -- dotnet fsi scripts/build.fsx ${{ steps.version.outputs.version }}
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.os }}

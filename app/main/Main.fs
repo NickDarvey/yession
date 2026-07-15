@@ -31,10 +31,11 @@ let private managerPort = Interop.envOr "YESSION_MANAGER_PORT" "8321" |> int
 [<Fable.Core.Emit("process.execPath")>]
 let private nodePath : string = Fable.Core.Util.jsNative
 
-// The session process command: the sibling binary in the product (Step 26); in
-// development, this Node running the Fable-compiled session entry.
+// The session process command: as a packaged single-file executable, the sibling
+// `yession-session` binary; in development, this Node running the Fable output.
 let private sessionCommand, sessionArgs =
     match Interop.envOr "YESSION_SESSION_BIN" "" with
+    | "" when Interop.isSea () -> Interop.siblingOfExecutable "yession-session", []
     | "" -> nodePath, [ Interop.envOr "YESSION_SESSION_MAIN" "app/SessionMain.js" ]
     | binary -> binary, []
 

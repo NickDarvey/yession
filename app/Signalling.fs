@@ -30,13 +30,11 @@ let private bootstrapHtml (sessionId: SessionId) =
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
 
-[<Fable.Core.Emit("(() => { try { const fs = $0; return fs.existsSync($1) ? fs.readFileSync($1, 'utf8') : null } catch { return null } })()")>]
-let private tryReadFile (fs: obj) (path: string) : string option = Fable.Core.Util.jsNative
-
 [<Fable.Core.ImportAll("node:fs")>]
 let private fs : obj = Fable.Core.Util.jsNative
 
-let private readBundle () : string option = tryReadFile fs bundlePath
+// From the SEA blob when packaged; from the build output in development.
+let private readBundle () : string option = readAsset "client.js" bundlePath fs
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""

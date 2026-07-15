@@ -88,9 +88,6 @@ let private pathnameOf (url: string) : string = Fable.Core.Util.jsNative
 [<Fable.Core.Emit("Object.fromEntries(new URLSearchParams($0))[$1] ?? ''")>]
 let private formField (body: string) (name: string) : string = Fable.Core.Util.jsNative
 
-[<Fable.Core.Emit("(() => { try { const fs = $0; return fs.readFileSync($1, 'utf8') } catch { return null } })()")>]
-let private tryReadFile (fs: obj) (path: string) : string option = Fable.Core.Util.jsNative
-
 [<Fable.Core.ImportAll("node:fs")>]
 let private fs : obj = Fable.Core.Util.jsNative
 
@@ -129,7 +126,8 @@ let tryHandle (pm: ProcessManager.ProcessManager) (req: IncomingMessage) (res: S
         html res (page (pm.Sessions ()))
         true
     | "GET", "/htmx.js" ->
-        match tryReadFile fs htmxBundlePath with
+        // From the SEA blob when packaged; from node_modules in development.
+        match readAsset "htmx.min.js" htmxBundlePath fs with
         | Some js -> respond res 200 "text/javascript; charset=utf-8" js
         | None -> respond res 404 "text/plain" "htmx bundle not found (npm install)"
         true

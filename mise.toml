@@ -70,6 +70,11 @@ run = [
   "node tests/browser/run.mjs",
 ]
 
+[tasks.package]
+description = "Package the two single-file executables (Node SEA) and tar them. Usage: mise run package -- <version>"
+depends = ["build"]
+run = "dotnet fsi scripts/build.fsx"
+
 [tasks.clean]
 description = "Remove build artifacts and installed dependencies."
 run = [

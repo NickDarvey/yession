@@ -107,6 +107,27 @@ let sdpField (json: string) : string = jsNative
 [<Emit("process.env[$0] || $1")>]
 let envOr (name: string) (fallback: string) : string = jsNative
 
+/// Is this process a Node single-file executable (SEA)?
+[<Emit("(() => { try { return typeof require !== 'undefined' && require('node:sea').isSea() } catch { return false } })()")>]
+let isSea () : bool = jsNative
+
+/// A path next to this executable (how the SEA manager finds its session binary).
+[<Emit("require('node:path').join(require('node:path').dirname(process.execPath), $0)")>]
+let siblingOfExecutable (name: string) : string = jsNative
+
+/// Read a bundled asset: from the SEA blob when running as a single-file executable,
+/// else from the filesystem fallback path. None when neither exists.
+[<Emit("""(() => {
+  try {
+    if (typeof require !== 'undefined') {
+      const sea = require('node:sea')
+      if (sea.isSea && sea.isSea()) return Buffer.from(sea.getAsset($0)).toString('utf8')
+    }
+  } catch {}
+  try { return $2.readFileSync($1, 'utf8') } catch { return null }
+})()""")>]
+let readAsset (assetName: string) (fallbackPath: string) (fs: obj) : string option = jsNative
+
 /// Terminate the Node process with an exit code.
 [<Emit("process.exit($0)")>]
 let exit (code: int) : unit = jsNative
