@@ -96,7 +96,7 @@ let private processTests =
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/pm-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
                 let options = ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ]
-                let pm = ProcessManager.create options
+                let! pm = ProcessManager.create options
 
                 // Create: durable registration, not running.
                 let record = pm.CreateSession "proc-1" "Process One" "proc-token" |> expect
@@ -163,7 +163,7 @@ let private processTests =
 
                 // A restarted Manager keeps the registry (state file), reconciles
                 // runtime state to stopped, and an unknown session cannot launch.
-                let pm2 = ProcessManager.create options
+                let! pm2 = ProcessManager.create options
                 Expect.equal
                     (pm2.Sessions () |> List.map (fun v -> v.Record.SessionId, v.Status))
                     [ record.SessionId, ProcessManager.NotRunning ]
@@ -171,6 +171,139 @@ let private processTests =
                 match! pm2.Launch (SessionId.create "never-created" |> expect) with
                 | Error reason -> Expect.isTrue (reason.Contains "unknown") "unknown sessions cannot launch"
                 | Ok _ -> failwith "an unregistered session must not launch"
+                do! pm2.StopAll ()
+            }
+    ]
+
+// -----------------------------------------------------------------------------
+// Step 24 — authority over the control RPC. The Step 11 rejection guarantees,
+// re-verified ACROSS the process boundary: the capability calls travel over HTTP
+// with a per-launch secret, and the Manager's registry still decides everything.
+// -----------------------------------------------------------------------------
+
+[<Emit("process.env[$0] = $1")>]
+let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNative
+
+[<Emit("delete process.env[$0]")>]
+let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
+
+let private startControlServer (secrets: (string * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string> =
+    async {
+        let table = Map.ofList secrets
+        let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) req res) then
+                res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "not found"
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening)
+    }
+
+let private controlRpcTests =
+    testList "Authority over the control RPC (Step 24)" [
+        testCaseAsync "Step 11's rejections hold across the wire; output streams in order; rejections never reach the backend" <|
+            async {
+                let sessionA = SessionId.create "rpc-session-a" |> expect
+                let sessionB = SessionId.create "rpc-session-b" |> expect
+                let registry = Authority.ContainerRegistry ()
+                let recorder = InMemoryBackend.Recorder ()
+                let scriptedExec : CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult> =
+                    fun command onChunk ->
+                        async {
+                            onChunk { CommandId = command.CommandId; Stream = Stdout; Text = "one" }
+                            onChunk { CommandId = command.CommandId; Stream = Stderr; Text = "warn" }
+                            onChunk { CommandId = command.CommandId; Stream = Stdout; Text = "two" }
+                            return CommandSucceeded 0
+                        }
+                let backend = InMemoryBackend.create recorder scriptedExec
+                let grant = Authority.grant registry backend
+                let! server, url = startControlServer [ "secret-a", grant sessionA; "secret-b", grant sessionB ]
+
+                let capsA = ControlClient.capabilities url "secret-a"
+                let capsB = ControlClient.capabilities url "secret-b"
+                let request =
+                    { CommandId = CommandId.create "rpc-cmd" |> expect
+                      Executable = "echo"
+                      Arguments = [ "ok" ]
+                      WorkingDirectory = None
+                      Environment = Map.empty
+                      Timeout = None }
+
+                // The happy path: start + execute over the wire, chunks in order.
+                let! started = capsA.StartContainer EnvironmentSpec.localProcess
+                let handle = match started with ContainerStarted h -> h | r -> failwithf "start failed: %A" r
+                let mutable chunks : (OutputStream * string) list = []
+                let! result = capsA.Execute handle request (fun c -> chunks <- chunks @ [ c.Stream, c.Text ])
+                Expect.equal result (CommandSucceeded 0) "the command ran through the RPC"
+                Expect.equal chunks [ Stdout, "one"; Stderr, "warn"; Stdout, "two" ] "chunks streamed in order across the wire"
+
+                // A forged secret gets nothing.
+                let mallory = ControlClient.capabilities url "stolen-secret"
+                match! mallory.StartContainer EnvironmentSpec.localProcess with
+                | ContainerStartFailed reason -> Expect.isTrue (reason.Contains "401") "rejected at the door"
+                | ContainerStarted _ -> failwith "a forged secret must not start containers"
+
+                // Cross-session use of A's handle through B's secret is rejected by the
+                // registry — before the backend is reached.
+                let executedBefore = recorder.Executed
+                match! capsB.Execute handle request ignore with
+                | CommandExecutionFailed reason -> Expect.isTrue (reason.Contains "session") "rejected as cross-session"
+                | other -> failwithf "expected rejection, got %A" other
+                Expect.equal recorder.Executed executedBefore "the backend was never reached"
+
+                // A fabricated handle is unknown; a stopped container cannot exec.
+                let forged = ContainerHandle.create sessionB "ctr-fabricated"
+                match! capsB.Execute forged request ignore with
+                | CommandExecutionFailed reason -> Expect.isTrue (reason.Contains "unknown") "fabricated handles are unknown"
+                | other -> failwithf "expected rejection, got %A" other
+                let! stopped = capsA.StopContainer handle
+                Expect.equal stopped ContainerStopped "stop crossed the wire"
+                match! capsA.Execute handle request ignore with
+                | CommandExecutionFailed reason -> Expect.isTrue (reason.Contains "not running") "a stopped container cannot exec"
+                | other -> failwithf "expected rejection, got %A" other
+
+                server.close ignore
+            }
+
+        testCaseAsync "a child Session Process exercises the capability end to end (diagnostic agent across real processes)" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/rpc-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let registry = Authority.ContainerRegistry ()
+                let backend = Backends.LocalProcessBackend.create ()
+                let! pm =
+                    ProcessManager.create
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Grant = Some (Authority.grant registry backend) }
+                let record = pm.CreateSession "rpc-child" "RPC child" "rpc-token" |> expect
+
+                // The child inherits our environment: run its built-in diagnostic agent.
+                setEnv "YESSION_AGENT" "diagnostic"
+                let! launched = pm.Launch record.SessionId
+                unsetEnv "YESSION_AGENT"
+                let port = launched |> expect
+
+                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) "rpc-token" "ada" "Ada"
+                let draftId = DraftId.create "rpc-draft" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg draftId))
+                a.Runner.Dispatch (user (editBody draftId (Ylmish.Text.insert 0 "run the diagnostic") (a.Runner.Model ())))
+                a.Connection.SendDraft draftId
+
+                // Everything below happened ACROSS process boundaries: the child asked
+                // the Manager (this test process) over the control RPC; the Manager's
+                // authority + engine ran the command; events streamed back to a client.
+                do! a.Runner.WaitFor (fun m ->
+                        (m.Conversation.Items
+                         |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "diagnostic-ok"))
+                        && (match m.Environment with EnvironmentRunning _ -> true | _ -> false)
+                        && (m.Commands.Entries
+                            |> List.exists (fun e ->
+                                e.Status = CommandFinished (CommandSucceeded 0)
+                                && (e.Output |> List.exists (fun (_, text) -> text.Contains "diagnostic-ok")))))
+
+                do! a.Channel.Close ()
+                do! pm.StopAll ()
             }
     ]
 
@@ -178,4 +311,5 @@ let tests =
     testList "Phase4" [
         stateTests
         Tag.verify processTests
+        Tag.verify controlRpcTests
     ]

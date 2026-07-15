@@ -285,7 +285,7 @@ module Codec =
         { Encode = CommandId.value >> Encode.string
           Decode = viaSmartCtor CommandId.create Decode.string }
 
-    let private outputStream : Codec<OutputStream> =
+    let outputStream : Codec<OutputStream> =
         { Encode =
             (fun s -> Encode.string (match s with Stdout -> "stdout" | Stderr -> "stderr"))
           Decode =
@@ -295,7 +295,7 @@ module Codec =
                 | "stderr" -> Decode.succeed Stderr
                 | other -> Decode.fail (sprintf "Unknown output stream: %s" other)) }
 
-    let private commandResult : Codec<CommandResult> =
+    let commandResult : Codec<CommandResult> =
         { Encode =
             (fun r ->
                 match r with

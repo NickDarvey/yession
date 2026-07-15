@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <Compile Include="State.fs" />
+    <Compile Include="ControlWire.fs" />
     <Compile Include="Authority.fs" />
   </ItemGroup>
 

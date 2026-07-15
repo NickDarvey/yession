@@ -37,10 +37,15 @@ let private sessionCommand, sessionArgs =
 
 Async.StartImmediate(
     async {
-        let manager =
+        // Container authority lives HERE, in the Manager: sessions reach it only over
+        // the control endpoint with their per-launch secret (Step 24).
+        let containers = Yession.Manager.Authority.ContainerRegistry ()
+        let backend = Backends.LocalProcessBackend.create ()
+        let! manager =
             ProcessManager.create
                 { ProcessManager.Options.defaults dataDir sessionCommand sessionArgs with
-                    SessionPort = (if port = 0 then None else Some port) }
+                    SessionPort = (if port = 0 then None else Some port)
+                    Grant = Some (Yession.Manager.Authority.grant containers backend) }
 
         // Ensure the default session exists (an existing registration is resume).
         let sessionId = SessionId.create sessionKey |> expect

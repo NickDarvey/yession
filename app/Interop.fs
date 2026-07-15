@@ -60,6 +60,7 @@ type [<AllowNullLiteral>] IncomingMessage =
 
 type [<AllowNullLiteral>] ServerResponse =
     abstract writeHead : int * obj -> ServerResponse
+    abstract write : string -> bool
     abstract ``end`` : string -> unit
 
 type [<AllowNullLiteral>] HttpServer =
@@ -81,6 +82,14 @@ let createServer (handler: IncomingMessage -> ServerResponse -> unit) : HttpServ
 /// Decode a Node Buffer (or string) chunk to a UTF-8 string.
 [<Emit("typeof $0 === 'string' ? $0 : $0.toString('utf8')")>]
 let bufferToString (chunk: obj) : string = jsNative
+
+/// Read a request header (Node lowercases header names); None when absent.
+[<Emit("($0.headers[$1] ?? null)")>]
+let headerOf (req: IncomingMessage) (name: string) : string option = jsNative
+
+/// A cryptographically random identifier (per-launch control secrets).
+[<Emit("crypto.randomUUID()")>]
+let randomSecret () : string = jsNative
 
 /// POST a JSON body and resolve with the response text. Uses Node 24's global `fetch`.
 [<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 }).then(r => r.text())")>]

@@ -38,7 +38,7 @@ type ProcessManager =
       /// Resolves when the session's running child exits (immediately if none runs).
       WaitForExit : SessionId -> Async<unit>
       TryFind : SessionId -> SessionView option
-      /// Stop every running child (Manager shutdown).
+      /// Stop every running child and the control endpoint (Manager shutdown).
       StopAll : unit -> Async<unit> }
 
 type Options =
@@ -53,7 +53,11 @@ type Options =
       /// How long a child may take to print its readiness line.
       LaunchTimeoutMs : int
       /// SIGTERM → SIGKILL escalation grace.
-      StopGraceMs : int }
+      StopGraceMs : int
+      /// Environment authority (Step 24): grants session-scoped capabilities, served
+      /// to children over the control endpoint with a per-launch secret. None =
+      /// sessions run environment-less.
+      Grant : (SessionId -> SessionEnvironmentCapabilities) option }
 
 module Options =
     let defaults (dataDir: string) (sessionCommand: string) (sessionArgs: string list) : Options =
@@ -62,14 +66,16 @@ module Options =
           SessionArgs = sessionArgs
           SessionPort = None
           LaunchTimeoutMs = 15000
-          StopGraceMs = 3000 }
+          StopGraceMs = 3000
+          Grant = None }
 
 [<Fable.Core.Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
 
 let private clock () = DateTimeOffset.UtcNow
 
-let create (options: Options) : ProcessManager =
+let create (options: Options) : Async<ProcessManager> =
+  async {
     let statePath = sprintf "%s/manager.json" options.DataDir
     let mutable state = ManagerStore.load statePath
 
@@ -79,6 +85,28 @@ let create (options: Options) : ProcessManager =
     let mutable lastExit : Map<string, int option> = Map.empty
     // Stops in flight: their exits are expected, not crashes.
     let mutable stopping : Set<string> = Set.empty
+
+    // The control endpoint (Step 24): per-launch secrets resolve to the capabilities
+    // the Manager granted that launch — the RPC equivalent of the Step 11 closure. A
+    // secret dies with its launch.
+    let mutable secrets : Map<string, SessionEnvironmentCapabilities> = Map.empty
+    let! controlServer =
+        match options.Grant with
+        | None -> async { return None }
+        | Some _ ->
+            async {
+                let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+                    if not (Control.tryHandle (fun secret -> Map.tryFind secret secrets) req res) then
+                        res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                        res.``end`` "not found"
+                let server = Interop.createServer handler
+                let! listening =
+                    Async.FromContinuations (fun (cont, _, _) ->
+                        server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+                return Some listening
+            }
+    let controlUrl () =
+        controlServer |> Option.map (fun s -> sprintf "http://127.0.0.1:%d" (Interop.serverPort s))
 
     let statusOf (record: SessionRecord) : SessionStatus =
         let key = SessionId.value record.SessionId
@@ -114,6 +142,15 @@ let create (options: Options) : ProcessManager =
             | None -> return Error (sprintf "unknown session %s" key)
             | Some _ when Map.containsKey key children -> return Error (sprintf "session %s is already running" key)
             | Some record ->
+                // Step 24: mint the per-launch secret and grant the capabilities it
+                // resolves to — the session scope is established HERE, by the Manager.
+                let controlEnv =
+                    match options.Grant, controlUrl () with
+                    | Some grant, Some url ->
+                        let secret = Interop.randomSecret ()
+                        secrets <- Map.add secret (grant record.SessionId) secrets
+                        [ "YESSION_CONTROL_URL", url; "YESSION_CONTROL_SECRET", secret ], Some secret
+                    | _ -> [], None
                 let env =
                     [ "YESSION_SESSION", SessionId.value record.SessionId
                       "YESSION_TOKEN", record.Token
@@ -121,13 +158,22 @@ let create (options: Options) : ProcessManager =
                       "YESSION_PORT", string (defaultArg options.SessionPort 0)
                       // The child watches its stdin and exits when this Manager dies.
                       "YESSION_PARENT_GUARD", "1" ]
+                    @ fst controlEnv
+                let revokeSecret () =
+                    match snd controlEnv with
+                    | Some secret -> secrets <- Map.remove secret secrets
+                    | None -> ()
                 match! Spawn.launch options.SessionCommand options.SessionArgs env options.LaunchTimeoutMs with
-                | Error reason -> return Error reason
+                | Error reason ->
+                    revokeSecret ()
+                    return Error reason
                 | Ok (child, port) ->
                     children <- Map.add key (child, port) children
                     lastExit <- Map.remove key lastExit
                     child.OnExit (fun code ->
                         children <- Map.remove key children
+                        // The launch's authority dies with it.
+                        revokeSecret ()
                         // A stop's exit is the expected outcome, not a crash to report.
                         if Set.contains key stopping then stopping <- Set.remove key stopping
                         else lastExit <- Map.add key code lastExit)
@@ -150,25 +196,28 @@ let create (options: Options) : ProcessManager =
                         |> ignore)
         }
 
-    { CreateSession = createSession
-      Launch = launch
-      Stop = stop
-      Sessions = fun () -> state.Sessions |> List.map (fun r -> { Record = r; Status = statusOf r })
-      WaitForExit =
-        fun sessionId ->
-            match Map.tryFind (SessionId.value sessionId) children with
-            | None -> async { return () }
-            | Some (child, _) ->
-                Async.FromContinuations (fun (cont, _, _) -> child.OnExit (fun _ -> cont ()))
-      TryFind =
-        fun sessionId ->
-            ManagerState.tryFind sessionId state
-            |> Option.map (fun r -> { Record = r; Status = statusOf r })
-      StopAll =
-        fun () ->
-            async {
-                for view in state.Sessions do
-                    if Map.containsKey (SessionId.value view.SessionId) children then
-                        let! _ = stop view.SessionId
-                        ()
-            } }
+    return
+        { CreateSession = createSession
+          Launch = launch
+          Stop = stop
+          Sessions = fun () -> state.Sessions |> List.map (fun r -> { Record = r; Status = statusOf r })
+          WaitForExit =
+            fun sessionId ->
+                match Map.tryFind (SessionId.value sessionId) children with
+                | None -> async { return () }
+                | Some (child, _) ->
+                    Async.FromContinuations (fun (cont, _, _) -> child.OnExit (fun _ -> cont ()))
+          TryFind =
+            fun sessionId ->
+                ManagerState.tryFind sessionId state
+                |> Option.map (fun r -> { Record = r; Status = statusOf r })
+          StopAll =
+            fun () ->
+                async {
+                    for record in state.Sessions do
+                        if Map.containsKey (SessionId.value record.SessionId) children then
+                            let! _ = stop record.SessionId
+                            ()
+                    controlServer |> Option.iter (fun s -> s.close ignore)
+                } }
+  }
