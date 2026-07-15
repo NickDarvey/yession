@@ -11,7 +11,7 @@ open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
 open Yession.Manager
-open Yession.Client
+open Yession.App
 open Yession.Host
 open Yession.Tests.Support
 

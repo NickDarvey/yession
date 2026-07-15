@@ -13,7 +13,7 @@ open Yession.Domain
 open Yession.SessionProcess
 open Yession.Host.Interop
 open Yession.Host.WebRtc
-open Yession.Client
+open Yession.App
 
 /// The static bootstrap page is the client shell itself, rendered from the initial model.
 /// The browser hydrates it and connects back over WebRTC; serving the same `View` keeps a

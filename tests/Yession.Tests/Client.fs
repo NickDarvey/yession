@@ -12,7 +12,7 @@ module Yession.Tests.Client
 open Fable.Pyxpecto
 open Yession.Domain
 open Yession.SessionProcess
-open Yession.Client
+open Yession.App
 open Yession.Host
 
 let private expect =

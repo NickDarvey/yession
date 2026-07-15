@@ -38,7 +38,7 @@
     <ProjectReference Include="..\src\Yession.Domain\Yession.Domain.fsproj" />
     <ProjectReference Include="..\src\Yession.Manager\Yession.Manager.fsproj" />
     <ProjectReference Include="..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
-    <ProjectReference Include="..\src\Yession.Client\Yession.Client.fsproj" />
+    <ProjectReference Include="..\src\Yession.App\Yession.App.fsproj" />
   </ItemGroup>
 
 </Project>

@@ -7,7 +7,7 @@ module Yession.Tests.Support
 open Elmish
 open Yjs
 open Yession.Domain
-open Yession.Client
+open Yession.App
 open Yession.Host
 
 let expect =

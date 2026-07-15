@@ -1,4 +1,4 @@
-namespace Yession.Client
+namespace Yession.App
 
 /// The DOM contract: every `data-*` hook and every observable text/value token the views
 /// emit and the tests assert on, defined once. Views (`View`, `ManagerUi`) compose these

@@ -1,4 +1,4 @@
-namespace Yession.Client
+namespace Yession.App
 
 open Elmish
 open Yjs

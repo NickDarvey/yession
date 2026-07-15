@@ -133,7 +133,7 @@ Tailwind `max-md:` / `md:` variants — still zero authored CSS.
 
 ## Architecture — compose Tailwind utilities as typed F# values
 
-New module `Yession.Client/Style.fs` (referenced before `View.fs`). It holds *named
+New module `Yession.App/Style.fs` (referenced before `View.fs`). It holds *named
 compositions of Tailwind utility classes* — the values below **are** Tailwind classes; F#
 just names, groups, and composes them so the view has no magic strings.
 
@@ -197,9 +197,9 @@ not needed yet; keep the view pure.
 
 ## File-by-file changes
 
-1. **`src/Yession.Client/Style.fs`** *(new)* — the named Tailwind‑utility groups, `cls`,
-   and `headTags`. Add to `Yession.Client.fsproj` **before** `View.fs`.
-2. **`src/Yession.Client/View.fs`** — restructure `render` into the workspace layout
+1. **`src/Yession.App/Style.fs`** *(new)* — the named Tailwind‑utility groups, `cls`,
+   and `headTags`. Add to `Yession.App.fsproj` **before** `View.fs`.
+2. **`src/Yession.App/View.fs`** — restructure `render` into the workspace layout
    (sidebar wrapper around connection/offsets/environment/commands; main column with
    timeline, activity strip, queue, composer) and add `cls [...]` classes throughout.
    Inject `Style.headTags` into `page`'s `<head>`. All `data-*` hooks stay untouched so

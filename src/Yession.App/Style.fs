@@ -1,4 +1,4 @@
-namespace Yession.Client
+namespace Yession.App
 
 /// The client's visual language, authored entirely in F# by composing Tailwind's own
 /// utility classes into typed, named values. Tailwind supplies the utilities (delivered

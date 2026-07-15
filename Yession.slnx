@@ -9,7 +9,7 @@
     <Project Path="app/browser/Yession.Browser.fsproj" />
   </Folder>
   <Folder Name="/src/">
-    <Project Path="src/Yession.Client/Yession.Client.fsproj" />
+    <Project Path="src/Yession.App/Yession.App.fsproj" />
     <Project Path="src/Yession.Domain/Yession.Domain.fsproj" />
     <Project Path="src/Yession.Manager/Yession.Manager.fsproj" />
     <Project Path="src/Yession.SessionProcess/Yession.SessionProcess.fsproj" />

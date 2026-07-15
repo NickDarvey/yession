@@ -12,7 +12,7 @@ open Fable.Core
 open Fable.Core.JsInterop
 open Yjs
 open Yession.Domain
-open Yession.Client
+open Yession.App
 
 // --- Native WebRTC (non-trickle, mirroring app/WebRtc.fs) -----------------------------
 

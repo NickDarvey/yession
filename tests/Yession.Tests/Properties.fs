@@ -25,7 +25,7 @@ open Yjs
 open Ylmish
 open Yession.Domain
 open Yession.SessionProcess
-open Yession.Client
+open Yession.App
 open Yession.Tests.Support
 
 // --- The schedule vocabulary -----------------------------------------------------------

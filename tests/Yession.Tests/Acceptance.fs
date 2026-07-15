@@ -9,7 +9,7 @@ module Yession.Tests.Acceptance
 open System
 open Fable.Pyxpecto
 open Yession.Domain
-open Yession.Client
+open Yession.App
 open Yession.Tests.Support
 
 let private draftId = DraftId.create "draft-ui" |> expect
