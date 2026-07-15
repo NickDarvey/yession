@@ -78,5 +78,6 @@ the schemas/interfaces it introduces, and automated verification.
 - **Design fundamentals:** [docs/design.md](docs/design.md)
 - **Delivery plan (Phase 1 + Phase 2 steps):** [docs/plans/00-init/](docs/plans/00-init/)
 - **Phase 3 plan (turn scheduling):** [docs/plans/01-turn-scheduling.md](docs/plans/01-turn-scheduling.md)
+- **Phase 4 plan (Manager process split):** [docs/plans/02-manager-process.md](docs/plans/02-manager-process.md)
 - **Progress & blockers tracker:** [docs/plans/TODO.md](docs/plans/TODO.md)
 - **Known gaps (honest inventory):** [docs/GAPS.md](docs/GAPS.md)

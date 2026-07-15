@@ -50,7 +50,7 @@ Status legend: `Todo` · `In progress` · `Blocked` · `Done`
 
 **Phase 2 acceptance:** **Accepted 2026-07-12.** The Manager owns launch and grants pre-scoped capabilities; environments start lazily (a conversational one-shot starts nothing) and restart on need after a stop; commands run only through the delegated capability with the log rendered read-only from events; authority (forged/stolen/re-minted handles, cross-session stop) is rejected before any backend is reached; disconnected clients catch up on mixed message/environment/command events by offset. All from `mise run test`: 5 consecutive deterministic runs (83/83) plus one credentialed run (83/83, live agent turn executed). The Phase 1 suite passes unchanged in the same run — the Elmish/Ylmish/WebRTC/event-log split is preserved. Docker smoke self-gates on daemon availability (no daemon in the dev container; the authority layer is verified engine-independently).
 
-## Phase 3 — Collaborative message queue & turn scheduling (planned)
+## Phase 3 — Collaborative message queue & turn scheduling
 
 Plan: [01-turn-scheduling.md](01-turn-scheduling.md) (rev 2) — sends enqueue into
 shared CRDT state (editable/reorderable/deletable until consumed); the Process drains
@@ -80,6 +80,28 @@ full server wipe in the real-Chromium E2E). Evidence: 5 consecutive `mise run te
 runs, 107/107 + both browser E2E scenarios each. The two live agent tests self-gate on
 credentials (none in this dev environment; CI exercises them via the
 `CLAUDE_CODE_OAUTH_TOKEN` secret).
+
+## Phase 4 — Manager as its own process (planned)
+
+Plan: [02-manager-process.md](02-manager-process.md) — the Manager and each Session
+Process become separate OS processes and separate single-file executables (Node SEA);
+sessions are created/launched/resumed from an htmx management UI; Manager state is a
+file behind an explicit codec (SQLite later); container authority crosses the process
+boundary as a secret-scoped control RPC; the test suite splits into a cheap always-on
+tier and a tagged `verify` tier that gates releases (incl. an executable-composition
+E2E on the built binaries).
+
+| #  | Step | Outcome | Status | Notes / Blockers |
+|----|------|---------|--------|------------------|
+| 21 | Test tiers & verify gate | `Tag.verify` (env-gated, skips reported); expensive suites tagged; CI: cheap on PR, `mise run verify` gates release | Todo | |
+| 22 | Manager state & codec | `ManagerState` + hand-written codec; atomic file store; registry survives restart | Todo | |
+| 23 | Session Process as an OS process | `yession-session` env contract + readiness line; spawn/observe/stop/resume; crash isolation | Todo | |
+| 24 | Authority over the control RPC | Per-launch secret; capability RPC; Step 11 rejections hold across the boundary | Todo | |
+| 25 | Management UI (htmx) | SSR pages/fragments; create/launch/stop/resume/list; vendored htmx | Todo | |
+| 26 | SEA binaries & F# build script | Two single-file executables; native addon extraction; `build.fsx` replaces `package.mjs` | Todo | |
+| 27 | Composition E2E & acceptance | The full scenario on built artifacts (verify tier); Phase 4 acceptance recorded | Todo | |
+
+**Phase 4 acceptance:** not started.
 
 ## Blockers log
 
