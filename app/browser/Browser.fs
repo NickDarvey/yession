@@ -84,6 +84,12 @@ let private frameChannel (dc: obj) : FrameChannel<string> =
 [<Emit("document.getElementById('app')")>]
 let private appRoot () : obj = jsNative
 
+// lit-html's `render` inserts its content AFTER a container's existing children rather
+// than replacing them, so the server-rendered shell (first paint) would linger beside the
+// live one. Clear it once before the client's first render so Lit owns `#app` outright.
+[<Emit("$0.replaceChildren()")>]
+let private clearChildren (el: obj) : unit = jsNative
+
 // The timeline is a chat surface: pinned to bottom while the reader is at (or within a few
 // px of) the bottom, position preserved when they've scrolled up to read. `-1` marks "was
 // pinned". Lit preserves focus/caret across its diff, but scroll is ours to manage.
@@ -171,6 +177,8 @@ let private start () =
               ToggleNav = toggleNav }
 
         let el = appRoot ()
+        // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
+        clearChildren el
 
         // Render the Lit view on every model change. Lit diffs into `#app`, so the focused
         // textarea and its caret survive; only the timeline scroll is restored by hand.
