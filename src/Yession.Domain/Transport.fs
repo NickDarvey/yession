@@ -6,12 +6,10 @@ namespace Yession.Domain
 /// opaque to the transport (owned by the Ylmish sync boundary in Step 05), hence the
 /// `'State` type parameter. See docs/design.md §2.3 and docs/plans/00-init/03-*.
 
+/// Commands are how clients ask for durable facts the CRDT cannot express. Drafting,
+/// sending (enqueueing), editing, reordering, and deleting are all pure CRDT writes —
+/// only the agent-turn interrupt needs a request/response.
 type SessionCommand =
-    | StartDraft
-    /// Retired in Phase 3: sending now enqueues via the shared session state (a pure
-    /// CRDT write), so there is nothing to request. The case stays for wire
-    /// compatibility — old clients' requests decode and are rejected as superseded.
-    | SendDraft of DraftId
     /// Cancel the running agent turn (Phase 3, Step 17). Rejected if that turn is no
     /// longer running — the interrupt-vs-completion race resolves at the Process.
     | InterruptAgentTurn of AgentTurnId

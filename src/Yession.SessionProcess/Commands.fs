@@ -3,9 +3,8 @@ namespace Yession.SessionProcess
 open Yession.Domain
 
 /// Handling of `SessionCommand` requests on the Session Process. Commands are how
-/// clients ask for durable facts the CRDT cannot express: as of Phase 3 that is the
-/// agent-turn interrupt alone — draft creation and sending are pure CRDT writes and
-/// their command shapes decode to rejections.
+/// clients ask for durable facts the CRDT cannot express: that is the agent-turn
+/// interrupt alone — draft creation and sending are pure CRDT writes.
 module SessionCommands =
 
     /// Handle one command from an accepted peer. `requestInterrupt` is the scheduler's
@@ -18,13 +17,6 @@ module SessionCommands =
         : Async<SessionCommandResult> =
         async {
             match command with
-            | StartDraft ->
-                // Drafts are created in the shared synced state (Step 05), not by command.
-                return CommandRejected "drafts are started in the shared session state"
-            | SendDraft _ ->
-                // Retired in Phase 3: sending enqueues via the shared session state; the
-                // Session Process consumes the queue (docs/plans/01-turn-scheduling.md).
-                return CommandRejected "superseded: sending enqueues via the shared session state"
             | InterruptAgentTurn turnId ->
                 match requestInterrupt peerId turnId with
                 | Ok () -> return CommandAccepted

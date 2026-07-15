@@ -481,15 +481,11 @@ module Codec =
         { Encode =
             (fun c ->
                 match c with
-                | StartDraft -> Encode.object [ "kind", Encode.string "startDraft" ]
-                | SendDraft d -> Encode.object [ "kind", Encode.string "sendDraft"; "draftId", draftId.Encode d ]
                 | InterruptAgentTurn t ->
                     Encode.object [ "kind", Encode.string "interruptAgentTurn"; "agentTurnId", agentTurnId.Encode t ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
-                | "startDraft" -> Decode.succeed StartDraft
-                | "sendDraft" -> Decode.field "draftId" draftId.Decode |> Decode.map SendDraft
                 | "interruptAgentTurn" -> Decode.field "agentTurnId" agentTurnId.Decode |> Decode.map InterruptAgentTurn
                 | other -> Decode.fail (sprintf "Unknown session command: %s" other)) }
 

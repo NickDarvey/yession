@@ -117,8 +117,6 @@ let private frameSerializationTests =
 
     let everyVariant : SessionFrame<string> list =
         [ State (StateSync "opaque-sync-payload")
-          Command (Request(requestId, StartDraft))
-          Command (Request(requestId, SendDraft draftId))
           Command (Request(requestId, InterruptAgentTurn (AgentTurnId.create "turn-1" |> expect)))
           Command (Response(requestId, CommandAccepted))
           Command (Response(requestId, CommandRejected "nope"))

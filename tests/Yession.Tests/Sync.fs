@@ -195,15 +195,6 @@ let private queueUnitTests =
             let plan = QueueDrain.plan Set.empty (queueOf [ entry "kept" 1.0 "kept" ])
             Expect.equal (plan.Batch |> List.map (fun m -> QueueId.value m.QueueId)) [ "kept" ] "only present entries consume"
 
-        testCaseAsync "the retired SendDraft command is rejected as superseded" <|
-            async {
-                let noInterrupt _ _ = Error "no turn running"
-                let! result = SessionCommands.handle noInterrupt ada (SendDraft draftId1)
-                match result with
-                | CommandRejected reason -> Expect.isTrue (reason.Contains "superseded") "named as superseded"
-                | other -> failwithf "expected CommandRejected, got %A" other
-            }
-
         testCase "MessageSent projects into the conversation" <| fun () ->
             let ada = PeerId.create "ada" |> expect
             let message =
