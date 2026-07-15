@@ -1,7 +1,7 @@
 # Known gaps
 
 An honest inventory of what Yession does **not** do yet, as of `1.0.0-beta.*`. Phases
-1–3 are accepted ([tracker](plans/TODO.md)); everything below is deliberate scope,
+1–4 are accepted ([tracker](plans/TODO.md)); everything below is deliberate scope,
 recorded so nobody discovers it in production. Items are roughly ordered by how much
 they matter.
 
@@ -14,6 +14,11 @@ they matter.
   browser client.
 - **The Manager and Process read plaintext** (per the stated Phase 1–2 threat model);
   command-to-container encryption is designed for but not implemented.
+- **The management UI and control endpoint are unauthenticated beyond locality +
+  secrets.** Both bind 127.0.0.1 only; the control RPC is gated by per-launch secrets,
+  but the management UI itself has no login — anyone with local access can manage
+  sessions (and session tokens appear in its open links). Same local-dev threat model
+  as everything else; revisit with real authn.
 - **`LocalProcessBackend` provides no OS isolation.** Commands run as child processes of
   the Manager with the Manager's own user and environment. The *authority* contract
   (session scoping, handle validation) is enforced and tested, but the *engine* is not a
@@ -26,16 +31,20 @@ they matter.
 
 ## Runtime & topology
 
-- **Manager and Session Processes share one Node process.** Each Process is its own
-  composition root on its own port, and the capability boundary is real (closures), but
-  a crashing Process takes the Manager with it and vice versa. The OS-process split
-  (and with it, capability delivery across a process boundary) is future work.
-- **One session per product launch.** `Main.fs` starts a single default session; the
-  Manager API supports many, but there is no session-management UI/CLI (create, list,
-  join by URL) yet.
-- **The default port is OS-assigned (random)** so instances coexist; there is no
-  stable well-known address without setting `YESSION_PORT`, and no port-conflict
-  message beyond Node's raw error when a fixed port is taken.
+- **The process split is done** (Phase 4): each session is a child OS process of the
+  Manager, capabilities cross the boundary as a secret-scoped control RPC, and
+  sessions are created/launched/resumed/stopped from the htmx management UI — but
+  **children die with the Manager** (no daemonising, no orphan adoption): a Manager
+  restart stops every running session, and resumes are manual clicks.
+- **The Manager is practically a singleton.** Nothing global is assumed (per-instance
+  data directories, OS-assigned session ports), but two Managers over the SAME data
+  directory are unsupported — there is no lock until the SQLite move — and the
+  management UI's fixed default port (8321) means a second instance must configure its
+  own.
+- **Session ports are OS-assigned and change on every launch**, so a session's client
+  URL is not stable across resumes; the management UI's open link is the way in.
+- **No health checks beyond the readiness line**: a child that wedges after readiness
+  shows as running until it exits.
 - **Peer-to-peer is star-shaped through the Process.** Clients sync Yjs state via the
   Session Process relay, not directly with each other; y-webrtc-style meshes are not
   used.
@@ -99,10 +108,15 @@ they matter.
 
 ## Delivery & operations
 
-- **The release workflow is untested until the first master push reaches GitHub
-  Actions** — the packaging script is verified locally (linux-x64 boot smoke), but the
-  workflow itself (mise action, Playwright install on runners, macOS packaging, release
-  creation) needs its first real run watched.
+- **Node SEA is still flagged experimental** (`--experimental-sea-config`): the blob
+  format may move between Node majors. The Node version is pinned in mise, so this is
+  a controlled upgrade — but every Node bump must re-run `mise run package` locally.
+- **The packaged agent path needs a system Claude Code install** (`PATH` or
+  `YESSION_CLAUDE_PATH`): the SDK is bundled into the binary, but it spawns an external
+  executable that does not ship in the tarball. Without credentials + the executable,
+  sessions run human-only (as designed).
+- **macOS packaging is exercised only in CI** (the packaging smoke runs per-OS in the
+  package job); the deep composition E2E runs on Linux.
 - **darwin-x64 is not built** (runners produce linux-x64 and darwin-arm64); Intel Mac
   users need Rosetta or a matrix addition.
 - **No Windows build**; no signing/notarisation for macOS binaries (Gatekeeper will

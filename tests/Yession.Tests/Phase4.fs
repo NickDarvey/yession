@@ -399,6 +399,154 @@ let private uiFlowTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Step 27 — the executable composition E2E: the SHIPPED single-file binaries
+// (packaged by `dotnet fsi scripts/build.fsx 0.0.0-verify` inside `mise run
+// verify`), composed for real — the manager binary spawns the session binary,
+// the management UI drives them, a real WebRTC client talks to the child, the
+// control RPC exercises authority, and both crash-resume and a manager restart
+// preserve everything. This is what gates a release.
+// -----------------------------------------------------------------------------
+
+[<Fable.Core.Import("spawn", "node:child_process")>]
+let private spawnRaw : obj = Fable.Core.Util.jsNative
+
+[<Emit("$0($1, [], { env: { ...process.env, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
+let private spawnBinary (spawn: obj) (command: string) (env: (string * string) array) : obj = Fable.Core.Util.jsNative
+
+[<Emit("$0.stdout.on('data', $1)")>]
+let private onStdout (child: obj) (handler: obj -> unit) : unit = Fable.Core.Util.jsNative
+
+[<Emit("typeof $0 === 'string' ? $0 : $0.toString('utf8')")>]
+let private chunkToString (chunk: obj) : string = Fable.Core.Util.jsNative
+
+[<Emit("$0.kill('SIGKILL')")>]
+let private killBinary (child: obj) : unit = Fable.Core.Util.jsNative
+
+[<Emit("$0.on('exit', $1)")>]
+let private onBinaryExit (child: obj) (handler: obj -> unit) : unit = Fable.Core.Util.jsNative
+
+[<Emit("process.platform + '-' + process.arch")>]
+let private platformName : string = Fable.Core.Util.jsNative
+
+/// A running packaged manager: its two announced URLs and a kill that resolves once
+/// the process is gone.
+type private PackagedManager =
+    { SessionUrl : string
+      UiUrl : string
+      Shutdown : unit -> Async<unit> }
+
+let private startPackagedManager (binary: string) (env: (string * string) list) : Async<PackagedManager> =
+    Async.FromContinuations (fun (cont, econt, _) ->
+        let child = spawnBinary spawnRaw binary (Array.ofList env)
+        let mutable sessionUrl = None
+        let mutable uiUrl = None
+        let mutable settled = false
+        let urlIn (line: string) =
+            let m = System.Text.RegularExpressions.Regex.Match (line, "http://[0-9.:]+/")
+            if m.Success then Some m.Value else None
+        onBinaryExit child (fun _ ->
+            if not settled then
+                settled <- true
+                econt (Exception "packaged manager exited before announcing its endpoints"))
+        // A missing/unrunnable binary is a loud test failure, not a crashed runner.
+        Fable.Core.JsInterop.emitJsExpr (child, (fun (e: obj) ->
+            if not settled then
+                settled <- true
+                econt (Exception (sprintf "packaged manager failed to start: %A" e)))) "$0.on('error', $1)"
+        let mutable buffer = ""
+        onStdout child (fun chunk ->
+            buffer <- buffer + chunkToString chunk
+            let parts = buffer.Split '\n'
+            buffer <- parts.[parts.Length - 1]
+            for line in parts.[0 .. parts.Length - 2] do
+                if line.Contains "launched at" then sessionUrl <- urlIn line
+                if line.Contains "management UI at" then uiUrl <- urlIn line
+                match sessionUrl, uiUrl, settled with
+                | Some s, Some u, false ->
+                    settled <- true
+                    cont
+                        { SessionUrl = s
+                          UiUrl = u
+                          Shutdown =
+                            fun () ->
+                                Async.FromContinuations (fun (kcont, _, _) ->
+                                    onBinaryExit child (fun _ -> kcont ())
+                                    killBinary child) }
+                | _ -> ()))
+
+let private portOfRow (row: string) : int =
+    let m = System.Text.RegularExpressions.Regex.Match (row, "port (\\d+)")
+    if m.Success then int m.Groups.[1].Value else failwithf "no port in row: %s" row
+
+let private compositionTests =
+    testList "Executable composition (Step 27)" [
+        testCaseAsync "the shipped binaries compose: manage, message, authority, crash-resume, manager restart" <|
+            async {
+                let binary = sprintf "dist/yession-0.0.0-verify-%s/yession" platformName
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/composed-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let env =
+                    [ "YESSION_DATA_DIR", dataDir
+                      "YESSION_PORT", "0"
+                      "YESSION_MANAGER_PORT", "0"
+                      // Children inherit this: the built-in diagnostic agent exercises
+                      // the control RPC on the shipped binaries, credential-free.
+                      "YESSION_AGENT", "diagnostic" ]
+
+                let! manager = startPackagedManager binary env
+
+                // Create and launch a session from the management UI.
+                let! created = postForm (manager.UiUrl + "sessions") "id=composed&name=Composed&token=comp-token" |> Async.AwaitPromise
+                Expect.equal (statusOfReply created) 200 "created via the UI"
+                let! launched = postForm (manager.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
+                let row = bodyOfReply launched
+                Expect.isTrue (row.Contains "data-status=\"running\"") "launched via the UI"
+                let sessionPort = portOfRow row
+
+                // A real client messages the packaged child; the diagnostic agent runs a
+                // real command through the packaged manager's control RPC.
+                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" sessionPort) "comp-token" "ada" "Ada"
+                let draftId = DraftId.create "composed-draft" |> expect
+                a.Runner.Dispatch (user (StartDraftMsg draftId))
+                a.Runner.Dispatch (user (editBody draftId (Ylmish.Text.insert 0 "built binaries talking") (a.Runner.Model ())))
+                a.Connection.SendDraft draftId
+                do! a.Runner.WaitFor (fun m ->
+                        (m.Conversation.Items |> List.exists (fun i -> i.Body = "built binaries talking"))
+                        && (m.Conversation.Items
+                            |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "diagnostic-ok"))
+                        && (match m.Environment with EnvironmentRunning _ -> true | _ -> false)
+                        && (m.Commands.Entries |> List.exists (fun e -> e.Status = CommandFinished (CommandSucceeded 0))))
+                do! a.Channel.Close ()
+
+                // Stop and resume from the UI; history replays into the fresh child.
+                let! stopped = postForm (manager.UiUrl + "sessions/composed/stop") "" |> Async.AwaitPromise
+                Expect.isTrue ((bodyOfReply stopped).Contains "data-status=\"stopped\"") "stopped via the UI"
+                let! resumed = postForm (manager.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
+                let resumedPort = portOfRow (bodyOfReply resumed)
+                let! b = connectClient (sprintf "http://127.0.0.1:%d/signal" resumedPort) "comp-token" "grace" "Grace"
+                do! b.Runner.WaitFor (fun m ->
+                        not m.EventConsumer.IsCatchingUp
+                        && (m.Conversation.Items |> List.exists (fun i -> i.Body = "built binaries talking")))
+                do! b.Channel.Close ()
+
+                // Kill the manager (its children die with it), restart over the same
+                // data directory: the registry survives, and resume still works.
+                do! manager.Shutdown ()
+                let! manager2 = startPackagedManager binary env
+                let! page = Interop.getText manager2.UiUrl |> Async.AwaitPromise
+                Expect.isTrue (page.Contains "data-session=\"composed\"") "the registry survived the manager restart"
+                let! relaunched = postForm (manager2.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
+                let relaunchedPort = portOfRow (bodyOfReply relaunched)
+                let! c = connectClient (sprintf "http://127.0.0.1:%d/signal" relaunchedPort) "comp-token" "carol" "Carol"
+                do! c.Runner.WaitFor (fun m ->
+                        not m.EventConsumer.IsCatchingUp
+                        && (m.Conversation.Items |> List.exists (fun i -> i.Body = "built binaries talking")))
+                do! c.Channel.Close ()
+                do! manager2.Shutdown ()
+            }
+    ]
+
 let tests =
     testList "Phase4" [
         stateTests
@@ -406,4 +554,5 @@ let tests =
         Tag.verify processTests
         Tag.verify controlRpcTests
         Tag.verify uiFlowTests
+        Tag.verify compositionTests
     ]

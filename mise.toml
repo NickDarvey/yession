@@ -65,6 +65,9 @@ run = [
   "dotnet fable app/main/Yession.Host.Main.fsproj -o app/out",
   "dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser",
   "esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=app/out/public/client.js",
+  # Package the real single-file executables: the composition E2E in the verify tier
+  # drives THESE artifacts, so a release is gated on what actually ships.
+  "dotnet fsi scripts/build.fsx 0.0.0-verify",
   "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
   "YESSION_TEST_TIER=verify node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 240000",
   "node tests/browser/run.mjs",
