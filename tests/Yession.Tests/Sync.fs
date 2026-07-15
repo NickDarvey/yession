@@ -402,8 +402,8 @@ let private e2eTests =
                 let sectionAt (marker: string) =
                     let start = html.IndexOf marker
                     html.Substring (start, html.IndexOf ("</section>", start) - start)
-                let timeline = sectionAt "data-conversation"
-                let editor = sectionAt "data-draft-editor"
+                let timeline = sectionAt Dom.Hooks.conversation
+                let editor = sectionAt Dom.Hooks.draftEditor
                 Expect.isTrue (timeline.Contains "while you were away") "the sent message is in the timeline"
                 Expect.isFalse (timeline.Contains "UNSENT") "unsent draft edits never appear in the timeline"
                 Expect.isTrue (editor.Contains "UNSENT thought") "the live draft renders in the draft editor"

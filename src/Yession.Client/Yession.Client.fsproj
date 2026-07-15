@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Dom.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="Connection.fs" />
     <Compile Include="PeerName.fs" />

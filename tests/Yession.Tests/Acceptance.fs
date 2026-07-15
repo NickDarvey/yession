@@ -57,28 +57,28 @@ let private uiChecklistTests =
         testCase "every required Phase 1 UI element renders from the model" <| fun () ->
             let html = View.render representativeModel
             let required =
-                [ "session connection status", "data-connection"
-                  "connection state value", ">Connected<"
-                  "peer display name", "data-display-name>swift-heron<"
-                  "collaborative draft editor", "data-draft-editor"
+                [ "session connection status", Dom.Hooks.connection
+                  "connection state value", Dom.hookText Dom.Hooks.connection Dom.Text.connected
+                  "peer display name", Dom.hookText Dom.Hooks.displayName "swift-heron"
+                  "collaborative draft editor", Dom.Hooks.draftEditor
                   "draft body", "half-typed idea"
-                  "send button", "data-send-draft=\"draft-ui\""
-                  "conversation timeline", "data-conversation"
-                  "sent message in timeline", ">ship it<"
-                  "agent streaming response", "data-message-status=\"streaming\""
-                  "agent stream indicator", "data-agent-stream"
-                  "active agent turn", "data-agent-turn"
-                  "last processed event offset", "data-last-processed-offset>5<"
-                  "latest known event offset", "data-latest-known-offset>7<"
-                  "catch-up status", "data-catch-up>Catching up<"
-                  "environment status (Phase 2)", "data-environment"
-                  "read-only command log (Phase 2)", "data-command-log"
-                  "message queue (Phase 3)", "data-message-queue"
+                  "send button", Dom.attr Dom.Hooks.sendDraft "draft-ui"
+                  "conversation timeline", Dom.Hooks.conversation
+                  "sent message in timeline", Dom.hookText Dom.Hooks.messageBody "ship it"
+                  "agent streaming response", Dom.attr Dom.Hooks.messageStatus Dom.Text.streaming
+                  "agent stream indicator", Dom.Hooks.agentStream
+                  "active agent turn", Dom.Hooks.agentTurn
+                  "last processed event offset", Dom.hookText Dom.Hooks.lastProcessedOffset "5"
+                  "latest known event offset", Dom.hookText Dom.Hooks.latestKnownOffset "7"
+                  "catch-up status", Dom.hookText Dom.Hooks.catchUp Dom.Text.catchingUp
+                  "environment status (Phase 2)", Dom.Hooks.environment
+                  "read-only command log (Phase 2)", Dom.Hooks.commandLog
+                  "message queue (Phase 3)", Dom.Hooks.messageQueue
                   "queued message body", "queued for the agent"
-                  "queued message editor", "data-queue-input=\"queue-ui\""
-                  "queue reorder up", "data-queue-up=\"queue-ui\""
-                  "queue reorder down", "data-queue-down=\"queue-ui\""
-                  "queue delete", "data-queue-delete=\"queue-ui\"" ]
+                  "queued message editor", Dom.attr Dom.Hooks.queueInput "queue-ui"
+                  "queue reorder up", Dom.attr Dom.Hooks.queueUp "queue-ui"
+                  "queue reorder down", Dom.attr Dom.Hooks.queueDown "queue-ui"
+                  "queue delete", Dom.attr Dom.Hooks.queueDelete "queue-ui" ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
 

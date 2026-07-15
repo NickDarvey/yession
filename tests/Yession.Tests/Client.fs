@@ -76,10 +76,10 @@ let tests =
 
                 // The UI renders both offset displays and the catch-up indicator.
                 let html = View.render model
-                Expect.isTrue (html.Contains "data-last-processed-offset") "last-processed offset display rendered"
-                Expect.isTrue (html.Contains "data-latest-known-offset") "latest-known offset display rendered"
-                Expect.isTrue (html.Contains "data-catch-up") "catch-up indicator rendered"
-                Expect.isTrue (html.Contains "data-connection") "connection status rendered"
+                Expect.isTrue (html.Contains Dom.Hooks.lastProcessedOffset) "last-processed offset display rendered"
+                Expect.isTrue (html.Contains Dom.Hooks.latestKnownOffset) "latest-known offset display rendered"
+                Expect.isTrue (html.Contains Dom.Hooks.catchUp) "catch-up indicator rendered"
+                Expect.isTrue (html.Contains Dom.Hooks.connection) "connection status rendered"
 
                 // A dropped channel moves the model to Reconnecting.
                 do! channel.Close ()
