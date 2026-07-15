@@ -103,6 +103,28 @@ let private focusedEditor () : string option = jsNative
 })()""")>]
 let private refocusEditor (key: string) : unit = jsNative
 
+// The timeline is a chat surface: pinned to bottom while the reader is at (or within a
+// few px of) the bottom, position preserved when they've scrolled up to read. `-1` marks
+// "was pinned"; mirrors the focus preservation above across the innerHTML swap.
+[<Emit("""(() => {
+  const el = document.querySelector('[data-conversation]')
+  if (!el) return null
+  return el.scrollTop + el.clientHeight >= el.scrollHeight - 4 ? -1 : el.scrollTop
+})()""")>]
+let private timelineScroll () : float option = jsNative
+
+[<Emit("""(() => {
+  const el = document.querySelector('[data-conversation]')
+  if (el) el.scrollTop = $0 < 0 ? el.scrollHeight : $0
+})()""")>]
+let private restoreTimelineScroll (position: float) : unit = jsNative
+
+// The sidebar/drawer state is one bit on the root element, outside `#app`, so it survives
+// every re-render: default = sidebar visible on desktop, off-canvas on mobile; `nav-alt`
+// = the inverse (see Style.sidebar).
+[<Emit("document.documentElement.classList.toggle('nav-alt')")>]
+let private toggleNav () : unit = jsNative
+
 [<Emit("""$0.addEventListener($1, (e) => {
   const target = e.target.closest ? e.target.closest(`[${$2}]`) : null
   if (target) $3(target.getAttribute($2) || '', target.value !== undefined ? String(target.value) : '')
@@ -165,50 +187,39 @@ let private start () =
 
         // Render the pure view on every model change. If a draft or queue textarea is
         // focused, its element is re-created by the render — restore focus and caret so
-        // typing is uninterrupted (the model already holds the text being typed).
+        // typing is uninterrupted (the model already holds the text being typed). The
+        // timeline's scroll position is carried across the swap the same way.
         let setState (model: ClientModel) (dispatch: Ylmish.Program.Message<ClientModel, ClientMsg> -> unit) =
             currentModel <- model
             dispatchRef <- fun msg -> dispatch (Ylmish.Program.Message.User msg)
             let focused = focusedEditor ()
+            let scroll = timelineScroll ()
             setHtml root (View.render model)
             match focused with
             | Some key when not (isNull (box key)) -> refocusEditor key
             | _ -> ()
+            match scroll with
+            | Some position -> restoreTimelineScroll position
+            | None -> ()
 
         App.makeProgram doc initial
         |> Program.withSetState setState
         |> Program.run
 
-        // Local-first: the doc persists in IndexedDB keyed by the session's address.
-        // Cold loads render local state (drafts, queued messages) before — and without
-        // — the network; on reconnect the full-state exchange reconciles, and entries
-        // the Process consumed meanwhile meet its removal tombstones and converge.
-        let persistence = newPersistence indexeddbPersistence (persistenceKey ()) doc
-        do! whenSynced persistence |> Async.AwaitPromise
+        // The connection is wired later (after persistence and signalling); controls that
+        // must speak over it hold this ref so everything else works before — and without
+        // — the network (local first).
+        let mutable connectionRef : App.Connection option = None
 
-        let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
-        let channel = frameChannel dc
-        let token = queryParam "token" "local-dev-token"
-        let hello =
-            { PeerId = peerId
-              DisplayName = displayName
-              Token = token }
-        // Events come over HTTP in immutable chunks, so the browser's own cache serves
-        // history (3-day full-chunk lifetime); only the growing tail chunk hits the
-        // Session Process. Availability hints still arrive over the data channel.
-        let options =
-            { App.ConnectOptions.defaults with
-                FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" token) }
-        let connection = App.connect options doc hello (fun msg -> dispatchRef msg) channel
-
-        // Interactive controls, delegated so re-renders never lose listeners.
+        // Interactive controls, delegated so re-renders never lose listeners — registered
+        // before any network await so the shell is interactive from the first paint.
         delegate' root "click" "data-start-draft" (fun _ _ ->
             match DraftId.create (mintId "draft") with
             | Ok draftId -> dispatchRef (StartDraftMsg draftId)
             | Error _ -> ())
         delegate' root "click" "data-send-draft" (fun draftId _ ->
             match DraftId.create draftId with
-            | Ok id -> connection.SendDraft id
+            | Ok id -> connectionRef |> Option.iter (fun c -> c.SendDraft id)
             | Error _ -> ())
         delegate' root "input" "data-draft-input" (fun draftId value ->
             match DraftId.create draftId with
@@ -249,8 +260,34 @@ let private start () =
             | Error _ -> ())
         delegate' root "click" "data-interrupt-turn" (fun turnId _ ->
             match AgentTurnId.create turnId with
-            | Ok id -> connection.InterruptTurn id
+            | Ok id -> connectionRef |> Option.iter (fun c -> c.InterruptTurn id)
             | Error _ -> ())
+        // Sidebar collapse/expand (desktop) and drawer open/close (mobile) — presentation
+        // state only, so it lives on the root element rather than in the model.
+        delegate' root "click" "data-nav-toggle" (fun _ _ -> toggleNav ())
+
+        // Local-first: the doc persists in IndexedDB keyed by the session's address.
+        // Cold loads render local state (drafts, queued messages) before — and without
+        // — the network; on reconnect the full-state exchange reconciles, and entries
+        // the Process consumed meanwhile meet its removal tombstones and converge.
+        let persistence = newPersistence indexeddbPersistence (persistenceKey ()) doc
+        do! whenSynced persistence |> Async.AwaitPromise
+
+        let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
+        let channel = frameChannel dc
+        let token = queryParam "token" "local-dev-token"
+        let hello =
+            { PeerId = peerId
+              DisplayName = displayName
+              Token = token }
+        // Events come over HTTP in immutable chunks, so the browser's own cache serves
+        // history (3-day full-chunk lifetime); only the growing tail chunk hits the
+        // Session Process. Availability hints still arrive over the data channel.
+        let options =
+            { App.ConnectOptions.defaults with
+                FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" token) }
+        let connection = App.connect options doc hello (fun msg -> dispatchRef msg) channel
+        connectionRef <- Some connection
 
         do! connection.Run
     }
