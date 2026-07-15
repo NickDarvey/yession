@@ -17,9 +17,12 @@
     <Compile Include="EventStore.fs" />
     <Compile Include="DocStore.fs" />
     <Compile Include="ManagerStore.fs" />
+    <Compile Include="Spawn.fs" />
+    <Compile Include="ProcessManager.fs" />
     <Compile Include="Host.fs" />
     <Compile Include="Backends.fs" />
     <Compile Include="Manager.fs" />
+    <Compile Include="SessionMain.fs" />
   </ItemGroup>
 
   <ItemGroup>
