@@ -162,11 +162,14 @@ module View =
         ]
 
     /// Render a full HTML document hosting the client shell. Used by the Session Process
-    /// static bootstrap so the served page *is* the client shell.
-    let page (model: ClientModel) : string =
+    /// static bootstrap so the served page *is* the client shell. The serving Process
+    /// embeds its session id, giving the browser a synchronous, pre-connection session
+    /// identity — the client's local doc store is keyed by it.
+    let page (sessionId: SessionId) (model: ClientModel) : string =
         String.concat "" [
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            sprintf "<meta name=\"yession-session\" content=\"%s\">" (escapeHtml (SessionId.value sessionId))
             "<title>Yession</title></head><body>"
             sprintf "<main id=\"app\">%s</main>" (render model)
             "<script type=\"module\" src=\"/client.js\"></script>"

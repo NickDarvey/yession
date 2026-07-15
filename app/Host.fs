@@ -200,7 +200,26 @@ let startFull
                     signalSessionEnded ()
                 })
 
-        let! server = Signalling.start onConnection port
+        // The HTTP-cacheable event read surface: chunk n = the JSONL envelopes at
+        // offsets [n*size, (n+1)*size). Full chunks are immutable (append-only log),
+        // so browsers cache them hard and cold loads replay history from disk.
+        let eventsEndpoint : Signalling.EventsEndpoint =
+            { Token = token
+              ReadChunk =
+                fun index ->
+                    async {
+                        let after =
+                            if index = 0 then None
+                            else
+                                match EventOffset.create (EventChunk.firstOffset index - 1L) with
+                                | Ok o -> Some o
+                                | Error e -> failwithf "chunk offset invariant violated: %s" e
+                        let! page = log.Read after EventChunk.size
+                        let lines = page.Events |> List.map (Codec.toString Codec.sessionEventEnvelope)
+                        return lines, List.length lines = EventChunk.size
+                    } }
+
+        let! server = Signalling.start sessionId onConnection (Some eventsEndpoint) port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server

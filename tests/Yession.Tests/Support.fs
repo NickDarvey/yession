@@ -92,20 +92,25 @@ type Client =
       Doc : Y.Doc
       Hello : PeerHelloPayload }
 
-/// Connect one full client: WebRTC channel, its own Yjs doc, the withYlmish program,
-/// and the connection driver. Resolves once the model reaches `Connected`.
-let connectClient (signalUrl: string) (token: string) (id: string) (name: string) : Async<Client> =
+/// Connect one full client with explicit options: WebRTC channel, its own Yjs doc, the
+/// withYlmish program, and the connection driver. Resolves once the model reaches
+/// `Connected`.
+let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: string) (id: string) (name: string) : Async<Client> =
     async {
         let! channel = WebRtc.connect signalUrl
         let doc = Y.Doc.Create ()
         let local = peer id name
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
-        let connection = App.connect App.ConnectOptions.defaults doc hello (user >> runner.Dispatch) channel
+        let connection = App.connect options doc hello (user >> runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
         return { Runner = runner; Connection = connection; Channel = channel; Doc = doc; Hello = hello }
     }
+
+/// `connectClientWith` under the default options (frame-based event reads).
+let connectClient (signalUrl: string) (token: string) (id: string) (name: string) : Async<Client> =
+    connectClientWith App.ConnectOptions.defaults signalUrl token id name
 
 /// Reconnect an existing client on a fresh channel, resuming event consumption from its
 /// model's processed offset (E2E-4's catch-up path). Small pages force multi-page reads.
@@ -113,8 +118,9 @@ let reconnectClient (signalUrl: string) (client: Client) : Async<Client> =
     async {
         let! channel = WebRtc.connect signalUrl
         let options =
-            { App.ConnectOptions.ResumeAfter = (client.Runner.Model ()).EventConsumer.LastProcessedOffset
-              App.ConnectOptions.PageSize = 2 }
+            { App.ConnectOptions.defaults with
+                ResumeAfter = (client.Runner.Model ()).EventConsumer.LastProcessedOffset
+                PageSize = 2 }
         let connection = App.connect options client.Doc client.Hello (user >> client.Runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! client.Runner.WaitFor (fun m -> m.Connection = Connected)

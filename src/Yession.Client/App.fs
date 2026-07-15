@@ -58,10 +58,70 @@ module App =
           /// when reconnecting); `None` reads from the beginning.
           ResumeAfter : EventOffset option
           /// Events per `ReadEventsAfter` request.
-          PageSize : int }
+          PageSize : int
+          /// When given, event pages are fetched through this function instead of
+          /// `ReadEventsAfter` frames — the browser passes its HTTP chunk fetcher here
+          /// so the browser cache serves history (immutable full chunks); pure
+          /// data-channel peers leave it `None` and read over frames.
+          FetchEvents : (EventOffset option -> Async<EventPage<SessionEvent>>) option }
 
     module ConnectOptions =
-        let defaults : ConnectOptions = { ResumeAfter = None; PageSize = 100 }
+        let defaults : ConnectOptions = { ResumeAfter = None; PageSize = 100; FetchEvents = None }
+
+    /// The HTTP event fetcher for `ConnectOptions.FetchEvents`: translates "events
+    /// after offset X" into the Session Process's immutable-chunk URL scheme
+    /// (`/events/{n}?token=…`) and decodes the JSONL envelopes. Because full chunks
+    /// are served immutable, an HTTP cache in front of `getText` (the browser's) makes
+    /// history replay local; only the growing tail chunk hits the network.
+    module EventFetch =
+
+        /// Build a fetcher over the platform's HTTP GET (`getText` must fail on
+        /// non-success statuses). A transport failure yields an empty final page so
+        /// the read loop re-arms on the next availability hint instead of wedging;
+        /// a malformed line is real corruption and fails loudly.
+        let overHttp
+            (getText: string -> Async<string>)
+            (baseUrl: string)
+            (token: string)
+            : EventOffset option -> Async<EventPage<SessionEvent>> =
+            fun after ->
+                async {
+                    let nextOffset =
+                        match after with
+                        | Some o -> EventOffset.value o + 1L
+                        | None -> 0L
+                    let url =
+                        sprintf "%s/events/%d?token=%s" baseUrl (EventChunk.indexOf nextOffset) (System.Uri.EscapeDataString token)
+                    let! fetched =
+                        async {
+                            try
+                                let! text = getText url
+                                return Some text
+                            with _ ->
+                                return None
+                        }
+                    match fetched with
+                    | None -> return { Events = []; LastOffset = None; IsEnd = true }
+                    | Some text ->
+                        let lines = text.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
+                        let fresh =
+                            lines
+                            |> Array.map (fun line ->
+                                match Codec.fromString Codec.sessionEventEnvelope line with
+                                | Ok envelope -> envelope
+                                | Error e -> failwithf "event chunk decode failed: %s" e)
+                            |> Array.filter (fun e ->
+                                match after with
+                                | Some o -> EventOffset.value e.Offset > EventOffset.value o
+                                | None -> true)
+                            |> List.ofArray
+                        return
+                            { Events = fresh
+                              LastOffset = fresh |> List.tryLast |> Option.map (fun e -> e.Offset)
+                              // A full chunk means more may exist beyond it; a partial
+                              // chunk IS the log's current tail.
+                              IsEnd = Array.length lines < EventChunk.size }
+                }
 
     /// Wire a connected channel to the client's doc and the event log: locally-originated
     /// doc updates (the Ylmish binding's writes) are sent as `State` frames, inbound
@@ -99,15 +159,25 @@ module App =
             | Some _, None -> true
             | None, _ -> false
 
-        let request () =
+        // `request` delivers fetched pages back through `onEventsPage`, which may in
+        // turn request the next page — hence the mutual recursion.
+        let rec request () =
             let requestId = RequestId.fresh ()
             readInFlight <- Some requestId
-            Async.StartImmediate (channel.Send (EventLog (ReadEventsAfter (requestId, lastProcessed, options.PageSize))))
+            match options.FetchEvents with
+            | Some fetch ->
+                Async.StartImmediate (
+                    async {
+                        let! page = fetch lastProcessed
+                        onEventsPage requestId page
+                    })
+            | None ->
+                Async.StartImmediate (channel.Send (EventLog (ReadEventsAfter (requestId, lastProcessed, options.PageSize))))
 
-        let requestIfBehind () =
+        and requestIfBehind () =
             if Option.isNone readInFlight && behind () then request ()
 
-        let onEventsPage (requestId: RequestId) (page: EventPage<SessionEvent>) =
+        and onEventsPage (requestId: RequestId) (page: EventPage<SessionEvent>) =
             if readInFlight = Some requestId then readInFlight <- None
             lastProcessed <- EventOffset.maxOption lastProcessed page.LastOffset
             latestKnown <- EventOffset.maxOption latestKnown page.LastOffset

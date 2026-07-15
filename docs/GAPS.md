@@ -44,15 +44,20 @@ they matter.
 
 - **Everything durable is now persisted** (Phase 3): the event log and the Yjs
   document both survive Process restarts (sidecar `*.doc.jsonl`, compacted at open),
-  and browser clients keep the document in IndexedDB (`y-indexeddb`) — but the
-  **event log has no browser-side cache**: a cold client replays the conversation
-  over the wire every load.
+  and browser clients keep the document in IndexedDB (`y-indexeddb`, keyed by the
+  session id embedded in the bootstrap page). The event log's browser-side cache is
+  the browser's own HTTP cache: the log is served as fixed-size immutable chunks
+  (`/events/{n}`, 3-day `max-age` on full chunks), so cold loads replay history from
+  disk and only the growing tail chunk hits the network.
 - **The JSONL event log loads fully into memory** and has no compaction, rotation, or
   checksumming; a corrupt line fails the whole open (loud by design). The doc store
   compacts only at open — a very long-lived Process grows its sidecar until restart.
-- **The browser doc store is keyed by host + path**, not session id (the client only
-  learns the session id after connecting, and persistence must load before/without the
-  network). Multiple sessions served from one origin+path would share a store.
+- **The session token rides the chunk URLs** (`?token=`), consistent with the page
+  URL, and therefore ends up in the browser's cache keys and history — acceptable for
+  the local-development threat model, revisit with real authn.
+- **A session served offline has no app shell**: IndexedDB restores state instantly
+  once the page loads, but the page itself still needs the Session Process (no
+  service worker).
 
 ## Browser client
 

@@ -123,11 +123,23 @@ let private newPersistence (ctor: obj) (name: string) (doc: Y.Doc) : obj = jsNat
 [<Emit("new Promise((resolve) => $0.once('synced', resolve))")>]
 let private whenSynced (persistence: obj) : JS.Promise<unit> = jsNative
 
-[<Emit("'yession/' + window.location.host + window.location.pathname")>]
+// The store is keyed by SESSION: the serving Session Process embeds its session id in
+// the bootstrap page (a synchronous, pre-connection identity), so two sessions served
+// from one address never share a store, and a session keeps its store wherever it is
+// served from. The origin+path key remains only as a fallback for a page without the
+// embed (never the shipped server's own page).
+[<Emit("""(() => {
+  const meta = document.querySelector('meta[name="yession-session"]')
+  const session = meta && meta.getAttribute('content')
+  return session ? 'yession/session/' + session : 'yession/' + window.location.host + window.location.pathname
+})()""")>]
 let private persistenceKey () : string = jsNative
 
 [<Emit("String(window.location.origin) + '/signal'")>]
 let private signalUrl () : string = jsNative
+
+[<Emit("fetch($0).then(r => { if (!r.ok) throw new Error('events fetch failed: ' + r.status); return r.text() })")>]
+let private fetchText (url: string) : JS.Promise<string> = jsNative
 
 [<Emit("Math.random()")>]
 let private jsRandom () : float = jsNative
@@ -176,11 +188,18 @@ let private start () =
 
         let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
         let channel = frameChannel dc
+        let token = queryParam "token" "local-dev-token"
         let hello =
             { PeerId = peerId
               DisplayName = displayName
-              Token = queryParam "token" "local-dev-token" }
-        let connection = App.connect App.ConnectOptions.defaults doc hello (fun msg -> dispatchRef msg) channel
+              Token = token }
+        // Events come over HTTP in immutable chunks, so the browser's own cache serves
+        // history (3-day full-chunk lifetime); only the growing tail chunk hits the
+        // Session Process. Availability hints still arrive over the data channel.
+        let options =
+            { App.ConnectOptions.defaults with
+                FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" token) }
+        let connection = App.connect options doc hello (fun msg -> dispatchRef msg) channel
 
         // Interactive controls, delegated so re-renders never lose listeners.
         delegate' root "click" "data-start-draft" (fun _ _ ->

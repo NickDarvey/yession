@@ -120,6 +120,17 @@ try {
     `.some(t => t.value === 'persisted in the browser')`)
 
   console.log('browser E2E: the draft survived a full server wipe via the browser doc store')
+
+  // The store is keyed by SESSION (embedded in the served page), not by address: the
+  // page carries the id and the IndexedDB database name derives from it.
+  const sessionId = await pageA.evaluate(
+    () => document.querySelector('meta[name="yession-session"]')?.getAttribute('content'))
+  if (!sessionId) throw new Error('the bootstrap page must embed the session id')
+  const dbNames = (await pageA.evaluate(() => indexedDB.databases().then(dbs => dbs.map(d => d.name))))
+  if (!dbNames.includes(`yession/session/${sessionId}`)) {
+    throw new Error(`expected a session-keyed doc store, found: ${dbNames.join(', ')}`)
+  }
+  console.log(`browser E2E: the doc store is keyed by session (${sessionId})`)
 } finally {
   await browser.close()
   host.kill('SIGKILL')
