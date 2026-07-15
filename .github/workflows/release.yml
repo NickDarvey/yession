@@ -63,6 +63,32 @@ jobs:
       - name: Compute version
         id: version
         run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Diff since previous release
+        id: diff
+        run: |
+          prev_tag=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          echo "prev_tag=$prev_tag" >> "$GITHUB_OUTPUT"
+          base=${prev_tag:-$(git rev-list --max-parents=0 HEAD)}
+          git diff "$base"..HEAD -- . ':!*.md' > release-diff.txt
+      - name: Draft release description with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Read release-diff.txt, the diff between the previous release
+            (${{ steps.diff.outputs.prev_tag || 'the repository start' }}) and this one.
+
+            Write a concise release description: plain prose, 2-4 sentences, no
+            heading, no bullet list. Describe what changed for someone using
+            Yession, not implementation detail. If the diff alone leaves a
+            change's effect ambiguous, read the surrounding source files
+            before describing it.
+
+            Write only the description text to RELEASE_NOTES.md, nothing else.
+          claude_args: |
+            --model claude-sonnet-5
+            --allowedTools "Read,Write,Grep,Glob"
+            --max-turns 15
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -72,5 +98,5 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           name: Yession ${{ steps.version.outputs.version }}
           prerelease: true
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           files: dist/*.tar.gz
