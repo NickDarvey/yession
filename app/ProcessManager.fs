@@ -38,7 +38,9 @@ type ProcessManager =
       /// Resolves when the session's running child exits (immediately if none runs).
       WaitForExit : SessionId -> Async<unit>
       TryFind : SessionId -> SessionView option
-      /// Stop every running child and the control endpoint (Manager shutdown).
+      /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
+      EndpointPort : int option
+      /// Stop every running child and the Manager endpoint (Manager shutdown).
       StopAll : unit -> Async<unit> }
 
 type Options =
@@ -57,7 +59,12 @@ type Options =
       /// Environment authority (Step 24): grants session-scoped capabilities, served
       /// to children over the control endpoint with a per-launch secret. None =
       /// sessions run environment-less.
-      Grant : (SessionId -> SessionEnvironmentCapabilities) option }
+      Grant : (SessionId -> SessionEnvironmentCapabilities) option
+      /// Fixed port for the Manager's own endpoint (control + management UI);
+      /// None = OS-assigned. A management UI wants a bookmarkable address, so the
+      /// product default is fixed — a second Manager instance must choose its own
+      /// (the bind fails loudly on conflict, never a silent fallback).
+      ManagerPort : int option }
 
 module Options =
     let defaults (dataDir: string) (sessionCommand: string) (sessionArgs: string list) : Options =
@@ -67,14 +74,20 @@ module Options =
           SessionPort = None
           LaunchTimeoutMs = 15000
           StopGraceMs = 3000
-          Grant = None }
+          Grant = None
+          ManagerPort = None }
 
 [<Fable.Core.Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
 
 let private clock () = DateTimeOffset.UtcNow
 
-let create (options: Options) : Async<ProcessManager> =
+/// Create the Manager. `ui` is the management surface (Step 25): a route handler that
+/// closes over the Manager itself, sharing the control endpoint's server.
+let createWithUi
+    (options: Options)
+    (ui: (ProcessManager -> Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
+    : Async<ProcessManager> =
   async {
     let statePath = sprintf "%s/manager.json" options.DataDir
     let mutable state = ManagerStore.load statePath
@@ -90,19 +103,32 @@ let create (options: Options) : Async<ProcessManager> =
     // the Manager granted that launch — the RPC equivalent of the Step 11 closure. A
     // secret dies with its launch.
     let mutable secrets : Map<string, SessionEnvironmentCapabilities> = Map.empty
+    // The UI handler closes over the Manager record, which exists only after this
+    // function returns — route through a slot the record fills in below. Requests
+    // cannot arrive before then in practice; a too-early one gets a 503.
+    let mutable self : ProcessManager option = None
     let! controlServer =
-        match options.Grant with
-        | None -> async { return None }
-        | Some _ ->
+        if Option.isNone options.Grant && Option.isNone ui && Option.isNone options.ManagerPort then
+            async { return None }
+        else
             async {
                 let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-                    if not (Control.tryHandle (fun secret -> Map.tryFind secret secrets) req res) then
+                    let handled =
+                        Control.tryHandle (fun secret -> Map.tryFind secret secrets) req res
+                        || (match ui, self with
+                            | Some handle, Some pm -> handle pm req res
+                            | Some _, None ->
+                                res.writeHead (503, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                                res.``end`` "starting"
+                                true
+                            | None, _ -> false)
+                    if not handled then
                         res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                         res.``end`` "not found"
                 let server = Interop.createServer handler
                 let! listening =
                     Async.FromContinuations (fun (cont, _, _) ->
-                        server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+                        server.listen (defaultArg options.ManagerPort 0, "127.0.0.1", fun () -> cont server) |> ignore)
                 return Some listening
             }
     let controlUrl () =
@@ -196,7 +222,7 @@ let create (options: Options) : Async<ProcessManager> =
                         |> ignore)
         }
 
-    return
+    let pm =
         { CreateSession = createSession
           Launch = launch
           Stop = stop
@@ -211,6 +237,7 @@ let create (options: Options) : Async<ProcessManager> =
             fun sessionId ->
                 ManagerState.tryFind sessionId state
                 |> Option.map (fun r -> { Record = r; Status = statusOf r })
+          EndpointPort = controlServer |> Option.map Interop.serverPort
           StopAll =
             fun () ->
                 async {
@@ -220,4 +247,9 @@ let create (options: Options) : Async<ProcessManager> =
                             ()
                     controlServer |> Option.iter (fun s -> s.close ignore)
                 } }
+    self <- Some pm
+    return pm
   }
+
+/// `createWithUi` without a management surface.
+let create (options: Options) : Async<ProcessManager> = createWithUi options None

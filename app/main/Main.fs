@@ -24,6 +24,9 @@ let private port = Interop.envOr "YESSION_PORT" "0" |> int
 let private token = Interop.envOr "YESSION_TOKEN" "local-dev-token"
 let private sessionKey = Interop.envOr "YESSION_SESSION" "local-session"
 let private dataDir = Interop.envOr "YESSION_DATA_DIR" ".yession"
+// The management UI wants a bookmarkable address, so its default is fixed; a second
+// Manager instance must choose its own port (bind conflicts fail loudly).
+let private managerPort = Interop.envOr "YESSION_MANAGER_PORT" "8321" |> int
 
 [<Fable.Core.Emit("process.execPath")>]
 let private nodePath : string = Fable.Core.Util.jsNative
@@ -42,10 +45,12 @@ Async.StartImmediate(
         let containers = Yession.Manager.Authority.ContainerRegistry ()
         let backend = Backends.LocalProcessBackend.create ()
         let! manager =
-            ProcessManager.create
+            ProcessManager.createWithUi
                 { ProcessManager.Options.defaults dataDir sessionCommand sessionArgs with
                     SessionPort = (if port = 0 then None else Some port)
-                    Grant = Some (Yession.Manager.Authority.grant containers backend) }
+                    Grant = Some (Yession.Manager.Authority.grant containers backend)
+                    ManagerPort = Some managerPort }
+                (Some ManagerUi.tryHandle)
 
         // Ensure the default session exists (an existing registration is resume).
         let sessionId = SessionId.create sessionKey |> expect
@@ -61,4 +66,7 @@ Async.StartImmediate(
                 sessionKey
                 sessionPort
                 dataDir
+            match manager.EndpointPort with
+            | Some uiPort -> printfn "Yession Manager: management UI at http://127.0.0.1:%d/" uiPort
+            | None -> ()
     })

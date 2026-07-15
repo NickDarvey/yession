@@ -307,9 +307,103 @@ let private controlRpcTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Step 25 — the management UI (htmx, server-side rendered). Fragment rendering is
+// pure (cheap tier); the flow over real HTTP + real child processes is verify tier.
+// -----------------------------------------------------------------------------
+
+let private uiRecord : SessionRecord =
+    { SessionId = SessionId.create "ui-render" |> expect
+      DisplayName = "UI <Render>"
+      Token = "t"
+      CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
+      DataDir = "sessions/ui-render" }
+
+let private uiRenderTests =
+    testList "Management UI rendering (Step 25)" [
+        testCase "a stopped session's row offers Launch; a running one offers Stop and the open link" <| fun () ->
+            let stopped = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.NotRunning }
+            Expect.isTrue (stopped.Contains "data-launch") "stopped rows can launch"
+            Expect.isTrue (stopped.Contains "hx-post=\"/sessions/ui-render/launch\"") "launch posts to the session route"
+            Expect.isTrue (stopped.Contains "UI &lt;Render&gt;") "display names are escaped"
+            let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
+            Expect.isTrue (running.Contains "data-stop") "running rows can stop"
+            Expect.isTrue (running.Contains "http://127.0.0.1:8199/?token=t") "the open link targets the child's port with the token"
+            Expect.isTrue (running.Contains "hx-trigger=\"every 2s\"") "status refreshes by polling"
+            let crashed = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
+            Expect.isTrue (crashed.Contains "data-status=\"exited\"") "a crash is visible"
+            Expect.isTrue (crashed.Contains "data-launch") "a crashed session can relaunch"
+
+        testCase "the page is self-contained: vendored htmx, no external script sources" <| fun () ->
+            let html = ManagerUi.page [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            Expect.isTrue (html.Contains "<script src=\"/htmx.js\"></script>") "htmx is served by this endpoint"
+            Expect.isFalse (html.Contains "src=\"http") "no CDN scripts (local-first)"
+            Expect.isTrue (html.Contains "data-create-session") "the create form renders"
+    ]
+
+[<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: $1 }).then(async r => ({ status: r.status, cacheControl: '', body: await r.text() }))")>]
+let private postForm (url: string) (body: string) : JS.Promise<obj> = Fable.Core.Util.jsNative
+
+[<Emit("$0.status")>]
+let private statusOfReply (reply: obj) : int = Fable.Core.Util.jsNative
+
+[<Emit("$0.body")>]
+let private bodyOfReply (reply: obj) : string = Fable.Core.Util.jsNative
+
+let private uiFlowTests =
+    testList "Management UI flow (Step 25)" [
+        testCaseAsync "create -> launch -> open -> stop -> resume, all over the management endpoint" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/ui-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let! pm =
+                    ProcessManager.createWithUi
+                        (ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ])
+                        (Some ManagerUi.tryHandle)
+                let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+
+                // The page serves, self-contained.
+                let! page = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
+                Expect.isTrue (page.Contains "data-create-session") "the create form is served"
+                let! htmx = Interop.getText (baseUrl + "/htmx.js") |> Async.AwaitPromise
+                Expect.isTrue (htmx.Contains "htmx") "the vendored htmx bundle serves from the endpoint"
+
+                // Create over the form endpoint.
+                let! created = postForm (baseUrl + "/sessions") "id=ui-1&name=UI+One&token=ui-token" |> Async.AwaitPromise
+                Expect.equal (statusOfReply created) 200 "created"
+                Expect.isTrue ((bodyOfReply created).Contains "data-session=\"ui-1\"") "the refreshed table holds the new session"
+                let! duplicate = postForm (baseUrl + "/sessions") "id=ui-1&name=Again&token=x" |> Async.AwaitPromise
+                Expect.equal (statusOfReply duplicate) 400 "duplicates are rejected"
+
+                // Launch from the UI; the fragment reflects it and the child REALLY serves.
+                let! launched = postForm (baseUrl + "/sessions/ui-1/launch") "" |> Async.AwaitPromise
+                let row = bodyOfReply launched
+                Expect.isTrue (row.Contains "data-status=\"running\"") "the row shows running"
+                let sessionPort =
+                    match (pm.TryFind (SessionId.create "ui-1" |> expect)).Value.Status with
+                    | ProcessManager.Running (port, _) -> port
+                    | other -> failwithf "expected Running, got %A" other
+                Expect.isTrue (row.Contains (sprintf "http://127.0.0.1:%d/?token=ui-token" sessionPort)) "the open link is live"
+                let! shell = Interop.getText (sprintf "http://127.0.0.1:%d/" sessionPort) |> Async.AwaitPromise
+                Expect.isTrue (shell.Contains "yession-session\" content=\"ui-1\"") "the opened session serves its shell"
+
+                // Poll, stop, resume.
+                let! polled = Interop.getText (baseUrl + "/sessions/ui-1/row") |> Async.AwaitPromise
+                Expect.isTrue (polled.Contains "data-status=\"running\"") "the poll fragment agrees"
+                let! stopped = postForm (baseUrl + "/sessions/ui-1/stop") "" |> Async.AwaitPromise
+                Expect.isTrue ((bodyOfReply stopped).Contains "data-status=\"stopped\"") "stopped from the UI"
+                let! resumed = postForm (baseUrl + "/sessions/ui-1/launch") "" |> Async.AwaitPromise
+                Expect.isTrue ((bodyOfReply resumed).Contains "data-status=\"running\"") "resume is just launch"
+
+                do! pm.StopAll ()
+            }
+    ]
+
 let tests =
     testList "Phase4" [
         stateTests
+        uiRenderTests
         Tag.verify processTests
         Tag.verify controlRpcTests
+        Tag.verify uiFlowTests
     ]
