@@ -29,12 +29,14 @@ let private bootstrapHtml (sessionId: SessionId) =
     Ssr.page sessionId (ClientModel.init placeholderPeer)
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
+let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
 
 [<Fable.Core.ImportAll("node:fs")>]
 let private fs : obj = Fable.Core.Util.jsNative
 
 // From the package's assets/ when installed; from the build output in development.
 let private readBundle () : string option = readAsset "client.js" bundlePath fs
+let private readCss () : string option = readAsset "app.css" cssPath fs
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
@@ -111,6 +113,15 @@ let start
             | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "client bundle not built (run: mise run build)"
+        | "GET", "/app.css" ->
+            // The locally built Tailwind stylesheet (no CDN); same one-day offline window.
+            match readCss () with
+            | Some css ->
+                res.writeHead (200, createObj [ "content-type", box "text/css; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
+                res.``end`` css
+            | None ->
+                res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "stylesheet not built (run: mise run build)"
         | "GET", path when path.StartsWith "/events/" ->
             match events, System.Int32.TryParse (path.Substring "/events/".Length) with
             | Some endpoint, (true, index) when index >= 0 -> serveChunk endpoint req.url index res

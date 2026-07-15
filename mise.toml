@@ -30,6 +30,8 @@ run = [
   "dotnet fable app/main/Yession.Host.Main.fsproj -o app/out",
   "dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser",
   "esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=app/out/public/client.js",
+  # Tailwind, built locally into a served stylesheet (no CDN); scans the F# sources.
+  "tailwindcss -i app/tailwind.css -o app/out/public/app.css --minify",
 ]
 
 [tasks.start]
@@ -65,6 +67,7 @@ run = [
   "dotnet fable app/main/Yession.Host.Main.fsproj -o app/out",
   "dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser",
   "esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=app/out/public/client.js",
+  "tailwindcss -i app/tailwind.css -o app/out/public/app.css --minify",
   # Assemble the real npm package: the composition E2E in the verify tier drives its
   # bundles (dist/npm/manager.js + session.js), so a release is gated on what ships.
   "dotnet fsi scripts/build.fsx 0.0.0-verify",

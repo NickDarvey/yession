@@ -1,0 +1,6 @@
+/* The single stylesheet entry: Tailwind's base reset, component, and utility layers.
+   Built by the Tailwind CLI (see mise `build`/`verify`/`package`) into
+   app/out/public/app.css, served locally at /app.css — no CDN. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
