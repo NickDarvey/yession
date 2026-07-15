@@ -400,19 +400,21 @@ let private uiFlowTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Step 27 — the executable composition E2E: the SHIPPED single-file binaries
-// (packaged by `dotnet fsi scripts/build.fsx 0.0.0-verify` inside `mise run
-// verify`), composed for real — the manager binary spawns the session binary,
+// Step 27/28 — the composition E2E: the SHIPPED npm bundles (`dist/npm/manager.js`
+// + `session.js`, produced by `dotnet fsi scripts/build.fsx` inside `mise run
+// verify`), composed for real — the packaged manager spawns the packaged session,
 // the management UI drives them, a real WebRTC client talks to the child, the
-// control RPC exercises authority, and both crash-resume and a manager restart
-// preserve everything. This is what gates a release.
+// control RPC exercises authority, and crash-resume + a manager restart preserve
+// everything. This is what gates a release.
 // -----------------------------------------------------------------------------
 
 [<Fable.Core.Import("spawn", "node:child_process")>]
 let private spawnRaw : obj = Fable.Core.Util.jsNative
 
-[<Emit("$0($1, [], { env: { ...process.env, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
-let private spawnBinary (spawn: obj) (command: string) (env: (string * string) array) : obj = Fable.Core.Util.jsNative
+// Run the packaged manager bundle on this Node, pointing it at the packaged session
+// bundle (what the `yession` bin shim does in an install).
+[<Emit("$0(process.execPath, [$1], { env: { ...process.env, YESSION_SESSION_MAIN: $3, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
+let private spawnBundle (spawn: obj) (managerJs: string) (env: (string * string) array) (sessionJs: string) : obj = Fable.Core.Util.jsNative
 
 [<Emit("$0.stdout.on('data', $1)")>]
 let private onStdout (child: obj) (handler: obj -> unit) : unit = Fable.Core.Util.jsNative
@@ -426,9 +428,6 @@ let private killBinary (child: obj) : unit = Fable.Core.Util.jsNative
 [<Emit("$0.on('exit', $1)")>]
 let private onBinaryExit (child: obj) (handler: obj -> unit) : unit = Fable.Core.Util.jsNative
 
-[<Emit("process.platform + '-' + process.arch")>]
-let private platformName : string = Fable.Core.Util.jsNative
-
 /// A running packaged manager: its two announced URLs and a kill that resolves once
 /// the process is gone.
 type private PackagedManager =
@@ -436,9 +435,10 @@ type private PackagedManager =
       UiUrl : string
       Shutdown : unit -> Async<unit> }
 
-let private startPackagedManager (binary: string) (env: (string * string) list) : Async<PackagedManager> =
+let private startPackagedManager (env: (string * string) list) : Async<PackagedManager> =
     Async.FromContinuations (fun (cont, econt, _) ->
-        let child = spawnBinary spawnRaw binary (Array.ofList env)
+        let child =
+            spawnBundle spawnRaw "dist/npm/manager.js" (Array.ofList env) "dist/npm/session.js"
         let mutable sessionUrl = None
         let mutable uiUrl = None
         let mutable settled = false
@@ -480,10 +480,9 @@ let private portOfRow (row: string) : int =
     if m.Success then int m.Groups.[1].Value else failwithf "no port in row: %s" row
 
 let private compositionTests =
-    testList "Executable composition (Step 27)" [
-        testCaseAsync "the shipped binaries compose: manage, message, authority, crash-resume, manager restart" <|
+    testList "Executable composition (Step 27/28)" [
+        testCaseAsync "the shipped npm bundles compose: manage, message, authority, crash-resume, manager restart" <|
             async {
-                let binary = sprintf "dist/yession-0.0.0-verify-%s/yession" platformName
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/composed-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
                 let env =
@@ -494,7 +493,7 @@ let private compositionTests =
                       // the control RPC on the shipped binaries, credential-free.
                       "YESSION_AGENT", "diagnostic" ]
 
-                let! manager = startPackagedManager binary env
+                let! manager = startPackagedManager env
 
                 // Create and launch a session from the management UI.
                 let! created = postForm (manager.UiUrl + "sessions") "id=composed&name=Composed&token=comp-token" |> Async.AwaitPromise
@@ -533,7 +532,7 @@ let private compositionTests =
                 // Kill the manager (its children die with it), restart over the same
                 // data directory: the registry survives, and resume still works.
                 do! manager.Shutdown ()
-                let! manager2 = startPackagedManager binary env
+                let! manager2 = startPackagedManager env
                 let! page = Interop.getText manager2.UiUrl |> Async.AwaitPromise
                 Expect.isTrue (page.Contains "data-session=\"composed\"") "the registry survived the manager restart"
                 let! relaunched = postForm (manager2.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise

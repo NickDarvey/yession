@@ -31,11 +31,12 @@ let private managerPort = Interop.envOr "YESSION_MANAGER_PORT" "8321" |> int
 [<Fable.Core.Emit("process.execPath")>]
 let private nodePath : string = Fable.Core.Util.jsNative
 
-// The session process command: as a packaged single-file executable, the sibling
-// `yession-session` binary; in development, this Node running the Fable output.
+// The session process command: this Node running the session entry. In the npm
+// package both bins live in one install, and the `yession` bin shim sets
+// `YESSION_SESSION_MAIN` to the packaged `session.js`; in development it defaults to
+// the Fable output. `YESSION_SESSION_BIN` overrides with a standalone command.
 let private sessionCommand, sessionArgs =
     match Interop.envOr "YESSION_SESSION_BIN" "" with
-    | "" when Interop.isSea () -> Interop.siblingOfExecutable "yession-session", []
     | "" -> nodePath, [ Interop.envOr "YESSION_SESSION_MAIN" "app/SessionMain.js" ]
     | binary -> binary, []
 

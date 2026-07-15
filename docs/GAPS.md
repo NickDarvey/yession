@@ -108,15 +108,16 @@ they matter.
 
 ## Delivery & operations
 
-- **Node SEA is still flagged experimental** (`--experimental-sea-config`): the blob
-  format may move between Node majors. The Node version is pinned in mise, so this is
-  a controlled upgrade — but every Node bump must re-run `mise run package` locally.
-- **The packaged agent path needs a system Claude Code install** (`PATH` or
-  `YESSION_CLAUDE_PATH`): the SDK is bundled into the binary, but it spawns an external
-  executable that does not ship in the tarball. Without credentials + the executable,
-  sessions run human-only (as designed).
-- **macOS packaging is exercised only in CI** (the packaging smoke runs per-OS in the
-  package job); the deep composition E2E runs on Linux.
+- **Node is a required runtime.** Yession ships as one npm package with two bins
+  (`yession`, `yession-session`); `npm i -g yession-*.tgz` pulls the platform-native
+  deps — `node-datachannel`'s addon AND the SDK's native `claude` — via npm's optional
+  dependencies, so install is all it takes and the agent works offline afterward. But
+  there is no self-contained binary anymore: a machine without Node ≥24 can't run it.
+- **First install downloads the native `claude`** (~240 MB, platform-specific): it is
+  not in the 300 KB tarball, npm fetches it. So the *first* install needs network and
+  disk; the SDK's own resolution finds it thereafter (no `YESSION_CLAUDE_PATH` needed).
+- **The composition E2E and install smoke run on Linux/CI**; other platforms' native
+  resolution rides npm's own optional-dependency machinery, unverified per-commit.
 - **darwin-x64 is not built** (runners produce linux-x64 and darwin-arm64); Intel Mac
   users need Rosetta or a matrix addition.
 - **No Windows build**; no signing/notarisation for macOS binaries (Gatekeeper will

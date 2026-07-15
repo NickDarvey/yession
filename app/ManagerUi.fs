@@ -126,7 +126,7 @@ let tryHandle (pm: ProcessManager.ProcessManager) (req: IncomingMessage) (res: S
         html res (page (pm.Sessions ()))
         true
     | "GET", "/htmx.js" ->
-        // From the SEA blob when packaged; from node_modules in development.
+        // From the package's assets/ when installed; from node_modules in development.
         match readAsset "htmx.min.js" htmxBundlePath fs with
         | Some js -> respond res 200 "text/javascript; charset=utf-8" js
         | None -> respond res 404 "text/plain" "htmx bundle not found (npm install)"

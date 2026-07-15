@@ -33,7 +33,7 @@ let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js
 [<Fable.Core.ImportAll("node:fs")>]
 let private fs : obj = Fable.Core.Util.jsNative
 
-// From the SEA blob when packaged; from the build output in development.
+// From the package's assets/ when installed; from the build output in development.
 let private readBundle () : string option = readAsset "client.js" bundlePath fs
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =

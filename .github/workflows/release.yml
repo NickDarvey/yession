@@ -1,9 +1,9 @@
 name: release
 
 # Trunk-based delivery: master is always production. Every push to master runs the full
-# verification gate and, when green, publishes a GitHub release with self-contained
-# executables for Linux and macOS. Versions are GitVersion-style continuous delivery:
-# 1.0.0-beta.<number of commits on master>, auto-incrementing with every merge.
+# verification gate and, when green, publishes a GitHub release with the npm package
+# tarball (`npm i -g` it; npm pulls the platform-native deps on install). Versions are
+# GitVersion-style continuous delivery: 1.0.0-beta.<commits on master>, auto-incrementing.
 
 on:
   push:
@@ -44,10 +44,7 @@ jobs:
   package:
     needs: verify
     if: github.ref == 'refs/heads/master'
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,12 +55,27 @@ jobs:
         run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
       - name: Build
         run: mise run build
-      - name: Package (two Node SEA single-file executables)
+      - name: Assemble the npm package (one package, two bins)
         run: mise exec -- dotnet fsi scripts/build.fsx ${{ steps.version.outputs.version }}
+      # Prove a clean install of the published tarball pulls the platform-native deps
+      # (node-datachannel's addon AND the SDK's native `claude`) and boots. This is the
+      # real end-to-end check of "installing the package is all it takes".
+      - name: Install smoke (native deps resolve; both surfaces serve)
+        run: |
+          tgz="$(ls dist/yession-*.tgz)"
+          prefix="$(mktemp -d)"
+          mise exec -- npm install --prefix "$prefix" "$tgz"
+          test -f "$prefix/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude" \
+            || (echo "native claude binary was not pulled by npm" && exit 1)
+          test -f "$prefix"/node_modules/node-datachannel/build/Release/*.node \
+            || (echo "node-datachannel addon was not built" && exit 1)
+          YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=8321 \
+            timeout 30 mise exec -- node "$prefix/node_modules/.bin/yession" | grep -q "management UI at" \
+            || (echo "the installed package did not boot" && exit 1)
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.os }}
-          path: dist/*.tar.gz
+          name: dist-npm
+          path: dist/*.tgz
 
   release:
     needs: package
@@ -112,4 +124,4 @@ jobs:
           name: Yession ${{ steps.version.outputs.version }}
           prerelease: true
           body_path: RELEASE_NOTES.md
-          files: dist/*.tar.gz
+          files: dist/*.tgz

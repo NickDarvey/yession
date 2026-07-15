@@ -51,6 +51,13 @@ mise run restore # install all dependencies (npm + .NET tools)
 mise tasks       # list every available task
 ```
 
+Yession ships as one npm package with two commands, `yession` (the Manager) and
+`yession-session` (a Session Process) — `npm i -g <release-tarball>` and npm pulls the
+platform-native pieces (WebRTC transport, and the agent's native Claude Code binary) on
+install; Node ≥24 is the only prerequisite. `yession` serves a management UI (default
+http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its own
+process.
+
 Core tasks: `restore`, `build`, `start`, `dev`, `test`, `verify`, `package`, `clean`. Prefer
 `mise run <task>` (or `mise exec -- <cmd>`) over invoking `node`/`dotnet` directly so
 the pinned versions are always used. `build` type-checks the F# solution and
