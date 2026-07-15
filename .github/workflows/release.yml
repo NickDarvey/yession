@@ -62,16 +62,23 @@ jobs:
       # real end-to-end check of "installing the package is all it takes".
       - name: Install smoke (native deps resolve; both surfaces serve)
         run: |
-          tgz="$(ls dist/yession-*.tgz)"
+          # Absolute path: a bare `dist/x.tgz` looks like a GitHub `owner/repo`
+          # shorthand to npm, which then tries to git-clone it. An absolute path is
+          # unambiguously a local tarball.
+          tgz="$PWD/$(ls dist/yession-*.tgz)"
           prefix="$(mktemp -d)"
           mise exec -- npm install --prefix "$prefix" "$tgz"
           test -f "$prefix/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude" \
-            || (echo "native claude binary was not pulled by npm" && exit 1)
-          test -f "$prefix"/node_modules/node-datachannel/build/Release/*.node \
-            || (echo "node-datachannel addon was not built" && exit 1)
-          YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=8321 \
-            timeout 30 mise exec -- node "$prefix/node_modules/.bin/yession" | grep -q "management UI at" \
-            || (echo "the installed package did not boot" && exit 1)
+            || { echo "native claude binary was not pulled by npm"; exit 1; }
+          ls "$prefix"/node_modules/node-datachannel/build/Release/*.node >/dev/null 2>&1 \
+            || { echo "node-datachannel addon was not built"; exit 1; }
+          # Capture the manager's output (it runs until the timeout), then assert it
+          # announced its endpoints — avoids a pipe racing the process to death.
+          out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=8321 \
+            timeout 25 mise exec -- node "$prefix/node_modules/.bin/yession" 2>&1 || true)"
+          echo "$out" | grep -q "management UI at" \
+            || { echo "the installed package did not boot:"; echo "$out"; exit 1; }
+          echo "install smoke passed: native deps resolved and the package booted"
       - uses: actions/upload-artifact@v4
         with:
           name: dist-npm
