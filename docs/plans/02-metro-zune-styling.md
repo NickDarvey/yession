@@ -38,11 +38,11 @@ Zune / early Metro as a *skin discipline*, applied to a workspace shape people a
   agent's voice; **green** (`#a8dd00`) is live/ok and the human pulse. People are
   identified by **tiny square display pics** (never round; generated two‑tone
   blue/green‑family checkers until real avatars exist), not by name colours. The
-  **blue→green gradient appears exactly once** — the composer's focus underline —
+  **blue→green gradient appears exactly once** — the composer's left focus edge —
   Zune's orange→pink signature, recast.
 - **Motion is directional and fast.** New timeline/queue items arrive with a short
-  translate‑up + fade (~180ms, sharp ease‑out); the composer focus underline grows from
-  the left; press states fill. No idle ambient motion; `motion-reduce:` respected.
+  translate‑up + fade (~180ms, sharp ease‑out); the composer focus edge grows from
+  the top; press states fill. No idle ambient motion; `motion-reduce:` respected.
 
 ### Theme tokens (registered once, from F#)
 
@@ -60,7 +60,7 @@ Registered in the Tailwind theme so semantic utilities resolve (`text-blue`,
 | `blue`           | `#1ba1e2` (Metro cyan)         | interactive: buttons, focus rings, agent voice, streaming caret |
 | `green`          | `#a8dd00` (Zune lime)          | live/ok statuses, queue editability edge, wordmark tick |
 | `err`            | `#ff4a4a`                      | failed statuses, destructive hover only |
-| *(gradient)*     | `blue → green`, 90°            | **once**: the composer focus underline (registered as a `bg-` utility) |
+| *(gradient)*     | `blue → green`, 180°           | **once**: the composer focus edge (registered as a `bg-` utility) |
 
 Font family (Tailwind `font-sans` override): `"Segoe UI", "Segoe UI Variable", "Segoe WP",
 Frutiger, "Helvetica Neue", system-ui, sans-serif`. Mono (`font-mono` override) for command
@@ -96,7 +96,7 @@ Message internal rhythm: one 16px meta line + 8px gap + n×24px body lines, on a
 │  running        │ ▸ peer   | queued message …            ↑ ↓ ✕    │
 │ COMMANDS        │ ┌ composer ────────────────────────────────────┐ │
 │  mise run test ✓│ │ Message the session…                  [Send] │ │
-│  mise run build⟳│ └ gradient underline grows on focus ────────────┘ │
+│  mise run build⟳│ ▍ gradient edge grows on focus ─────────────────┘ │
 └─────────────────┴──────────────────────────────────────────────────┘
 ```
 
@@ -118,15 +118,15 @@ Section mapping (all eight existing `View` sections survive; `data-*` hooks unch
   composer. Each 40px row: tiny avatar, inline‑editable input, reorder/delete icon
   buttons revealed on hover/focus. Left edge carries a 2px hairline that turns green on
   hover — it encodes editability.
-- **Composer** (`section.draft`): the primary draft as a flat surface; on focus the
-  underline grows left‑to‑right in the blue→green gradient (the design's one gradient);
+- **Composer** (`section.draft`): the primary draft as a flat surface; on focus a 2px left edge grows top-to-bottom in the
+  blue→green gradient (the design's one gradient);
   **Send** is a bordered blue button; other peers' in‑progress drafts shown as an
   avatar + "X is drafting…" ghost line beneath (their content is already synced state).
 
 ### Mobile (≤ 780px)
 
 The workspace collapses to the conversation: the sidebar becomes an off‑canvas drawer
-(translate‑X, scrim, 220ms sharp ease‑out) opened from a menu button in the header;
+(translate‑X, scrim, 220ms sharp ease‑out) toggled by subtle chevrons (one in the sidebar band, one floated in the header gutter so the title stays on the content column);
 header drops to 64px; timeline/queue/composer go full‑width with 16px gutters; the
 composer hint and the activity strip's turn id hide. All breakpoint behaviour is
 Tailwind `max-md:` / `md:` variants — still zero authored CSS.
