@@ -333,7 +333,7 @@ let private lazyLifecycleTests =
                     "need -> start -> started, then the second need reuses the environment"
 
                 // The client's UI reflects the running environment from events alone.
-                let html = View.render (a.Runner.Model ())
+                let html = Support.render (a.Runner.Model ())
                 Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.environment Dom.Text.envRunning)) "the environment status renders"
 
                 do! a.Channel.Close ()
@@ -525,7 +525,7 @@ let private commandTests =
                 Expect.equal kinds [ "requested"; "started"; "output"; "completed" ] "Started/OutputReceived/Completed appended"
 
                 // E2E-4: the UI renders the read-only command log from events.
-                let html = View.render (b.Runner.Model ())
+                let html = Support.render (b.Runner.Model ())
                 Expect.isTrue (html.Contains Dom.Hooks.commandLog) "the command log section renders"
                 Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.commandStatus (Dom.Text.cmdSucceeded 0))) "the command status renders"
                 Expect.isTrue (html.Contains "hello from the env") "the streamed output renders"

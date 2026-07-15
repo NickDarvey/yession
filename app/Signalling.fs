@@ -26,7 +26,7 @@ let private bootstrapHtml (sessionId: SessionId) =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
         | Error e -> failwith e
-    View.page sessionId (ClientModel.init placeholderPeer)
+    Ssr.page sessionId (ClientModel.init placeholderPeer)
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
 
@@ -98,13 +98,15 @@ let start
                         res.``end`` answer
                     }))
         | "GET", "/" ->
-            res.writeHead (200, createObj [ "content-type", box "text/html; charset=utf-8" ]) |> ignore
+            // A one-day cache window: the browser can reopen the app offline for up to a
+            // day before it must fetch a fresh shell (local-first, tight back-compat window).
+            res.writeHead (200, createObj [ "content-type", box "text/html; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
             res.``end`` bootstrapHtml
         | "GET", "/client.js" ->
             // The browser client bundle, built by `mise run build` (esbuild output).
             match readBundle () with
             | Some js ->
-                res.writeHead (200, createObj [ "content-type", box "text/javascript; charset=utf-8" ]) |> ignore
+                res.writeHead (200, createObj [ "content-type", box "text/javascript; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
                 res.``end`` js
             | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore

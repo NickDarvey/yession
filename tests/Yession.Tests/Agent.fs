@@ -255,7 +255,7 @@ let private e2eTests =
                     "one turn, streamed as events"
 
                 // The UI renders the streamed agent message from the projection.
-                let html = View.render (a.Runner.Model ())
+                let html = Support.render (a.Runner.Model ())
                 Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.messageAuthor Dom.Text.agent)) "the agent message renders"
                 Expect.isTrue (html.Contains "You said: hi agent") "with the streamed body"
 

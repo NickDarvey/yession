@@ -19,6 +19,11 @@
     <PackageVersion Include="FSharp.Data.Adaptive" Version="1.2.26" />
     <!-- Fable interop core (Node host + browser client). -->
     <PackageVersion Include="Fable.Core" Version="5.0.0" />
+    <!-- Fable.Lit: the `html` DSL for the client shell (client-side render) and the
+         management UI (our own SSR wrapper renders the same templates to a string). -->
+    <PackageVersion Include="Fable.Lit" Version="1.4.2" />
+    <!-- Maintained Node core-module bindings (type-only; no npm dependency). -->
+    <PackageVersion Include="Fable.Node" Version="1.6.0" />
     <!-- Single test framework: Expecto-style tests compiled by Fable and run on Node. -->
     <PackageVersion Include="Fable.Pyxpecto" Version="2.0.0" />
     <!-- JSON wire-format codec for the domain (isomorphic: Fable + .NET). The Fable

@@ -55,7 +55,7 @@ let private representativeModel : ClientModel =
 let private uiChecklistTests =
     testList "UI checklist" [
         testCase "every required Phase 1 UI element renders from the model" <| fun () ->
-            let html = View.render representativeModel
+            let html = Support.render representativeModel
             let required =
                 [ "session connection status", Dom.Hooks.connection
                   "connection state value", Dom.hookText Dom.Hooks.connection Dom.Text.connected

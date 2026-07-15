@@ -395,7 +395,7 @@ let private e2eTests =
                 a.Runner.Dispatch (user (StartDraftMsg unsentId))
                 a.Runner.Dispatch (user (editBody unsentId (Text.insert 0 "UNSENT thought") (a.Runner.Model ())))
                 do! b.Runner.WaitFor (fun m -> bodyOf unsentId m = Some "UNSENT thought")
-                let html = View.render (b.Runner.Model ())
+                let html = Support.render (b.Runner.Model ())
                 // A section's markup runs from its data marker to its closing tag (no
                 // section nests another), so these slices are exact wherever the layout
                 // places the section in the document.

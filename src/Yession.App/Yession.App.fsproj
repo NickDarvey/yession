@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <PackageReference Include="Fable.Elmish" />
+    <PackageReference Include="Fable.Lit" />
     <PackageReference Include="Ylmish" />
     <PackageReference Include="Fable.Yjs" />
   </ItemGroup>

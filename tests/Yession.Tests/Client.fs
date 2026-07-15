@@ -75,7 +75,7 @@ let tests =
                 Expect.isTrue model.EventConsumer.IsCatchingUp "catch-up active while behind the known offset"
 
                 // The UI renders both offset displays and the catch-up indicator.
-                let html = View.render model
+                let html = Support.render model
                 Expect.isTrue (html.Contains Dom.Hooks.lastProcessedOffset) "last-processed offset display rendered"
                 Expect.isTrue (html.Contains Dom.Hooks.latestKnownOffset) "latest-known offset display rendered"
                 Expect.isTrue (html.Contains Dom.Hooks.catchUp) "catch-up indicator rendered"

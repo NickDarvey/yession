@@ -23,8 +23,10 @@ module App =
 
     /// The client Elmish program for a given Yjs doc: the pure `ClientModel.update`
     /// under `Program.withYlmish`, so local draft edits flow out as CRDT deltas and
-    /// remote transactions fold back in as ordinary `Set` messages. `initial` is
-    /// usually `ClientModel.init peer`.
+    /// remote transactions fold back in as ordinary `Set` messages. The view is supplied
+    /// by `Program.withSetState` (the browser renders `View.view` with Lit; the headless
+    /// test harness captures the model), so the program itself carries a unit view.
+    /// `initial` is usually `ClientModel.init peer`.
     let makeProgram (doc: Y.Doc) (initial: ClientModel) =
         Program.mkProgram
             (fun () -> initial, Cmd.none)

@@ -2,9 +2,10 @@ module Yession.Browser.Main
 
 // The browser client entry: the same Elmish/Ylmish program as everywhere else, wired to
 // the Session Process over a *native* WebRTC data channel (the Node tests use
-// libdatachannel; the protocol and signalling are identical). The DOM shell renders the
-// pure `View` on every model change and delegates the interactive controls back into
-// dispatch — the markup stays the single source of truth.
+// libdatachannel; the protocol and signalling are identical). The shell is rendered by
+// Fable.Lit — `View.view` into `#app` on every model change. Lit diffs the DOM, so focus,
+// caret, and the collaborative textareas survive re-renders with no manual bookkeeping;
+// interactive controls are inline template handlers, not attribute delegation.
 
 open System
 open Elmish
@@ -13,6 +14,7 @@ open Fable.Core.JsInterop
 open Yjs
 open Yession.Domain
 open Yession.App
+open Lit
 
 // --- Native WebRTC (non-trickle, mirroring app/WebRtc.fs) -----------------------------
 
@@ -82,30 +84,9 @@ let private frameChannel (dc: obj) : FrameChannel<string> =
 [<Emit("document.getElementById('app')")>]
 let private appRoot () : obj = jsNative
 
-[<Emit("$0.innerHTML = $1")>]
-let private setHtml (el: obj) (html: string) : unit = jsNative
-
-[<Emit("""(() => {
-  const el = document.activeElement
-  if (!el || !el.getAttribute) return null
-  const draft = el.getAttribute('data-draft-input')
-  if (draft) return 'data-draft-input:' + draft
-  const queued = el.getAttribute('data-queue-input')
-  if (queued) return 'data-queue-input:' + queued
-  return null
-})()""")>]
-let private focusedEditor () : string option = jsNative
-
-[<Emit("""(() => {
-  const idx = $0.indexOf(':')
-  const el = document.querySelector(`[${$0.slice(0, idx)}="${$0.slice(idx + 1)}"]`)
-  if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length) }
-})()""")>]
-let private refocusEditor (key: string) : unit = jsNative
-
-// The timeline is a chat surface: pinned to bottom while the reader is at (or within a
-// few px of) the bottom, position preserved when they've scrolled up to read. `-1` marks
-// "was pinned"; mirrors the focus preservation above across the innerHTML swap.
+// The timeline is a chat surface: pinned to bottom while the reader is at (or within a few
+// px of) the bottom, position preserved when they've scrolled up to read. `-1` marks "was
+// pinned". Lit preserves focus/caret across its diff, but scroll is ours to manage.
 [<Emit("""(() => {
   const el = document.querySelector('[data-conversation]')
   if (!el) return null
@@ -125,12 +106,6 @@ let private restoreTimelineScroll (position: float) : unit = jsNative
 [<Emit("document.documentElement.classList.toggle('nav-alt')")>]
 let private toggleNav () : unit = jsNative
 
-[<Emit("""$0.addEventListener($1, (e) => {
-  const target = e.target.closest ? e.target.closest(`[${$2}]`) : null
-  if (target) $3(target.getAttribute($2) || '', target.value !== undefined ? String(target.value) : '')
-})""")>]
-let private delegate' (el: obj) (eventName: string) (attribute: string) (handler: string -> string -> unit) : unit = jsNative
-
 [<Emit("new URLSearchParams(window.location.search).get($0) || $1")>]
 let private queryParam (name: string) (fallback: string) : string = jsNative
 
@@ -145,11 +120,9 @@ let private newPersistence (ctor: obj) (name: string) (doc: Y.Doc) : obj = jsNat
 [<Emit("new Promise((resolve) => $0.once('synced', resolve))")>]
 let private whenSynced (persistence: obj) : JS.Promise<unit> = jsNative
 
-// The store is keyed by SESSION: the serving Session Process embeds its session id in
-// the bootstrap page (a synchronous, pre-connection identity), so two sessions served
-// from one address never share a store, and a session keeps its store wherever it is
-// served from. The origin+path key remains only as a fallback for a page without the
-// embed (never the shipped server's own page).
+// The store is keyed by SESSION: the serving Session Process embeds its session id in the
+// bootstrap page (a synchronous, pre-connection identity), so two sessions served from one
+// address never share a store, and a session keeps its store wherever it is served from.
 [<Emit("""(() => {
   const meta = document.querySelector('meta[name="yession-session"]')
   const session = meta && meta.getAttribute('content')
@@ -181,23 +154,30 @@ let private start () =
         let doc = Y.Doc.Create ()
         let initial = ClientModel.init { PeerId = peerId; DisplayName = displayName }
 
-        let root = appRoot ()
+        // The connection is wired later (after persistence and signalling); the interrupt
+        // control holds this ref so everything else works before — and without — the
+        // network (local first). `dispatchRef` lets the connection driver feed inbound
+        // frames into the same Elmish loop the view dispatches into.
+        let mutable connectionRef : App.Connection option = None
         let mutable dispatchRef : (ClientMsg -> unit) = ignore
-        let mutable currentModel = initial
 
-        // Render the pure view on every model change. If a draft or queue textarea is
-        // focused, its element is re-created by the render — restore focus and caret so
-        // typing is uninterrupted (the model already holds the text being typed). The
-        // timeline's scroll position is carried across the swap the same way.
+        // The side effects a template can't derive from the model. Sending is a pure CRDT
+        // write (dispatch `SendDraftMsg` with a fresh queue id), so only the interrupt
+        // needs the connection; the sidebar toggle is a root-class bit.
+        let actions : ViewActions =
+            { NewDraftId = fun () -> match DraftId.create (mintId "draft") with Ok d -> d | Error e -> failwith e
+              NewQueueId = fun () -> match QueueId.create (mintId "queue") with Ok q -> q | Error e -> failwith e
+              Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
+              ToggleNav = toggleNav }
+
+        let el = appRoot ()
+
+        // Render the Lit view on every model change. Lit diffs into `#app`, so the focused
+        // textarea and its caret survive; only the timeline scroll is restored by hand.
         let setState (model: ClientModel) (dispatch: Ylmish.Program.Message<ClientModel, ClientMsg> -> unit) =
-            currentModel <- model
             dispatchRef <- fun msg -> dispatch (Ylmish.Program.Message.User msg)
-            let focused = focusedEditor ()
             let scroll = timelineScroll ()
-            setHtml root (View.render model)
-            match focused with
-            | Some key when not (isNull (box key)) -> refocusEditor key
-            | _ -> ()
+            Lit.render (unbox el) (View.view actions model dispatchRef)
             match scroll with
             | Some position -> restoreTimelineScroll position
             | None -> ()
@@ -206,70 +186,9 @@ let private start () =
         |> Program.withSetState setState
         |> Program.run
 
-        // The connection is wired later (after persistence and signalling); controls that
-        // must speak over it hold this ref so everything else works before — and without
-        // — the network (local first).
-        let mutable connectionRef : App.Connection option = None
-
-        // Interactive controls, delegated so re-renders never lose listeners — registered
-        // before any network await so the shell is interactive from the first paint.
-        delegate' root "click" "data-start-draft" (fun _ _ ->
-            match DraftId.create (mintId "draft") with
-            | Ok draftId -> dispatchRef (StartDraftMsg draftId)
-            | Error _ -> ())
-        delegate' root "click" "data-send-draft" (fun draftId _ ->
-            match DraftId.create draftId with
-            | Ok id -> connectionRef |> Option.iter (fun c -> c.SendDraft id)
-            | Error _ -> ())
-        delegate' root "input" "data-draft-input" (fun draftId value ->
-            match DraftId.create draftId with
-            | Ok id ->
-                // Derive the edit intent against the CURRENT body, so the splice merges
-                // instead of clobbering concurrent edits.
-                match Map.tryFind id currentModel.Synced.Drafts with
-                | Some draft -> dispatchRef (EditDraftBodyMsg (id, Ylmish.Text.edit value draft.Body))
-                | None -> ()
-            | Error _ -> ())
-
-        // Queue controls (Phase 3): queued messages stay editable, reorderable, and
-        // deletable by any peer until the agent takes them.
-        delegate' root "input" "data-queue-input" (fun queueId value ->
-            match QueueId.create queueId with
-            | Ok id ->
-                match Map.tryFind id currentModel.Synced.Queue with
-                | Some entry -> dispatchRef (EditQueuedBodyMsg (id, Ylmish.Text.edit value entry.Body))
-                | None -> ()
-            | Error _ -> ())
-        delegate' root "click" "data-queue-delete" (fun queueId _ ->
-            match QueueId.create queueId with
-            | Ok id -> dispatchRef (DeleteQueuedMsg id)
-            | Error _ -> ())
-        delegate' root "click" "data-queue-up" (fun queueId _ ->
-            match QueueId.create queueId with
-            | Ok id ->
-                match QueueOrder.moveUp currentModel.Synced.Queue id with
-                | Some order -> dispatchRef (ReorderQueuedMsg (id, order))
-                | None -> ()
-            | Error _ -> ())
-        delegate' root "click" "data-queue-down" (fun queueId _ ->
-            match QueueId.create queueId with
-            | Ok id ->
-                match QueueOrder.moveDown currentModel.Synced.Queue id with
-                | Some order -> dispatchRef (ReorderQueuedMsg (id, order))
-                | None -> ()
-            | Error _ -> ())
-        delegate' root "click" "data-interrupt-turn" (fun turnId _ ->
-            match AgentTurnId.create turnId with
-            | Ok id -> connectionRef |> Option.iter (fun c -> c.InterruptTurn id)
-            | Error _ -> ())
-        // Sidebar collapse/expand (desktop) and drawer open/close (mobile) — presentation
-        // state only, so it lives on the root element rather than in the model.
-        delegate' root "click" "data-nav-toggle" (fun _ _ -> toggleNav ())
-
-        // Local-first: the doc persists in IndexedDB keyed by the session's address.
-        // Cold loads render local state (drafts, queued messages) before — and without
-        // — the network; on reconnect the full-state exchange reconciles, and entries
-        // the Process consumed meanwhile meet its removal tombstones and converge.
+        // Local-first: the doc persists in IndexedDB keyed by the session's address. Cold
+        // loads render local state (drafts, queued messages) before — and without — the
+        // network; on reconnect the full-state exchange reconciles.
         let persistence = newPersistence indexeddbPersistence (persistenceKey ()) doc
         do! whenSynced persistence |> Async.AwaitPromise
 
@@ -281,8 +200,8 @@ let private start () =
               DisplayName = displayName
               Token = token }
         // Events come over HTTP in immutable chunks, so the browser's own cache serves
-        // history (3-day full-chunk lifetime); only the growing tail chunk hits the
-        // Session Process. Availability hints still arrive over the data channel.
+        // history; only the growing tail chunk hits the Session Process. Availability hints
+        // still arrive over the data channel.
         let options =
             { App.ConnectOptions.defaults with
                 FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" token) }

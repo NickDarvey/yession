@@ -1,0 +1,108 @@
+module Yession.Host.Ssr
+
+// Our own dependency-free server-side renderer for Fable.Lit templates. A lit-html
+// `TemplateResult` is `{ strings, values }`: the static markup parts interleaved with the
+// hole values. Rendering to a string is just that interleave — recursing into nested
+// templates and arrays, escaping text, and dropping the bindings a string can't carry
+// (event/property/boolean holes, `@ . ?`). Because it never parses HTML, it handles
+// `<textarea>` child-text bindings that @lit-labs/ssr miscounts, and because it pulls no
+// dependencies it bundles trivially into the shipped single-file executable — no CDN, no
+// parse5. The browser renders the same templates live; this is the first paint.
+
+open Fable.Core
+open Fable.Core.JsInterop
+open Yession.Domain
+open Yession.App
+open Lit
+
+// --- lit-html TemplateResult shape (read-only) ------------------------------------------
+
+[<Emit("$0 != null && $0._$litType$ !== undefined")>]
+let private isTemplateResult (v: obj) : bool = jsNative
+
+[<Emit("$0.strings")>]
+let private trStrings (v: obj) : string[] = jsNative
+
+[<Emit("$0.values")>]
+let private trValues (v: obj) : obj[] = jsNative
+
+/// Any iterable that isn't a string (JS arrays AND Fable's F# lists, which lit-html renders
+/// as a sequence of child parts). Excludes strings, which are handled as text.
+[<Emit("$0 != null && typeof $0 !== 'string' && typeof $0[Symbol.iterator] === 'function'")>]
+let private isIterable (v: obj) : bool = jsNative
+
+[<Emit("Array.from($0)")>]
+let private toArray (v: obj) : obj[] = jsNative
+
+[<Emit("typeof $0")>]
+let private jsTypeof (v: obj) : string = jsNative
+
+[<Emit("String($0)")>]
+let private jsString (v: obj) : string = jsNative
+
+/// A static part ending in an event/property/boolean binding hole (`@x=`, `.x=`, `?x=`,
+/// with or without an opening quote). These carry a listener/property a string cannot.
+[<Emit("/[@.?][A-Za-z0-9_-]+=\"?$/.test($0)")>]
+let private endsWithBinding (s: string) : bool = jsNative
+
+[<Emit("$0.replace(/\\s*[@.?][A-Za-z0-9_-]+=\"?$/, '')")>]
+let private stripBinding (s: string) : string = jsNative
+
+/// A static part ending in an attribute-value hole (`name=` or `name="`).
+[<Emit("/=\"?$/.test($0)")>]
+let private endsWithAttr (s: string) : bool = jsNative
+
+let private escapeText (s: string) =
+    s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
+
+let private escapeAttr (s: string) =
+    s.Replace("&", "&amp;").Replace("\"", "&quot;")
+
+let rec private renderValue (inAttr: bool) (v: obj) : string =
+    if isNull v then ""
+    elif isTemplateResult v then renderTemplate v
+    elif jsTypeof v = "string" then (let s = unbox<string> v in if inAttr then escapeAttr s else escapeText s)
+    elif jsTypeof v = "number" || jsTypeof v = "boolean" then jsString v
+    elif isIterable v then toArray v |> Array.map (renderValue false) |> String.concat ""
+    // Functions (event handlers), lit's `nothing`/`noChange` sentinels, and any other
+    // object have no string form — render nothing.
+    else ""
+
+and private renderTemplate (tr: obj) : string =
+    let strings = trStrings tr
+    let values = trValues tr
+    let sb = System.Text.StringBuilder ()
+    for i in 0 .. values.Length - 1 do
+        let s = strings.[i]
+        if endsWithBinding s then
+            // Drop the binding syntax and its value — a string can't carry a listener.
+            sb.Append (stripBinding s) |> ignore
+        else
+            sb.Append s |> ignore
+            sb.Append (renderValue (endsWithAttr s) values.[i]) |> ignore
+    sb.Append strings.[strings.Length - 1] |> ignore
+    sb.ToString ()
+
+/// Render a Fable.Lit template to an HTML string.
+let render (template: TemplateResult) : string = renderTemplate (box template)
+
+/// Render the client shell for `model` to a string (the view's `ViewActions` are no-ops —
+/// the handlers never fire during rendering).
+let renderModel (model: ClientModel) : string =
+    render (View.view ViewActions.ssr model ignore)
+
+/// The full bootstrap document: the served page IS the client shell. Embeds the serving
+/// session id (so the browser keys its local doc store before any connection), the local
+/// stylesheet, and the `#app` mount whose classes persist across the browser's re-renders.
+let page (sessionId: SessionId) (model: ClientModel) : string =
+    String.concat "" [
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        sprintf "<meta name=\"%s\" content=\"%s\">" Dom.sessionMetaName (escapeAttr (SessionId.value sessionId))
+        "<title>Yession</title>"
+        Style.headTags
+        "</head><body>"
+        sprintf "<main id=\"%s\" class=\"%s\">%s</main>" Dom.appId Style.app (renderModel model)
+        "<script type=\"module\" src=\"/client.js\"></script>"
+        "</body></html>"
+    ]

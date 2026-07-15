@@ -1,209 +1,92 @@
 namespace Yession.App
 
 open Yession.Domain
+open Lit
 
-/// Pure rendering of the client shell to HTML. The view is a total function of the model,
-/// so it is identical whether produced by the Session Process for the static bootstrap or
-/// by the browser as the model updates.
+/// The client shell as Fable.Lit templates. The view is a total function of the model
+/// (plus injected `ViewActions` for the few things a template cannot derive from the
+/// model: fresh ids, the interrupt round-trip, the sidebar toggle). In the browser Lit
+/// renders it into `#app` on every model change (no manual innerHTML, no delegation, no
+/// focus juggling — Lit diffs); the host renders the same templates to a string for the
+/// served bootstrap (`Yession.Host.Ssr`).
 ///
-/// The layout is a session workspace (docs/plans/02-metro-zune-styling.md): a sidebar
-/// (identity, connection + offsets — a core product invariant, not a debug detail —
-/// presence, environment, command log) beside a conversation column (timeline pinned to
-/// bottom, agent activity strip, the shared message queue, and the draft composer).
-/// Styling is composed Tailwind utilities from `Style` — no CSS is authored anywhere.
-///
-/// Markup contracts: every interactive or observable element carries a `data-*` hook
-/// (`data-connection`, `data-draft-input`, `data-queue-up`, …). The shell's delegation and
-/// the E2E suites bind to those hooks only — classes are presentation and carry no
-/// behaviour. `data-*` attributes stay immediately before the closing `>` where a test
-/// asserts `data-foo>text<`.
+/// Markup contract: every observable element carries a `data-*` hook. lit-html cannot
+/// inject attribute *names* through a hole, so the hook names are written literally here;
+/// they ARE the `Dom.Hooks` vocabulary the tests assert against, and the tests fail loudly
+/// if the two drift. Classes are `Style.*` compositions (presentation only, no behaviour).
+
+/// The side-effecting actions a template needs but cannot compute from the model. Injected
+/// so the view stays free of Guid/random and of the connection; the browser supplies real
+/// implementations, tests and SSR supply no-ops.
+type ViewActions =
+    { /// Mint a fresh draft id for "start draft".
+      NewDraftId : unit -> DraftId
+      /// Mint a fresh queue id for "send" (draft → queue).
+      NewQueueId : unit -> QueueId
+      /// Ask the Session Process to cancel the running agent turn.
+      Interrupt : AgentTurnId -> unit
+      /// Toggle the sidebar drawer (a presentation bit on the shell root, not model).
+      ToggleNav : unit -> unit }
+
+module ViewActions =
+    /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
+    /// are never invoked while rendering — they fire on user events in the live browser —
+    /// so the minters return fixed valid ids and the effects are no-ops.
+    let ssr : ViewActions =
+        { NewDraftId = fun () -> match DraftId.create "ssr-draft" with Ok d -> d | Error e -> failwith e
+          NewQueueId = fun () -> match QueueId.create "ssr-queue" with Ok q -> q | Error e -> failwith e
+          Interrupt = ignore
+          ToggleNav = ignore }
+
 module View =
+
+    // --- Label helpers: map model cases to the shared `Dom.Text` tokens -----------------
 
     let private connectionLabel =
         function
-        | Disconnected -> "Disconnected"
-        | Connecting -> "Connecting"
-        | Connected -> "Connected"
-        | Reconnecting -> "Reconnecting"
+        | Disconnected -> Dom.Text.disconnected
+        | Connecting -> Dom.Text.connecting
+        | Connected -> Dom.Text.connected
+        | Reconnecting -> Dom.Text.reconnecting
 
     let private offsetText =
         function
         | Some offset -> string (EventOffset.value offset)
-        | None -> "—"
+        | None -> Dom.Text.offsetNone
 
     let private catchUpText (consumer: EventConsumerState) =
-        if consumer.IsCatchingUp then "Catching up" else "Up to date"
-
-    let private escapeHtml (s: string) =
-        s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
-
-    // --- Sidebar ---------------------------------------------------------------------------
-
-    /// The session's live sync state: connection, catch-up, and the event-log offsets.
-    let private connectionSection (model: ClientModel) : string =
-        let consumer = model.EventConsumer
-        let catchUpClass = if consumer.IsCatchingUp then Style.statusRun else Style.statusOk
-        String.concat "" [
-            sprintf "<section class=\"%s\">" Style.sideSectionFirst
-            sprintf "<span class=\"%s\" data-connection>%s</span>" Style.body (connectionLabel model.Connection)
-            sprintf "<span class=\"%s\" data-catch-up>%s</span>" catchUpClass (catchUpText consumer)
-            sprintf "<span class=\"%s tabular-nums\">processed <b class=\"text-ink-dim\" data-last-processed-offset>%s</b> · latest <b class=\"text-ink-dim\" data-latest-known-offset>%s</b></span>"
-                Style.label
-                (offsetText consumer.LastProcessedOffset)
-                (offsetText consumer.LatestKnownOffset)
-            "</section>"
-        ]
-
-    let private peopleSection (model: ClientModel) : string =
-        String.concat "" [
-            sprintf "<section class=\"%s\">" Style.sideSection
-            sprintf "<span class=\"%s\">people</span>" Style.label
-            sprintf "<div class=\"%s\"><span class=\"%s\"></span><span class=\"truncate\" data-display-name>%s</span><span class=\"%s\">you</span></div>"
-                Style.person
-                (Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value model.Peer.PeerId) ])
-                (escapeHtml model.Peer.DisplayName)
-                Style.label
-            sprintf "<div class=\"%s\"><span class=\"%s\"></span>agent</div>"
-                Style.person
-                (Style.cls [ Style.avatar; Style.agentAvatar ])
-            "</section>"
-        ]
-
-    let private environmentLabel =
-        function
-        | EnvironmentNotStarted -> "not-started"
-        | EnvironmentStarting -> "starting"
-        | EnvironmentRunning _ -> "running"
-        | EnvironmentFailed _ -> "failed"
-        | EnvironmentDown -> "stopped"
-
-    let private environmentStatus =
-        function
-        | EnvironmentNotStarted -> Style.statusFaint, "not started"
-        | EnvironmentStarting -> Style.statusRun, sprintf "<span class=\"%s\"></span>starting" Style.statusDotPulse
-        | EnvironmentRunning _ -> Style.statusOk, sprintf "<span class=\"%s\"></span>running" Style.statusDot
-        | EnvironmentFailed _ -> Style.statusErr, "failed"
-        | EnvironmentDown -> Style.statusFaint, "stopped"
-
-    let private environmentSection (status: EnvironmentStatus) : string =
-        let statusClass, statusHtml = environmentStatus status
-        String.concat "" [
-            sprintf "<section class=\"%s\" data-environment=\"%s\">" Style.sideSection (environmentLabel status)
-            sprintf "<div class=\"%s\"><span class=\"%s\">environment</span><span class=\"%s\">%s</span></div>"
-                Style.sideRow Style.label statusClass statusHtml
-            "</section>"
-        ]
-
-    let private commandStatusLabel =
-        function
-        | CommandPending -> "pending"
-        | CommandRunning -> "running"
-        | CommandFinished (CommandSucceeded code) -> sprintf "succeeded:%d" code
-        | CommandFinished (CommandFailed code) -> sprintf "failed:%d" code
-        | CommandFinished CommandTimedOut -> "timed-out"
-        | CommandFinished (CommandExecutionFailed _) -> "execution-failed"
-
-    let private commandStatusHtml =
-        function
-        | CommandPending -> sprintf "<span class=\"%s\">pending</span>" Style.statusFaint
-        | CommandRunning -> sprintf "<span class=\"%s\"><span class=\"%s\"></span>running</span>" Style.statusRun Style.statusDotPulse
-        | CommandFinished (CommandSucceeded code) -> sprintf "<span class=\"%s\">✓ %d</span>" Style.statusOk code
-        | CommandFinished (CommandFailed code) -> sprintf "<span class=\"%s\">✗ %d</span>" Style.statusErr code
-        | CommandFinished CommandTimedOut -> sprintf "<span class=\"%s\">timed out</span>" Style.statusErr
-        | CommandFinished (CommandExecutionFailed _) -> sprintf "<span class=\"%s\">failed</span>" Style.statusErr
-
-    /// The read-only command log — derived from events only; there is no input surface.
-    let private commandsSection (log: CommandLog) : string =
-        let entries =
-            log.Entries
-            |> List.map (fun entry ->
-                let output =
-                    entry.Output
-                    |> List.map (fun (stream, text) ->
-                        sprintf "<pre class=\"%s\" data-stream=\"%s\">%s</pre>"
-                            Style.monoOut
-                            (match stream with Stdout -> "stdout" | Stderr -> "stderr")
-                            (escapeHtml text))
-                    |> String.concat ""
-                String.concat "" [
-                    sprintf "<article class=\"%s\" data-command-id=\"%s\" data-command-status=\"%s\">"
-                        Style.commandCard
-                        (CommandId.value entry.CommandId)
-                        (commandStatusLabel entry.Status)
-                    sprintf "<div class=\"%s\"><code class=\"%s\">%s %s</code>%s</div>"
-                        Style.sideRow
-                        Style.mono
-                        (escapeHtml entry.Executable)
-                        (escapeHtml (String.concat " " entry.Arguments))
-                        (commandStatusHtml entry.Status)
-                    output
-                    "</article>"
-                ])
-            |> String.concat ""
-        String.concat "" [
-            sprintf "<section class=\"%s\" data-command-log>" Style.sideSection
-            sprintf "<span class=\"%s\">commands</span>" Style.label
-            entries
-            "</section>"
-        ]
-
-    let private sidebar (model: ClientModel) : string =
-        String.concat "" [
-            sprintf "<div class=\"%s\" data-nav-toggle></div>" Style.scrim
-            sprintf "<aside class=\"%s\">" Style.sidebar
-            sprintf "<div class=\"%s\"><span class=\"%s\">yession<span class=\"text-green\">.</span></span><button type=\"button\" class=\"%s\" aria-label=\"Hide sidebar\" data-nav-toggle>‹</button></div>"
-                Style.sideHead Style.wordmark Style.navChevron
-            connectionSection model
-            peopleSection model
-            environmentSection model.Environment
-            commandsSection model.Commands
-            "<div class=\"flex-1\"></div>"
-            sprintf "<span class=\"%s pt-4\">local first · every fact is an event</span>" Style.label
-            "</aside>"
-        ]
-
-    // --- Conversation column ---------------------------------------------------------------
-
-    let private headerStatus (model: ClientModel) : string =
-        match model.Connection with
-        | Connected when model.EventConsumer.IsCatchingUp ->
-            sprintf "<span class=\"%s\"><span class=\"%s\"></span>catching up</span>"
-                (Style.cls [ Style.statusRun; Style.headerStatus ]) Style.statusDotPulse
-        | Connected ->
-            sprintf "<span class=\"%s\"><span class=\"%s\"></span>up to date</span>"
-                (Style.cls [ Style.statusOk; Style.headerStatus ]) Style.statusDot
-        | Connecting ->
-            sprintf "<span class=\"%s\"><span class=\"%s\"></span>connecting</span>"
-                (Style.cls [ Style.statusRun; Style.headerStatus ]) Style.statusDotPulse
-        | Reconnecting ->
-            sprintf "<span class=\"%s\"><span class=\"%s\"></span>reconnecting</span>"
-                (Style.cls [ Style.statusRun; Style.headerStatus ]) Style.statusDotPulse
-        | Disconnected ->
-            sprintf "<span class=\"%s\">disconnected</span>" (Style.cls [ Style.statusFaint; Style.headerStatus ])
-
-    let private header (model: ClientModel) : string =
-        String.concat "" [
-            sprintf "<header class=\"%s\">" Style.header
-            sprintf "<button type=\"button\" class=\"%s\" aria-label=\"Show sidebar\" data-nav-toggle>›</button>"
-                (Style.cls [ Style.navChevron; Style.navReopen ])
-            sprintf "<h1 class=\"%s\">session</h1>" (Style.cls [ Style.heading; Style.headerTitle ])
-            headerStatus model
-            "</header>"
-        ]
+        if consumer.IsCatchingUp then Dom.Text.catchingUp else Dom.Text.upToDate
 
     let private authorLabel =
         function
         | HumanPeer p -> PeerId.value p
-        | ActorRef.Agent -> "agent"
-        | ActorRef.SessionProcess -> "session-process"
-        | ActorRef.System -> "system"
+        | ActorRef.Agent -> Dom.Text.agent
+        | ActorRef.SessionProcess -> Dom.Text.sessionProcess
+        | ActorRef.System -> Dom.Text.system
 
     let private messageStatusLabel =
         function
-        | Complete -> "complete"
-        | Streaming -> "streaming"
-        | ConversationItemStatus.Failed -> "failed"
-        | ConversationItemStatus.Interrupted -> "interrupted"
+        | Complete -> Dom.Text.complete
+        | Streaming -> Dom.Text.streaming
+        | ConversationItemStatus.Failed -> Dom.Text.failed
+        | ConversationItemStatus.Interrupted -> Dom.Text.interrupted
+
+    let private environmentLabel =
+        function
+        | EnvironmentNotStarted -> Dom.Text.envNotStarted
+        | EnvironmentStarting -> Dom.Text.envStarting
+        | EnvironmentRunning _ -> Dom.Text.envRunning
+        | EnvironmentFailed _ -> Dom.Text.envFailed
+        | EnvironmentDown -> Dom.Text.envStopped
+
+    let private commandStatusLabel =
+        function
+        | CommandPending -> Dom.Text.cmdPending
+        | CommandRunning -> Dom.Text.cmdRunning
+        | CommandFinished (CommandSucceeded code) -> Dom.Text.cmdSucceeded code
+        | CommandFinished (CommandFailed code) -> Dom.Text.cmdFailed code
+        | CommandFinished CommandTimedOut -> Dom.Text.cmdTimedOut
+        | CommandFinished (CommandExecutionFailed _) -> Dom.Text.cmdExecutionFailed
 
     let private authorAvatar =
         function
@@ -211,149 +94,195 @@ module View =
         | ActorRef.Agent -> Style.agentAvatar
         | ActorRef.SessionProcess | ActorRef.System -> Style.humanAvatar "session"
 
-    /// The conversation timeline — rendered from the event projection only, never from
-    /// the synced draft state (docs/design.md §1 "Durable facts are events").
-    let private conversation (projection: ConversationProjection) : string =
+    // --- Sidebar ------------------------------------------------------------------------
+
+    let private connectionSection (model: ClientModel) : TemplateResult =
+        let consumer = model.EventConsumer
+        let catchUpClass = if consumer.IsCatchingUp then Style.statusRun else Style.statusOk
+        html $"""
+            <section class="{Style.sideSectionFirst}">
+              <span class="{Style.body}" data-connection>{connectionLabel model.Connection}</span>
+              <span class="{catchUpClass}" data-catch-up>{catchUpText consumer}</span>
+              <span class="{Style.label} tabular-nums">processed <b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> · latest <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>
+            </section>"""
+
+    let private peopleSection (model: ClientModel) : TemplateResult =
+        html $"""
+            <section class="{Style.sideSection}">
+              <span class="{Style.label}">people</span>
+              <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value model.Peer.PeerId) ]}"></span><span class="truncate" data-display-name>{model.Peer.DisplayName}</span><span class="{Style.label}">you</span></div>
+              <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]}"></span>agent</div>
+            </section>"""
+
+    let private environmentStatus =
+        function
+        | EnvironmentNotStarted -> Style.statusFaint, html $"""not started"""
+        | EnvironmentStarting -> Style.statusRun, html $"""<span class="{Style.statusDotPulse}"></span>starting"""
+        | EnvironmentRunning _ -> Style.statusOk, html $"""<span class="{Style.statusDot}"></span>running"""
+        | EnvironmentFailed _ -> Style.statusErr, html $"""failed"""
+        | EnvironmentDown -> Style.statusFaint, html $"""stopped"""
+
+    let private environmentSection (status: EnvironmentStatus) : TemplateResult =
+        let statusClass, statusInner = environmentStatus status
+        html $"""
+            <section class="{Style.sideSection}" data-environment="{environmentLabel status}">
+              <div class="{Style.sideRow}"><span class="{Style.label}">environment</span><span class="{statusClass}">{statusInner}</span></div>
+            </section>"""
+
+    let private commandStatusInner =
+        function
+        | CommandPending -> html $"""<span class="{Style.statusFaint}">pending</span>"""
+        | CommandRunning -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>running</span>"""
+        | CommandFinished (CommandSucceeded code) -> html $"""<span class="{Style.statusOk}">✓ {code}</span>"""
+        | CommandFinished (CommandFailed code) -> html $"""<span class="{Style.statusErr}">✗ {code}</span>"""
+        | CommandFinished CommandTimedOut -> html $"""<span class="{Style.statusErr}">timed out</span>"""
+        | CommandFinished (CommandExecutionFailed _) -> html $"""<span class="{Style.statusErr}">failed</span>"""
+
+    let private commandsSection (log: CommandLog) : TemplateResult =
+        let entries =
+            log.Entries
+            |> List.map (fun entry ->
+                let output =
+                    entry.Output
+                    |> List.map (fun (stream, text) ->
+                        html $"""<pre class="{Style.monoOut}" data-stream="{match stream with Stdout -> Dom.Text.stdout | Stderr -> Dom.Text.stderr}">{text}</pre>""")
+                html $"""
+                    <article class="{Style.commandCard}" data-command-id="{CommandId.value entry.CommandId}" data-command-status="{commandStatusLabel entry.Status}">
+                      <div class="{Style.sideRow}"><code class="{Style.mono}">{entry.Executable} {String.concat " " entry.Arguments}</code>{commandStatusInner entry.Status}</div>
+                      {output}
+                    </article>""")
+        html $"""
+            <section class="{Style.sideSection}" data-command-log>
+              <span class="{Style.label}">commands</span>
+              {entries}
+            </section>"""
+
+    let private sidebar (actions: ViewActions) (model: ClientModel) : TemplateResult =
+        html $"""
+            <div class="{Style.scrim}" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}></div>
+            <aside class="{Style.sidebar}">
+              <div class="{Style.sideHead}"><span class="{Style.wordmark}">yession<span class="text-green">.</span></span><button type="button" class="{Style.navChevron}" aria-label="Hide sidebar" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}>‹</button></div>
+              {connectionSection model}
+              {peopleSection model}
+              {environmentSection model.Environment}
+              {commandsSection model.Commands}
+              <div class="flex-1"></div>
+              <span class="{Style.label} pt-4">local first · every fact is an event</span>
+            </aside>"""
+
+    // --- Conversation column ------------------------------------------------------------
+
+    let private headerStatus (model: ClientModel) : TemplateResult =
+        match model.Connection with
+        | Connected when model.EventConsumer.IsCatchingUp ->
+            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>catching up</span>"""
+        | Connected ->
+            html $"""<span class="{Style.cls [ Style.statusOk; Style.headerStatus ]}"><span class="{Style.statusDot}"></span>up to date</span>"""
+        | Connecting ->
+            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>connecting</span>"""
+        | Reconnecting ->
+            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>"""
+        | Disconnected ->
+            html $"""<span class="{Style.cls [ Style.statusFaint; Style.headerStatus ]}">disconnected</span>"""
+
+    let private header (actions: ViewActions) (model: ClientModel) : TemplateResult =
+        html $"""
+            <header class="{Style.header}">
+              <button type="button" class="{Style.cls [ Style.navChevron; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}>›</button>
+              <h1 class="{Style.cls [ Style.heading; Style.headerTitle ]}">session</h1>
+              {headerStatus model}
+            </header>"""
+
+    let private conversation (projection: ConversationProjection) : TemplateResult =
         let items =
             projection.Items
             |> List.map (fun item ->
                 let isAgent = (item.Author = ActorRef.Agent)
                 let whoClass = if isAgent then Style.whoAgent else Style.who
-                let statusHtml =
+                let statusInner =
                     match item.Status with
-                    | Complete -> ""
-                    | Streaming -> sprintf "<span class=\"%s\"><span class=\"%s\"></span>streaming</span>" Style.statusRun Style.statusDotPulse
-                    | ConversationItemStatus.Failed -> sprintf "<span class=\"%s\">failed</span>" Style.statusErr
-                    | ConversationItemStatus.Interrupted -> sprintf "<span class=\"%s\">interrupted</span>" Style.statusFaint
-                let bodyClass, caretHtml =
+                    | Complete -> Lit.nothing
+                    | Streaming -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>streaming</span>"""
+                    | ConversationItemStatus.Failed -> html $"""<span class="{Style.statusErr}">failed</span>"""
+                    | ConversationItemStatus.Interrupted -> html $"""<span class="{Style.statusFaint}">interrupted</span>"""
+                let bodyClass, caret =
                     match item.Status with
-                    | Streaming -> Style.messageBodyStreaming, sprintf "<span class=\"%s\"></span>" Style.caret
-                    | _ -> Style.messageBody, ""
-                String.concat "" [
-                    sprintf "<article class=\"%s\" data-message-id=\"%s\" data-message-author=\"%s\" data-message-status=\"%s\">"
-                        Style.message
-                        (MessageId.value item.MessageId)
-                        (authorLabel item.Author)
-                        (messageStatusLabel item.Status)
-                    sprintf "<span class=\"%s\"></span>" (Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ])
-                    sprintf "<div class=\"%s\"><span class=\"%s\">%s</span>%s</div>"
-                        Style.messageMeta whoClass (escapeHtml (authorLabel item.Author)) statusHtml
-                    // The body carries its own hook so tests can assert the snapshotted
-                    // text exactly, independent of the author/status markup around it.
-                    sprintf "<div class=\"%s\" data-message-body>%s%s</div>" bodyClass (escapeHtml item.Body) caretHtml
-                    "</article>"
-                ])
-            |> String.concat ""
-        sprintf "<section class=\"%s\" data-conversation>%s</section>" Style.timeline items
+                    | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
+                    | _ -> Style.messageBody, Lit.nothing
+                html $"""
+                    <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
+                      <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
+                      <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
+                      <div class="{bodyClass}" data-message-body>{item.Body}{caret}</div>
+                    </article>""")
+        html $"""<section class="{Style.timeline}" data-conversation>{items}</section>"""
 
-    /// The agent activity strip. The explicit interrupt (Phase 3) cancels the running
-    /// turn and drains the queue immediately; the shell wires it to `InterruptTurn`.
-    let private agentStrip (agent: AgentViewState) : string =
+    let private agentStrip (actions: ViewActions) (agent: AgentViewState) : TemplateResult =
         match agent.ActiveTurn with
         | Some turn ->
-            String.concat "" [
-                sprintf "<section class=\"%s\" data-agent-stream>" Style.activity
-                sprintf "<span class=\"%s\"></span>" Style.activityPulse
-                sprintf "<span class=\"%s\" data-agent-turn=\"%s\">agent is responding</span>"
-                    Style.activityText (AgentTurnId.value turn)
-                sprintf "<span class=\"%s\">turn %s</span>" Style.activityTurn (escapeHtml (AgentTurnId.value turn))
-                sprintf "<button type=\"button\" class=\"%s ml-auto\" data-interrupt-turn=\"%s\">Interrupt</button>"
-                    Style.btnDanger (AgentTurnId.value turn)
-                "</section>"
-            ]
-        | None -> "<section class=\"hidden\" data-agent-stream></section>"
+            html $"""
+                <section class="{Style.activity}" data-agent-stream>
+                  <span class="{Style.activityPulse}"></span>
+                  <span class="{Style.activityText}" data-agent-turn="{AgentTurnId.value turn}">agent is responding</span>
+                  <span class="{Style.activityTurn}">turn {AgentTurnId.value turn}</span>
+                  <button type="button" class="{Style.btnDanger} ml-auto" data-interrupt-turn="{AgentTurnId.value turn}" @click={Ev(fun _ -> actions.Interrupt turn)}>Interrupt</button>
+                </section>"""
+        | None -> html $"""<section class="hidden" data-agent-stream></section>"""
 
-    /// The shared message queue (Phase 3), in consumption order. Every entry stays
-    /// editable, reorderable (one fractional-index write per move), and deletable by
-    /// any peer until the Session Process drains it into the timeline.
-    let private queue (synced: SyncedSessionState) : string =
+    let private queue (dispatch: ClientMsg -> unit) (synced: SyncedSessionState) : TemplateResult =
         let entries = QueueOrder.sorted synced.Queue
         let head =
             match entries with
-            | [] -> ""
+            | [] -> Lit.nothing
             | _ ->
-                sprintf "<div class=\"%s\"><span class=\"%s\">queued · %d</span><span class=\"%s\">editable until the agent takes them</span></div>"
-                    Style.queueHead Style.queueCount (List.length entries) Style.small
+                html $"""<div class="{Style.queueHead}"><span class="{Style.queueCount}">queued · {List.length entries}</span><span class="{Style.small}">editable until the agent takes them</span></div>"""
         let items =
             entries
             |> List.map (fun entry ->
-                let id = QueueId.value entry.QueueId
-                String.concat "" [
-                    sprintf "<article class=\"%s\" data-queue-id=\"%s\" data-queue-author=\"%s\" data-queue-order=\"%s\">"
-                        Style.queueItem id (PeerId.value entry.Author) (string entry.Order)
-                    sprintf "<span class=\"%s\"></span>" (Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value entry.Author) ])
-                    sprintf "<textarea rows=\"1\" class=\"%s\" data-queue-input=\"%s\">%s</textarea>"
-                        Style.queueInput id (escapeHtml (Ylmish.Text.toString entry.Body))
-                    sprintf "<div class=\"%s\">" Style.queueTools
-                    sprintf "<button type=\"button\" class=\"%s\" aria-label=\"Move up\" data-queue-up=\"%s\">↑</button>"
-                        (Style.cls [ Style.btn; Style.btnIcon ]) id
-                    sprintf "<button type=\"button\" class=\"%s\" aria-label=\"Move down\" data-queue-down=\"%s\">↓</button>"
-                        (Style.cls [ Style.btn; Style.btnIcon ]) id
-                    sprintf "<button type=\"button\" class=\"%s\" aria-label=\"Delete\" data-queue-delete=\"%s\">✕</button>"
-                        (Style.cls [ Style.btnDanger; Style.btnIcon ]) id
-                    "</div></article>"
-                ])
-            |> String.concat ""
-        sprintf "<section class=\"%s\" data-message-queue>%s%s</section>" Style.queue head items
+                let id = entry.QueueId
+                html $"""
+                    <article class="{Style.queueItem}" data-queue-id="{QueueId.value id}" data-queue-author="{PeerId.value entry.Author}" data-queue-order="{string entry.Order}">
+                      <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value entry.Author) ]}"></span>
+                      <textarea rows="1" class="{Style.queueInput}" data-queue-input="{QueueId.value id}" .value={Ylmish.Text.toString entry.Body} @input={EvVal(fun v -> dispatch (EditQueuedBodyMsg (id, Ylmish.Text.edit v entry.Body)))}>{Ylmish.Text.toString entry.Body}</textarea>
+                      <div class="{Style.queueTools}">
+                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>↑</button>
+                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>↓</button>
+                        <button type="button" class="{Style.cls [ Style.btnDanger; Style.btnIcon ]}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>✕</button>
+                      </div>
+                    </article>""")
+        html $"""<section class="{Style.queue}" data-message-queue>{head}{items}</section>"""
 
-    /// The synced drafts, rendered in stable (id) order so the markup is deterministic.
-    /// Every draft is a composer box, editable and sendable by any peer — sending moves
-    /// it into the shared queue (the shell wires the button to `SendDraft`; Phase 3).
-    let private drafts (model: ClientModel) : string =
+    let private drafts (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         let items =
             model.Synced.Drafts
             |> Map.toList
             |> List.map (fun (draftId, draft) ->
-                let id = DraftId.value draftId
                 let author =
-                    if draft.Author = model.Peer.PeerId then ""
-                    else sprintf "<span class=\"%s\">%s</span>" Style.draftAuthor (escapeHtml (PeerId.value draft.Author))
-                String.concat "" [
-                    sprintf "<article class=\"%s\" data-draft-id=\"%s\" data-draft-author=\"%s\">"
-                        Style.draftBox id (PeerId.value draft.Author)
-                    sprintf "<span class=\"%s\"></span>" Style.draftEdge
-                    sprintf "<textarea rows=\"2\" placeholder=\"Message the session — sending queues while the agent works\" class=\"%s\" data-draft-input=\"%s\">%s</textarea>"
-                        Style.draftInput id (escapeHtml (Ylmish.Text.toString draft.Body))
-                    sprintf "<div class=\"%s\">" Style.draftActions
-                    sprintf "<button type=\"button\" class=\"%s\" data-send-draft=\"%s\">Send</button>" Style.btnPrimary id
-                    author
-                    "</div></article>"
-                ])
-            |> String.concat ""
-        String.concat "" [
-            sprintf "<section class=\"%s\" data-draft-editor>" Style.composer
-            items
-            sprintf "<button type=\"button\" class=\"%s self-start\" data-start-draft>Start draft</button>" Style.btn
-            "</section>"
-        ]
+                    if draft.Author = model.Peer.PeerId then Lit.nothing
+                    else html $"""<span class="{Style.draftAuthor}">{PeerId.value draft.Author}</span>"""
+                html $"""
+                    <article class="{Style.draftBox}" data-draft-id="{DraftId.value draftId}" data-draft-author="{PeerId.value draft.Author}">
+                      <span class="{Style.draftEdge}"></span>
+                      <textarea rows="2" placeholder="Message the session — sending queues while the agent works" class="{Style.draftInput}" data-draft-input="{DraftId.value draftId}" .value={Ylmish.Text.toString draft.Body} @input={EvVal(fun v -> dispatch (EditDraftBodyMsg (draftId, Ylmish.Text.edit v draft.Body)))}>{Ylmish.Text.toString draft.Body}</textarea>
+                      <div class="{Style.draftActions}">
+                        <button type="button" class="{Style.btnPrimary}" data-send-draft="{DraftId.value draftId}" @click={Ev(fun _ -> dispatch (SendDraftMsg (draftId, actions.NewQueueId ())))}>Send</button>
+                        {author}
+                      </div>
+                    </article>""")
+        html $"""
+            <section class="{Style.composer}" data-draft-editor>
+              {items}
+              <button type="button" class="{Style.btn} self-start" data-start-draft @click={Ev(fun _ -> dispatch (StartDraftMsg (actions.NewDraftId ())))}>Start draft</button>
+            </section>"""
 
-    /// Render the client shell as an HTML fragment (the contents of `#app`).
-    let render (model: ClientModel) : string =
-        String.concat "" [
-            sidebar model
-            sprintf "<div class=\"%s\">" Style.mainColumn
-            header model
-            conversation model.Conversation
-            agentStrip model.Agent
-            queue model.Synced
-            drafts model
-            "</div>"
-        ]
-
-    /// Render a full HTML document hosting the client shell. Used by the Session Process
-    /// static bootstrap so the served page *is* the client shell. The serving Process
-    /// embeds its session id, giving the browser a synchronous, pre-connection session
-    /// identity — the client's local doc store is keyed by it. The `#app` wrapper's
-    /// classes live here: the browser only ever swaps its innerHTML, so they persist.
-    let page (sessionId: SessionId) (model: ClientModel) : string =
-        String.concat "" [
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            sprintf "<meta name=\"yession-session\" content=\"%s\">" (escapeHtml (SessionId.value sessionId))
-            "<title>Yession</title>"
-            Style.headTags
-            "</head><body>"
-            sprintf "<main id=\"app\" class=\"%s\">%s</main>" Style.app (render model)
-            "<script type=\"module\" src=\"/client.js\"></script>"
-            "</body></html>"
-        ]
+    /// The client shell, rendered into `#app`.
+    let view (actions: ViewActions) (model: ClientModel) (dispatch: ClientMsg -> unit) : TemplateResult =
+        html $"""
+            {sidebar actions model}
+            <div class="{Style.mainColumn}">
+              {header actions model}
+              {conversation model.Conversation}
+              {agentStrip actions model.Agent}
+              {queue dispatch model.Synced}
+              {drafts actions dispatch model}
+            </div>"""
