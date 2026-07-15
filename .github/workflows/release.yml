@@ -102,25 +102,32 @@ jobs:
           echo "prev_tag=$prev_tag" >> "$GITHUB_OUTPUT"
           base=${prev_tag:-$(git rev-list --max-parents=0 HEAD)}
           git diff "$base"..HEAD -- . ':!*.md' > release-diff.txt
-      - name: Draft release description with Claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            Read release-diff.txt, the diff between the previous release
-            (${{ steps.diff.outputs.prev_tag || 'the repository start' }}) and this one.
-
-            Write a concise release description: plain prose, 2-4 sentences, no
-            heading, no bullet list. Describe what changed for someone using
-            Yession, not implementation detail. If the diff alone leaves a
-            change's effect ambiguous, read the surrounding source files
-            before describing it.
-
-            Write only the description text to RELEASE_NOTES.md, nothing else.
-          claude_args: |
-            --model claude-sonnet-5
-            --allowedTools "Read,Write,Grep,Glob"
-            --max-turns 15
+      # Claude drafts the notes from the diff via the Messages API directly — the
+      # claude-code-action only runs on PR/issue events, not the `push` that triggers
+      # this release. Best-effort: any failure (no key, API error, bad model) falls
+      # back to GitHub's generated notes, so release notes never block a release.
+      - name: Draft release description with Claude (best effort)
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          [ -n "$ANTHROPIC_API_KEY" ] || { echo "no ANTHROPIC_API_KEY; using generated notes"; exit 0; }
+          req="$(jq -n \
+            --arg d "$(head -c 60000 release-diff.txt)" \
+            --arg prev "${{ steps.diff.outputs.prev_tag || 'the repository start' }}" \
+            '{model:"claude-sonnet-5", max_tokens:400, messages:[{role:"user", content:(
+              "Here is the diff between the previous release (" + $prev + ") and this one:\n\n" + $d +
+              "\n\nWrite a concise release description: plain prose, 2-4 sentences, no heading, no bullet list. Describe what changed for someone using Yession, not implementation detail. Output only the description text.")}]}')"
+          text="$(curl -sS https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" \
+            -d "$req" | jq -r '.content[0].text // empty')"
+          if [ -n "$text" ]; then printf '%s\n' "$text" > RELEASE_NOTES.md && cat RELEASE_NOTES.md
+          else echo "draft empty; using generated notes"; fi
+      - name: Release-notes source
+        id: notes
+        run: |
+          if [ -s RELEASE_NOTES.md ]; then echo "body=RELEASE_NOTES.md" >> "$GITHUB_OUTPUT"
+          else echo "body=" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -130,5 +137,7 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           name: Yession ${{ steps.version.outputs.version }}
           prerelease: true
-          body_path: RELEASE_NOTES.md
+          # Claude-drafted notes when present, GitHub's generated notes otherwise.
+          body_path: ${{ steps.notes.outputs.body }}
+          generate_release_notes: ${{ steps.notes.outputs.body == '' }}
           files: dist/*.tgz
