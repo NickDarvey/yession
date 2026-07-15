@@ -5,10 +5,12 @@
 
 ## Goal
 
-Give the Browser Client the look and motion of classic **Metro / Zune** (pre‑Windows 8):
-elegant Segoe‑family typography with deliberate weights and baselines, flat high‑contrast
-surfaces, a single vivid accent, and a **panorama** layout where each concern is a *place*
-in a horizontal 3D canvas you pan across — so navigation is spatial, not a scroll‑stack.
+Give the Browser Client a working-room UX with a classic **Metro / Zune** (pre‑Windows 8)
+visual language. The **anatomy is Slack/Cursor** — a session sidebar, a conversation
+column, queued messages stacked above a composer — because the user is *collaborating in
+a session*, not browsing media. The **skin and motion are Zune**: elegant Segoe‑family
+typography with deliberate weights and baselines, flat black surfaces, one vivid accent,
+and fast directional motion.
 
 Styling is authored **entirely in F#** by composing **Tailwind's own utility classes** into
 typed, named values — **no CSS files and no hand‑written CSS.** Tailwind supplies the
@@ -17,47 +19,92 @@ it just gains class names.
 
 ## Design north star
 
-Zune / early Metro is a small set of rules applied without compromise:
+Zune / early Metro as a *skin discipline*, applied to a workspace shape people already know:
 
-- **Content over chrome.** No borders, no bevels, no gradients, no drop shadows, no
-  rounded corners. Structure comes from *type* and *whitespace*, not boxes.
-- **Typography is the interface.** Huge thin display headings; tiny wide‑tracked ALL‑CAPS
-  labels; a clear body weight. Hierarchy is carried by weight and size, never by rules or
-  fills. Everything sits on a baseline grid.
-- **Authentically digital.** Flat colour, one accent, motion that is fast and directional.
-- **Panorama / Pivot.** The canvas is *wider than the screen*. An oversized wordmark
-  ("yession") is the backdrop and bleeds off the right edge; sections sit side‑by‑side and
-  you pan horizontally; layers move at different rates (parallax) so the space reads as 3D.
+- **Content over chrome.** No borders‑as‑decoration, no bevels, no gradients, no shadows,
+  no rounded corners. Structure comes from type, whitespace, and one hairline where a
+  region genuinely ends.
+- **Typography is the interface.** A thin lowercase wordmark; tiny wide‑tracked ALL‑CAPS
+  labels for metadata (author, section, status); light 300 body for message text.
+  Hierarchy by weight and size, never by fills. Never bold a heading — Metro headings get
+  *bigger and lighter*, not heavier.
+- **Authentically digital.** Zune‑black ground, flat colour, a single orange accent for
+  *your* voice and focus; teal reserved for the agent's voice.
+- **Motion is directional and fast.** New timeline/queue items arrive with a short
+  translate‑up + fade (~180ms, sharp ease‑out); the composer focus is an accent underline
+  that grows from the left; press states scale down slightly. No idle ambient motion.
 
 ### Theme tokens (registered once, from F#)
 
-Registered in the Tailwind theme so semantic utilities resolve (`text-accent`, `bg-surface`,
-`font-sans`); the config object is emitted from F#, not a CSS file.
+Registered in the Tailwind theme so semantic utilities resolve (`text-accent`,
+`bg-surface`, `font-sans`); the config object is emitted from F#, not a CSS file.
 
-| Token            | Value                                            | Utility → role |
-|------------------|--------------------------------------------------|------|
-| `bg`             | `#000000`                                        | `bg-bg` — Zune black canvas |
-| `surface`/`surface-2` | `#0b0b0b` / `#141414`                       | `bg-surface` — panel washes (barely lifted) |
-| `ink`            | `#ffffff`                                         | `text-ink` — primary text |
-| `ink-dim`        | `#b8b8b8`                                         | `text-ink-dim` — secondary text |
-| `ink-faint`      | `#6e6e6e`                                         | `text-ink-faint` — labels, metadata |
-| `accent`         | `#f09609` (Zune orange)                           | `text-accent` — active, nav, focus |
-| `magenta/teal/lime/violet` | `#e6007e / #00b7c3 / #a4c400 / #a200ff` | per‑pivot Metro tile accents |
-| `ok`/`warn`/`err`| `#60d060 / #f09609 / #ff4040`                     | status pills only |
+| Token            | Value                          | Utility → role |
+|------------------|--------------------------------|------|
+| `bg` / `panel`   | `#000000` / `#0a0a0a`          | canvas / sidebar & strips |
+| `surface`/`surface-2` | `#111111` / `#191919`     | cards, composer, hover lift |
+| `hair`           | `#1f1f1f`                      | the only rule colour (region boundaries) |
+| `ink`            | `#ffffff`                      | primary text |
+| `ink-dim`        | `#b4b4b4`                      | secondary text |
+| `ink-faint`      | `#6a6a6a`                      | labels, metadata |
+| `accent`         | `#f09609` (Zune orange)        | your voice, focus, queue affordances |
+| `agent`          | `#00b7c3` (teal)               | the agent's voice & activity |
+| `ok` / `err`     | `#60d060` / `#ff4a4a`          | status pills / destructive hover only |
 
 Font family (Tailwind `font-sans` override): `"Segoe UI", "Segoe UI Variable", "Segoe WP",
-Frutiger, "Helvetica Neue", system-ui, sans-serif`. Weights via Tailwind: **`font-thin`**
-(display wordmark), **`font-extralight`** (200 — titles), **`font-light`** (300 — subhead/body
-lift), **`font-normal`** (400 — body), **`font-semibold`** (600 — labels/emphasis). Never bold
-a heading — Metro headings get *bigger and lighter*, not heavier.
+Frutiger, "Helvetica Neue", system-ui, sans-serif`. Mono (`font-mono` override) for command
+lines: `"Cascadia Code", Consolas, monospace`. Weights: **200** wordmark/headings, **300**
+body & message text, **400** default, **600** caps labels only.
 
-### Type scale (Tailwind sizes + arbitrary tracking)
+### Type scale
 
-- `display` — `font-thin text-[6rem] tracking-tighter leading-none` → the panorama wordmark.
-- `title` — `font-extralight text-5xl lowercase tracking-tight` → section titles.
-- `subhead` — `font-light text-xl`.
-- `body` — `font-normal text-[0.9375rem] leading-relaxed`.
-- `label` — `font-semibold text-[0.6875rem] tracking-[0.18em] uppercase` → the tiny caps labels.
+- `wordmark` — `font-extralight text-4xl tracking-tight lowercase` → "yession." in the sidebar.
+- `heading` — `font-extralight text-3xl lowercase` → the column header ("session").
+- `body` — `font-light text-[0.9375rem] leading-relaxed` → message text.
+- `label` — `font-semibold text-[0.65rem] tracking-[0.18em] uppercase text-ink-faint` →
+  authors, section labels, offsets; tabular figures (`tabular-nums`) wherever digits align.
+
+## Layout — a session workspace
+
+```
+┌ sidebar 280px ──┬ main ────────────────────────────────────────────┐
+│ yession.        │ session                              UP TO DATE  │
+│ session name    │ ┌ timeline (scrolls, pinned to bottom) ────────┐ │
+│ ● connected     │ │  QUIET-HARBOR-42  14:02                       │ │
+│ offsets · state │ │  message body …                               │ │
+│ ────────────    │ │  AGENT  14:02                                 │ │
+│ PEOPLE          │ │  reply … + inline command card                │ │
+│  you · peers    │ └───────────────────────────────────────────────┘ │
+│  agent          │ ▍agent is responding · turn a1f-9c   [Interrupt] │
+│ ────────────    │ QUEUED · 2 — editable until the agent takes them │
+│ ENVIRONMENT     │ ▸ you    | queued message …            ↑ ↓ ✕    │
+│  running        │ ▸ peer   | queued message …            ↑ ↓ ✕    │
+│ COMMANDS        │ ┌ composer ────────────────────────────────────┐ │
+│  mise run test ✓│ │ Message the session…                  [Send] │ │
+│  mise run build⟳│ └ accent underline grows on focus ─────────────┘ │
+└─────────────────┴──────────────────────────────────────────────────┘
+```
+
+Section mapping (all eight existing `View` sections survive; `data-*` hooks unchanged):
+
+- **Sidebar** (`section.connection` + `.offsets` + `.environment` + `.commands`):
+  wordmark, session name, connection dot + offsets line (a product invariant, styled as a
+  quiet tabular line — not hidden), presence list (you in orange, agent in teal),
+  environment pill, and the command log as compact mono cards. Commands may *also* render
+  inline in the timeline as Cursor‑style cards where they belong to an agent turn (the
+  projection already interleaves by offset; presentation‑only choice).
+- **Timeline** (`section.timeline`): the main scroll, pinned to bottom like every chat
+  surface. Author caps‑label + time, light body text; streaming messages get a teal caret
+  and dimmed body; arrival animation translate‑up + fade.
+- **Agent activity strip** (`section.agent`): a slim bar between timeline and queue —
+  pulse, "agent is responding", turn id, **Interrupt** on the right.
+- **Queue** (`section.queue`): Cursor's queued‑messages pattern, stacked above the
+  composer. Each row: author label, inline‑editable input, reorder/delete tools revealed
+  on hover/focus. Left edge carries a 2px hairline that turns accent on hover — the one
+  "border" in the design, and it encodes editability.
+- **Composer** (`section.draft`): the primary draft as a flat surface with the growing
+  accent underline on focus; Send in accent; other peers' in‑progress drafts shown as a
+  "X is drafting…" ghost line beneath (their content is already synced state).
 
 ## Architecture — compose Tailwind utilities as typed F# values
 
@@ -71,117 +118,104 @@ module Style =
     let cls (groups: string list) : string = String.concat " " groups
 
     // Semantic groups — each is a string of real Tailwind utilities.
-    let title   = "font-extralight text-5xl lowercase tracking-tight text-ink"
-    let label   = "font-semibold text-[0.6875rem] tracking-[0.18em] uppercase text-ink-faint"
-    let panel   = "snap-start shrink-0 min-w-[min(80vw,40rem)] px-14 pt-36 pb-16 overflow-y-auto"
-    let card    = "bg-surface hover:bg-surface-2 active:scale-[.985] transition p-5 flex flex-col gap-2"
-    let btnGhost = "text-ink-faint hover:text-ink text-[0.6875rem] font-semibold tracking-[0.14em] uppercase px-2 py-1"
-    // …one value per role: rail / wordmark / panel / title / label / card / field / btn / pill / motion.
+    let label    = "font-semibold text-[0.65rem] tracking-[0.18em] uppercase text-ink-faint"
+    let body     = "font-light text-[0.9375rem] leading-relaxed text-ink"
+    let sidebar  = "w-[280px] shrink-0 bg-panel border-r border-hair flex flex-col px-6 py-7 overflow-y-auto"
+    let queueRow = "flex items-center gap-4 bg-surface px-4 py-2 border-l-2 border-hair hover:border-accent hover:bg-surface-2 transition"
+    let arrive   = "animate-arrive motion-reduce:animate-none"   // registered keyframes, see headTags
+    // …one value per role: wordmark / heading / timeline / msg / activity / composer / btn / pill.
 
-    /// The <head> tags that deliver Tailwind + register the theme. No CSS file.
+    /// The <head> tags that deliver Tailwind + register the theme (colors, fonts, and the
+    /// 'arrive'/'pulse' keyframes all live in this F#-emitted config object). No CSS file.
     let headTags = """
       <script src="https://cdn.tailwindcss.com"></script>
       <script>tailwind.config={theme:{extend:{
-        colors:{bg:'#000',surface:'#0b0b0b','surface-2':'#141414',ink:'#fff','ink-dim':'#b8b8b8',
-          'ink-faint':'#6e6e6e',accent:'#f09609',magenta:'#e6007e',teal:'#00b7c3',lime:'#a4c400',
-          violet:'#a200ff',ok:'#60d060',warn:'#f09609',err:'#ff4040'},
-        fontFamily:{sans:['Segoe UI','Segoe UI Variable','Segoe WP','Frutiger','Helvetica Neue','system-ui','sans-serif']}
+        colors:{bg:'#000',panel:'#0a0a0a',surface:'#111','surface-2':'#191919',hair:'#1f1f1f',
+          ink:'#fff','ink-dim':'#b4b4b4','ink-faint':'#6a6a6a',accent:'#f09609',agent:'#00b7c3',
+          ok:'#60d060',err:'#ff4a4a'},
+        fontFamily:{sans:['Segoe UI','Segoe UI Variable','Segoe WP','Frutiger','Helvetica Neue','system-ui','sans-serif'],
+          mono:['Cascadia Code','Consolas','monospace']},
+        keyframes:{arrive:{from:{opacity:0,transform:'translateY(10px)'},to:{opacity:1,transform:'none'}},
+          pulse2:{'0%,100%':{opacity:.25},'50%':{opacity:1}}},
+        animation:{arrive:'arrive .18s cubic-bezier(.1,.9,.2,1)',pulse2:'pulse2 1.1s ease-in-out infinite'}
       }}}</script>"""
 ```
 
-- **Compose, don't author.** Views write `cls [ Style.card; Style.label ]`; each value is a
-  bundle of Tailwind utilities. No `.css` file, no `@apply`, no `<style>` block with rules —
-  only Tailwind's utilities and one theme‑config object, both emitted from F#.
+- **Compose, don't author.** Views write `cls [ Style.queueRow; Style.arrive ]`; each value
+  is a bundle of Tailwind utilities. No `.css` file, no `@apply`, no `<style>` rules — only
+  Tailwind's utilities and one theme‑config object, both emitted from F#.
 - **Typed & deterministic.** The value set is fixed and named in F#, so a typo is a compile
   error and refactors are safe. `View.render` stays a pure total function that only emits
   *class names* — server bootstrap and browser render remain byte‑identical (design.md §1).
 - **Tailwind delivery = the Play CDN (a script, not a stylesheet).** `cdn.tailwindcss.com`
   generates utilities at runtime and **watches the DOM**, so the `#app` innerHTML swap in
-  `Browser.fs` gets styled automatically — no per‑render step. This keeps the "no CSS file"
-  constraint literally true. *Local‑first caveat:* the Play CDN is a network script; for a
-  fully offline session, vendor that JS and serve it like `client.js` (a `/tailwind.js`
-  route) — still a script, still no CSS file. Recommend Play CDN now, vendor‑JS when offline
-  matters.
-- Pseudo‑classes (`hover:`, `active:`, `focus-visible:`), responsive/`motion-reduce:`
-  variants, arbitrary transforms (`[perspective:1000px]`, `[transform:translateZ(...)]`) for
-  parallax — all are ordinary Tailwind utilities, so the Metro motion stays in‑composition.
-
-## Spatial layout — the panorama
-
-Map the eight existing sections onto a horizontal panorama. Reading left→right *is* the
-navigation:
-
-```
-┌────────────────────────────────────────── pan → ──────────────────────────────────────────┐
-│  yession            session ▸ draft  ▸  queue  ▸  timeline ▸ agent ▸ environment ▸ commands │
-│  (display wordmark, bleeds off right edge; parallax backdrop)                               │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-- **Track**: `#app` becomes `flex snap-x snap-mandatory overflow-x-auto`; each `<section>` a
-  `Style.panel` (`snap-start shrink-0 min-w-[...]`). One vivid accent per pivot header
-  (magenta/orange/teal cycling à la Metro tiles), title lowercase.
-- **3D depth via parallax.** The oversized `yession` wordmark and section titles sit on layers
-  that translate slower than content — Tailwind arbitrary utilities (`[perspective:1000px]`,
-  `[transform-style:preserve-3d]`, `[transform:translateZ(-1px)_scale(2)]`) or a slower
-  `translate-x` on the wordmark layer. Fast ease‑out on hover/press (`active:scale-[.98]`).
-- **Section mapping**: connection+offsets fold into a slim **status rail** (persistent, top,
-  tiny caps); draft / queue / timeline / agent / environment / commands each become a panorama
-  panel with a `Style.title` heading and `Style.label` metadata.
+  `Browser.fs` gets styled automatically — no per‑render step. *Local‑first caveat:* the
+  Play CDN is a network script; for a fully offline session, vendor that JS and serve it
+  like `client.js` (a `/tailwind.js` route) — still a script, still no CSS file. Recommend
+  Play CDN now, vendor‑JS when offline matters.
+- Pseudo‑classes (`hover:`, `focus-within:`, `active:`), `motion-reduce:`, keyframes via
+  the theme config, arbitrary values where the scale doesn't reach — all ordinary Tailwind,
+  so the Metro motion stays in‑composition.
 
 ### Constraint to resolve: scroll state vs full re‑render
 
-`Browser.fs` replaces `#app` innerHTML on every model change, which would reset the
-panorama's `scrollLeft`. There is already a precedent to reuse: `focusedEditor` /
-`refocusEditor` snapshot and restore the focused textarea across re‑render. **Recommended:**
-mirror that pattern — capture `#app.scrollLeft` before `setHtml` and restore it after (a
-~4‑line addition in `setState`). *Alternative* (larger): make the panorama track a persistent
-DOM element and let the pure view fill only the panel contents. Recommend the scroll‑restore
-mirror first; it stays within the existing pattern and keeps the view pure.
+`Browser.fs` replaces `#app` innerHTML on every model change, which resets the timeline's
+`scrollTop`. A chat surface needs the standard behaviour: **pinned to bottom while the user
+is at (or near) the bottom; position preserved when they've scrolled up to read.** There is
+a precedent to mirror: `focusedEditor` / `refocusEditor` snapshot and restore the focused
+textarea across re‑render. Do the same for the timeline — before `setHtml`, record
+`scrollTop` and whether it was at‑bottom; after, restore position or re‑pin (~8 lines in
+`setState`). *Alternative* (larger): a persistent DOM shell with per‑section patching —
+not needed yet; keep the view pure.
 
 ## File-by-file changes
 
-1. **`src/Yession.Client/Style.fs`** *(new)* — the named Tailwind‑utility groups, `cls`, and
-   `headTags`. Add to `Yession.Client.fsproj` **before** `View.fs`.
-2. **`src/Yession.Client/View.fs`** — add `cls [...]` class attributes to every element
-   (status rail, panels, titles, labels, drafts, queue, timeline, messages, agent, commands).
-   Inject `Style.headTags` into `page`'s `<head>`. Markup structure changes only where the
-   panorama needs wrapper layers; the `data-*` hooks stay untouched so `Browser.fs` delegation
-   and the E2E selectors keep working.
-3. **`app/browser/Browser.fs`** — add `scrollLeft` capture/restore around `setHtml` in
-   `setState`, mirroring the focus‑preservation code.
+1. **`src/Yession.Client/Style.fs`** *(new)* — the named Tailwind‑utility groups, `cls`,
+   and `headTags`. Add to `Yession.Client.fsproj` **before** `View.fs`.
+2. **`src/Yession.Client/View.fs`** — restructure `render` into the workspace layout
+   (sidebar wrapper around connection/offsets/environment/commands; main column with
+   timeline, activity strip, queue, composer) and add `cls [...]` classes throughout.
+   Inject `Style.headTags` into `page`'s `<head>`. All `data-*` hooks stay untouched so
+   `Browser.fs` delegation and the E2E selectors keep working.
+3. **`app/browser/Browser.fs`** — timeline scroll preservation (pin‑to‑bottom / restore)
+   around `setHtml` in `setState`, mirroring the focus‑preservation code.
 4. *(No change)* `app/Signalling.fs` — still serves `View.page`; Tailwind rides in `<head>`.
 
 ## Verification (automated, per design.md §2.2)
 
 - `mise run build` type‑checks the solution and Fable‑compiles the host — proves `Style.fs`
   and the reworked view compile and that class names stay pure/total.
-- The existing WebRTC/UI E2E suite must stay green: keep all `data-*` attributes and the
-  section hooks so selectors resolve. Add a UI‑checklist assertion that the served `/` head
-  loads Tailwind and registers the theme, and that `#app` carries the panorama track classes
-  — a cheap regression that styling shipped.
-- Browser E2E: assert the wordmark renders and horizontal snap panels exist; assert
-  `scrollLeft` is preserved across a model update (guards the re‑render fix).
-- Visual truth is manual‑only by nature; keep it out of the gate but use the reference mock
-  (companion) as the design target.
+- The existing WebRTC/UI E2E suite must stay green: keep all `data-*` attributes so
+  selectors resolve. Add a UI‑checklist assertion that the served `/` head loads Tailwind
+  and registers the theme, and that the workspace regions (sidebar, timeline, queue,
+  composer) are present — a cheap regression that styling shipped.
+- Browser E2E: assert the timeline stays pinned to bottom across a model update when at
+  bottom, and preserves position when scrolled up (guards the re‑render fix).
+- Visual truth is manual‑only by nature; keep it out of the gate but use the reference
+  mock (companion file) as the design target.
 
 ## Decisions & alternatives
 
+- **Slack/Cursor anatomy, Zune skin.** A panorama/pivot layout was considered and
+  rejected: it is a media‑browsing metaphor and fights the job (watching a conversation,
+  editing a queue, intervening fast). The session is one room; navigation is vertical
+  time, not horizontal space. Zune survives in type, colour, and motion.
 - **"No CSS" = no CSS files / no authored CSS — compose Tailwind's utilities instead.**
-  Deliver Tailwind via the Play CDN (a script, not a stylesheet) so the constraint holds
-  literally; compose its utilities as typed F# values. **Recommended.**
-- **Play CDN now; vendor the Tailwind JS when offline matters.** Vendoring keeps local‑first
-  intact and is still a script, not a CSS file. Rejected: the Tailwind *CLI build* and the
-  *standalone* both emit a `.css` file — against the constraint.
-- **Named utility groups in F#** over scattering raw class strings through the view: typed,
-  refactorable, single source per role — the same reason Tailwind users extract components.
-- **Scroll‑restore mirror** over persistent‑shell refactor for panorama state — smaller,
-  reuses the focus‑preservation precedent, keeps `View.render` a total function.
+  Deliver Tailwind via the Play CDN (a script, not a stylesheet); compose its utilities as
+  typed F# values. Keyframes/theme live in the F#-emitted config object. **Recommended.**
+- **Play CDN now; vendor the Tailwind JS when offline matters.** Vendoring keeps
+  local‑first intact and is still a script, not a CSS file. Rejected: the Tailwind *CLI
+  build* and the *standalone* both emit a `.css` file — against the constraint.
+- **Named utility groups in F#** over scattering raw class strings through the view:
+  typed, refactorable, single source per role.
+- **Pin‑to‑bottom scroll preservation** over a persistent‑shell refactor — smaller,
+  mirrors the focus‑preservation precedent, keeps `View.render` a total function.
 
 ## Rollout
 
 1. Land `Style.fs` (utility groups + `headTags`) with a couple of throwaway usages; `mise run build`.
-2. Restyle `View.fs` section by section (status rail → panels → items); keep `data-*` hooks.
-3. Add scroll preservation in `Browser.fs`.
+2. Restructure `View.fs` into the workspace layout, section by section (sidebar → timeline
+   → activity strip → queue → composer); keep `data-*` hooks.
+3. Add timeline scroll preservation in `Browser.fs`.
 4. Extend the UI checklist / browser E2E; `mise run test`.
-5. Tune tokens against the reference mock (weights, baselines, accent cadence, parallax).
+5. Tune against the reference mock (weights, baselines, motion timing, accent discipline).
