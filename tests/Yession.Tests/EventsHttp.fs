@@ -87,7 +87,7 @@ let private endpointTests =
                 do! h.Stop ()
             }
 
-        testCaseAsync "a client consuming over the HTTP fetcher builds the same timeline as the frame path" <|
+        Tag.verify (testCaseAsync "a client consuming over the HTTP fetcher builds the same timeline as the frame path" <|
             async {
                 let! h = Host.start (SessionId.create "events-http-client" |> expect) "fetch-token" 0
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
@@ -106,7 +106,7 @@ let private endpointTests =
                         && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "fetched over http" ])
                 do! a.Channel.Close ()
                 do! h.Stop ()
-            }
+            })
     ]
 
 let tests =

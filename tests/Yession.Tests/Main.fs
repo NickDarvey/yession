@@ -17,8 +17,8 @@ let all =
         SessionProcess.tests
         Sync.tests
         Agent.tests
-        E2E.tests
-        Client.tests
+        Tag.verify E2E.tests
+        Tag.verify Client.tests
         Phase2.tests
         Phase3.tests
         EventsHttp.tests

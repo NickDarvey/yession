@@ -475,5 +475,5 @@ let tests =
     testList "Sync" [
         codecTests
         queueUnitTests
-        e2eTests
+        Tag.verify e2eTests
     ]

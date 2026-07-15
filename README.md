@@ -51,14 +51,16 @@ mise run restore # install all dependencies (npm + .NET tools)
 mise tasks       # list every available task
 ```
 
-Core tasks: `restore`, `build`, `start`, `dev`, `test`, `clean`. Prefer
+Core tasks: `restore`, `build`, `start`, `dev`, `test`, `verify`, `clean`. Prefer
 `mise run <task>` (or `mise exec -- <cmd>`) over invoking `node`/`dotnet` directly so
-the pinned versions are always used. `restore`, `build`, `start`, `dev`, and `test` are
-all live. `build` type-checks the F# solution and Fable-compiles the Session Process
-host; `start` runs it (serving http://127.0.0.1:8080); `test` Fable-compiles a single test
-project and runs the whole suite (domain/protocol units + a real WebRTC end-to-end test)
-on Node with [Pyxpecto](https://github.com/Freymaurer/Fable.Pyxpecto). .NET is a build
-tool only — nothing runs on the CLR; tests exercise the same JavaScript the product runs.
+the pinned versions are always used. `build` type-checks the F# solution and
+Fable-compiles the Session Process host; `start` runs it. Tests run on Node with
+[Pyxpecto](https://github.com/Freymaurer/Fable.Pyxpecto) in two tiers, tagged in code
+(not folders): `test` is the cheap tier (pure/model/protocol tests — fast, no ports, no
+browser, no credentials; what PRs run), and `verify` is the full release gate (the
+tagged expensive suites — real WebRTC, live agent, Docker — plus the real-browser E2E).
+.NET is a build tool only — nothing runs on the CLR; tests exercise the same JavaScript
+the product runs.
 
 The Session Process is F# compiled to JavaScript by [Fable](https://fable.io) and run on
 Node (the `app/` host). Its WebRTC transport uses

@@ -93,7 +93,7 @@ E2E on the built binaries).
 
 | #  | Step | Outcome | Status | Notes / Blockers |
 |----|------|---------|--------|------------------|
-| 21 | Test tiers & verify gate | `Tag.verify` (env-gated, skips reported); expensive suites tagged; CI: cheap on PR, `mise run verify` gates release | Todo | |
+| 21 | Test tiers & verify gate | `Tag.verify` (env-gated, skips reported); expensive suites tagged; CI: cheap on PR, `mise run verify` gates release | Done | `Tags.fs`: `Tag.verify` includes a suite only under `YESSION_TEST_TIER=verify`, else stands in one visible skip; tagged: all WebRTC E2E suites, live SDK, Docker smoke, Manager/host port-binding suites; cheap tests extracted where they were mixed in (env projection, command fold + local child-process integration, offset invariant); cheap tier = 90 tests in ~10s node-time, no ports/browser/credentials; verify tier = 110 tests + browser E2E via `mise run verify`; CI: `test` job on PRs only, `verify` job on master pushes gates `package`/`release` |
 | 22 | Manager state & codec | `ManagerState` + hand-written codec; atomic file store; registry survives restart | Todo | |
 | 23 | Session Process as an OS process | `yession-session` env contract + readiness line; spawn/observe/stop/resume; crash isolation | Todo | |
 | 24 | Authority over the control RPC | Per-launch secret; capability RPC; Step 11 rejections hold across the boundary | Todo | |

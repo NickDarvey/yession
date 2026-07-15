@@ -539,7 +539,8 @@ let private docPersistenceTests =
 let tests =
     testList "Phase3" [
         raceTests
-        interruptTests
         crashRepairTests
         docPersistenceTests
+        // Interrupt runs over real WebRTC clients: verify tier.
+        Tag.verify interruptTests
     ]

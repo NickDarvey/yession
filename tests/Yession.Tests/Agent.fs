@@ -347,6 +347,6 @@ let private liveTests =
 let tests =
     testList "Agent" [
         turnTests
-        e2eTests
-        liveTests
+        Tag.verify e2eTests
+        Tag.verify liveTests
     ]

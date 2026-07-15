@@ -42,13 +42,27 @@ description = "Run the Session Process in watch mode (recompiles and restarts on
 depends = ["restore"]
 run = "dotnet fable watch app/main/Yession.Host.Main.fsproj -o app/out --runWatch node app/out/Main.js"
 
+# Two test tiers, tagged in code (tests/Yession.Tests/Tags.fs), not folders:
+# `test` is the cheap tier — every PR, no ports, no browser, no credentials;
+# `verify` is the release gate — everything, including the tagged expensive suites
+# and the real-browser E2E.
+
 [tasks.test]
-description = "Run the full test suite (Pyxpecto on Node + the real-browser E2E)."
+description = "Run the cheap test tier (pure/model/protocol tests; fast, credential-free)."
 depends = ["restore"]
 run = [
   "dotnet build Yession.slnx",
   "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
   "node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 120000",
+]
+
+[tasks.verify]
+description = "Run the FULL verification gate (verify tier + real-browser E2E). Gates releases."
+depends = ["restore"]
+run = [
+  "dotnet build Yession.slnx",
+  "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
+  "YESSION_TEST_TIER=verify node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 240000",
   "dotnet fable app/main/Yession.Host.Main.fsproj -o app/out",
   "dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser",
   "esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=app/out/public/client.js",

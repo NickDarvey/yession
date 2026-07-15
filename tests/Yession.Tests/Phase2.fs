@@ -238,8 +238,9 @@ let private environmentEventsOf (log: Yession.SessionProcess.EventLog<SessionEve
                 | _ -> None)
     }
 
-let private lazyLifecycleTests =
-    testList "Lazy environment lifecycle" [
+// Pure fold — cheap tier, runs everywhere.
+let private environmentProjectionTests =
+    testList "Environment projection" [
         testCase "environment events project deterministically into UI state" <| fun () ->
             let step status event = EnvironmentStatus.applyEvent status event
             let s0 = EnvironmentNotStarted
@@ -253,7 +254,10 @@ let private lazyLifecycleTests =
             Expect.equal s4 EnvironmentDown "stopped"
             let s5 = step s2 (EnvironmentStartFailed { EnvironmentId = "env-1"; Reason = "no image" })
             Expect.equal s5 (EnvironmentFailed "no image") "failure surfaces"
+    ]
 
+let private lazyLifecycleTests =
+    testList "Lazy environment lifecycle" [
         testCaseAsync "a conversational one-shot does not start an environment (E2E-1)" <|
             async {
                 let recorder = InMemoryBackend.Recorder ()
@@ -390,8 +394,9 @@ let private nodeCommand (id: string) (script: string) : CommandRequest =
       Environment = Map.empty
       Timeout = None }
 
-let private commandTests =
-    testList "Command execution" [
+// Pure fold + a local child-process integration — cheap tier, no ports.
+let private commandFoldTests =
+    testList "Command execution (local)" [
         testCase "command output ordering is preserved per command (interleaved commands)" <| fun () ->
             let idA = CommandId.create "cmd-a" |> expect
             let idB = CommandId.create "cmd-b" |> expect
@@ -463,7 +468,10 @@ let private commandTests =
                     |> List.map snd
                 Expect.equal kinds [ "requested"; "started"; "completed" ] "the lifecycle, in order"
             }
+    ]
 
+let private commandTests =
+    testList "Command execution" [
         testCaseAsync "an agent-run command reaches browser clients as a read-only log (E2E-3/E2E-4)" <|
             async {
                 // The agent ensures an environment, runs a real command, and answers.
@@ -565,7 +573,10 @@ let private acceptanceTests =
                 let offsets = page.Events |> List.map (fun e -> EventOffset.value e.Offset)
                 Expect.equal offsets [ 0L .. int64 (List.length mixed - 1) ] "offsets are dense and monotonic across event kinds"
             }
+    ]
 
+let private acceptanceE2eTests =
+    testList "Phase 2 acceptance E2E" [
         testCaseAsync "a disconnected client catches up on environment and command events (E2E-8)" <|
             async {
                 let devAgent : RunAgent =
@@ -705,10 +716,15 @@ let private persistenceTests =
 
 let tests =
     testList "Phase2" [
-        launchTests
+        // Cheap tier: pure folds, in-memory authority, local child-process integration.
         authorityTests
-        lazyLifecycleTests
-        commandTests
+        environmentProjectionTests
+        commandFoldTests
         acceptanceTests
-        persistenceTests
+        // Verify tier: everything that binds ports / spawns hosts over real WebRTC.
+        Tag.verify launchTests
+        Tag.verify lazyLifecycleTests
+        Tag.verify commandTests
+        Tag.verify acceptanceE2eTests
+        Tag.verify persistenceTests
     ]
