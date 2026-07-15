@@ -238,7 +238,9 @@ module View =
                     sprintf "<span class=\"%s\"></span>" (Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ])
                     sprintf "<div class=\"%s\"><span class=\"%s\">%s</span>%s</div>"
                         Style.messageMeta whoClass (escapeHtml (authorLabel item.Author)) statusHtml
-                    sprintf "<div class=\"%s\">%s%s</div>" bodyClass (escapeHtml item.Body) caretHtml
+                    // The body carries its own hook so tests can assert the snapshotted
+                    // text exactly, independent of the author/status markup around it.
+                    sprintf "<div class=\"%s\" data-message-body>%s%s</div>" bodyClass (escapeHtml item.Body) caretHtml
                     "</article>"
                 ])
             |> String.concat ""

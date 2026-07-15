@@ -80,10 +80,12 @@ try {
   await pageB.waitForFunction(
     `document.querySelector('textarea[data-draft-input]')?.value === 'hello from a real browser'`)
 
-  // A sends; both timelines show the immutable message (from events, not Yjs).
+  // A sends; both timelines show the immutable message (from events, not Yjs). The
+  // body node carries its own hook, so the snapshotted text is asserted exactly,
+  // independent of the author/status markup around it.
   await pageA.click('[data-send-draft]')
   const inTimeline =
-    `[...document.querySelectorAll('[data-conversation] [data-message-id]')]` +
+    `[...document.querySelectorAll('[data-conversation] [data-message-body]')]` +
     `.some(m => m.textContent === 'hello from a real browser')`
   await pageA.waitForFunction(inTimeline)
   await pageB.waitForFunction(inTimeline)
