@@ -118,6 +118,18 @@ ports/browser/credentials). Live agent tests self-gate on credentials (none in t
 dev environment; CI's `CLAUDE_CODE_OAUTH_TOKEN` secret exercises them in the verify
 job).
 
+## Client presentation (planned)
+
+Presentation work not yet scheduled into a numbered phase:
+
+- [02-metro-zune-styling.md](02-metro-zune-styling.md) — Metro/Zune workspace skin for the
+  client shell (Tailwind utilities composed as typed F# values; zero authored CSS).
+- [03-rich-text-editing.md](03-rich-text-editing.md) — Linear-style rich text editing: type or
+  paste Markdown, rendered live as formatted WYSIWYG. Bodies become a ProseMirror doc synced as
+  a Yjs `XmlFragment`, exposed as a first-class Ylmish-encoded field (extend Ylmish's
+  live-handle `CustomElement` codec — the sync boundary stays intact); markdown survives at the
+  drain so the agent path is unchanged. Starts with a de-risking spike (Step 0).
+
 ## Blockers log
 
 | Date | Step | Blocker | Owner | Resolution |
