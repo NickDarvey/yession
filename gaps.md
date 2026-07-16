@@ -68,10 +68,12 @@ type DraftState =
 
 Deltas from the current code:
 
-- **`DraftId` retires from synced state.** The author is the identity. `DraftId` the
-  type survives only where it is already durable — `MessageSent.DraftId : DraftId option`
-  — and even there it is redundant with `MessageSent.Author`; keep it `None`-able for
-  wire-compat and stop minting it (open question below).
+- **`DraftId` is deleted.** The author is the identity. The type has no remaining use:
+  drafts key on `PeerId`, `DraftStarted` goes (it is a durable event **no projection
+  reads** — `Conversation.fs` explicitly ignores it), and `MessageSent.DraftId` is
+  redundant with `MessageSent.Author`, so drop the field. Nothing is released yet, so
+  there is no compat to keep — delete `DraftId`, `DraftStarted`, and
+  `MessageSent.DraftId` outright.
 - **`Sync.fs` codec:** `draftsByKey` keys on `PeerId.value` instead of `DraftId.value`;
   `draftsToDomain` validates the key via `PeerId.create` (skipping invalid keys, as it
   already does — the decode stays total over a doc shared with peers we don't control).
@@ -143,22 +145,11 @@ For any schedule and any delivery order:
 | 1 | Re-key drafts | `Drafts : Map<PeerId, DraftState>`; `DraftState` drops `DraftId`; codec keys/validates on `PeerId`; author register dropped | Codec round-trip (`decode∘encode` preserves state); "drafts keyed by author" model test |
 | 2 | Composer lifecycle | Local composer always visible; lazy materialise on first keystroke; `DiscardDraftMsg`; empty+blur removes slot | Model tests: first edit creates the slot; discard/empty removes it; no phantom empty slot syncs |
 | 3 | Two modes in the View | Own composer pinned below the queue; peers' active drafts joinable above it with author badge; single textarea, no cursors/selections | E2E: peer A types own draft; peer B joins A's draft and both converge; peer B also writes B's own; both drafts distinct and co-editable |
-| 4 | Owner-sends + retire minting | `SendDraftMsg` owner-only; stop minting `DraftId`; `MessageSent.DraftId = None` | E2E: only the owner's Send commits the slot; edit-during-send lands the snapshot (delete-beats-edit); one queue entry appended |
+| 4 | Owner-sends + delete `DraftId` | `SendDraftMsg` owner-only; delete `DraftId`, `DraftStarted`, `MessageSent.DraftId` | E2E: only the owner's Send commits the slot; edit-during-send lands the snapshot (delete-beats-edit); one queue entry appended |
 | 5 | Properties | Invariants 1–5 as `property {}` blocks in the vendored Hedgehog harness (Plan 01 §Verification), schedules over `Edit(slot) \| Send \| Discard \| Deliver \| Offline/Rejoin` | Hundreds of deterministic cases per property; named example: two offline peers each draft own, rejoin ⇒ both present |
 
 ## Risks & open questions
 
-- **`DraftId` and `DraftStarted`.** Drafts are not durable facts (only `MessageSent`
-  is), so the `DraftStarted { DraftId; StartedBy }` event and `MessageSent.DraftId` are
-  arguably vestigial once the author is the key. Recommend: retire `DraftStarted`, keep
-  `MessageSent.DraftId` as `None` for wire-compat, revisit the type's removal in a
-  cleanup. Confirm no consumer reads `DraftStarted`.
-- **Re-key is a doc-format change.** Old docs key drafts by `DraftId`; those keys fail
-  `PeerId.create` only if they aren't valid peer ids — otherwise they'd decode as
-  spurious slots. Pre-1.0, the safe move is to treat pre-change draft keys as
-  non-authoritative (the decode already skips keys it can't validate; drafts are
-  ephemeral WIP, never history, so dropping stale draft keys on upgrade is acceptable).
-  Note in release notes.
 - **"Their own" vs "a shared draft".** This plan has no ownerless shared draft — the
   collaborative case is always *someone's* slot that others join. If a truly ownerless
   "session draft" is later wanted, it is one extra optional slot (`SharedBrief` is the
