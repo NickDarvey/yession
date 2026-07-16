@@ -84,17 +84,21 @@ module Docker =
 let peer (id: string) (name: string) : PeerState =
     { PeerId = PeerId.create id |> expect; DisplayName = name }
 
-let bodyOf (draftId: DraftId) (m: ClientModel) : string option =
-    m.Synced.Drafts |> Map.tryFind draftId |> Option.map (fun d -> Ylmish.Text.toString d.Body)
+/// The body of the draft in `peerId`'s slot (drafts are keyed by author, one per client).
+let bodyOf (peerId: PeerId) (m: ClientModel) : string option =
+    m.Synced.Drafts |> Map.tryFind peerId |> Option.map (fun d -> Ylmish.Text.toString d.Body)
 
-let editBody (draftId: DraftId) (edit: Ylmish.Text -> Ylmish.Text) (m: ClientModel) : ClientMsg =
-    match Map.tryFind draftId m.Synced.Drafts with
-    | Some draft -> EditDraftBodyMsg (draftId, edit draft.Body)
-    | None ->
-        failwithf
-            "editBody: draft %s not in the model (drafts: %A)"
-            (DraftId.value draftId)
-            (m.Synced.Drafts |> Map.toList |> List.map (fst >> DraftId.value))
+/// An edit to `peerId`'s draft slot; materialises the slot lazily if it does not exist
+/// yet (the first keystroke into your own composer, or joining a peer's draft).
+let editBody (peerId: PeerId) (edit: Ylmish.Text -> Ylmish.Text) (m: ClientModel) : ClientMsg =
+    match Map.tryFind peerId m.Synced.Drafts with
+    | Some draft -> EditDraftBodyMsg (peerId, edit draft.Body)
+    | None -> EditDraftBodyMsg (peerId, edit Ylmish.Text.empty)
+
+/// Materialise (or overwrite) `peerId`'s draft with `body` — the model message a
+/// keystroke produces; send it afterwards with `Connection.SendDraft peerId` (owner-sends).
+let setDraft (peerId: PeerId) (body: string) : ClientMsg =
+    EditDraftBodyMsg (peerId, Ylmish.Text.edit body Ylmish.Text.empty)
 
 let queueBodyOf (queueId: QueueId) (m: ClientModel) : string option =
     m.Synced.Queue |> Map.tryFind queueId |> Option.map (fun e -> Ylmish.Text.toString e.Body)

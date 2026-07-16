@@ -45,10 +45,11 @@ module App =
     type Connection =
         { /// Runs the handshake and frame pump until the channel closes.
           Run : Async<unit>
-          /// Send a draft: enqueue it (Phase 3). A pure CRDT model update under a
+          /// Send the draft in the given peer's slot: enqueue it (Phase 3). Owner-sends,
+          /// so the `PeerId` is the local peer's own slot. A pure CRDT model update under a
           /// freshly minted `QueueId` — no command round-trip; the Session Process
           /// consumes the queue and the message lands in the timeline as events.
-          SendDraft : DraftId -> unit
+          SendDraft : PeerId -> unit
           /// Ask the Session Process to cancel the running agent turn (Step 17). The
           /// outcome arrives as events: `AgentTurnInterrupted` on success, or nothing
           /// if the turn already finished (the request is then rejected).
@@ -207,11 +208,11 @@ module App =
         { Run =
             Connection.run hello dispatchAndConsume (DocSync.applyRemote doc) onResponse onEventsPage channel
           SendDraft =
-            fun draftId ->
+            fun peerId ->
                 // Enqueue under a fresh queue id (unique keys make concurrent sends
-                // safe); the model update moves the draft into the shared queue.
+                // safe); the model update moves the peer's own draft into the shared queue.
                 match QueueId.create (string (System.Guid.NewGuid ())) with
-                | Ok queueId -> dispatch (SendDraftMsg (draftId, queueId))
+                | Ok queueId -> dispatch (SendDraftMsg (peerId, queueId))
                 | Error e -> failwithf "queue id invariant violated: %s" e
           InterruptTurn =
             fun turnId ->

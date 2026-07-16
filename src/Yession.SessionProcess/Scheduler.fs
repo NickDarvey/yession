@@ -86,7 +86,6 @@ module Scheduler =
                             for entry in plan.Batch do
                                 let message =
                                     { MessageId = mintMessageId ()
-                                      DraftId = None
                                       QueueId = Some entry.QueueId
                                       Author = HumanPeer entry.Author
                                       Body = Ylmish.Text.toString entry.Body }

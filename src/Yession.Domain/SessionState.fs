@@ -4,9 +4,13 @@ namespace Yession.Domain
 /// Client. These are the model shapes only; the Yjs/Ylmish encoding that keeps them in
 /// sync lives in Sync.fs. See docs/design.md §2.2 and docs/plans/01-turn-scheduling.md.
 
+/// A client's work-in-progress draft: the WIP tail, not yet queued. Keyed by its
+/// `Author` in `SyncedSessionState.Drafts`, so each client owns at most one — the cap is
+/// structural, not a runtime check. The body is collaborative text: any peer may edit any
+/// slot and edits merge (Step 05), so "collaborate" is co-editing someone's slot and
+/// "write your own" is typing in yours.
 type DraftState =
-    { DraftId : DraftId
-      Author  : PeerId
+    { Author  : PeerId
       Body    : Ylmish.Text }
 
 /// A message waiting for the agent (Phase 3). Queued messages are collaborative state:
@@ -26,7 +30,7 @@ type SharedBrief = { Body : string }
 
 /// Collaborative state synced via Ylmish.
 type SyncedSessionState =
-    { Drafts      : Map<DraftId, DraftState>
+    { Drafts      : Map<PeerId, DraftState>
       Queue       : Map<QueueId, QueuedMessage>
       SharedBrief : SharedBrief option }
 

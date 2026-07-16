@@ -171,8 +171,7 @@ let private start () =
         // write (dispatch `SendDraftMsg` with a fresh queue id), so only the interrupt
         // needs the connection; the sidebar toggle is a root-class bit.
         let actions : ViewActions =
-            { NewDraftId = fun () -> match DraftId.create (mintId "draft") with Ok d -> d | Error e -> failwith e
-              NewQueueId = fun () -> match QueueId.create (mintId "queue") with Ok q -> q | Error e -> failwith e
+            { NewQueueId = fun () -> match QueueId.create (mintId "queue") with Ok q -> q | Error e -> failwith e
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
               ToggleNav = toggleNav }
 

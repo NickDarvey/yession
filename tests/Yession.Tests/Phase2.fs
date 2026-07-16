@@ -74,12 +74,10 @@ let private launchTests =
                 let! a = connectClient signalUrl "managed-1-token" "ada" "Ada"
                 let! b = connectClient signalUrl "managed-1-token" "grace" "Grace"
 
-                let draftId = DraftId.create "managed-draft" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "managed hello") (a.Runner.Model ())))
-                do! b.Runner.WaitFor (fun model -> bodyOf draftId model = Some "managed hello")
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "managed hello"))
+                do! b.Runner.WaitFor (fun model -> bodyOf a.Hello.PeerId model = Some "managed hello")
 
-                a.Connection.SendDraft draftId
+                a.Connection.SendDraft a.Hello.PeerId
                 do! b.Runner.WaitFor (fun model ->
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "managed hello"))
 
@@ -277,10 +275,8 @@ let private lazyLifecycleTests =
                 let managed = (m.Registered ()) |> List.head
 
                 let! a = connectClient (managed.BootstrapUri + "signal") "lazy-token" "ada" "Ada"
-                let draftId = DraftId.create "oneshot" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "what is a monad?") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "what is a monad?"))
+                a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun model ->
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "just an answer"))
 
@@ -317,10 +313,8 @@ let private lazyLifecycleTests =
                 let managed = (m.Registered ()) |> List.head
 
                 let! a = connectClient (managed.BootstrapUri + "signal") "lazy-token" "ada" "Ada"
-                let draftId = DraftId.create "devtask" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "please run the tests") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "please run the tests"))
+                a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun model ->
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "environment is up")
                         && (match model.Environment with EnvironmentRunning _ -> true | _ -> false))
@@ -498,10 +492,8 @@ let private commandTests =
                 // command log purely through event pages.
                 let! a = connectClient (managed.BootstrapUri + "signal") "cmd-token" "ada" "Ada"
                 let! b = connectClient (managed.BootstrapUri + "signal") "cmd-token" "grace" "Grace"
-                let draftId = DraftId.create "cmd-draft" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "run the thing") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "run the thing"))
+                a.Connection.SendDraft a.Hello.PeerId
 
                 let sawCommand (model: ClientModel) =
                     model.Commands.Entries
@@ -554,7 +546,6 @@ let private acceptanceTests =
                 let mixed : SessionEvent list =
                     [ MessageSent
                         { MessageId = MessageId.create "m1" |> expect
-                          DraftId = None
                           QueueId = None
                           Author = HumanPeer ada
                           Body = "hi" }
@@ -603,10 +594,8 @@ let private acceptanceE2eTests =
                 do! b.Channel.Close ()
                 do! b.Runner.WaitFor (fun model -> model.Connection = Reconnecting)
 
-                let draftId = DraftId.create "catchup-draft" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "do the work") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "do the work"))
+                a.Connection.SendDraft a.Hello.PeerId
                 let caughtUp (model: ClientModel) =
                     (model.Conversation.Items |> List.exists (fun i -> i.Body = "done"))
                     && (match model.Environment with EnvironmentRunning _ -> true | _ -> false)
@@ -676,10 +665,8 @@ let private persistenceTests =
                 let! _ = m1.StartSession { SessionId = sessionId; SessionToken = "persist-token" }
                 let managed1 = (m1.Registered ()) |> List.head
                 let! a = connectClient (managed1.BootstrapUri + "signal") "persist-token" "ada" "Ada"
-                let draftId = DraftId.create "persist-draft" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "remember me") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "remember me"))
+                a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun model ->
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "remember me"))
                 let! before = managed1.Host.Log.Read None Int32.MaxValue

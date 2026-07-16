@@ -49,15 +49,17 @@ type ClientMsg =
     /// built by folding pages through the shared projection; offsets track progress.
     | EventsPageMsg of EventPage<SessionEvent>
     | DisconnectedMsg
-    /// Start a draft under an app-minted id (unique keys make concurrent — even
-    /// offline — creation safe; see docs/design.md §1 "Ylmish is the sync boundary").
-    | StartDraftMsg of DraftId
-    /// Replace a draft's body with an edited `Text` (carrying the edit intent).
-    | EditDraftBodyMsg of DraftId * Ylmish.Text
-    /// Send = enqueue (Phase 3): the draft moves into the shared message queue under
-    /// the app-minted `QueueId`, at the tail. A pure CRDT write; the Session Process
-    /// consumes the queue when the agent is idle.
-    | SendDraftMsg of DraftId * QueueId
+    /// Edit the draft in the slot keyed by `PeerId`. Drafts are keyed by author, so a peer
+    /// owns at most one; editing a peer's own slot materialises it lazily (first keystroke),
+    /// editing another peer's slot is collaboration on their draft (bodies merge, Step 05).
+    | EditDraftBodyMsg of PeerId * Ylmish.Text
+    /// Send = enqueue (Phase 3): the owner's draft moves into the shared message queue
+    /// under the app-minted `QueueId`, at the tail, and the slot clears. A pure CRDT
+    /// write; the Session Process consumes the queue when the agent is idle. Owner-sends:
+    /// the `PeerId` is the sender's own slot.
+    | SendDraftMsg of PeerId * QueueId
+    /// Discard the draft in the slot keyed by `PeerId` without sending it.
+    | DiscardDraftMsg of PeerId
     /// Edit a queued message's body (any peer may, until the agent takes it).
     | EditQueuedBodyMsg of QueueId * Ylmish.Text
     /// Reorder a queued message: one fractional-index register write.
@@ -157,40 +159,32 @@ module ClientModel =
                       IsCatchingUp = isBehind highWater latestKnown } }
         | DisconnectedMsg ->
             { model with Connection = Reconnecting }
-        | StartDraftMsg draftId ->
-            // Starting an already-present draft is a no-op: ids are app-minted and unique.
-            if Map.containsKey draftId model.Synced.Drafts then
-                model
-            else
-                let draft =
-                    { DraftId = draftId
-                      Author = model.Peer.PeerId
-                      Body = Ylmish.Text.empty }
-                model |> withSynced { model.Synced with Drafts = Map.add draftId draft model.Synced.Drafts }
-        | EditDraftBodyMsg (draftId, body) ->
-            match Map.tryFind draftId model.Synced.Drafts with
-            | Some draft ->
-                model
-                |> withSynced
-                    { model.Synced with Drafts = Map.add draftId { draft with Body = body } model.Synced.Drafts }
-            | None -> model
-        | SendDraftMsg (draftId, queueId) ->
-            // Draft -> queue entry, atomically in one model update (one CRDT
-            // transaction): the draft key is deleted and the queue key created. The
-            // sender is the attributed author; the entry lands at the queue tail.
-            match Map.tryFind draftId model.Synced.Drafts with
+        | EditDraftBodyMsg (peerId, body) ->
+            // Upsert the slot keyed by `peerId`: the key is the author, so this both
+            // materialises a peer's own draft on first keystroke and folds collaborative
+            // edits into an existing slot. One draft per client is structural (the key).
+            model
+            |> withSynced
+                { model.Synced with Drafts = Map.add peerId { Author = peerId; Body = body } model.Synced.Drafts }
+        | SendDraftMsg (peerId, queueId) ->
+            // Draft -> queue entry, atomically in one model update (one CRDT transaction):
+            // the slot is deleted and the queue key created. Owner-sends: the slot's author
+            // is the attributed author; the entry lands at the queue tail.
+            match Map.tryFind peerId model.Synced.Drafts with
             | Some draft when not (Map.containsKey queueId model.Synced.Queue) ->
                 let entry =
                     { QueueId = queueId
-                      Author = model.Peer.PeerId
+                      Author = draft.Author
                       Body = draft.Body
                       Order = QueueOrder.next model.Synced.Queue }
                 model
                 |> withSynced
                     { model.Synced with
-                        Drafts = Map.remove draftId model.Synced.Drafts
+                        Drafts = Map.remove peerId model.Synced.Drafts
                         Queue = Map.add queueId entry model.Synced.Queue }
             | _ -> model
+        | DiscardDraftMsg peerId ->
+            model |> withSynced { model.Synced with Drafts = Map.remove peerId model.Synced.Drafts }
         | EditQueuedBodyMsg (queueId, body) ->
             match Map.tryFind queueId model.Synced.Queue with
             | Some entry ->

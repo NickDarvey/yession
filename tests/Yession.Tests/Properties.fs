@@ -231,12 +231,12 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
     let mutable enqueueCounter = 0
     let enqueue (i: int) =
         enqueueCounter <- enqueueCounter + 1
-        let draftId = DraftId.create (sprintf "draft-%d" enqueueCounter) |> expect
         let queueId = QueueId.create (sprintf "queue-%d" enqueueCounter) |> expect
         let r = peerRunner i
-        r.Dispatch (user (StartDraftMsg draftId))
-        r.Dispatch (user (editBody draftId (Text.insert 0 (sprintf "message %d" enqueueCounter)) (r.Model ())))
-        r.Dispatch (user (SendDraftMsg (draftId, queueId)))
+        // Peer i writes its own slot (keyed by its peer id) and sends: send clears the
+        // slot, so a peer can enqueue repeatedly.
+        r.Dispatch (user (setDraft (peerIdOf i) (sprintf "message %d" enqueueCounter)))
+        r.Dispatch (user (SendDraftMsg (peerIdOf i, queueId)))
         enqueuedIds.Add (QueueId.value queueId)
 
     let pickEntry (i: int) (pick: int) : QueueId option =
@@ -319,8 +319,81 @@ let private check (name: string) (assertion: CaseResult -> unit) =
 let private consumedIdsOf (r: CaseResult) : string list =
     r.Events |> List.choose QueueDrain.consumedOf
 
+// --- Draft plan invariant 4: clean send ------------------------------------------------
+// docs/plans/03-one-draft-per-client.md, invariant 4:
+//   a send removes exactly the sender's slot and appends exactly one queue entry with the
+//   snapshotted body; later edits to the (re-materialised) slot never mutate the queue
+//   entry. One real client program over its Yjs doc — `SendDraftMsg` is the only moving
+//   part — so this pins the model transition AND the doc structure: the queue is decoded
+//   after every later slot edit, so any aliasing bleed from a re-created draft would show.
+
+type private DraftOp =
+    | SetBody of text: string
+    | Send
+
+let private genDraftOp : Gen<DraftOp> =
+    gen {
+        let! tag = Gen.int32 (Range.linear 0 3)
+        let! n = Gen.int32 (Range.linear 0 999)
+        // A third of the ops are sends; the rest (re)write the one slot, so post-send
+        // edits are common and the "later edits never mutate" clause is exercised.
+        return (if tag = 0 then Send else SetBody (sprintf "w%d" n))
+    }
+
+let private genDraftSchedule : Gen<DraftOp list> =
+    Gen.list (Range.linear 0 15) genDraftOp
+
+/// Drive the ops through one client program; return the (queueId, snapshot-at-send) pairs
+/// and the doc's decoded synced state after every op (post-send edits included).
+let private runDraftSchedule (ops: DraftOp list) : (string * string) list * PeerId * SyncedSessionState =
+    let doc = Y.Doc.Create ()
+    doc.clientID <- 1.0
+    let owner = peerIdOf 0
+    let runner = Harness.run (App.makeProgram doc (ClientModel.init (peer "peer-0" "Peer 0")))
+    let snapshots = ResizeArray<string * string> ()
+    let mutable qn = 0
+    let apply op =
+        match op with
+        | SetBody text -> runner.Dispatch (user (setDraft owner text))
+        | Send ->
+            match (runner.Model ()).Synced.Drafts |> Map.tryFind owner with
+            | Some draft ->
+                qn <- qn + 1
+                let queueId = QueueId.create (sprintf "q-%d" qn) |> expect
+                let snapshot = Text.toString draft.Body
+                runner.Dispatch (user (SendDraftMsg (owner, queueId)))
+                snapshots.Add (QueueId.value queueId, snapshot)
+                // Clean send, part 1: the sender's slot is gone the instant it is sent.
+                Expect.isFalse
+                    (Map.containsKey owner (runner.Model ()).Synced.Drafts)
+                    "a send removes exactly the sender's slot"
+            | None -> ()   // an empty slot: SendDraftMsg is a no-op, nothing enqueued
+    ops |> List.iter apply
+    let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+    List.ofSeq snapshots, owner, decoded
+
+let private draftInvariant4 =
+    testCase "clean send: removes the slot, appends one snapshotted entry, and later edits never mutate it" <| fun () ->
+        Property.check (property {
+            let! ops = genDraftSchedule
+            let snapshots, owner, decoded = runDraftSchedule ops
+            // Exactly one queue entry per successful send — no send appends two or drops one.
+            Expect.equal (Map.count decoded.Queue) (List.length snapshots)
+                "exactly one queue entry per send"
+            // Every send's snapshot survives verbatim through all later slot edits, and each
+            // entry is attributed to the slot owner (owner-sends).
+            for (qid, snapshotBody) in snapshots do
+                match decoded.Queue |> Map.tryFind (QueueId.create qid |> expect) with
+                | Some entry ->
+                    Expect.equal (Text.toString entry.Body) snapshotBody
+                        "the queued body is the send-time snapshot; later slot edits never mutate it"
+                    Expect.equal entry.Author owner "the queue entry is attributed to the slot owner"
+                | None -> failwithf "sent entry %s missing from the queue" qid
+        })
+
 let tests =
-    testList "Properties (invariants 1-7, Hedgehog schedules)" [
+    testList "Properties" [
+      testList "Queue invariants 1-7 (Hedgehog schedules)" [
 
         check "1. exactly-once: every QueueId is consumed at most once; at quiescence, unconsumed = deleted" <| fun r ->
             let consumed = consumedIdsOf r
@@ -386,4 +459,8 @@ let tests =
                     | AgentMessageCompleted _ | AgentTurnFailed _ | AgentTurnInterrupted _ ->
                         runningTurn <- false
                     | _ -> ()
+      ]
+      testList "Draft invariant 4 — clean send (Hedgehog schedules)" [
+        draftInvariant4
+      ]
     ]

@@ -23,7 +23,7 @@ type AdaptiveSyncedState =
 module SyncedStateSync =
 
     let private draftsByKey (m: SyncedSessionState) : HashMap<string, DraftState> =
-        m.Drafts |> Map.toSeq |> Seq.map (fun (k, v) -> DraftId.value k, v) |> HashMap.ofSeq
+        m.Drafts |> Map.toSeq |> Seq.map (fun (k, v) -> PeerId.value k, v) |> HashMap.ofSeq
 
     let private queueByKey (m: SyncedSessionState) : HashMap<string, QueuedMessage> =
         m.Queue |> Map.toSeq |> Seq.map (fun (k, v) -> QueueId.value k, v) |> HashMap.ofSeq
@@ -41,12 +41,10 @@ module SyncedStateSync =
         a.Queue.Value <- queueByKey m
         a.SharedBrief.Value <- m.SharedBrief
 
-    /// Per-draft encoding: the author is an honest LWW register, the body is
-    /// collaborative text — concurrent edits to the same body interleave and merge.
+    /// Per-draft encoding: the map key *is* the author (one draft per client), so only the
+    /// body crosses — collaborative text, concurrent edits to the same slot interleave.
     let private encodeDraft (d: DraftState) : Encoded =
-        Encode.object
-            [ "author", Encode.string (AVal.constant (PeerId.value d.Author))
-              "body", Encode.text (AVal.constant d.Body) ]
+        Encode.object [ "body", Encode.text (AVal.constant d.Body) ]
 
     /// Per-queue-entry encoding: body is collaborative text; order is an LWW float
     /// register, so reorder = one register write (never a structural move).
@@ -69,8 +67,7 @@ module SyncedStateSync =
 
     /// The doc-side field shapes, before identifier validation.
     type private DraftFields =
-        { Author : string
-          Body : Text }
+        { Body : Text }
 
     type private QueuedFields =
         { Author : string
@@ -79,11 +76,8 @@ module SyncedStateSync =
 
     let private decodeDraft<'m> : Decoder<'m, DraftFields> =
         Decode.object {
-            let! author = Decode.object.required "author" Decode.string
             let! body = Decode.object.optional "body" Decode.text
-            return
-                { Author = author
-                  Body = defaultArg body Text.empty }
+            return { Body = defaultArg body Text.empty }
         }
 
     let private decodeQueued<'m> : Decoder<'m, QueuedFields> =
@@ -106,13 +100,14 @@ module SyncedStateSync =
     /// Entries whose identifiers fail the smart constructors are skipped rather than
     /// failing the decode: the doc is shared with peers we don't control, and a decode
     /// must stay total.
-    let private draftsToDomain (h: HashMap<string, DraftFields>) : Map<DraftId, DraftState> =
+    let private draftsToDomain (h: HashMap<string, DraftFields>) : Map<PeerId, DraftState> =
         (Map.empty, HashMap.toSeq h)
         ||> Seq.fold (fun acc (key, f) ->
-            match DraftId.create key, PeerId.create f.Author with
-            | Ok id, Ok author ->
-                acc |> Map.add id { DraftId = id; Author = author; Body = f.Body }
-            | _ -> acc)
+            // The key is the author (one draft per client); an invalid key is skipped so
+            // the decode stays total over a doc shared with peers we don't control.
+            match PeerId.create key with
+            | Ok author -> acc |> Map.add author { Author = author; Body = f.Body }
+            | Error _ -> acc)
 
     let private queueToDomain (h: HashMap<string, QueuedFields>) : Map<QueueId, QueuedMessage> =
         (Map.empty, HashMap.toSeq h)

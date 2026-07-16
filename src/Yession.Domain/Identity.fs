@@ -84,13 +84,6 @@ module PeerId =
         normalize "PeerId" raw |> Result.map PeerId
     let value (PeerId s) = s
 
-type DraftId = private DraftId of string
-
-module DraftId =
-    let create (raw: string) : Result<DraftId, string> =
-        normalize "DraftId" raw |> Result.map DraftId
-    let value (DraftId s) = s
-
 type QueueId = private QueueId of string
 
 module QueueId =

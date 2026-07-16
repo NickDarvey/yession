@@ -35,10 +35,6 @@ module Codec =
         { Encode = PeerId.value >> Encode.string
           Decode = viaSmartCtor PeerId.create Decode.string }
 
-    let draftId : Codec<DraftId> =
-        { Encode = DraftId.value >> Encode.string
-          Decode = viaSmartCtor DraftId.create Decode.string }
-
     let queueId : Codec<QueueId> =
         { Encode = QueueId.value >> Encode.string
           Decode = viaSmartCtor QueueId.create Decode.string }
@@ -112,30 +108,17 @@ module Codec =
             Decode.object (fun get ->
                 { PeerLeft.PeerId = get.Required.Field "peerId" peerId.Decode }) }
 
-    let private draftStarted : Codec<DraftStarted> =
-        { Encode =
-            fun (p: DraftStarted) ->
-                Encode.object [ "draftId", draftId.Encode p.DraftId; "startedBy", peerId.Encode p.StartedBy ]
-          Decode =
-            Decode.object (fun get ->
-                { DraftStarted.DraftId = get.Required.Field "draftId" draftId.Decode
-                  DraftStarted.StartedBy = get.Required.Field "startedBy" peerId.Decode }) }
-
     let private messageSent : Codec<MessageSent> =
         { Encode =
             fun (p: MessageSent) ->
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
-                      "draftId", Encode.option draftId.Encode p.DraftId
                       "queueId", Encode.option queueId.Encode p.QueueId
                       "author", actor.Encode p.Author
                       "body", Encode.string p.Body ]
           Decode =
             Decode.object (fun get ->
                 { MessageSent.MessageId = get.Required.Field "messageId" messageId.Decode
-                  MessageSent.DraftId = get.Required.Field "draftId" (Decode.option draftId.Decode)
-                  // Optional for wire compatibility: event-log lines persisted before
-                  // Phase 3 have no queueId field and decode to None.
                   MessageSent.QueueId = get.Optional.Field "queueId" queueId.Decode
                   MessageSent.Author = get.Required.Field "author" actor.Decode
                   MessageSent.Body = get.Required.Field "body" Decode.string }) }
@@ -366,8 +349,6 @@ module Codec =
                     Encode.object [ "type", Encode.string "peerJoined"; "payload", peerJoined.Encode p ]
                 | PeerLeft p ->
                     Encode.object [ "type", Encode.string "peerLeft"; "payload", peerLeft.Encode p ]
-                | DraftStarted p ->
-                    Encode.object [ "type", Encode.string "draftStarted"; "payload", draftStarted.Encode p ]
                 | MessageSent p ->
                     Encode.object [ "type", Encode.string "messageSent"; "payload", messageSent.Encode p ]
                 | AgentTurnStarted p ->
@@ -411,7 +392,6 @@ module Codec =
                 | "sessionCreated" -> Decode.field "payload" sessionCreated.Decode |> Decode.map SessionCreated
                 | "peerJoined" -> Decode.field "payload" peerJoined.Decode |> Decode.map PeerJoined
                 | "peerLeft" -> Decode.field "payload" peerLeft.Decode |> Decode.map PeerLeft
-                | "draftStarted" -> Decode.field "payload" draftStarted.Decode |> Decode.map DraftStarted
                 | "messageSent" -> Decode.field "payload" messageSent.Decode |> Decode.map MessageSent
                 | "agentTurnStarted" -> Decode.field "payload" agentTurnStarted.Decode |> Decode.map AgentTurnStarted
                 | "agentContextBuilt" -> Decode.field "payload" agentContextBuilt.Decode |> Decode.map AgentContextBuilt
