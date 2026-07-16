@@ -88,5 +88,6 @@ the schemas/interfaces it introduces, and automated verification.
 - **Delivery plan (Phase 1 + Phase 2 steps):** [docs/plans/00-init/](docs/plans/00-init/)
 - **Phase 3 plan (turn scheduling):** [docs/plans/01-turn-scheduling.md](docs/plans/01-turn-scheduling.md)
 - **Phase 4 plan (Manager process split, delivered):** [docs/plans/02-manager-process.md](docs/plans/02-manager-process.md)
+- **One draft per client (collaboration refinement, delivered):** [docs/plans/03-one-draft-per-client.md](docs/plans/03-one-draft-per-client.md)
 - **Progress & blockers tracker:** [docs/plans/TODO.md](docs/plans/TODO.md)
 - **Known gaps (honest inventory):** [docs/GAPS.md](docs/GAPS.md)

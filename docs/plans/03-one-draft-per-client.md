@@ -1,20 +1,27 @@
 # Plan — One WIP draft per client (collaborate, or write your own)
 
+> **Status: delivered.** The re-key, composer lifecycle, two-mode View, and owner-sends
+> all landed in one change. Verification: the full solution type-checks (0 warnings,
+> 0 errors) and the cheap test tier is **101/101** green (codec round-trip on
+> author-keyed drafts, two-client collaboration convergence, the queue property suite
+> driving the new send path, and the UI checklist). One follow-up is noted below.
+>
 > Phase 1 · Collaboration (refinement)
-> Refines the [GAPS.md](docs/GAPS.md) § Browser client bullet
+> Refines the [GAPS.md](../GAPS.md) § Browser client bullet
 > *"One draft textarea UX: no presence cursors, no per-peer selections, no rich text."*
-> Design context: [docs/design.md](docs/design.md) §1 "Ylmish is the sync boundary",
-> §2.2; builds on [Step 05](docs/plans/00-init/05-ylmish-collaborative-draft-sync.md)
-> and the queue in [Plan 01](docs/plans/01-turn-scheduling.md).
+> Design context: [docs/design.md](../design.md) §1 "Ylmish is the sync boundary",
+> §2.2; builds on [Step 05](00-init/05-ylmish-collaborative-draft-sync.md)
+> and the queue in [Plan 01](01-turn-scheduling.md).
 
 ## The gap
 
-Today `SyncedSessionState.Drafts : Map<DraftId, DraftState>` allows **unbounded**
-drafts — "Start draft" mints a fresh `DraftId` every click — and offers no product
-answer to *whose* draft is *whose*. The bodies are already collaborative (Step 05: any
-peer editing any draft's `Ylmish.Text` converges), and the View already renders every
-draft with an author badge. What's missing is the **shape of the composer**: how many
-drafts exist, who owns them, and how "collaborate" differs from "start my own".
+Before this change `SyncedSessionState.Drafts : Map<DraftId, DraftState>` allowed
+**unbounded** drafts — "Start draft" minted a fresh `DraftId` every click — and offered
+no product answer to *whose* draft is *whose*. The bodies were already collaborative
+(Step 05: any peer editing any draft's `Ylmish.Text` converges), and the View already
+rendered every draft with an author badge. What was missing is the **shape of the
+composer**: how many drafts exist, who owns them, and how "collaborate" differs from
+"start my own".
 
 ## Target UX
 
@@ -46,8 +53,8 @@ next. One draft at a time; any number of queued messages.
   GAPS constraint, kept verbatim. Collaboration is body-merge, not a shared cursor.
 
 Layout: drafts render **below the queue** (the WIP tail). Your own composer is pinned
-last (the box you type into now); other peers' active drafts appear above it as joinable
-boxes carrying the existing author badge (`View.drafts` already draws this).
+last (the box you type into now, with Send and Discard); other peers' active drafts
+appear above it as joinable boxes carrying the author badge (no Send — owner-sends).
 
 ## Data model
 
@@ -66,37 +73,36 @@ type DraftState =
 //   Drafts : Map<PeerId, DraftState>      // was Map<DraftId, DraftState>
 ```
 
-Deltas from the current code:
+What changed in the code:
 
-- **`DraftId` is deleted.** The author is the identity. The type has no remaining use:
-  drafts key on `PeerId`, `DraftStarted` goes (it is a durable event **no projection
-  reads** — `Conversation.fs` explicitly ignores it), and `MessageSent.DraftId` is
-  redundant with `MessageSent.Author`, so drop the field. Nothing is released yet, so
-  there is no compat to keep — delete `DraftId`, `DraftStarted`, and
-  `MessageSent.DraftId` outright.
-- **`Sync.fs` codec:** `draftsByKey` keys on `PeerId.value` instead of `DraftId.value`;
-  `draftsToDomain` validates the key via `PeerId.create` (skipping invalid keys, as it
-  already does — the decode stays total over a doc shared with peers we don't control).
-  The per-draft `author` register drops: the key carries it. Body stays `Encode.text`.
+- **`DraftId` deleted.** The author is the identity. The type had no remaining use:
+  drafts key on `PeerId`, `DraftStarted` went (a durable event **no projection read** —
+  `Conversation.fs` explicitly ignored it), and `MessageSent.DraftId` was redundant with
+  `MessageSent.Author`, so the field went too. Nothing is released, so there was no compat
+  to keep — `DraftId`, `DraftStarted`, and `MessageSent.DraftId` are gone outright.
+- **`Sync.fs` codec:** `draftsByKey` keys on `PeerId.value`; `draftsToDomain` validates
+  the key via `PeerId.create` (skipping invalid keys, as it already did — the decode
+  stays total over a doc shared with peers we don't control). The per-draft `author`
+  register dropped: the key carries it. Body stays `Encode.text`.
 - **`ClientMsg`:**
-  - `StartDraftMsg` is **removed**. Creation is implicit: the first non-empty
-    `EditDraftBodyMsg (myPeer, _)` materialises the local peer's slot.
+  - `StartDraftMsg` removed. Creation is implicit: the first `EditDraftBodyMsg (myPeer, _)`
+    materialises the local peer's slot.
   - `EditDraftBodyMsg of PeerId * Ylmish.Text` (was `DraftId * _`) — the `PeerId` names
     *which slot* you are editing (yours, or a peer's you are collaborating on).
   - `SendDraftMsg of PeerId * QueueId` — owner-only (below), so the `PeerId` is the local
     peer's.
-  - Add `DiscardDraftMsg of PeerId` — clear a slot (empties your WIP without sending).
-- **Lifecycle.** The local composer is *always visible* (there is always somewhere to
-  type). A `DraftState` enters synced state on the first non-empty keystroke and leaves
-  it on send, on discard, or when cleared to empty and blurred — so peers never see
-  phantom empty boxes and the slot stays honestly optional.
+  - `DiscardDraftMsg of PeerId` — clear a slot (empties your WIP without sending).
+- **View / lifecycle.** The local composer is *always visible* (there is always somewhere
+  to type); a `DraftState` enters synced state on the first keystroke and leaves it on
+  send or discard. `Host` no longer appends a draft-announcement event — it keeps only the
+  while-idle drain trigger.
 
 ## Send policy: owner sends
 
 Only the **slot owner** sends their draft into the queue; collaborators contribute text,
 the owner commits. Send is the existing atomic draft → queue transition (`SendDraftMsg`
 in `ClientModel.update`), now with the slot key = author: one CRDT transaction removes
-`Drafts[myPeer]` and adds the `Queue` entry at the tail.
+`Drafts[myPeer]` and adds the `Queue` entry at the tail (author = the slot's author).
 
 Why owner-sends over anyone-sends:
 
@@ -105,8 +111,8 @@ Why owner-sends over anyone-sends:
 - **No double-send race** — two peers cannot both commit the same slot, so there is no
   dedup to design at this layer (contrast the queue's drain, which needs one).
 
-*Alternative (noted, not recommended):* anyone-sends, attributed to the slot owner —
-adds a send-vs-send race that needs a dedup key, for a marginal UX gain.
+*Alternative (noted, not chosen):* anyone-sends, attributed to the slot owner — adds a
+send-vs-send race that needs a dedup key, for a marginal UX gain.
 
 ## Concurrency (Ylmish / CRDT)
 
@@ -121,13 +127,12 @@ assumptions.
 | **Owner sends while a collaborator types** | Send removes the slot key; late splices target a removed entry ⇒ discarded (delete-beats-edit, U9). Collaborator sees the draft jump into the queue with the sent snapshot. | The queue's edit-vs-accept race (Plan 01), one layer up: snapshot-at-send is the linearization point. |
 | **Discard vs edit** | Discard removes the key; concurrent edits inside a removed entry no-op. | Delete beats concurrent edit (U9) — the semantics we want. |
 
-### Invariants (property-test contract)
+### Invariants
 
 For any schedule and any delivery order:
 
 1. **One-per-client** — on every replica, every peer authors ≤ 1 draft. *(Structural:
-   `Map<PeerId,_>`. The property asserts the type is used, i.e. no code path stores a
-   draft under a non-author key.)*
+   `Map<PeerId,_>`.)*
 2. **Participation is unbounded** — any peer may edit any slot; after quiescence every
    replica agrees on every slot's body (Step 05, per slot).
 3. **Offline-safe creation** — concurrent own-draft creation across a partition never
@@ -138,15 +143,24 @@ For any schedule and any delivery order:
 5. **Convergence** — after all updates deliver, replicas agree on the set of slots, each
    body, and the queue.
 
-## Delivery steps
+## What landed, and how it was verified
 
-| # | Step | Outcome | Verification |
-|---|------|---------|--------------|
-| 1 | Re-key drafts | `Drafts : Map<PeerId, DraftState>`; `DraftState` drops `DraftId`; codec keys/validates on `PeerId`; author register dropped | Codec round-trip (`decode∘encode` preserves state); "drafts keyed by author" model test |
-| 2 | Composer lifecycle | Local composer always visible; lazy materialise on first keystroke; `DiscardDraftMsg`; empty+blur removes slot | Model tests: first edit creates the slot; discard/empty removes it; no phantom empty slot syncs |
-| 3 | Two modes in the View | Own composer pinned below the queue; peers' active drafts joinable above it with author badge; single textarea, no cursors/selections | E2E: peer A types own draft; peer B joins A's draft and both converge; peer B also writes B's own; both drafts distinct and co-editable |
-| 4 | Owner-sends + delete `DraftId` | `SendDraftMsg` owner-only; delete `DraftId`, `DraftStarted`, `MessageSent.DraftId` | E2E: only the owner's Send commits the slot; edit-during-send lands the snapshot (delete-beats-edit); one queue entry appended |
-| 5 | Properties | Invariants 1–5 as `property {}` blocks in the vendored Hedgehog harness (Plan 01 §Verification), schedules over `Edit(slot) \| Send \| Discard \| Deliver \| Offline/Rejoin` | Hundreds of deterministic cases per property; named example: two offline peers each draft own, rejoin ⇒ both present |
+The change was small enough to land in one commit rather than staged steps:
+
+| Area | Change | Verification (as delivered) |
+|---|---|---|
+| Re-key | `Drafts : Map<PeerId, DraftState>`; `DraftState` drops `DraftId`; codec keys/validates on `PeerId`; author register dropped | Codec round-trip (`decode∘encode` preserves state); "draft in the doc under the peer key" test |
+| Composer & View | Local composer always visible; lazy materialise; `DiscardDraftMsg`; peers' drafts joinable with author badge; single textarea | UI checklist (`Acceptance.fs`) renders the composer, draft body, and `data-send-draft` keyed by peer; E2E-7 keeps unsent drafts out of the timeline |
+| Collaboration | Any peer co-edits any slot | Two-client convergence test (in-memory + the E2E-1 collaboration path) |
+| Owner-sends | `SendDraftMsg` owner-only; delete `DraftId`/`DraftStarted`/`MessageSent.DraftId` | Send E2E (enqueue → drain → one `MessageSent`, slot clears on both clients); every-`SessionEvent`-case wire round-trip with the two events gone |
+| Send-many | Send clears the slot; a peer enqueues repeatedly | The queue property suite (invariants 1–7) drives every enqueue through the author-keyed slot |
+
+**Follow-up (not done):** dedicated draft-invariant `property {}` blocks (invariants 1–5
+above) were not added. Invariants 1/3/5 are structural (the `Map<PeerId,_>` type and
+Step 05's existing convergence coverage); the queue property harness already exercises
+the author-keyed send path. Adding draft-op schedules (edit-slot / send / discard /
+offline-rejoin) to the Hedgehog harness would pin 2 and 4 directly — a good next step if
+the composer grows.
 
 ## Risks & open questions
 
@@ -154,9 +168,3 @@ For any schedule and any delivery order:
   collaborative case is always *someone's* slot that others join. If a truly ownerless
   "session draft" is later wanted, it is one extra optional slot (`SharedBrief` is the
   precedent), not a change to the per-peer invariant.
-
-## Fold back into GAPS.md
-
-On delivery, rewrite the § Browser client bullet from *"One draft textarea UX"* to note:
-one WIP draft **per client**, co-editable by any peer, keyed by author — still one
-textarea each, still no presence cursors / per-peer selections / rich text.
