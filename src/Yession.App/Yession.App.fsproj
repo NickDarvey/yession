@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Dom.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="Connection.fs" />
     <Compile Include="PeerName.fs" />
@@ -15,6 +16,7 @@
 
   <ItemGroup>
     <PackageReference Include="Fable.Elmish" />
+    <PackageReference Include="Fable.Lit" />
     <PackageReference Include="Ylmish" />
     <PackageReference Include="Fable.Yjs" />
   </ItemGroup>

@@ -13,7 +13,7 @@ open Fable.Core
 open Fable.Pyxpecto
 open Ylmish
 open Yession.Domain
-open Yession.Client
+open Yession.App
 open Yession.Host
 open Yession.Tests.Support
 
@@ -49,7 +49,7 @@ let private launchTests =
                 let m = manager.Value
                 let managed = (m.Registered ()) |> List.head
                 let! html = Interop.getText managed.BootstrapUri |> Async.AwaitPromise
-                Expect.isTrue (html.Contains "<main id=\"app\"") "the served page is the client shell"
+                Expect.isTrue (html.Contains (Dom.attr "id" Dom.appId)) "the served page is the client shell"
             }
 
         testCaseAsync "launching the same session twice is rejected" <|
@@ -333,8 +333,8 @@ let private lazyLifecycleTests =
                     "need -> start -> started, then the second need reuses the environment"
 
                 // The client's UI reflects the running environment from events alone.
-                let html = View.render (a.Runner.Model ())
-                Expect.isTrue (html.Contains "data-environment=\"running\"") "the environment status renders"
+                let html = Support.render (a.Runner.Model ())
+                Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.environment Dom.Text.envRunning)) "the environment status renders"
 
                 do! a.Channel.Close ()
                 do! m.Stop ()
@@ -525,11 +525,11 @@ let private commandTests =
                 Expect.equal kinds [ "requested"; "started"; "output"; "completed" ] "Started/OutputReceived/Completed appended"
 
                 // E2E-4: the UI renders the read-only command log from events.
-                let html = View.render (b.Runner.Model ())
-                Expect.isTrue (html.Contains "data-command-log") "the command log section renders"
-                Expect.isTrue (html.Contains "data-command-status=\"succeeded:0\"") "the command status renders"
+                let html = Support.render (b.Runner.Model ())
+                Expect.isTrue (html.Contains Dom.Hooks.commandLog) "the command log section renders"
+                Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.commandStatus (Dom.Text.cmdSucceeded 0))) "the command status renders"
                 Expect.isTrue (html.Contains "hello from the env") "the streamed output renders"
-                Expect.isFalse (html.Contains "data-command-input") "no input surface exists — read-only by construction"
+                Expect.isFalse (html.Contains Dom.Hooks.commandInput) "no input surface exists — read-only by construction"
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()

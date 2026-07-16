@@ -1,4 +1,4 @@
-namespace Yession.Client
+namespace Yession.App
 
 /// The client's visual language, authored entirely in F# by composing Tailwind's own
 /// utility classes into typed, named values. Tailwind supplies the utilities (delivered
@@ -200,20 +200,8 @@ module Style =
     /// swaps its innerHTML, so these persist untouched across re-renders).
     let app = "flex h-screen overflow-hidden bg-bg text-ink font-sans antialiased"
 
-    /// Tailwind, delivered as a script (the Play CDN — never a stylesheet), plus the theme
-    /// registered from this F#-emitted config object. The config script is guarded so a
-    /// failed CDN fetch degrades to unstyled markup without breaking the shell.
-    let headTags =
-        String.concat "" [
-            "<script src=\"https://cdn.tailwindcss.com\"></script>"
-            "<script>if (window.tailwind) tailwind.config = {theme:{extend:{"
-            "colors:{bg:'#000',panel:'#0a0a0a',surface:'#111','surface-2':'#191919',hair:'#1f1f1f',"
-            "ink:'#fff','ink-dim':'#b4b4b4','ink-faint':'#6a6a6a',blue:'#1ba1e2',green:'#a8dd00',err:'#ff4a4a'},"
-            "backgroundImage:{grad:'linear-gradient(180deg,#1ba1e2,#a8dd00)'},"
-            "fontFamily:{sans:['Segoe UI','Segoe UI Variable','Segoe WP','Frutiger','Helvetica Neue','system-ui','sans-serif'],"
-            "mono:['Cascadia Code','Consolas','monospace']},"
-            "keyframes:{pulse2:{'0%,100%':{opacity:'.25'},'50%':{opacity:'1'}},"
-            "blink:{'50%':{opacity:'0'}}},"
-            "animation:{pulse2:'pulse2 1.1s ease-in-out infinite',blink:'blink 1s steps(1) infinite'}"
-            "}}}</script>"
-        ]
+    /// Tailwind, built locally into a stylesheet and served from the Session Process at
+    /// `/app.css` — never a CDN (local first; the app works offline). The utilities and the
+    /// theme (colours, fonts, keyframes) come from the CLI build configured in
+    /// `tailwind.config.js`, which scans the F# sources for the composed class names.
+    let headTags = "<link rel=\"stylesheet\" href=\"/app.css\">"

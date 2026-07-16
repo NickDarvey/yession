@@ -13,7 +13,7 @@ open Yession.Domain
 open Yession.SessionProcess
 open Yession.Host.Interop
 open Yession.Host.WebRtc
-open Yession.Client
+open Yession.App
 
 /// The static bootstrap page is the client shell itself, rendered from the initial model.
 /// The browser hydrates it and connects back over WebRTC; serving the same `View` keeps a
@@ -26,15 +26,17 @@ let private bootstrapHtml (sessionId: SessionId) =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
         | Error e -> failwith e
-    View.page sessionId (ClientModel.init placeholderPeer)
+    Ssr.page sessionId (ClientModel.init placeholderPeer)
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
+let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
 
 [<Fable.Core.ImportAll("node:fs")>]
 let private fs : obj = Fable.Core.Util.jsNative
 
 // From the package's assets/ when installed; from the build output in development.
 let private readBundle () : string option = readAsset "client.js" bundlePath fs
+let private readCss () : string option = readAsset "app.css" cssPath fs
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
@@ -98,17 +100,28 @@ let start
                         res.``end`` answer
                     }))
         | "GET", "/" ->
-            res.writeHead (200, createObj [ "content-type", box "text/html; charset=utf-8" ]) |> ignore
+            // A one-day cache window: the browser can reopen the app offline for up to a
+            // day before it must fetch a fresh shell (local-first, tight back-compat window).
+            res.writeHead (200, createObj [ "content-type", box "text/html; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
             res.``end`` bootstrapHtml
         | "GET", "/client.js" ->
             // The browser client bundle, built by `mise run build` (esbuild output).
             match readBundle () with
             | Some js ->
-                res.writeHead (200, createObj [ "content-type", box "text/javascript; charset=utf-8" ]) |> ignore
+                res.writeHead (200, createObj [ "content-type", box "text/javascript; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
                 res.``end`` js
             | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "client bundle not built (run: mise run build)"
+        | "GET", "/app.css" ->
+            // The locally built Tailwind stylesheet (no CDN); same one-day offline window.
+            match readCss () with
+            | Some css ->
+                res.writeHead (200, createObj [ "content-type", box "text/css; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
+                res.``end`` css
+            | None ->
+                res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "stylesheet not built (run: mise run build)"
         | "GET", path when path.StartsWith "/events/" ->
             match events, System.Int32.TryParse (path.Substring "/events/".Length) with
             | Some endpoint, (true, index) when index >= 0 -> serveChunk endpoint req.url index res

@@ -12,6 +12,7 @@
   <ItemGroup>
     <Compile Include="Interop.fs" />
     <Compile Include="WebRtc.fs" />
+    <Compile Include="Ssr.fs" />
     <Compile Include="Signalling.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="EventStore.fs" />
@@ -30,6 +31,8 @@
 
   <ItemGroup>
     <PackageReference Include="Fable.Core" />
+    <PackageReference Include="Fable.Lit" />
+    <PackageReference Include="Fable.Node" />
     <PackageReference Include="Fable.Yjs" />
     <PackageReference Include="Ylmish" />
   </ItemGroup>
@@ -38,7 +41,7 @@
     <ProjectReference Include="..\src\Yession.Domain\Yession.Domain.fsproj" />
     <ProjectReference Include="..\src\Yession.Manager\Yession.Manager.fsproj" />
     <ProjectReference Include="..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
-    <ProjectReference Include="..\src\Yession.Client\Yession.Client.fsproj" />
+    <ProjectReference Include="..\src\Yession.App\Yession.App.fsproj" />
   </ItemGroup>
 
 </Project>

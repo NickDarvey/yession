@@ -7,32 +7,31 @@ module Yession.Host.EventStore
 // not a browser store: browser clients already recover by offset catch-up (Step 07).
 
 open Fable.Core
+open Node.Api
 open Yession.Domain
 open Yession.SessionProcess
 
-[<ImportAll("node:fs")>]
-let private fs : obj = jsNative
+// The plain reads/writes go through the maintained Fable.Node `fs` binding.
+let private existsSync (path: string) : bool = fs.existsSync (U2.Case1 path)
+let private readFileSync (path: string) : string = fs.readFileSync (path, "utf8")
+let private writeFileSync (path: string) (text: string) : unit = fs.writeFileSync (path, box text)
 
-[<Emit("$0.existsSync($1)")>]
-let private existsSync (fs: obj) (path: string) : bool = jsNative
-
-[<Emit("$0.readFileSync($1, 'utf8')")>]
-let private readFileSync (fs: obj) (path: string) : string = jsNative
-
+// Kept as custom interop over the same `fs` module: Fable.Node's binding has no string
+// `writeSync` overload, no append-flag `openSync` helper, and no recursive `mkdirSync` —
+// and these are exactly the durability-critical writes, so they stay explicit.
 [<Emit("$0.openSync($1, 'a')")>]
-let private openAppend (fs: obj) (path: string) : int = jsNative
-
-[<Emit("$0.writeFileSync($1, $2)")>]
-let private writeFileSync (fs: obj) (path: string) (text: string) : unit = jsNative
+let private openSyncAppend (fs: obj) (path: string) : int = jsNative
 
 [<Emit("($0.writeSync($1, $2), $0.fsyncSync($1))")>]
-let private writeAndSync (fs: obj) (fd: int) (text: string) : unit = jsNative
+let private writeSyncFsync (fs: obj) (fd: int) (text: string) : unit = jsNative
 
 [<Emit("$0.mkdirSync($1, { recursive: true })")>]
-let private mkdirSync (fs: obj) (path: string) : unit = jsNative
+let private mkdirRecursive (fs: obj) (path: string) : unit = jsNative
 
-[<Emit("$0.split('\\n')")>]
-let private splitLines (s: string) : string array = jsNative
+let private openAppend (path: string) : int = openSyncAppend (box fs) path
+let private writeAndSync (fd: int) (text: string) : unit = writeSyncFsync (box fs) fd text
+let private mkdirSync (path: string) : unit = mkdirRecursive (box fs) path
+let private splitLines (s: string) : string array = s.Split '\n'
 
 /// Open (or create) a file-backed event log at `path`. Existing lines are replayed into
 /// memory at open, so reads are as fast as the in-memory log and offsets continue where
@@ -42,11 +41,11 @@ let openLog (path: string) (sessionId: SessionId) (clock: unit -> System.DateTim
     let directory =
         let idx = path.LastIndexOf '/'
         if idx > 0 then path.Substring (0, idx) else ""
-    if directory <> "" then mkdirSync fs directory
+    if directory <> "" then mkdirSync directory
 
     let events = ResizeArray<EventEnvelope<SessionEvent>> ()
-    if existsSync fs path then
-        let content = readFileSync fs path
+    if existsSync path then
+        let content = readFileSync path
         let lines = splitLines content |> Array.filter (fun l -> l.Trim().Length > 0)
         // A crash can tear the FINAL append (no trailing newline yet): that write was
         // never acknowledged, so it is safe to drop. Any other malformed line means
@@ -70,9 +69,9 @@ let openLog (path: string) (sessionId: SessionId) (clock: unit -> System.DateTim
                 events
                 |> Seq.map (fun e -> Codec.toString Codec.sessionEventEnvelope e + "\n")
                 |> String.concat ""
-            writeFileSync fs path valid
+            writeFileSync path valid
 
-    let fd = openAppend fs path
+    let fd = openAppend path
 
     let append (actor: ActorRef) (event: SessionEvent) : Async<AppendResult> =
         async {
@@ -89,7 +88,7 @@ let openLog (path: string) (sessionId: SessionId) (clock: unit -> System.DateTim
                   Event = event }
             // Durability before visibility: one write() of the whole line (atomic under
             // O_APPEND) followed by fsync, before the envelope becomes readable.
-            writeAndSync fs fd (Codec.toString Codec.sessionEventEnvelope envelope + "\n")
+            writeAndSync fd (Codec.toString Codec.sessionEventEnvelope envelope + "\n")
             events.Add envelope
             return { Offset = offset }
         }

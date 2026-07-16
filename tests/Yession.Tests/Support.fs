@@ -7,7 +7,7 @@ module Yession.Tests.Support
 open Elmish
 open Yjs
 open Yession.Domain
-open Yession.Client
+open Yession.App
 open Yession.Host
 
 let expect =
@@ -51,6 +51,11 @@ module Harness =
                 Async.FromContinuations (fun (cont, _, _) ->
                     if predicate model then cont ()
                     else waiters <- (predicate, fun () -> cont ()) :: waiters) }
+
+/// Render the client view to an HTML string for markup assertions — through the very
+/// renderer the served bootstrap uses (`Ssr`), so tests exercise the shipped SSR path.
+/// The view's `ViewActions` are no-ops (handlers fire on live browser events only).
+let render (model: ClientModel) : string = Ssr.renderModel model
 
 let peer (id: string) (name: string) : PeerState =
     { PeerId = PeerId.create id |> expect; DisplayName = name }

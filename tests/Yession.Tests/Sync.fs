@@ -19,7 +19,7 @@ open Yjs
 open Ylmish
 open Yession.Domain
 open Yession.SessionProcess
-open Yession.Client
+open Yession.App
 open Yession.Host
 open Yession.Tests.Support
 
@@ -395,15 +395,15 @@ let private e2eTests =
                 a.Runner.Dispatch (user (StartDraftMsg unsentId))
                 a.Runner.Dispatch (user (editBody unsentId (Text.insert 0 "UNSENT thought") (a.Runner.Model ())))
                 do! b.Runner.WaitFor (fun m -> bodyOf unsentId m = Some "UNSENT thought")
-                let html = View.render (b.Runner.Model ())
+                let html = Support.render (b.Runner.Model ())
                 // A section's markup runs from its data marker to its closing tag (no
                 // section nests another), so these slices are exact wherever the layout
                 // places the section in the document.
                 let sectionAt (marker: string) =
                     let start = html.IndexOf marker
                     html.Substring (start, html.IndexOf ("</section>", start) - start)
-                let timeline = sectionAt "data-conversation"
-                let editor = sectionAt "data-draft-editor"
+                let timeline = sectionAt Dom.Hooks.conversation
+                let editor = sectionAt Dom.Hooks.draftEditor
                 Expect.isTrue (timeline.Contains "while you were away") "the sent message is in the timeline"
                 Expect.isFalse (timeline.Contains "UNSENT") "unsent draft edits never appear in the timeline"
                 Expect.isTrue (editor.Contains "UNSENT thought") "the live draft renders in the draft editor"

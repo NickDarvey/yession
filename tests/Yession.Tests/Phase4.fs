@@ -11,7 +11,7 @@ open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
 open Yession.Manager
-open Yession.Client
+open Yession.App
 open Yession.Host
 open Yession.Tests.Support
 
@@ -121,7 +121,7 @@ let private processTests =
                 // The child serves the real bootstrap (session id embedded) and a real
                 // WebRTC client can message it.
                 let! html = Interop.getText (sprintf "http://127.0.0.1:%d/" port) |> Async.AwaitPromise
-                Expect.isTrue (html.Contains "yession-session\" content=\"proc-1\"") "the child serves ITS session's page"
+                Expect.isTrue (html.Contains (Dom.sessionMetaName + "\" " + Dom.attr "content" "proc-1")) "the child serves ITS session's page"
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" port
                 let! a = connectClient signalUrl "proc-token" "ada" "Ada"
                 let draftId = DraftId.create "proc-draft" |> expect
@@ -308,8 +308,9 @@ let private controlRpcTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Step 25 — the management UI (htmx, server-side rendered). Fragment rendering is
-// pure (cheap tier); the flow over real HTTP + real child processes is verify tier.
+// Step 25 — the management UI (server-side rendered Lit, swapped by a tiny inline
+// script — no htmx). Fragment rendering is pure (cheap tier); the flow over real HTTP +
+// real child processes is verify tier.
 // -----------------------------------------------------------------------------
 
 let private uiRecord : SessionRecord =
@@ -323,22 +324,22 @@ let private uiRenderTests =
     testList "Management UI rendering (Step 25)" [
         testCase "a stopped session's row offers Launch; a running one offers Stop and the open link" <| fun () ->
             let stopped = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.NotRunning }
-            Expect.isTrue (stopped.Contains "data-launch") "stopped rows can launch"
-            Expect.isTrue (stopped.Contains "hx-post=\"/sessions/ui-render/launch\"") "launch posts to the session route"
+            Expect.isTrue (stopped.Contains (Dom.attr Dom.Manager.launch "ui-render")) "stopped rows can launch (button carries the session id)"
             Expect.isTrue (stopped.Contains "UI &lt;Render&gt;") "display names are escaped"
             let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
-            Expect.isTrue (running.Contains "data-stop") "running rows can stop"
+            Expect.isTrue (running.Contains (Dom.attr Dom.Manager.stop "ui-render")) "running rows can stop"
             Expect.isTrue (running.Contains "http://127.0.0.1:8199/?token=t") "the open link targets the child's port with the token"
-            Expect.isTrue (running.Contains "hx-trigger=\"every 2s\"") "status refreshes by polling"
+            Expect.isTrue (running.Contains (Dom.attr Dom.Manager.session "ui-render")) "the row is a poll unit keyed by session id"
             let crashed = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
-            Expect.isTrue (crashed.Contains "data-status=\"exited\"") "a crash is visible"
-            Expect.isTrue (crashed.Contains "data-launch") "a crashed session can relaunch"
+            Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)) "a crash is visible"
+            Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
-        testCase "the page is self-contained: vendored htmx, no external script sources" <| fun () ->
+        testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
             let html = ManagerUi.page [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
-            Expect.isTrue (html.Contains "<script src=\"/htmx.js\"></script>") "htmx is served by this endpoint"
-            Expect.isFalse (html.Contains "src=\"http") "no CDN scripts (local-first)"
-            Expect.isTrue (html.Contains "data-create-session") "the create form renders"
+            Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
+            Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
+            Expect.isFalse (html.Contains "src=\"http") "no external/CDN scripts (local-first)"
+            Expect.isTrue (html.Contains Dom.Manager.createSession) "the create form renders"
     ]
 
 [<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: $1 }).then(async r => ({ status: r.status, cacheControl: '', body: await r.text() }))")>]
@@ -364,36 +365,36 @@ let private uiFlowTests =
 
                 // The page serves, self-contained.
                 let! page = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
-                Expect.isTrue (page.Contains "data-create-session") "the create form is served"
-                let! htmx = Interop.getText (baseUrl + "/htmx.js") |> Async.AwaitPromise
-                Expect.isTrue (htmx.Contains "htmx") "the vendored htmx bundle serves from the endpoint"
+                Expect.isTrue (page.Contains Dom.Manager.createSession) "the create form is served"
+                let! css = Interop.getText (baseUrl + "/app.css") |> Async.AwaitPromise
+                Expect.isTrue (css.Length > 500) "the shared local stylesheet serves from the endpoint (no CDN)"
 
                 // Create over the form endpoint.
                 let! created = postForm (baseUrl + "/sessions") "id=ui-1&name=UI+One&token=ui-token" |> Async.AwaitPromise
                 Expect.equal (statusOfReply created) 200 "created"
-                Expect.isTrue ((bodyOfReply created).Contains "data-session=\"ui-1\"") "the refreshed table holds the new session"
+                Expect.isTrue ((bodyOfReply created).Contains (Dom.attr Dom.Manager.session "ui-1")) "the refreshed table holds the new session"
                 let! duplicate = postForm (baseUrl + "/sessions") "id=ui-1&name=Again&token=x" |> Async.AwaitPromise
                 Expect.equal (statusOfReply duplicate) 400 "duplicates are rejected"
 
                 // Launch from the UI; the fragment reflects it and the child REALLY serves.
                 let! launched = postForm (baseUrl + "/sessions/ui-1/launch") "" |> Async.AwaitPromise
                 let row = bodyOfReply launched
-                Expect.isTrue (row.Contains "data-status=\"running\"") "the row shows running"
+                Expect.isTrue (row.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "the row shows running"
                 let sessionPort =
                     match (pm.TryFind (SessionId.create "ui-1" |> expect)).Value.Status with
                     | ProcessManager.Running (port, _) -> port
                     | other -> failwithf "expected Running, got %A" other
                 Expect.isTrue (row.Contains (sprintf "http://127.0.0.1:%d/?token=ui-token" sessionPort)) "the open link is live"
                 let! shell = Interop.getText (sprintf "http://127.0.0.1:%d/" sessionPort) |> Async.AwaitPromise
-                Expect.isTrue (shell.Contains "yession-session\" content=\"ui-1\"") "the opened session serves its shell"
+                Expect.isTrue (shell.Contains (Dom.sessionMetaName + "\" " + Dom.attr "content" "ui-1")) "the opened session serves its shell"
 
                 // Poll, stop, resume.
                 let! polled = Interop.getText (baseUrl + "/sessions/ui-1/row") |> Async.AwaitPromise
-                Expect.isTrue (polled.Contains "data-status=\"running\"") "the poll fragment agrees"
+                Expect.isTrue (polled.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "the poll fragment agrees"
                 let! stopped = postForm (baseUrl + "/sessions/ui-1/stop") "" |> Async.AwaitPromise
-                Expect.isTrue ((bodyOfReply stopped).Contains "data-status=\"stopped\"") "stopped from the UI"
+                Expect.isTrue ((bodyOfReply stopped).Contains (Dom.attr Dom.Manager.status Dom.Manager.statusStopped)) "stopped from the UI"
                 let! resumed = postForm (baseUrl + "/sessions/ui-1/launch") "" |> Async.AwaitPromise
-                Expect.isTrue ((bodyOfReply resumed).Contains "data-status=\"running\"") "resume is just launch"
+                Expect.isTrue ((bodyOfReply resumed).Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "resume is just launch"
 
                 do! pm.StopAll ()
             }
@@ -500,7 +501,7 @@ let private compositionTests =
                 Expect.equal (statusOfReply created) 200 "created via the UI"
                 let! launched = postForm (manager.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
                 let row = bodyOfReply launched
-                Expect.isTrue (row.Contains "data-status=\"running\"") "launched via the UI"
+                Expect.isTrue (row.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "launched via the UI"
                 let sessionPort = portOfRow row
 
                 // A real client messages the packaged child; the diagnostic agent runs a
@@ -520,7 +521,7 @@ let private compositionTests =
 
                 // Stop and resume from the UI; history replays into the fresh child.
                 let! stopped = postForm (manager.UiUrl + "sessions/composed/stop") "" |> Async.AwaitPromise
-                Expect.isTrue ((bodyOfReply stopped).Contains "data-status=\"stopped\"") "stopped via the UI"
+                Expect.isTrue ((bodyOfReply stopped).Contains (Dom.attr Dom.Manager.status Dom.Manager.statusStopped)) "stopped via the UI"
                 let! resumed = postForm (manager.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
                 let resumedPort = portOfRow (bodyOfReply resumed)
                 let! b = connectClient (sprintf "http://127.0.0.1:%d/signal" resumedPort) "comp-token" "grace" "Grace"
@@ -534,7 +535,7 @@ let private compositionTests =
                 do! manager.Shutdown ()
                 let! manager2 = startPackagedManager env
                 let! page = Interop.getText manager2.UiUrl |> Async.AwaitPromise
-                Expect.isTrue (page.Contains "data-session=\"composed\"") "the registry survived the manager restart"
+                Expect.isTrue (page.Contains (Dom.attr Dom.Manager.session "composed")) "the registry survived the manager restart"
                 let! relaunched = postForm (manager2.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
                 let relaunchedPort = portOfRow (bodyOfReply relaunched)
                 let! c = connectClient (sprintf "http://127.0.0.1:%d/signal" relaunchedPort) "comp-token" "carol" "Carol"

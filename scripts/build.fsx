@@ -12,7 +12,7 @@
 // / self-resolving deps kept EXTERNAL — node-datachannel loads its addon, and the Agent
 // SDK resolves its own native `claude` sibling via import.meta.url, both of which only
 // work when they run from their real node_modules, never bundled. Assets (the client
-// bundle, htmx) are copied in and read package-relative at runtime.
+// bundle, the stylesheet) are copied in and read package-relative at runtime.
 
 open System
 open System.Diagnostics
@@ -44,7 +44,7 @@ printfn "packaging yession %s (npm, one package / two bins)" version
 
 // --- Preconditions: the Fable outputs `mise run build` produces --------------------------
 
-for required in [ "app/out/Main.js"; "app/SessionMain.js"; "app/out/public/client.js" ] do
+for required in [ "app/out/Main.js"; "app/SessionMain.js"; "app/out/public/client.js"; "app/out/public/app.css" ] do
     if not (File.Exists (Path.Combine (repoRoot, required))) then
         failwithf "missing %s — run `mise run build` first" required
 
@@ -77,7 +77,7 @@ bundle "app/SessionMain.js" "session.js"
 // --- Assets (read package-relative at runtime by Interop.readAsset) ----------------------
 
 File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
-File.Copy (Path.Combine (repoRoot, "node_modules/htmx.org/dist/htmx.min.js"), Path.Combine (pkg, "assets/htmx.min.js"), true)
+File.Copy (Path.Combine (repoRoot, "app/out/public/app.css"), Path.Combine (pkg, "assets/app.css"), true)
 
 // --- Bin shims ----------------------------------------------------------------------------
 // `yession` points the Manager at the packaged session bundle (both live in one install),

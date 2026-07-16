@@ -9,31 +9,29 @@ module Yession.Host.DocStore
 // then COMPACTED to a single merged-state snapshot line.
 
 open Fable.Core
+open Node.Api
 open Yession.Domain
 
-[<ImportAll("node:fs")>]
-let private fs : obj = jsNative
+// The plain reads/writes go through the maintained Fable.Node `fs` binding.
+let private existsSync (path: string) : bool = fs.existsSync (U2.Case1 path)
+let private readFileSync (path: string) : string = fs.readFileSync (path, "utf8")
+let private writeFileSync (path: string) (text: string) : unit = fs.writeFileSync (path, box text)
 
-[<Emit("$0.existsSync($1)")>]
-let private existsSync (fs: obj) (path: string) : bool = jsNative
-
-[<Emit("$0.readFileSync($1, 'utf8')")>]
-let private readFileSync (fs: obj) (path: string) : string = jsNative
-
+// Kept as custom interop over the same `fs` module: Fable.Node's binding has no string
+// `writeSync` overload, no append-flag `openSync` helper, and no recursive `mkdirSync`.
 [<Emit("$0.openSync($1, 'a')")>]
-let private openAppend (fs: obj) (path: string) : int = jsNative
-
-[<Emit("$0.writeFileSync($1, $2)")>]
-let private writeFileSync (fs: obj) (path: string) (text: string) : unit = jsNative
+let private openSyncAppend (fs: obj) (path: string) : int = jsNative
 
 [<Emit("($0.writeSync($1, $2), $0.fsyncSync($1))")>]
-let private writeAndSync (fs: obj) (fd: int) (text: string) : unit = jsNative
+let private writeSyncFsync (fs: obj) (fd: int) (text: string) : unit = jsNative
 
 [<Emit("$0.mkdirSync($1, { recursive: true })")>]
-let private mkdirSync (fs: obj) (path: string) : unit = jsNative
+let private mkdirRecursive (fs: obj) (path: string) : unit = jsNative
 
-[<Emit("$0.split('\\n')")>]
-let private splitLines (s: string) : string array = jsNative
+let private openAppend (path: string) : int = openSyncAppend (box fs) path
+let private writeAndSync (fd: int) (text: string) : unit = writeSyncFsync (box fs) fd text
+let private mkdirSync (path: string) : unit = mkdirRecursive (box fs) path
+let private splitLines (s: string) : string array = s.Split '\n'
 
 type DocStore =
     { /// Replay every persisted update into the doc, then compact the file to one
@@ -48,11 +46,11 @@ let openStore (path: string) : DocStore =
     let directory =
         let idx = path.LastIndexOf '/'
         if idx > 0 then path.Substring (0, idx) else ""
-    if directory <> "" then mkdirSync fs directory
+    if directory <> "" then mkdirSync directory
 
     let lines, tornTail =
-        if existsSync fs path then
-            let content = readFileSync fs path
+        if existsSync path then
+            let content = readFileSync path
             let lines = splitLines content |> Array.filter (fun l -> l.Trim().Length > 0)
             // A crash can tear the FINAL append (no trailing newline yet): that write
             // was never acknowledged, so it is safe to drop if it fails to apply.
@@ -78,15 +76,15 @@ let openStore (path: string) : DocStore =
             // Compaction: the whole history collapses into one merged snapshot line
             // (Yjs updates merge losslessly), so the file never grows unbounded and
             // the next open replays a single update.
-            writeFileSync fs path (DocSync.fullState doc + "\n")
-            fd <- Some (openAppend fs path)
+            writeFileSync path (DocSync.fullState doc + "\n")
+            fd <- Some (openAppend path)
 
     let append (payload: string) : unit =
         match fd with
         | Some fd ->
             // Durability before visibility: one write() of the whole line (atomic
             // under O_APPEND) followed by fsync.
-            writeAndSync fs fd (payload + "\n")
+            writeAndSync fd (payload + "\n")
         | None -> failwithf "doc store %s: Append before ReplayInto" path
 
     { ReplayInto = replayInto

@@ -15,13 +15,14 @@
   <ItemGroup>
     <PackageReference Include="Fable.Core" />
     <PackageReference Include="Fable.Elmish" />
+    <PackageReference Include="Fable.Lit" />
     <PackageReference Include="Ylmish" />
     <PackageReference Include="Fable.Yjs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Yession.Domain\Yession.Domain.fsproj" />
-    <ProjectReference Include="..\..\src\Yession.Client\Yession.Client.fsproj" />
+    <ProjectReference Include="..\..\src\Yession.App\Yession.App.fsproj" />
   </ItemGroup>
 
 </Project>

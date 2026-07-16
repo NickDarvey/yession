@@ -31,5 +31,8 @@ tests/**/*.js
 # Browser E2E scratch data
 tests/browser/.data*
 
+# Local Session Process runtime data (event logs, doc store)
+.yession/
+
 # Release packaging output
 dist/
