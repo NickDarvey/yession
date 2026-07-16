@@ -61,7 +61,9 @@ Directory.CreateDirectory (Path.Combine (pkg, "assets")) |> ignore
 
 let esbuild = Path.Combine (repoRoot, "node_modules", ".bin", "esbuild")
 let externals =
-    [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "zod" ]
+    // dockerode is kept external too: it's pure JS but pulls ssh2 (with an optional native
+    // addon), so it resolves from node_modules rather than being bundled.
+    [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "zod"; "dockerode" ]
     |> List.map (sprintf "--external:%s")
 
 let bundle (entry: string) (outFile: string) =
@@ -126,6 +128,7 @@ File.WriteAllText (
   "engines": { "node": ">=24" },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "%s",
+    "dockerode": "%s",
     "node-datachannel": "%s",
     "zod": "%s"
   }
@@ -133,6 +136,7 @@ File.WriteAllText (
 """
         version
         (depVersion "@anthropic-ai/claude-agent-sdk")
+        (depVersion "dockerode")
         (depVersion "node-datachannel")
         (depVersion "zod"))
 

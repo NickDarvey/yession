@@ -38,6 +38,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\src\Fable.Dockerode\Fable.Dockerode.fsproj" />
     <ProjectReference Include="..\src\Yession.Domain\Yession.Domain.fsproj" />
     <ProjectReference Include="..\src\Yession.Manager\Yession.Manager.fsproj" />
     <ProjectReference Include="..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />

@@ -16,11 +16,65 @@ module private IdString =
         elif String.IsNullOrWhiteSpace raw then Error (label + " cannot be empty or whitespace")
         else Ok (raw.Trim())
 
+/// Crockford base32 — the encoding that turns a session id into a value that is also a
+/// legal Docker object name with no transformation. The alphabet is a strict subset of
+/// Docker's `[a-zA-Z0-9]`; a 128-bit value encodes to a fixed 26-char string. Pure integer
+/// arithmetic so it compiles the same under .NET and Fable.
+module private Base32Crockford =
+
+    [<Literal>]
+    let private Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+    /// Encode bytes as Crockford base32, no padding. 16 bytes -> 26 chars.
+    let encode (bytes: byte[]) : string =
+        let sb = System.Text.StringBuilder()
+        let mutable buffer = 0
+        let mutable bits = 0
+        for b in bytes do
+            buffer <- (buffer <<< 8) ||| int b
+            bits <- bits + 8
+            while bits >= 5 do
+                bits <- bits - 5
+                sb.Append(Alphabet.[(buffer >>> bits) &&& 0x1F]) |> ignore
+                // Keep only the still-unconsumed low bits so `buffer` never overflows an int.
+                buffer <- buffer &&& ((1 <<< bits) - 1)
+        if bits > 0 then
+            sb.Append(Alphabet.[(buffer <<< (5 - bits)) &&& 0x1F]) |> ignore
+        sb.ToString()
+
+    let private hexNibble (c: char) : int =
+        if c >= '0' && c <= '9' then int c - int '0'
+        elif c >= 'a' && c <= 'f' then int c - int 'a' + 10
+        elif c >= 'A' && c <= 'F' then int c - int 'A' + 10
+        else 0
+
+    /// 16 random bytes from a fresh v4 GUID, parsed from its hex form (portable across
+    /// .NET and Fable — no reliance on `Guid.ToByteArray` byte ordering).
+    let guidBytes () : byte[] =
+        let hex = (Guid.NewGuid().ToString()).Replace("-", "")
+        Array.init 16 (fun i -> byte ((hexNibble hex.[i * 2] <<< 4) ||| hexNibble hex.[i * 2 + 1]))
+
 type SessionId = private SessionId of string
 
 module SessionId =
+    let private isNameChar (c: char) =
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+        || c = '_' || c = '.' || c = '-'
+    let private isNameStart (c: char) =
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+
+    /// A session id is always a valid Docker object name: the container and its named
+    /// workspace volume are named by the id verbatim (docs/plans/03). `mint` produces one;
+    /// `create` parses one off the wire/env and rejects anything Docker could not name.
     let create (raw: string) : Result<SessionId, string> =
-        normalize "SessionId" raw |> Result.map SessionId
+        normalize "SessionId" raw
+        |> Result.bind (fun s ->
+            if s.Length >= 2 && isNameStart s.[0] && String.forall isNameChar s then Ok (SessionId s)
+            else Error "SessionId must be a valid container name ([A-Za-z0-9][A-Za-z0-9_.-]+)")
+
+    /// Mint a fresh id: 128 random bits, Crockford base32-encoded (26 chars, Docker-safe).
+    let mint () : SessionId = SessionId (Base32Crockford.encode (Base32Crockford.guidBytes ()))
+
     let value (SessionId s) = s
 
 type PeerId = private PeerId of string

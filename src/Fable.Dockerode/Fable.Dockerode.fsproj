@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Fable bindings to the `dockerode` npm package (the Docker backend's engine client).
+    Fable-only, like app/Yession.Host.fsproj: `dotnet build` only type-checks it; the
+    runnable JS comes from Fable. Kept a standalone project so the bindings are a distinct
+    layer, mirroring how Fable.Yjs wraps yjs.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Dockerode.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>

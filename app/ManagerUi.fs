@@ -103,8 +103,9 @@ let private bodyTemplate (views: ProcessManager.SessionView list) : TemplateResu
     html $"""
         <main class="max-w-4xl mx-auto px-8 py-10 flex flex-col gap-8">
           <h1 class="{Style.wordmark}">yession<span class="text-green">.</span> <span class="{Style.label}">manager</span></h1>
+          <!-- The id is minted server-side (a Docker-safe Crockford id); only a human name
+               and the token are entered here. -->
           <form class="flex flex-wrap items-end gap-3" data-create-session>
-            <input name="id" placeholder="session id" required class="bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue">
             <input name="name" placeholder="display name" class="bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue">
             <input name="token" placeholder="token" required class="bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue">
             <button type="submit" class="{Style.btnPrimary}">Create</button>
@@ -177,7 +178,7 @@ let tryHandle (pm: ProcessManager.ProcessManager) (req: IncomingMessage) (res: S
         true
     | "POST", "/sessions" ->
         readBody req (fun body ->
-            match pm.CreateSession (formField body "id") (formField body "name") (formField body "token") with
+            match pm.CreateSession (SessionId.value (SessionId.mint ())) (formField body "name") (formField body "token") with
             | Ok _ -> html res (sessionsTable (pm.Sessions ()))
             | Error e -> respond res 400 "text/plain" e)
         true
