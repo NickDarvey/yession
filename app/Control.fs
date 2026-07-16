@@ -5,12 +5,15 @@ module Yession.Host.Control
 // stays IN the Manager — the child authenticates each call with its per-launch secret,
 // the secret resolves to the capabilities the Manager granted that launch (the RPC
 // equivalent of the Step 11 closure), and every handle re-validates against the
-// Manager's registry. 127.0.0.1 only; NO session content crosses this channel.
+// Manager's registry. 127.0.0.1 only. The channel carries environment and command
+// traffic, plus ONE piece of session metadata — the session's self-assigned display name
+// (a label, never conversation or event content) — so the Manager's list reflects the title.
 //
 // Routes (all POST, secret in the `x-yession-control` header):
 //   /control/start    EnvironmentSpec        -> StartContainerResult
 //   /control/stop     ContainerHandle        -> StopContainerResult
 //   /control/execute  ExecuteRequest         -> NDJSON: chunk* then exactly one result
+//   /control/name     { name }               -> "ok" (updates the registry display name)
 
 open Fable.Core.JsInterop
 open Yession.Domain
@@ -37,14 +40,15 @@ let private respond (res: ServerResponse) (status: int) (text: string) =
 /// composing HTTP server (the management UI shares the port) falls through.
 let tryHandle
     (resolve: string -> SessionEnvironmentCapabilities option)
+    (reportName: string -> string -> Async<Result<unit, string>>)
     (req: IncomingMessage)
     (res: ServerResponse)
     : bool =
     let path = pathnameOf req.url
     if not (path.StartsWith "/control/") then false
     else
-        let capabilities =
-            headerOf req "x-yession-control" |> Option.bind resolve
+        let secret = headerOf req "x-yession-control"
+        let capabilities = secret |> Option.bind resolve
         match capabilities with
         | None -> respond res 401 "invalid control secret"
         | Some capabilities ->
@@ -80,6 +84,16 @@ let tryHandle
                                     res.write (ControlWire.toString ControlWire.executeLine (ControlWire.OutputLine chunk) + "\n")
                                     |> ignore)
                             res.``end`` (ControlWire.toString ControlWire.executeLine (ControlWire.ResultLine result) + "\n")
+                        }))
+            | "POST", "/control/name" ->
+                // Session metadata, not environment authority: the secret only names WHICH
+                // session is reporting; the Manager updates that session's display name.
+                decodeAnd (ControlWire.fromString ControlWire.sessionNameReport) (fun name ->
+                    Async.StartImmediate (
+                        async {
+                            match! reportName (Option.defaultValue "" secret) name with
+                            | Ok () -> respond res 200 "ok"
+                            | Error e -> respond res 400 e
                         }))
             | _ -> respond res 404 "not found"
         true

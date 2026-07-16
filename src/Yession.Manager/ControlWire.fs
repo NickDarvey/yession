@@ -231,6 +231,13 @@ module ControlWire =
                 [ Decode.field "chunk" commandOutputChunk.Decode |> Decode.map OutputLine
                   Decode.field "result" Codec.commandResult.Decode |> Decode.map ResultLine ] }
 
+    /// A session's self-assigned display name, reported child→Manager. The one piece of
+    /// non-environment traffic on the control channel: a label (metadata), never
+    /// conversation or event content.
+    let sessionNameReport : Codec<string> =
+        { Encode = fun name -> Encode.object [ "name", Encode.string name ]
+          Decode = Decode.field "name" Decode.string }
+
     let toString (codec: Codec<'a>) (value: 'a) : string = codec.Encode value |> Encode.toString 0
 
     let fromString (codec: Codec<'a>) (json: string) : Result<'a, string> = Decode.fromString codec.Decode json

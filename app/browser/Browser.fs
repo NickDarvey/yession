@@ -106,6 +106,34 @@ let private timelineScroll () : float option = jsNative
 })()""")>]
 let private restoreTimelineScroll (position: float) : unit = jsNative
 
+// Remote cursors carry a character index; a native <input> has no per-character DOM
+// geometry, so we measure the pixel offset of the substring before the caret with a canvas
+// using the input's own font, then place each caret absolutely (and colour it by a stable
+// hash of the peer id). Runs after every Lit render — the DOM is up to date synchronously.
+[<Emit("""(() => {
+  const input = document.querySelector('input[data-session-title]')
+  const markers = document.querySelectorAll('[data-title-cursor]')
+  if (!input || !markers.length) return
+  const cs = getComputedStyle(input)
+  const canvas = (window.__yTitleCanvas || (window.__yTitleCanvas = document.createElement('canvas')))
+  const ctx = canvas.getContext('2d')
+  ctx.font = cs.font && cs.font.trim() ? cs.font : (cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily)
+  const value = input.value || ''
+  const padLeft = parseFloat(cs.paddingLeft) || 0
+  for (const m of markers) {
+    const raw = parseInt(m.getAttribute('data-title-cursor'), 10)
+    const idx = Math.max(0, Math.min(value.length, isNaN(raw) ? 0 : raw))
+    const w = ctx.measureText(value.slice(0, idx)).width
+    m.style.left = (padLeft + w - (input.scrollLeft || 0)) + 'px'
+    const peer = m.getAttribute('data-cursor-peer') || ''
+    let h = 0; for (let i = 0; i < peer.length; i++) h = (h * 31 + peer.charCodeAt(i)) | 0
+    const color = 'hsl(' + ((((h % 360) + 360) % 360)) + ', 70%, 55%)'
+    m.style.background = color
+    if (m.firstElementChild) m.firstElementChild.style.background = color
+  }
+})()""")>]
+let private positionTitleCursors () : unit = jsNative
+
 // The sidebar/drawer state is one bit on the root element, outside `#app`, so it survives
 // every re-render: default = sidebar visible on desktop, off-canvas on mobile; `nav-alt`
 // = the inverse (see Style.sidebar).
@@ -173,7 +201,8 @@ let private start () =
         let actions : ViewActions =
             { NewQueueId = fun () -> match QueueId.create (mintId "queue") with Ok q -> q | Error e -> failwith e
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
-              ToggleNav = toggleNav }
+              ToggleNav = toggleNav
+              ReportTitleCursor = fun index -> connectionRef |> Option.iter (fun c -> c.ReportCursor index) }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
@@ -188,6 +217,9 @@ let private start () =
             match scroll with
             | Some position -> restoreTimelineScroll position
             | None -> ()
+            // Place collaborators' title carets by measurement (native inputs have no
+            // per-character geometry); a no-op when there are no remote cursors.
+            positionTitleCursors ()
 
         App.makeProgram doc initial
         |> Program.withSetState setState

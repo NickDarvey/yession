@@ -142,6 +142,38 @@ let private codecTests =
 
             Expect.equal (bodyOf ada (pA.Model ())) (Some "oh, hello world") "both edits survive on A"
             Expect.equal (bodyOf ada (pB.Model ())) (bodyOf ada (pA.Model ())) "models converge"
+
+        testCase "the collaborative title round-trips through the codec" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            p.Dispatch (user (EditTitleMsg (Text.insert 0 "Launch plan" (p.Model ()).Synced.Title)))
+
+            let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+            Expect.equal decoded (p.Model ()).Synced "the doc decodes back to exactly the model's synced state"
+            Expect.equal (Text.toString decoded.Title) "Launch plan" "the title crossed the boundary"
+            Expect.isTrue (doc.share.has "title") "the title anchors to a named text root"
+
+        testCase "two in-memory clients converge on the title (concurrent edits interleave)" <| fun () ->
+            let docA = Y.Doc.Create ()
+            let docB = Y.Doc.Create ()
+            // Pin clientIDs so concurrent ties resolve to one deterministic outcome.
+            docA.clientID <- 1.0
+            docB.clientID <- 2.0
+            let pA = Harness.run (App.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
+            let pB = Harness.run (App.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
+
+            // Ada names the session; Grace sees it after a sync.
+            pA.Dispatch (user (EditTitleMsg (Text.insert 0 "plan" (pA.Model ()).Synced.Title)))
+            syncBoth docA docB
+            Expect.equal (Text.toString (pB.Model ()).Synced.Title) "plan" "B sees A's title after sync"
+
+            // Concurrent edits from both peers merge rather than clobber.
+            pA.Dispatch (user (EditTitleMsg (Text.insert 4 " day" (pA.Model ()).Synced.Title)))
+            pB.Dispatch (user (EditTitleMsg (Text.insert 0 "the " (pB.Model ()).Synced.Title)))
+            syncBoth docA docB
+
+            Expect.equal (Text.toString (pA.Model ()).Synced.Title) "the plan day" "both edits survive on A"
+            Expect.equal (Text.toString (pB.Model ()).Synced.Title) (Text.toString (pA.Model ()).Synced.Title) "models converge"
     ]
 
 // -----------------------------------------------------------------------------
@@ -450,9 +482,43 @@ let private e2eTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Pure client-model reducers for the editable title and cursor presence.
+// -----------------------------------------------------------------------------
+
+let private titlePresenceTests =
+    let base' = ClientModel.init (peer "ada" "Ada")
+    let bob = PeerId.create "bob" |> expect
+    testList "Title and presence (client model)" [
+        testCase "ConnectedMsg records the session id as the secondary identifier" <| fun () ->
+            let accepted =
+                { SessionId = SessionId.create "demo-session" |> expect
+                  AssignedDisplayName = "swift-heron"
+                  LatestOffset = None }
+            let next = ClientModel.update (ConnectedMsg accepted) base'
+            Expect.equal next.Session (Some (SessionId.create "demo-session" |> expect)) "the session id is learned from PeerAccepted"
+
+        testCase "EditTitleMsg sets the collaborative title" <| fun () ->
+            let next = ClientModel.update (EditTitleMsg (Text.insert 0 "launch" base'.Synced.Title)) base'
+            Expect.equal (Text.toString next.Synced.Title) "launch" "the title reflects the edit"
+
+        testCase "RemotePresenceMsg adds, updates, and clears a peer's cursor" <| fun () ->
+            let added = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = "brave-owl"; TitleCursor = Some 3 }) base'
+            Expect.equal (Map.tryFind bob added.Presence) (Some { DisplayName = "brave-owl"; Index = 3 }) "the peer's caret is recorded"
+            let moved = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = "brave-owl"; TitleCursor = Some 7 }) added
+            Expect.equal (Map.tryFind bob moved.Presence |> Option.map (fun c -> c.Index)) (Some 7) "the caret moves"
+            let cleared = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = ""; TitleCursor = None }) moved
+            Expect.isFalse (Map.containsKey bob cleared.Presence) "a cleared cursor removes the peer"
+
+        testCase "RemotePresenceMsg ignores the local peer's own cursor" <| fun () ->
+            let next = ClientModel.update (RemotePresenceMsg { PeerId = base'.Peer.PeerId; DisplayName = "Ada"; TitleCursor = Some 2 }) base'
+            Expect.isFalse (Map.containsKey base'.Peer.PeerId next.Presence) "you never render your own remote caret"
+    ]
+
 let tests =
     testList "Sync" [
         codecTests
         queueUnitTests
+        titlePresenceTests
         Tag.verify e2eTests
     ]

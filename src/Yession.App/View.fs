@@ -24,7 +24,10 @@ type ViewActions =
       /// Ask the Session Process to cancel the running agent turn.
       Interrupt : AgentTurnId -> unit
       /// Toggle the sidebar drawer (a presentation bit on the shell root, not model).
-      ToggleNav : unit -> unit }
+      ToggleNav : unit -> unit
+      /// Broadcast the local caret position in the title (`None` = caret left the title),
+      /// so collaborators see the cursor. Ephemeral presence, relayed to other peers.
+      ReportTitleCursor : int option -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -33,7 +36,8 @@ module ViewActions =
     let ssr : ViewActions =
         { NewQueueId = fun () -> match QueueId.create "ssr-queue" with Ok q -> q | Error e -> failwith e
           Interrupt = ignore
-          ToggleNav = ignore }
+          ToggleNav = ignore
+          ReportTitleCursor = ignore }
 
 module View =
 
@@ -182,11 +186,41 @@ module View =
         | Disconnected ->
             html $"""<span class="{Style.cls [ Style.statusFaint; Style.headerStatus ]}">disconnected</span>"""
 
-    let private header (actions: ViewActions) (model: ClientModel) : TemplateResult =
+    /// The caret index (`selectionStart`) of the event's target input, or `None` when it
+    /// has no collapsed caret. Read live from the DOM; only ever invoked in the browser
+    /// (SSR drops event bindings), so the `.NET` type-check sees a signature it never runs.
+    [<Fable.Core.Emit("($0 && $0.target && typeof $0.target.selectionStart === 'number') ? $0.target.selectionStart : null")>]
+    let private caretOf (e: obj) : int option = Fable.Core.Util.jsNative
+
+    /// One collaborator's caret marker: an empty bar the browser positions and colours by
+    /// measurement after render (its `left` and accent are inline styles set there). The
+    /// index and peer ride `data-*` so the measurement pass finds and places them.
+    let private remoteCursor (peerId: PeerId) (cursor: RemoteCursor) : TemplateResult =
+        html $"""
+            <span class="{Style.remoteCursor}" data-title-cursor="{string cursor.Index}" data-cursor-peer="{PeerId.value peerId}">
+              <span class="{Style.remoteCursorLabel}">{cursor.DisplayName}</span>
+            </span>"""
+
+    let private header (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        let titleStr = Ylmish.Text.toString model.Synced.Title
+        let sessionIdText = model.Session |> Option.map SessionId.value |> Option.defaultValue ""
+        let cursors = model.Presence |> Map.toList |> List.map (fun (peerId, cursor) -> remoteCursor peerId cursor)
         html $"""
             <header class="{Style.header}">
               <button type="button" class="{Style.cls [ Style.navChevron; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}>›</button>
-              <h1 class="{Style.cls [ Style.heading; Style.headerTitle ]}">session</h1>
+              <div class="{Style.cls [ Style.titleWrap; Style.headerTitle ]}">
+                <input type="text" class="{Style.titleInput}" data-session-title aria-label="Session title" placeholder="session"
+                       value="{titleStr}"
+                       .value={titleStr}
+                       @input={EvVal(fun v -> dispatch (EditTitleMsg (Ylmish.Text.edit v model.Synced.Title)))}
+                       @keyup={Ev(fun e -> actions.ReportTitleCursor (caretOf e))}
+                       @click={Ev(fun e -> actions.ReportTitleCursor (caretOf e))}
+                       @select={Ev(fun e -> actions.ReportTitleCursor (caretOf e))}
+                       @focus={Ev(fun e -> actions.ReportTitleCursor (caretOf e))}
+                       @blur={Ev(fun _ -> actions.ReportTitleCursor None)}>
+                {cursors}
+                <span class="{Style.titleId}" data-session-id>{sessionIdText}</span>
+              </div>
               {headerStatus model}
             </header>"""
 
@@ -296,7 +330,7 @@ module View =
         html $"""
             {sidebar actions model}
             <div class="{Style.mainColumn}">
-              {header actions model}
+              {header actions dispatch model}
               {conversation model.Conversation}
               {agentStrip actions model.Agent}
               {queue dispatch model.Synced}

@@ -14,6 +14,8 @@ open Yession.Tests.Support
 
 let private queueId = QueueId.create "queue-ui" |> expect
 let private ada = PeerId.create "ada" |> expect
+let private bob = PeerId.create "bob" |> expect
+let private sessionId = SessionId.create "demo-session" |> expect
 
 /// A model exercising every UI element at once: connected, mid catch-up, one draft
 /// (sendable), one queued message (editable/reorderable/deletable), a completed human
@@ -22,6 +24,7 @@ let private representativeModel : ClientModel =
     let turnId = AgentTurnId.create "turn-ui" |> expect
     { Peer = { PeerId = ada; DisplayName = "swift-heron" }
       Connection = Connected
+      Session = Some sessionId
       Synced =
         { Drafts =
             Map.ofList
@@ -31,6 +34,7 @@ let private representativeModel : ClientModel =
             Map.ofList
                 [ queueId,
                   { QueueId = queueId; Author = ada; Body = Ylmish.Text.ofString "queued for the agent"; Order = 1.0 } ]
+          Title = Ylmish.Text.ofString "planning the launch"
           SharedBrief = None }
       Conversation =
         { Items =
@@ -48,6 +52,7 @@ let private representativeModel : ClientModel =
           LatestKnownOffset = Some (EventOffset.create 7L |> expect)
           IsCatchingUp = true }
       Agent = { ActiveTurn = Some turnId }
+      Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Index = 4 } ]
       Environment = EnvironmentNotStarted
       Commands = CommandLog.empty }
 
@@ -58,6 +63,11 @@ let private uiChecklistTests =
             let required =
                 [ "session connection status", Dom.Hooks.connection
                   "connection state value", Dom.hookText Dom.Hooks.connection Dom.Text.connected
+                  "editable session title", Dom.Hooks.sessionTitle
+                  "title body", "planning the launch"
+                  "session id secondary identifier", Dom.hookText Dom.Hooks.sessionId "demo-session"
+                  "remote collaborator cursor", Dom.attr Dom.Hooks.titleCursor "4"
+                  "remote cursor peer label", "brave-owl"
                   "peer display name", Dom.hookText Dom.Hooks.displayName "swift-heron"
                   "collaborative draft editor", Dom.Hooks.draftEditor
                   "draft body", "half-typed idea"

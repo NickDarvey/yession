@@ -29,6 +29,14 @@ let private environmentCapabilities =
     | _, "" -> None
     | url, secret -> Some (ControlClient.capabilities url secret)
 
+// The same control channel carries the collaborative title back to the Manager as the
+// session's display name, when a control channel exists for this launch.
+let private reportName =
+    match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
+    | "", _
+    | _, "" -> None
+    | url, secret -> Some (ControlClient.nameReporter url secret)
+
 /// A built-in diagnostic runner (`YESSION_AGENT=diagnostic`): exercises the session's
 /// environment capability end to end — ensure, execute, stream — without model
 /// credentials. The verify suite drives it across real process boundaries; it doubles
@@ -72,7 +80,7 @@ Async.StartImmediate (
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
-        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) sessionId token port
+        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName sessionId token port
         // Sessions never outlive their Manager: spawned under the guard, the Manager's
         // death closes our stdin (the kernel does this even on SIGKILL) and we exit.
         if Interop.envOr "YESSION_PARENT_GUARD" "" = "1" then

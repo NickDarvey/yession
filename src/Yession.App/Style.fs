@@ -127,6 +127,33 @@ module Style =
     let headerTitle = "ml-8"
     let headerStatus = "ml-auto shrink-0 pb-1"
 
+    // --- Editable session title ------------------------------------------------------------
+
+    /// The title block: the editable heading over its dim secondary id. `relative` anchors
+    /// the absolutely-positioned remote-cursor overlays; `ml-8` keeps it on the content column.
+    let titleWrap = "relative flex flex-col min-w-0 ml-8"
+
+    /// The title itself: the heading, worn by a text input. No chrome except a subtle dotted
+    /// underline (the editable affordance) that goes solid blue on focus. Edits in place, no
+    /// save button — the model is the collaborative `Title` text.
+    let titleInput =
+        "w-full min-w-0 bg-transparent border-0 border-b border-dotted border-ink-faint "
+        + "focus:border-solid focus:border-blue outline-none px-0 py-0 "
+        + "font-extralight text-[28px] leading-8 tracking-[-0.01em] lowercase text-ink "
+        + "placeholder:text-ink-faint truncate"
+
+    /// The session id, shown small and dim under the title as a stable secondary identifier.
+    let titleId = "font-mono text-[11px] leading-4 text-ink-faint truncate mt-0.5"
+
+    /// A collaborator's caret in the title, positioned by measurement in the browser (the
+    /// `left` and accent colour are set as inline styles post-render). Two-px bar the height
+    /// of the input, ignoring pointer events so it never blocks typing.
+    let remoteCursor = "absolute top-0 w-0.5 h-8 -ml-px pointer-events-none"
+    /// The peer-name pill floating just above a remote caret.
+    let remoteCursorLabel =
+        "absolute -top-3 left-0 whitespace-nowrap font-semibold text-[9px] leading-3 "
+        + "tracking-[0.08em] uppercase px-1 text-bg"
+
     /// The reopen chevron, floated in the gutter left of the title so it never shifts the
     /// heading off the content column. Hidden while the sidebar is visible.
     let navReopen =

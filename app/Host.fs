@@ -41,6 +41,7 @@ let startFull
     (environmentCapabilities: SessionEnvironmentCapabilities option)
     (baseLog: EventLog<SessionEvent> option)
     (docStore: DocStore.DocStore option)
+    (reportName: (string -> Async<unit>) option)
     (sessionId: SessionId)
     (token: string)
     (port: int)
@@ -64,6 +65,12 @@ let startFull
 
         let broadcastExcept (except: int) (payload: string) =
             connections |> Map.iter (fun id channel -> if id <> except then sendState channel payload)
+
+        // Ephemeral cursor presence: relayed to every OTHER peer, never applied to the doc
+        // or the log. A peer disconnecting relays a cleared cursor so its caret vanishes.
+        let broadcastPresenceExcept (except: int) (payload: PresencePayload) =
+            connections
+            |> Map.iter (fun id channel -> if id <> except then Async.StartImmediate (channel.Send (Presence payload)))
 
         // Every durable fact is advertised: appends go through a log wrapper that
         // broadcasts the new latest offset to all connected peers (clients page the
@@ -138,6 +145,23 @@ let startFull
         // durable facts (only their send is) — so a new draft appearing needs no append.
         DocSync.onAnyUpdate doc (fun () -> drain ())
 
+        // Report the collaborative title to the Manager (metadata, not an event) so the
+        // session list reflects it. Last-value debounced: only a changed, non-empty title
+        // is reported, and Yjs already coalesces keystrokes into transactions. Inert when
+        // there is no Manager report hook (a session with no control channel).
+        match reportName with
+        | Some report ->
+            let mutable lastReported = ""
+            DocSync.onAnyUpdate doc (fun () ->
+                match SyncedStateSync.ofDoc doc with
+                | Ok synced ->
+                    let title = (Ylmish.Text.toString synced.Title).Trim ()
+                    if title <> "" && title <> lastReported then
+                        lastReported <- title
+                        Async.StartImmediate (report title)
+                | Error _ -> ())
+        | None -> ()
+
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the
         // crash window — the log-anchored dedup repairs them without re-consuming).
@@ -158,12 +182,18 @@ let startFull
                         DocSync.applyRemote doc payload
                         broadcastExcept connectionId payload
                   OnCommand = SessionCommands.handle requestInterrupt
+                  OnPresence = fun payload -> broadcastPresenceExcept connectionId payload
                   OnAccepted =
-                    fun _ ch ->
+                    fun peerId ch ->
                         async {
                             connections <- Map.add connectionId ch connections
                             do! ch.Send (State (StateSync (DocSync.fullState doc)))
-                            return fun () -> connections <- Map.remove connectionId connections
+                            return
+                                fun () ->
+                                    connections <- Map.remove connectionId connections
+                                    // Clear this peer's cursor on every remaining peer.
+                                    broadcastPresenceExcept connectionId
+                                        { PeerId = peerId; DisplayName = ""; TitleCursor = None }
                         } }
             Async.StartImmediate(
                 async {
@@ -233,7 +263,7 @@ let startWithCapabilities
     (token: string)
     (port: int)
     : Async<SessionHost> =
-    startFull runAgent environmentCapabilities baseLog None sessionId token port
+    startFull runAgent environmentCapabilities baseLog None None sessionId token port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =

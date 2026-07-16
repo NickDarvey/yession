@@ -45,6 +45,15 @@ module ManagerState =
         else
             Ok { state with Sessions = state.Sessions @ [ record ] }
 
+    /// Rename a session's display name (the session's self-assigned title, reported over the
+    /// control channel). A no-op if the session is not registered; the registry key
+    /// (`SessionId`) never changes, so this only ever touches `DisplayName`.
+    let setDisplayName (sessionId: SessionId) (displayName: string) (state: ManagerState) : ManagerState =
+        { state with
+            Sessions =
+                state.Sessions
+                |> List.map (fun s -> if s.SessionId = sessionId then { s with DisplayName = displayName } else s) }
+
 /// The explicit wire codec for the Manager's state — the ONLY way it touches storage
 /// (same discipline as the event envelope). Hand-written so private constructors are
 /// honoured; decoding tolerates unknown fields, so a newer schema's file still loads.

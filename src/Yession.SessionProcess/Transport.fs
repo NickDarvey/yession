@@ -15,6 +15,9 @@ module PeerSession =
           /// Called with every command request the accepted peer sends; the result is
           /// returned to the peer as the command response.
           OnCommand : PeerId -> SessionCommand -> Async<SessionCommandResult>
+          /// Called with every ephemeral presence update the peer sends (relay to other
+          /// peers); never durable, so nothing is appended.
+          OnPresence : PresencePayload -> unit
           /// Called once after `PeerAccepted` is sent, with the peer's channel (e.g. to
           /// send the initial state and register the peer for relay). Returns the
           /// cleanup to run when the peer disconnects.
@@ -27,6 +30,7 @@ module PeerSession =
         let none<'State> : PeerHandlers<'State> =
             { OnState = ignore
               OnCommand = fun _ _ -> async { return CommandRejected "commands are not handled" }
+              OnPresence = ignore
               OnAccepted = fun _ _ -> async { return fun () -> () } }
 
     /// Run a peer session over a connected channel until the peer disconnects.
@@ -69,6 +73,9 @@ module PeerSession =
                         | Some (Command (Request (requestId, command))) ->
                             let! result = handlers.OnCommand hello.PeerId command
                             do! channel.Send (Command (Response (requestId, result)))
+                            return! pump ()
+                        | Some (Presence payload) ->
+                            handlers.OnPresence payload
                             return! pump ()
                         | Some (EventLog (ReadEventsAfter (requestId, after, limit))) ->
                             // Clients are read-only consumers: reads are served, and no

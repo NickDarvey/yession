@@ -69,7 +69,7 @@ let createFull
                 let baseLog = makeLog |> Option.map (fun make -> make request.SessionId)
                 let docStore = makeDocStore |> Option.map (fun make -> make request.SessionId)
                 let! host =
-                    Host.startFull runAgent environmentCapabilities baseLog docStore request.SessionId request.SessionToken port
+                    Host.startFull runAgent environmentCapabilities baseLog docStore None request.SessionId request.SessionToken port
                 let bootstrapUri = sprintf "http://127.0.0.1:%d/" host.Port
                 let managed =
                     { SessionId = request.SessionId
