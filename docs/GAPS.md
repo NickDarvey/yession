@@ -33,7 +33,7 @@ they matter.
 
 - **The process split is done** (Phase 4): each session is a child OS process of the
   Manager, capabilities cross the boundary as a secret-scoped control RPC, and
-  sessions are created/launched/resumed/stopped from the htmx management UI — but
+  sessions are created/launched/resumed/stopped from the management UI — but
   **children die with the Manager** (no daemonising, no orphan adoption): a Manager
   restart stops every running session, and resumes are manual clicks.
 - **The Manager is practically a singleton.** Nothing global is assumed (per-instance
@@ -70,10 +70,6 @@ they matter.
 
 ## Browser client
 
-- **Rendering is innerHTML-replacement with a focus/caret restore hack** for the draft
-  being typed. Fine at this scale; a proper reconciling renderer (Elmish.React or
-  morphdom) is the upgrade path. Caret position is restored to end-of-text, so editing
-  mid-string while remote edits land can jump the caret.
 - **One draft textarea UX**: no presence cursors, no per-peer selections, no rich text.
 - **Reconnect is manual** (reload). The model reaches `Reconnecting`, but the browser
   shell does not yet redial and resume (the protocol supports it — E2E-4 proves resume
@@ -116,12 +112,9 @@ they matter.
 - **First install downloads the native `claude`** (~240 MB, platform-specific): it is
   not in the 300 KB tarball, npm fetches it. So the *first* install needs network and
   disk; the SDK's own resolution finds it thereafter (no `YESSION_CLAUDE_PATH` needed).
-- **The composition E2E and install smoke run on Linux/CI**; other platforms' native
-  resolution rides npm's own optional-dependency machinery, unverified per-commit.
-- **darwin-x64 is not built** (runners produce linux-x64 and darwin-arm64); Intel Mac
-  users need Rosetta or a matrix addition.
-- **No Windows build**; no signing/notarisation for macOS binaries (Gatekeeper will
-  warn).
+- **The composition E2E and install smoke run on Linux/CI**; other platforms (macOS,
+  Windows) rely on npm's own optional-dependency machinery to resolve the native deps,
+  unverified per-commit.
 - **No telemetry, structured logging, or crash reporting**; the Process logs to stdout.
 - **Interactive terminal, multi-node/remote sessions, and work-intake integrations
   (Slack/Linear)** remain out of scope, as planned.
