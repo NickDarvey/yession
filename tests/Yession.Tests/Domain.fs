@@ -18,6 +18,28 @@ let private identityTests =
         testCase "SessionId rejects blank input" <| fun () ->
             Expect.isError (SessionId.create "   ") "blank should be rejected"
 
+        testCase "SessionId rejects non-Docker-safe characters" <| fun () ->
+            // The id names a container and volume verbatim, so it must be a legal Docker
+            // object name: no spaces, slashes, or a leading punctuation char.
+            Expect.isError (SessionId.create "bad id") "spaces should be rejected"
+            Expect.isError (SessionId.create "bad/id") "slashes should be rejected"
+            Expect.isError (SessionId.create "-lead") "leading '-' should be rejected"
+            Expect.isError (SessionId.create "x") "a single char is too short for a Docker name"
+
+        testCase "SessionId.mint produces a Docker-safe id that create accepts" <| fun () ->
+            let minted = SessionId.mint ()
+            let raw = SessionId.value minted
+            Expect.equal raw.Length 26 "128 bits Crockford base32-encode to 26 chars"
+            let isSafe c =
+                (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                || c = '_' || c = '.' || c = '-'
+            Expect.isTrue (String.forall isSafe raw) "every char is a legal Docker name char"
+            // Round-trips through the parser (mint and create agree on the invariant).
+            Expect.equal (SessionId.create raw |> expect) minted "minted id parses back"
+
+        testCase "SessionId.mint is unique per call" <| fun () ->
+            Expect.isFalse (SessionId.mint () = SessionId.mint ()) "two mints differ"
+
         testCase "PeerId rejects empty input" <| fun () ->
             Expect.isError (PeerId.create "") "empty should be rejected"
 

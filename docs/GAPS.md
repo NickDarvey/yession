@@ -23,11 +23,16 @@ they matter.
   the Manager with the Manager's own user and environment. The *authority* contract
   (session scoping, handle validation) is enforced and tested, but the *engine* is not a
   sandbox. Use the Docker backend for isolation — see next.
-- **The Docker backend is shipped but only smoke-verified where a daemon exists.** The
-  dev container has no daemon, so CI/dev runs report the smoke as skipped. Mounts,
-  build specs, secret refs, and env-var refs in `EnvironmentSpec` are typed but not yet
-  interpreted by any backend.
-- **Secrets**: `SecretRef` exists in the spec vocabulary; there is no secret store.
+- **The Docker backend runs through the `dockerode` SDK and is integration-tested in the
+  verify gate.** Containers and a per-session named workspace volume are named by the
+  session id (a Crockford base32 id, always a valid Docker object name), and `EnvironmentSpec`
+  is fully interpreted — image/build, mounts (incl. the persistent workspace volume),
+  working directory, env-var refs, secret refs, and command timeouts. The suite
+  (`tests/Yession.Tests/DockerIntegration.fs`) runs where a daemon exists; on the CI
+  `verify` runner `YESSION_REQUIRE_DOCKER=1` makes a missing daemon a hard failure rather
+  than a silent skip. The dev container has no daemon, so local runs still report a skip.
+- **Secrets**: `SecretRef` resolves from a process-env store (local-dev only — see
+  `DockerBackend`); there is no real secret store yet.
 
 ## Runtime & topology
 

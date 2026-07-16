@@ -626,37 +626,34 @@ let private acceptanceE2eTests =
                 do! m.Stop ()
             }
 
-        testCaseAsync "Docker adapter smoke (runs where a daemon exists; reported skipped otherwise)" <|
+        // The daemon gate replaces the old silent no-op: present -> run; required-but-absent
+        // -> fail; absent -> reported skip (see Support.Docker.gate). Richer coverage lives
+        // in the DockerIntegration suite.
+        Docker.gate "Docker adapter smoke (real container start/exec/stop)" (fun () ->
             async {
-                match! Backends.DockerBackend.daemonAvailable () with
-                | false ->
-                    // No daemon in this environment: the authority layer is verified
-                    // engine-independently; this smoke runs wherever Docker exists.
-                    ()
-                | true ->
-                    let registry = Authority.ContainerRegistry ()
-                    let sessionId = SessionId.create "docker-smoke" |> expect
-                    let capabilities = Authority.grant registry (Backends.DockerBackend.create ()) sessionId
-                    match! capabilities.StartContainer EnvironmentSpec.localProcess with
-                    | ContainerStartFailed reason -> failwithf "docker start failed: %s" reason
-                    | ContainerStarted handle ->
-                        let mutable output = ""
-                        let! result =
-                            capabilities.Execute
-                                handle
-                                { CommandId = CommandId.create "docker-echo" |> expect
-                                  Executable = "echo"
-                                  Arguments = [ "hello-from-docker" ]
-                                  WorkingDirectory = None
-                                  Environment = Map.empty
-                                  Timeout = None }
-                                (fun c -> output <- output + c.Text)
-                        Expect.equal result (CommandSucceeded 0) "docker exec succeeded"
-                        Expect.isTrue (output.Contains "hello-from-docker") "docker exec streamed"
-                        match! capabilities.StopContainer handle with
-                        | ContainerStopped -> ()
-                        | ContainerStopFailed reason -> failwithf "docker stop failed: %s" reason
-            }
+                let registry = Authority.ContainerRegistry ()
+                let sessionId = SessionId.mint ()
+                let capabilities = Authority.grant registry (Backends.DockerBackend.create ()) sessionId
+                match! capabilities.StartContainer EnvironmentSpec.localProcess with
+                | ContainerStartFailed reason -> failwithf "docker start failed: %s" reason
+                | ContainerStarted handle ->
+                    let mutable output = ""
+                    let! result =
+                        capabilities.Execute
+                            handle
+                            { CommandId = CommandId.create "docker-echo" |> expect
+                              Executable = "echo"
+                              Arguments = [ "hello-from-docker" ]
+                              WorkingDirectory = None
+                              Environment = Map.empty
+                              Timeout = None }
+                            (fun c -> output <- output + c.Text)
+                    Expect.equal result (CommandSucceeded 0) "docker exec succeeded"
+                    Expect.isTrue (output.Contains "hello-from-docker") "docker exec streamed"
+                    match! capabilities.StopContainer handle with
+                    | ContainerStopped -> ()
+                    | ContainerStopFailed reason -> failwithf "docker stop failed: %s" reason
+            })
     ]
 
 // -----------------------------------------------------------------------------

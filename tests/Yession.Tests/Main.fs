@@ -20,6 +20,7 @@ let all =
         Tag.verify E2E.tests
         Tag.verify Client.tests
         Phase2.tests
+        DockerIntegration.tests
         Phase3.tests
         EventsHttp.tests
         Phase4.tests
