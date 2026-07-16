@@ -73,12 +73,12 @@ try {
   await pageA.waitForFunction(connected)
   await pageB.waitForFunction(connected)
 
-  // A starts a draft and types; B converges on the same body.
-  await pageA.click('[data-start-draft]')
+  // A types in its always-present composer (one draft per client, materialised on the
+  // first keystroke); B converges on the same body — it renders as a peer's draft there.
   await pageA.waitForSelector('textarea[data-draft-input]')
   await pageA.fill('textarea[data-draft-input]', 'hello from a real browser')
   await pageB.waitForFunction(
-    `document.querySelector('textarea[data-draft-input]')?.value === 'hello from a real browser'`)
+    `[...document.querySelectorAll('textarea[data-draft-input]')].some(t => t.value === 'hello from a real browser')`)
 
   // A sends; both timelines show the immutable message (from events, not Yjs). The
   // body node carries its own hook, so the snapshotted text is asserted exactly,
@@ -92,15 +92,15 @@ try {
 
   console.log('browser E2E: two real browser peers converged and saw the sent message')
 
-  // Client-side persistence (Step 20): A types a NEW draft, then the server is killed
-  // and its data wiped. After A reloads against the fresh server, the draft can only
-  // have come back from the browser's IndexedDB — and it re-syncs to B via the server.
-  await pageA.click('[data-start-draft]')
+  // Client-side persistence (Step 20): A types a NEW draft (its composer cleared when the
+  // first one sent), then the server is killed and its data wiped. After A reloads against
+  // the fresh server, the draft can only have come back from the browser's IndexedDB — and
+  // it re-syncs to B via the server.
   await pageA.waitForFunction(
     `document.querySelectorAll('textarea[data-draft-input]').length === 1`)
   await pageA.fill('textarea[data-draft-input]', 'persisted in the browser')
   await pageA.waitForFunction(
-    `document.querySelector('textarea[data-draft-input]')?.value === 'persisted in the browser'`)
+    `[...document.querySelectorAll('textarea[data-draft-input]')].some(t => t.value === 'persisted in the browser')`)
 
   const exited = new Promise((resolve) => host.on('exit', resolve))
   host.kill('SIGKILL')
