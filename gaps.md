@@ -21,8 +21,18 @@ drafts exist, who owns them, and how "collaborate" differs from "start my own".
 A draft is the **WIP tail** — the thing after the queue that is *not yet* queued. Like
 the last item in the queue, but uncommitted: no agent will ever see it until it is sent.
 
+**The queue is unchanged.** This plan bounds *drafts only*; the shared message queue
+stays exactly as Plan 01 delivered it — unbounded, many messages, editable/reorderable
+until the agent drains it. A peer still queues **as many messages as they like**: send
+moves their one draft into the queue and clears the slot, so they immediately draft the
+next. One draft at a time; any number of queued messages.
+
 - **At most one draft per client.** Each peer owns exactly zero-or-one WIP draft. This
-  is a *type-level* invariant, not a runtime cap (below).
+  is a *type-level* invariant, not a runtime cap (below). It caps *drafts*, never the
+  queue.
+- **You see every peer's draft.** Other clients' active drafts are visible in your
+  composer as first-class boxes (author badge, live body) — so the WIP tail shows
+  everyone's in-flight thought, not just yours.
 - **Collaborate, or write your own.** Two modes, no new machinery:
   - *Write your own* — type into **your** slot (keyed by your `PeerId`). This is the
     default composer, always present at the bottom.
