@@ -2,9 +2,10 @@
 
 > **Status: delivered.** The re-key, composer lifecycle, two-mode View, and owner-sends
 > all landed in one change. Verification: the full solution type-checks (0 warnings,
-> 0 errors) and the cheap test tier is **101/101** green (codec round-trip on
-> author-keyed drafts, two-client collaboration convergence, the queue property suite
-> driving the new send path, and the UI checklist). One follow-up is noted below.
+> 0 errors) and the cheap test tier is **102/102** green (codec round-trip on
+> author-keyed drafts, two-client collaboration convergence, a Hedgehog property for
+> invariant 4 below, the queue property suite driving the new send path, and the UI
+> checklist). One follow-up is noted below.
 >
 > Phase 1 · Collaboration (refinement)
 > Refines the [GAPS.md](../GAPS.md) § Browser client bullet
@@ -154,13 +155,12 @@ The change was small enough to land in one commit rather than staged steps:
 | Collaboration | Any peer co-edits any slot | Two-client convergence test (in-memory + the E2E-1 collaboration path) |
 | Owner-sends | `SendDraftMsg` owner-only; delete `DraftId`/`DraftStarted`/`MessageSent.DraftId` | Send E2E (enqueue → drain → one `MessageSent`, slot clears on both clients); every-`SessionEvent`-case wire round-trip with the two events gone |
 | Send-many | Send clears the slot; a peer enqueues repeatedly | The queue property suite (invariants 1–7) drives every enqueue through the author-keyed slot |
+| Invariant 4 (clean send) | send removes exactly the slot, appends one snapshotted entry, later edits never mutate it | Dedicated `property {}` — `Properties.fs` "Draft invariant 4 — clean send": generated schedules of slot edits + sends over a real client program, asserting one snapshotted queue entry per send, owner attribution, and immutability under post-send edits |
 
-**Follow-up (not done):** dedicated draft-invariant `property {}` blocks (invariants 1–5
-above) were not added. Invariants 1/3/5 are structural (the `Map<PeerId,_>` type and
-Step 05's existing convergence coverage); the queue property harness already exercises
-the author-keyed send path. Adding draft-op schedules (edit-slot / send / discard /
-offline-rejoin) to the Hedgehog harness would pin 2 and 4 directly — a good next step if
-the composer grows.
+**Follow-up (not done):** invariant 4 (clean send) is now pinned by its own `property {}`
+block; invariants 1/3/5 are structural (the `Map<PeerId,_>` type and Step 05's existing
+convergence coverage). Invariant 2 (participation) remains the noted follow-up — adding
+co-edit / offline-rejoin draft schedules to the Hedgehog harness would pin it directly.
 
 ## Risks & open questions
 

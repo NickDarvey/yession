@@ -79,8 +79,8 @@ they matter.
   structurally, not by a runtime cap. Any peer may co-edit any slot (collaboration); the
   owner sends their own. The queue is untouched (send clears the slot, so a client still
   queues many by sending repeatedly). Still **one textarea each: no presence cursors, no
-  per-peer selections, no rich text**. Dedicated draft-invariant property tests are the
-  noted follow-up (the queue property suite already drives the author-keyed send path).
+  per-peer selections, no rich text**. Invariant 4 (clean send) has a dedicated Hedgehog
+  property; broader draft-op schedules (participation, offline rejoin) are the follow-up.
 - **Reconnect is manual** (reload). The model reaches `Reconnecting`, but the browser
   shell does not yet redial and resume (the protocol supports it — E2E-4 proves resume
   works, and the client now pushes its full local state on every accept — the browser
