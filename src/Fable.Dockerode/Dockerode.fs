@@ -41,6 +41,11 @@ type [<AllowNullLiteral>] Container =
 type [<AllowNullLiteral>] Volume =
     abstract remove: options: obj -> JS.Promise<obj>
 
+/// An image handle — used to test local presence before pulling.
+type [<AllowNullLiteral>] Image =
+    /// Resolves if the image exists locally; rejects otherwise.
+    abstract inspect: unit -> JS.Promise<obj>
+
 /// docker-modem: the low-level plumbing dockerode exposes for stream handling.
 type [<AllowNullLiteral>] Modem =
     /// Split Docker's multiplexed exec stream into stdout/stderr sinks.
@@ -56,6 +61,7 @@ type [<AllowNullLiteral>] Docker =
     abstract getContainer: id: string -> Container
     abstract createVolume: options: obj -> JS.Promise<obj>
     abstract getVolume: name: string -> Volume
+    abstract getImage: name: string -> Image
     /// Pull an image; resolves to the progress stream to drain before use.
     abstract pull: tag: string -> JS.Promise<Stream>
     /// Build an image from a tar/`{ context; src }` and options `{ t; dockerfile }`.

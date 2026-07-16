@@ -161,9 +161,21 @@ module DockerBackend =
                                     return drained |> Result.map (fun () -> tag)
                                 | None ->
                                     let image = imageRef spec
-                                    let! stream = client.pull image |> Async.AwaitPromise
-                                    let! drained = drainProgress client stream
-                                    return drained |> Result.map (fun () -> image)
+                                    // Pull only when the image is absent locally — matches
+                                    // `docker run`, and avoids re-hitting the registry (and its
+                                    // transient failures) on every container start.
+                                    let! present =
+                                        async {
+                                            try
+                                                do! client.getImage(image).inspect () |> Async.AwaitPromise |> Async.Ignore
+                                                return true
+                                            with _ -> return false
+                                        }
+                                    if present then return Ok image
+                                    else
+                                        let! stream = client.pull image |> Async.AwaitPromise
+                                        let! drained = drainProgress client stream
+                                        return drained |> Result.map (fun () -> image)
                             }
                         match imageResult, resolveEnv spec with
                         | Error reason, _ -> return Error reason

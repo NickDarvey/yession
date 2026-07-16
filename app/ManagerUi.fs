@@ -178,7 +178,13 @@ let tryHandle (pm: ProcessManager.ProcessManager) (req: IncomingMessage) (res: S
         true
     | "POST", "/sessions" ->
         readBody req (fun body ->
-            match pm.CreateSession (SessionId.value (SessionId.mint ())) (formField body "name") (formField body "token") with
+            // The human UI omits the id, so mint a Docker-safe Crockford one; a caller that
+            // supplies an explicit id (automation, tests) keeps it.
+            let id =
+                match formField body "id" with
+                | "" -> SessionId.value (SessionId.mint ())
+                | provided -> provided
+            match pm.CreateSession id (formField body "name") (formField body "token") with
             | Ok _ -> html res (sessionsTable (pm.Sessions ()))
             | Error e -> respond res 400 "text/plain" e)
         true
