@@ -231,12 +231,12 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
     let mutable enqueueCounter = 0
     let enqueue (i: int) =
         enqueueCounter <- enqueueCounter + 1
-        let draftId = DraftId.create (sprintf "draft-%d" enqueueCounter) |> expect
         let queueId = QueueId.create (sprintf "queue-%d" enqueueCounter) |> expect
         let r = peerRunner i
-        r.Dispatch (user (StartDraftMsg draftId))
-        r.Dispatch (user (editBody draftId (Text.insert 0 (sprintf "message %d" enqueueCounter)) (r.Model ())))
-        r.Dispatch (user (SendDraftMsg (draftId, queueId)))
+        // Peer i writes its own slot (keyed by its peer id) and sends: send clears the
+        // slot, so a peer can enqueue repeatedly.
+        r.Dispatch (user (setDraft (peerIdOf i) (sprintf "message %d" enqueueCounter)))
+        r.Dispatch (user (SendDraftMsg (peerIdOf i, queueId)))
         enqueuedIds.Add (QueueId.value queueId)
 
     let pickEntry (i: int) (pick: int) : QueueId option =

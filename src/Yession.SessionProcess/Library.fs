@@ -13,7 +13,6 @@ module Bootstrap =
         | SessionCreated _ -> "session-created"
         | PeerJoined _ -> "peer-joined"
         | PeerLeft _ -> "peer-left"
-        | DraftStarted _ -> "draft-started"
         | MessageSent _ -> "message-sent"
         | AgentTurnStarted _ -> "agent-turn-started"
         | AgentContextBuilt _ -> "agent-context-built"

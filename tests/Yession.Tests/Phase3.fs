@@ -37,12 +37,13 @@ let private offlinePeer (clientId: float) (id: string) (name: string) : OfflineP
 let private deliver (source: Y.Doc) (target: Y.Doc) : unit =
     Y.applyUpdate (target, Y.encodeStateAsUpdate source)
 
-let private enqueue (p: OfflinePeer) (draftKey: string) (queueKey: string) (text: string) : QueueId =
-    let draftId = DraftId.create draftKey |> expect
+// The draft slot is the peer's own (drafts are keyed by author); `_draftKey` is kept only
+// so the offline-race call sites still read as (draft, queue) pairs.
+let private enqueue (p: OfflinePeer) (_draftKey: string) (queueKey: string) (text: string) : QueueId =
     let queueId = QueueId.create queueKey |> expect
-    p.Runner.Dispatch (user (StartDraftMsg draftId))
-    p.Runner.Dispatch (user (editBody draftId (Text.insert 0 text) (p.Runner.Model ())))
-    p.Runner.Dispatch (user (SendDraftMsg (draftId, queueId)))
+    let peerId = (p.Runner.Model ()).Peer.PeerId
+    p.Runner.Dispatch (user (setDraft peerId text))
+    p.Runner.Dispatch (user (SendDraftMsg (peerId, queueId)))
     queueId
 
 /// A `RunAgent` that suspends until the test releases it — the deterministic stand-in
@@ -312,10 +313,8 @@ let private interruptTests =
                 let! a = connectClient signalUrl "interrupt-token" "ada" "Ada"
 
                 // First send: the turn starts and streams its partial response.
-                let d1 = DraftId.create "d-1" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg d1))
-                a.Runner.Dispatch (user (editBody d1 (Text.insert 0 "go research this") (a.Runner.Model ())))
-                a.Connection.SendDraft d1
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "go research this"))
+                a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         m.Agent.ActiveTurn.IsSome
                         && (m.Conversation.Items |> List.exists (fun i -> i.Status = Streaming && i.Body = "partial thoughts")))
@@ -324,10 +323,8 @@ let private interruptTests =
                 // A second message queues behind the running turn (Cursor default);
                 // the ordered channel guarantees it reaches the Process before the
                 // interrupt that follows.
-                let d2 = DraftId.create "d-2" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg d2))
-                a.Runner.Dispatch (user (editBody d2 (Text.insert 0 "queued behind") (a.Runner.Model ())))
-                a.Connection.SendDraft d2
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "queued behind"))
+                a.Connection.SendDraft a.Hello.PeerId
 
                 // Interrupt: partial body kept (Interrupted status), and the queued
                 // message drains immediately into a NEW turn.
@@ -363,10 +360,8 @@ let private interruptTests =
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
                 let! a = connectClient signalUrl "late-token" "ada" "Ada"
 
-                let d1 = DraftId.create "d-1" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg d1))
-                a.Runner.Dispatch (user (editBody d1 (Text.insert 0 "quick one") (a.Runner.Model ())))
-                a.Connection.SendDraft d1
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "quick one"))
+                a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         (m.Conversation.Items |> List.exists (fun i -> i.Body = "instant"))
                         && m.Agent.ActiveTurn = None)
@@ -441,16 +436,15 @@ let private docPersistenceTests =
                 deliver o.Doc h1.Doc
                 let q2 = enqueue o "d-2" "q-2" "pending at crash"
                 deliver o.Doc h1.Doc
-                let keptDraft = DraftId.create "d-keep" |> expect
-                o.Runner.Dispatch (user (StartDraftMsg keptDraft))
-                o.Runner.Dispatch (user (editBody keptDraft (Text.insert 0 "durable words") (o.Runner.Model ())))
+                let oPeer = (o.Runner.Model ()).Peer.PeerId
+                o.Runner.Dispatch (user (setDraft oPeer "durable words"))
                 deliver o.Doc h1.Doc
                 let! firstLife = sentMessages h1.Log
                 Expect.equal (firstLife |> List.map (fun m -> m.QueueId)) [ Some q1 ] "only e1 consumed; e2 waits behind the held turn"
                 do! h1.Stop () // crash: the held turn never finishes
 
                 // Second life: replay doc + log. The boot drain consumes e2 exactly
-                // once; the draft is intact and not announced again.
+                // once; the draft is intact.
                 let runner2, release2 = heldAgent ()
                 let! h2 = Host.startFull (Some runner2) None (Some (openLog ())) (Some (DocStore.openStore docPath)) sessionId "t" 0
                 let! secondLife = sentMessages h2.Log
@@ -463,21 +457,9 @@ let private docPersistenceTests =
 
                 let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
                 Expect.equal
-                    (synced.Drafts |> Map.tryFind keptDraft |> Option.map (fun d -> Text.toString d.Body))
+                    (synced.Drafts |> Map.tryFind oPeer |> Option.map (fun d -> Text.toString d.Body))
                     (Some "durable words")
                     "the unsent draft survived the restart"
-                // A later doc update triggers the draft scan; the replayed draft must
-                // not produce a second DraftStarted (knownDrafts seeds from the log).
-                o.Runner.Dispatch (user (editBody keptDraft (Text.insert 13 "!") (o.Runner.Model ())))
-                deliver o.Doc h2.Doc
-                let! page = h2.Log.Read None Int32.MaxValue
-                let announcements =
-                    page.Events
-                    |> List.filter (fun e ->
-                        match e.Event with
-                        | DraftStarted d -> d.DraftId = keptDraft
-                        | _ -> false)
-                Expect.equal (List.length announcements) 1 "DraftStarted appended exactly once across both lives"
                 do! h2.Stop ()
 
                 // Compaction: the second open collapsed the history to one snapshot
@@ -497,9 +479,8 @@ let private docPersistenceTests =
 
                 let! h1 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) sessionId "t" 0
                 let o = offlinePeer 22.0 "olive" "Olive"
-                let draftId = DraftId.create "d-1" |> expect
-                o.Runner.Dispatch (user (StartDraftMsg draftId))
-                o.Runner.Dispatch (user (editBody draftId (Text.insert 0 "acknowledged") (o.Runner.Model ())))
+                let oPeer = (o.Runner.Model ()).Peer.PeerId
+                o.Runner.Dispatch (user (setDraft oPeer "acknowledged"))
                 deliver o.Doc h1.Doc
                 do! h1.Stop ()
 
@@ -509,7 +490,7 @@ let private docPersistenceTests =
                 let! h2 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) sessionId "t" 0
                 let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
                 Expect.equal
-                    (synced.Drafts |> Map.tryFind draftId |> Option.map (fun d -> Text.toString d.Body))
+                    (synced.Drafts |> Map.tryFind oPeer |> Option.map (fun d -> Text.toString d.Body))
                     (Some "acknowledged")
                     "every acknowledged update survived; only the torn tail was dropped"
                 do! h2.Stop ()

@@ -46,15 +46,15 @@ let private endpointTests =
         testCaseAsync "chunks serve JSONL with immutability-derived cache headers, token-gated" <|
             async {
                 let! h = Host.start (SessionId.create "events-http" |> expect) "events-token" 0
-                // Fill two full chunks plus a 5-event tail (offset 0 is PeerJoined-free
-                // here: appends go straight to the log).
+                // Fill two full chunks plus a 5-event tail (no client connects, so appends
+                // go straight to the log from offset 0).
                 for i in 1 .. 2 * EventChunk.size + 5 do
                     let! _ =
                         h.Log.Append
                             ActorRef.SessionProcess
-                            (DraftStarted
-                                { DraftId = DraftId.create (sprintf "d-%d" i) |> expect
-                                  StartedBy = PeerId.create "ada" |> expect })
+                            (PeerJoined
+                                { PeerId = PeerId.create (sprintf "p-%d" i) |> expect
+                                  DisplayName = "filler" })
                     ()
                 let url (chunk: int) (token: string) =
                     sprintf "http://127.0.0.1:%d/events/%d?token=%s" h.Port chunk token
@@ -97,10 +97,8 @@ let private endpointTests =
                         FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) baseUrl "fetch-token") }
                 let! a = connectClientWith options signalUrl "fetch-token" "ada" "Ada"
 
-                let draftId = DraftId.create "http-draft" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "fetched over http") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "fetched over http"))
+                a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         not m.EventConsumer.IsCatchingUp
                         && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "fetched over http" ])

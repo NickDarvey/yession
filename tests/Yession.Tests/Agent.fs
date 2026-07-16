@@ -39,7 +39,6 @@ let private eventsOf (log: EventLog<SessionEvent>) =
 
 let private trigger : MessageSent =
     { MessageId = humanMessageId
-      DraftId = None
       QueueId = None
       Author = HumanPeer ada
       Body = "hi agent" }
@@ -222,10 +221,8 @@ let private e2eTests =
         testCaseAsync "a sent message yields a streamed agent response built from events (E2E-5)" <|
             async {
                 let! a = connectClient signalUrl token "ada" "Ada"
-                let draftId = DraftId.create "draft-agent" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Text.insert 0 "hi agent") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "hi agent"))
+                a.Connection.SendDraft a.Hello.PeerId
 
                 // The client's timeline gains the sent message and then the agent's
                 // completed response — all consumed as events.
@@ -305,15 +302,12 @@ let private liveTests =
                               SessionToken = "live-tools-token" }
                     let managed = (m.Registered ()) |> List.head
                     let! a = connectClient (managed.BootstrapUri + "signal") "live-tools-token" "ada" "Ada"
-                    let draftId = DraftId.create "live-tools-draft" |> expect
-                    a.Runner.Dispatch (user (StartDraftMsg draftId))
                     a.Runner.Dispatch (
                         user (
-                            editBody
-                                draftId
-                                (Text.insert 0 "Use your execute_command tool to run the executable `node` with arguments `-e` and `console.log(6*7)`, then reply with just the number it printed.")
-                                (a.Runner.Model ())))
-                    a.Connection.SendDraft draftId
+                            setDraft
+                                a.Hello.PeerId
+                                "Use your execute_command tool to run the executable `node` with arguments `-e` and `console.log(6*7)`, then reply with just the number it printed."))
+                    a.Connection.SendDraft a.Hello.PeerId
 
                     do! a.Runner.WaitFor (fun model ->
                             model.Conversation.Items

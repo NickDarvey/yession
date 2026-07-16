@@ -132,40 +132,11 @@ let startFull
         DocSync.onLocalUpdate doc (fun payload ->
             connections |> Map.iter (fun _ channel -> sendState channel payload))
 
-        // Durable facts from collaborative state: the first appearance of a draft in the
-        // doc appends `DraftStarted` exactly once. Content stays in Yjs; the log records
-        // only the fact (docs/design.md §1 "Durable facts are events").
-        // Seeded from the replayed log so drafts restored by doc replay (Step 19) are
-        // not re-announced as started.
-        let mutable knownDrafts : Set<string> =
-            replayed.Events
-            |> List.choose (fun e ->
-                match e.Event with
-                | DraftStarted d -> Some (DraftId.value d.DraftId)
-                | _ -> None)
-            |> Set.ofList
-        DocSync.onAnyUpdate doc (fun () ->
-            match SyncedStateSync.ofDoc doc with
-            | Ok synced ->
-                synced.Drafts
-                |> Map.iter (fun draftId draft ->
-                    let key = DraftId.value draftId
-                    if not (Set.contains key knownDrafts) then
-                        knownDrafts <- Set.add key knownDrafts
-                        Async.StartImmediate (
-                            async {
-                                let! _ =
-                                    log.Append
-                                        (HumanPeer draft.Author)
-                                        (DraftStarted { DraftId = draftId; StartedBy = draft.Author })
-                                return ()
-                            }))
-            // Schema drift in the doc must not break relay; decode errors are ignored here.
-            | Error _ -> ()
-            // The drain re-arms on every doc update observed while idle, so an enqueue
-            // can never be missed (liveness; recursion during a drain's own removal is
-            // cut by the single-flight guard).
-            drain ())
+        // The drain re-arms on every doc update observed while idle, so an enqueue can
+        // never be missed (liveness; recursion during a drain's own removal is cut by the
+        // single-flight guard). Drafts are ephemeral WIP in the synced state — never
+        // durable facts (only their send is) — so a new draft appearing needs no append.
+        DocSync.onAnyUpdate doc (fun () -> drain ())
 
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the

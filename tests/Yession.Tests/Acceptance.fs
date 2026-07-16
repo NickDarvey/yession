@@ -12,7 +12,6 @@ open Yession.Domain
 open Yession.App
 open Yession.Tests.Support
 
-let private draftId = DraftId.create "draft-ui" |> expect
 let private queueId = QueueId.create "queue-ui" |> expect
 let private ada = PeerId.create "ada" |> expect
 
@@ -26,8 +25,8 @@ let private representativeModel : ClientModel =
       Synced =
         { Drafts =
             Map.ofList
-                [ draftId,
-                  { DraftId = draftId; Author = ada; Body = Ylmish.Text.ofString "half-typed idea" } ]
+                [ ada,
+                  { Author = ada; Body = Ylmish.Text.ofString "half-typed idea" } ]
           Queue =
             Map.ofList
                 [ queueId,
@@ -62,7 +61,7 @@ let private uiChecklistTests =
                   "peer display name", Dom.hookText Dom.Hooks.displayName "swift-heron"
                   "collaborative draft editor", Dom.Hooks.draftEditor
                   "draft body", "half-typed idea"
-                  "send button", Dom.attr Dom.Hooks.sendDraft "draft-ui"
+                  "send button", Dom.attr Dom.Hooks.sendDraft "ada"
                   "conversation timeline", Dom.Hooks.conversation
                   "sent message in timeline", Dom.hookText Dom.Hooks.messageBody "ship it"
                   "agent streaming response", Dom.attr Dom.Hooks.messageStatus Dom.Text.streaming

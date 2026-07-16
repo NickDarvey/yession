@@ -63,7 +63,7 @@ module Dom =
         let draftAuthor = "data-draft-author"
         let draftInput = "data-draft-input"
         let sendDraft = "data-send-draft"
-        let startDraft = "data-start-draft"
+        let discardDraft = "data-discard-draft"
         // Chrome: the sidebar drawer toggle (lives on the shell root, outside `#app`).
         let navToggle = "data-nav-toggle"
 

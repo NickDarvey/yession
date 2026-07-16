@@ -38,7 +38,6 @@ module ConversationProjection =
         | SessionCreated _ -> proj // session lifecycle, not a conversation item
         | PeerJoined _ -> proj     // presence, not a conversation item
         | PeerLeft _ -> proj       // presence, not a conversation item
-        | DraftStarted _ -> proj   // drafts enter the conversation only when sent (Step 06)
         | MessageSent m ->
             { proj with
                 Items =

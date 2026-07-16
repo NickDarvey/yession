@@ -100,7 +100,6 @@ let private conversationProjectionTests =
 let private frameSerializationTests =
     let sessionId = SessionId.create "session-frames" |> expect
     let peerId = PeerId.create "peer-1" |> expect
-    let draftId = DraftId.create "draft-1" |> expect
     let requestId = RequestId.fresh ()
     let offset = EventOffset.create 7L |> expect
 
@@ -157,9 +156,8 @@ let private frameSerializationTests =
                 [ SessionCreated { SessionCreated.SessionId = sessionId }
                   PeerJoined { PeerId = peerId; DisplayName = "Ada" }
                   PeerLeft { PeerId = peerId }
-                  DraftStarted { DraftId = draftId; StartedBy = peerId }
-                  MessageSent { MessageId = messageId; DraftId = Some draftId; QueueId = None; Author = HumanPeer peerId; Body = "hi" }
-                  MessageSent { MessageId = messageId; DraftId = None; QueueId = Some (QueueId.create "q-1" |> expect); Author = ActorRef.System; Body = "" }
+                  MessageSent { MessageId = messageId; QueueId = None; Author = HumanPeer peerId; Body = "hi" }
+                  MessageSent { MessageId = messageId; QueueId = Some (QueueId.create "q-1" |> expect); Author = ActorRef.System; Body = "" }
                   AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = messageId }
                   AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }
                   AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId }
@@ -194,17 +192,16 @@ let private frameSerializationTests =
             // Wire compatibility: event-log lines written by earlier versions carry no
             // queueId; they must decode to None, not fail the whole log open.
             let legacy =
-                """{"type":"messageSent","payload":{"messageId":"msg-legacy","draftId":null,"author":{"kind":"system"},"body":"old line"}}"""
+                """{"type":"messageSent","payload":{"messageId":"msg-legacy","author":{"kind":"system"},"body":"old line"}}"""
             let decoded = Codec.fromString Codec.sessionEvent legacy |> expect
             Expect.equal
                 decoded
                 (MessageSent
                     { MessageId = MessageId.create "msg-legacy" |> expect
-                      DraftId = None
                       QueueId = None
                       Author = ActorRef.System
                       Body = "old line" })
-                "legacy line decodes with QueueId = None"
+                "a line without queueId decodes with QueueId = None"
     ]
 
 let tests =

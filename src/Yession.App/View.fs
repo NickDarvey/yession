@@ -19,9 +19,7 @@ open Lit
 /// so the view stays free of Guid/random and of the connection; the browser supplies real
 /// implementations, tests and SSR supply no-ops.
 type ViewActions =
-    { /// Mint a fresh draft id for "start draft".
-      NewDraftId : unit -> DraftId
-      /// Mint a fresh queue id for "send" (draft → queue).
+    { /// Mint a fresh queue id for "send" (draft → queue).
       NewQueueId : unit -> QueueId
       /// Ask the Session Process to cancel the running agent turn.
       Interrupt : AgentTurnId -> unit
@@ -33,8 +31,7 @@ module ViewActions =
     /// are never invoked while rendering — they fire on user events in the live browser —
     /// so the minters return fixed valid ids and the effects are no-ops.
     let ssr : ViewActions =
-        { NewDraftId = fun () -> match DraftId.create "ssr-draft" with Ok d -> d | Error e -> failwith e
-          NewQueueId = fun () -> match QueueId.create "ssr-queue" with Ok q -> q | Error e -> failwith e
+        { NewQueueId = fun () -> match QueueId.create "ssr-queue" with Ok q -> q | Error e -> failwith e
           Interrupt = ignore
           ToggleNav = ignore }
 
@@ -253,26 +250,45 @@ module View =
         html $"""<section class="{Style.queue}" data-message-queue>{head}{items}</section>"""
 
     let private drafts (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
-        let items =
+        let myPeer = model.Peer.PeerId
+        // Other peers' active drafts: visible and joinable (edits merge into their slot),
+        // author-badged, but not sendable — owner-sends. One textarea each, no cursors.
+        let others =
             model.Synced.Drafts
             |> Map.toList
-            |> List.map (fun (draftId, draft) ->
-                let author =
-                    if draft.Author = model.Peer.PeerId then Lit.nothing
-                    else html $"""<span class="{Style.draftAuthor}">{PeerId.value draft.Author}</span>"""
+            |> List.filter (fun (peerId, _) -> peerId <> myPeer)
+            |> List.map (fun (peerId, draft) ->
                 html $"""
-                    <article class="{Style.draftBox}" data-draft-id="{DraftId.value draftId}" data-draft-author="{PeerId.value draft.Author}">
+                    <article class="{Style.draftBox}" data-draft-id="{PeerId.value peerId}" data-draft-author="{PeerId.value peerId}">
                       <span class="{Style.draftEdge}"></span>
-                      <textarea rows="2" placeholder="Message the session — sending queues while the agent works" class="{Style.draftInput}" data-draft-input="{DraftId.value draftId}" .value={Ylmish.Text.toString draft.Body} @input={EvVal(fun v -> dispatch (EditDraftBodyMsg (draftId, Ylmish.Text.edit v draft.Body)))}>{Ylmish.Text.toString draft.Body}</textarea>
-                      <div class="{Style.draftActions}">
-                        <button type="button" class="{Style.btnPrimary}" data-send-draft="{DraftId.value draftId}" @click={Ev(fun _ -> dispatch (SendDraftMsg (draftId, actions.NewQueueId ())))}>Send</button>
-                        {author}
-                      </div>
+                      <textarea rows="2" placeholder="Add to {PeerId.value peerId}'s draft" class="{Style.draftInput}" data-draft-input="{PeerId.value peerId}" .value={Ylmish.Text.toString draft.Body} @input={EvVal(fun v -> dispatch (EditDraftBodyMsg (peerId, Ylmish.Text.edit v draft.Body)))}>{Ylmish.Text.toString draft.Body}</textarea>
+                      <div class="{Style.draftActions}"><span class="{Style.draftAuthor}">{PeerId.value peerId}</span></div>
                     </article>""")
+        // The local composer: always present (materialises on first keystroke), the only
+        // one with Send (owner-sends) and Discard.
+        let myBody =
+            model.Synced.Drafts
+            |> Map.tryFind myPeer
+            |> Option.map (fun d -> d.Body)
+            |> Option.defaultValue Ylmish.Text.empty
+        let myBodyStr = Ylmish.Text.toString myBody
+        let discard =
+            if myBodyStr = "" then Lit.nothing
+            else html $"""<button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Discard draft" data-discard-draft @click={Ev(fun _ -> dispatch (DiscardDraftMsg myPeer))}>✕</button>"""
+        let mine =
+            html $"""
+                <article class="{Style.draftBox}" data-draft-id="{PeerId.value myPeer}" data-draft-author="{PeerId.value myPeer}">
+                  <span class="{Style.draftEdge}"></span>
+                  <textarea rows="2" placeholder="Message the session — sending queues while the agent works" class="{Style.draftInput}" data-draft-input="{PeerId.value myPeer}" .value={myBodyStr} @input={EvVal(fun v -> dispatch (EditDraftBodyMsg (myPeer, Ylmish.Text.edit v myBody)))}>{myBodyStr}</textarea>
+                  <div class="{Style.draftActions}">
+                    <button type="button" class="{Style.btnPrimary}" data-send-draft="{PeerId.value myPeer}" @click={Ev(fun _ -> dispatch (SendDraftMsg (myPeer, actions.NewQueueId ())))}>Send</button>
+                    {discard}
+                  </div>
+                </article>"""
         html $"""
             <section class="{Style.composer}" data-draft-editor>
-              {items}
-              <button type="button" class="{Style.btn} self-start" data-start-draft @click={Ev(fun _ -> dispatch (StartDraftMsg (actions.NewDraftId ())))}>Start draft</button>
+              {others}
+              {mine}
             </section>"""
 
     /// The client shell, rendered into `#app`.

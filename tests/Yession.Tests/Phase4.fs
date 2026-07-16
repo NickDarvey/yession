@@ -124,10 +124,8 @@ let private processTests =
                 Expect.isTrue (html.Contains (Dom.sessionMetaName + "\" " + Dom.attr "content" "proc-1")) "the child serves ITS session's page"
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" port
                 let! a = connectClient signalUrl "proc-token" "ada" "Ada"
-                let draftId = DraftId.create "proc-draft" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Ylmish.Text.insert 0 "hello from another process") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "hello from another process"))
+                a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         m.Conversation.Items |> List.exists (fun i -> i.Body = "hello from another process"))
                 do! a.Channel.Close ()
@@ -285,10 +283,8 @@ let private controlRpcTests =
                 let port = launched |> expect
 
                 let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) "rpc-token" "ada" "Ada"
-                let draftId = DraftId.create "rpc-draft" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Ylmish.Text.insert 0 "run the diagnostic") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "run the diagnostic"))
+                a.Connection.SendDraft a.Hello.PeerId
 
                 // Everything below happened ACROSS process boundaries: the child asked
                 // the Manager (this test process) over the control RPC; the Manager's
@@ -507,10 +503,8 @@ let private compositionTests =
                 // A real client messages the packaged child; the diagnostic agent runs a
                 // real command through the packaged manager's control RPC.
                 let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" sessionPort) "comp-token" "ada" "Ada"
-                let draftId = DraftId.create "composed-draft" |> expect
-                a.Runner.Dispatch (user (StartDraftMsg draftId))
-                a.Runner.Dispatch (user (editBody draftId (Ylmish.Text.insert 0 "built binaries talking") (a.Runner.Model ())))
-                a.Connection.SendDraft draftId
+                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "built binaries talking"))
+                a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         (m.Conversation.Items |> List.exists (fun i -> i.Body = "built binaries talking"))
                         && (m.Conversation.Items

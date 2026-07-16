@@ -33,11 +33,9 @@ type SessionEvent =
     // Control/presence facts appended by the Session Process on connect/disconnect (Step 03).
     | PeerJoined of PeerJoined
     | PeerLeft of PeerLeft
-    // The durable fact that a draft began (Step 05). The draft's *content* lives in the
-    // synced collaborative state (Yjs), never in the event log.
-    | DraftStarted of DraftStarted
-    // A draft sent: the body snapshotted at send time by the Session Process (Step 06).
-    // Immutable in Phase 1 — later draft edits never touch it.
+    // A message consumed off the queue: the body snapshotted at drain time by the Session
+    // Process. Immutable — later edits never touch it. Drafts themselves are ephemeral WIP
+    // in the synced state and are never durable facts (only their send is).
     | MessageSent of MessageSent
     // Agent turn lifecycle (Step 08): the agent's response is represented entirely as
     // events — streamed deltas project as a Streaming conversation item; completion or
@@ -78,14 +76,8 @@ and PeerJoined =
 and PeerLeft =
     { PeerId : PeerId }
 
-and DraftStarted =
-    { DraftId : DraftId
-      StartedBy : PeerId }
-
 and MessageSent =
     { MessageId : MessageId
-      /// The draft the message came from; `None` once direct (draftless) sends exist.
-      DraftId : DraftId option
       /// The queue entry this message was consumed from (Phase 3): the durable link
       /// from doc-world to event-world, and the drain's exactly-once dedup key.
       /// `None` for messages that predate the queue.
