@@ -15,6 +15,7 @@
     <Compile Include="Ssr.fs" />
     <Compile Include="Signalling.fs" />
     <Compile Include="Agent.fs" />
+    <Compile Include="Telemetry.fs" />
     <Compile Include="EventStore.fs" />
     <Compile Include="DocStore.fs" />
     <Compile Include="ManagerStore.fs" />
@@ -39,6 +40,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\src\Fable.Dockerode\Fable.Dockerode.fsproj" />
+    <ProjectReference Include="..\src\Fable.OpenTelemetry\Fable.OpenTelemetry.fsproj" />
     <ProjectReference Include="..\src\Yession.Domain\Yession.Domain.fsproj" />
     <ProjectReference Include="..\src\Yession.Manager\Yession.Manager.fsproj" />
     <ProjectReference Include="..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
