@@ -22,6 +22,7 @@
     <Compile Include="Sync.fs" />
     <Compile Include="Editor.fs" />
     <Compile Include="Agent.fs" />
+    <Compile Include="Telemetry.fs" />
     <Compile Include="Browser.fs" />
     <Compile Include="E2E.fs" />
     <Compile Include="Client.fs" />
@@ -49,6 +50,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Fable.OpenTelemetry\Fable.OpenTelemetry.fsproj" />
     <ProjectReference Include="..\..\src\Yession.Domain\Yession.Domain.fsproj" />
     <ProjectReference Include="..\..\src\Yession.Manager\Yession.Manager.fsproj" />
     <ProjectReference Include="..\..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />

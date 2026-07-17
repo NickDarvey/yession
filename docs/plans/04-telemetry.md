@@ -1,6 +1,6 @@
 # Plan 04 — OpenTelemetry: the Manager as collector, Session Processes emit
 
-> **Status: in progress.** Step 28 delivered (`6f220a5`); Steps 29–33 pending.
+> **Status: in progress.** Steps 28–29 delivered; Steps 30–33 pending.
 >
 > Phase 5 · Observability. Addresses [GAPS.md](../GAPS.md) § Delivery & operations
 > ("No telemetry, structured logging, or crash reporting; the Process logs to stdout")
@@ -164,7 +164,7 @@ it aligns with the existing lifecycle (`AgentTurnStarted → … → AgentMessag
 | Step | Title | Interfaces / deliverable | Automated verification |
 |---|---|---|---|
 | 28 ✅ | **Capture usage from the SDK** | `AgentUsage` in Domain; `AgentCompleted` carries optional usage; `app/Agent.fs` reads `result.usage` + model | Delivered `6f220a5`: `dotnet build` (0 errors) + `dotnet fable` of tests both green; live-agent smoke (verify tier) confirms real values |
-| 29 | **`Fable.OpenTelemetry` bindings** | `src/Fable.OpenTelemetry` — ts2fable + hand-tweaked bindings for the logs SDK + OTLP HTTP exporter; deps pinned centrally | Project type-checks + Fable-compiles; a smoke that builds a `LoggerProvider` with an in-memory exporter and emits one record (`test` tier) |
+| 29 ✅ | **`Fable.OpenTelemetry` bindings** | `src/Fable.OpenTelemetry` — hand-trimmed bindings for the logs SDK (`api-logs`/`sdk-logs`) + OTLP HTTP exporter + `resources`; deps pinned in `package.json`; `Telemetry.fs` smoke (in-memory exporter) in the cheap tier | Delivered: `dotnet build` + `dotnet fable` green; the compiled binding drives the real `@opentelemetry/sdk-logs` — one emit → one record with attributes preserved. **Gotcha found & encoded:** `Simple`/`BatchLogRecordProcessor` take `{ exporter }` (SDK 2.x), not the bare exporter — the bare form silently no-ops |
 | 30 | **Session emitter** | `app/Telemetry.fs` — `LoggerProvider`/`Resource`/exporter + `record`; no-op when unset; async/failure isolation | `test` tier: `record` maps an `AgentUsage` → a LogRecord with the expected attributes (in-memory exporter); `record` never throws on a dead/absent endpoint |
 | 31 | **Manager receiver + collector** | `app/TelemetryReceiver.fs` `tryHandle` composed into the shared server; `LogsWire.decode`; `Collector` aggregates + logs; per-launch bearer auth | `test` tier: `LogsWire.decode` of a real exporter payload → expected counts; route returns 401 on bad secret, 200 + record on good; collector running-total assertion |
 | 32 | **Env contract + wiring** | `ProcessManager` injects `YESSION_OTLP_ENDPOINT`/`_SECRET`, mints/revokes the bearer on launch/exit; receiver starts when telemetry enabled; `AgentTurn.run` emit sink; `SessionMain` builds + injects the emitter | Cross-process **verify** tier: launch a session with telemetry on, drive one turn (diagnostic agent), assert the Manager collector recorded the four counts tagged with the session + turn id and **no body text anywhere in the payload** |
