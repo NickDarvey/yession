@@ -116,13 +116,22 @@ is bumped to `beta0219`. Remaining de-risking (fold into the first build step): 
   reducer). `StartDraftMsg` just creates the draft (its empty fragment is anchored on encode);
   `SendDraftMsg` triggers the draft→queue **content copy** of the fragment;
   `ReorderQueuedMsg`/`DeleteQueuedMsg` unaffected.
-- **JS/Fable rich-editor module (new)** — a ProseMirror/TipTap editor factory bound to a body's
-  `Y.XmlFragment`: StarterKit/`prosemirror-inputrules` for markdown-typing (`#`, `-`, `1.`,
-  `**`, `` ` ``, ``` ``` ```, `>`, links), `prosemirror-markdown` for markdown **paste**, and
-  `ySyncPlugin`/`yCursorPlugin`/`yUndoPlugin` for collaboration. Schema = a Linear-like subset
-  (headings, bold/italic/strike/code marks, bullet/ordered lists, code blocks, blockquote,
-  links). Add deps to [`package.json`](../../package.json) (`prosemirror-*` + `y-prosemirror`,
-  or `@tiptap/*` + `@tiptap/extension-collaboration`).
+- **Fable bindings for ProseMirror + y-prosemirror (new, pure F#)** — the repo forbids authored
+  JavaScript (master #7: `git ls-files '*.js' '*.mjs' '*.cjs'` is empty; the only boundary is
+  `[<Import>]`/`[<Emit>]` in F#). So the editor is **not** a `.mjs` shim. Following the
+  **`Fable.Yjs` precedent** (its `Yjs.fs`/`Lib0.fs` are `ts2fable`-generated then hand-edited),
+  generate Fable bindings from the packages' bundled `.d.ts` with **`ts2fable`** and hand-edit
+  them, in a new bindings area (e.g. `src/Fable.ProseMirror/` mirroring `src/Fable.Yjs/`, or
+  app-local `[<Import>]` modules for the few symbols used): `prosemirror-{model,state,view,
+  keymap,commands,inputrules,schema-list,markdown}` and `y-prosemirror`. Add these npm packages
+  to [`package.json`](../../package.json) — they supply the runtime JS the bindings import; the
+  editor *code* stays F#.
+- **`src/Yession.App/Editor.fs` (new, pure F#)** — the editor itself over those bindings: a
+  Linear-like markdown schema (headings, bold/italic/strike/code marks, bullet/ordered lists,
+  code blocks, blockquote, links), markdown **input rules** (`#`, `-`, `1.`, `>`, ```` ``` ````,
+  `**b**`, `*i*`, `` `c` ``), a markdown **paste** handler (`prosemirror-markdown` parser), and
+  `ySyncPlugin`/`yUndoPlugin` (optionally `yCursorPlugin`). Exposes `mountEditor`,
+  `fragmentToMarkdown`, `copyFragment` as F# functions. Small regex/lambda glue uses `[<Emit>]`.
 - **[`src/Yession.App/View.fs`](../../src/Yession.App/View.fs)** — replace the draft and queue
   `<textarea>`s (the `data-draft-input` / `data-queue-input` elements) with a **stable editor
   mount host** per body id. Keep every `data-*` hook so the E2E selectors resolve.
@@ -134,10 +143,11 @@ is bumped to `beta0219`. Remaining de-risking (fold into the first build step): 
   existing hand-managed-DOM precedents in `Browser.fs` (focus preservation, timeline scroll
   preservation).
 - **[`src/Yession.SessionProcess/Scheduler.fs`](../../src/Yession.SessionProcess/Scheduler.fs)**
-  — replace `Ylmish.Text.toString entry.Body` with a ProseMirror-doc→markdown serialization
-  (`prosemirror-markdown` `defaultMarkdownSerializer` over the `Y.XmlFragment`) so
+  — replace `Ylmish.Text.toString entry.Body` with `Editor.fragmentToMarkdown` (the pure-F#
+  serializer over `prosemirror-markdown`) applied to the queue entry's `Y.XmlFragment` so
   `MessageSent.Body` stays markdown. The Session Process already observes the doc without its own
-  Ylmish binding (see `Sync.fs`), so it reads the fragment and serializes JS-side.
+  Ylmish binding (see `Sync.fs`); it reads `(doc.getMap "queue").get(id)."body"` and serializes it
+  (missing/empty fragment → empty string).
 - **[`src/Yession.App/View.fs`](../../src/Yession.App/View.fs) (timeline)** — sent-message
   bodies are now markdown strings; render them **formatted** (read-only markdown→HTML) in
   `conversation` so the timeline matches the rich input. A small dependency-light renderer, or
@@ -145,18 +155,22 @@ is bumped to `beta0219`. Remaining de-risking (fold into the first build step): 
 
 ## Verification (automated, per design.md §2.2)
 
-- `mise run build` — type-checks the solution + Fable-compiles the host; proves the new
-  `SessionState`/`Sync` body types, the retired messages, and the reworked view compile.
+- `mise run build` — type-checks the solution + Fable-compiles the host; proves the bindings, the
+  new `SessionState`/`Sync` body types, the retired messages, `Editor.fs`, and the reworked view
+  all compile, and that **no authored JS crept in** (`git ls-files '*.js' '*.mjs' '*.cjs'` stays
+  empty — the master #7 invariant).
 - `mise run test` — existing WebRTC/UI E2E stays green; update the draft/queue selectors to the
   editor mount and keep all other `data-*` hooks.
-- New E2E / browser assertions:
+- **New browser assertions in the repo's F# Playwright E2E** (`scripts/browser-e2e.fsx`, the
+  `Microsoft.Playwright` .NET driver that already drives two real Chromium peers against the live
+  Session Process):
   - typing `**x**` produces a bold mark and the `**` syntax is **not** persisted;
   - pasting a markdown block yields headings/lists;
-  - two clients editing one body converge (collab round-trip over real WebRTC);
+  - two peers editing one body converge (collab round-trip over real WebRTC);
   - a rich body drained by the agent yields the expected **markdown** in `MessageSent.Body`;
   - the timeline renders that markdown formatted.
-- The Ylmish codec change carries its own unit test (encode→doc→decode of an XML body handle) in
-  the Ylmish repo before the version bump is consumed here.
+- The Ylmish `GetXmlFragment` change carries its own unit test upstream (`NickDarvey/Ylmish` #135,
+  already merged and green).
 
 ## Decisions & alternatives
 
@@ -169,18 +183,23 @@ is bumped to `beta0219`. Remaining de-risking (fold into the first build step): 
   but not true hide-the-syntax WYSIWYG. Set aside in favour of the structured route.
 - **Rejected — ProseMirror over `Y.Text` with markdown round-trip.** Serializing doc→markdown
   on every keystroke into a text CRDT is an impedance mismatch that degrades collaborative merge.
-- **TipTap vs. raw ProseMirror** (open sub-decision, resolve during the spike): TipTap is fastest
-  (official Yjs collab extension, StarterKit input rules, Markdown extension); raw ProseMirror is
-  closest to Linear with fewer layers. Recommend TipTap unless the abstraction fights the
-  Fable/Lit mount.
+- **Raw ProseMirror + `y-prosemirror` (chosen)** over TipTap: leanest deps, closest to how Linear
+  is built, and no framework layer to fight the Fable/Lit mount. TipTap was rejected — its value
+  is JS-side ergonomics we don't get from F#, and it is a heavier dep tree.
+- **Pure-F# `ts2fable` bindings (chosen)** over an authored `.mjs` editor shim: the repo forbids
+  authored JS (master #7 — `git ls-files '*.js' '*.mjs' '*.cjs'` must stay empty; interop is
+  `[<Import>]`/`[<Emit>]` only). `Fable.Yjs` set the precedent (ts2fable-generated + hand-edited).
+  An earlier `editor.mjs` shim was written and then **removed** for this reason.
 
-## Open questions (resolve during Step 0)
+## Open questions
 
-1. Does Ylmish already expose an opaque/custom shared-element case, or must `Encode.xmlFragment`
-   be added and released? (Drives whether an upstream version bump is on the critical path.)
-2. Does the model hold a **live handle** or a **snapshot**? Determines the `SessionState.Body`
-   type and how `View.fs` hands the fragment to the editor.
-3. TipTap vs. raw ProseMirror under Fable + a Lit mount host (bundle size, interop friction).
+1. ~~Ylmish custom-element case / live handle~~ — **resolved** (shipped in beta0219; the model holds
+   a live handle via `RichBody`, but the body is *not* decoded — see the two findings above).
+2. **Bindings scope:** full `ts2fable` generation into a `src/Fable.ProseMirror` project vs.
+   hand-written `[<Import>]` modules for just the symbols the editor uses. Prefer the latter if the
+   used surface is small; escalate to generated bindings if it sprawls.
+3. **Lit stable-mount timing:** confirm (in the F# Playwright E2E) that a remote draft's fragment
+   is available by the time its editor mounts, or that the create-on-demand fallback covers the lag.
 
 ## Rollout
 
