@@ -46,57 +46,76 @@ grabs behind Ylmish's back. This keeps invariant *"Ylmish is the sync boundary /
 domain model"* (design.md §5) true: a body is still an Ylmish-encoded field; it is encoded as an
 `XmlFragment` instead of `Text`.
 
-### The linchpin: `Encode.text` is value-semantics; `y-prosemirror` needs a live handle
+### Two findings that shape the design (both from reading Ylmish source, one merged upstream)
 
-Today `Sync.fs` binds a body with `Encode.text (AVal.constant d.Body)` and
-`Decode.object.optional "body" Decode.text` — the Elmish model **owns a `Ylmish.Text` value**
-and Ylmish reconciles it into the `Y.Text`. `y-prosemirror`, by contrast, binds
-**imperatively to the live `Y.XmlFragment`** and owns it directly. So the Ylmish change is *not*
-a value-semantics `Encode.xmlFragment` mirroring `Encode.text` (that would force us to diff a
-ProseMirror doc against an F# value and throw away the whole point). It is an **opaque /
-live-handle element** — the "add a xml element to `CustomElement`" shape: Ylmish materializes a
-named Yjs `XmlFragment` under the encoded object and **hands the app the live handle**, which
-the editor gives to `y-prosemirror`. The Elmish model then holds an opaque body **handle** per
-id, not a text value. Editor edits flow editor → live `Y.XmlFragment` → Ylmish relays the
-update; they no longer pass through `EditDraftBodyMsg`/`EditQueuedBodyMsg` (those body-text
-messages retire; start / send / reorder / delete stay).
+**1. The live handle exists via `CustomElement` — and it's shipped.** Ylmish's escape hatch is
+`Encode.custom` over a `CustomElement { Connect : BindContext -> IDisposable; Value : obj }`.
+`Connect` receives live get-or-adopt getters and `Decode.custom` returns `c.Value`, so a custom
+can hand the model a **live Yjs handle**. The only gap was that `BindContext` exposed
+`GetText`/`GetMap`/`GetArray` but no `GetXmlFragment`. That is now **merged upstream**
+(`NickDarvey/Ylmish` PR #135 → `1.0.0-beta0219`): `BindContext.GetXmlFragment` + an
+`ensureXmlFragment` slot helper, wired at both the top-level and nested construction sites, with
+`Fable.Yjs` already binding `YXmlFragment`/`getXmlFragment`. A `RichBody : CustomElement` can now
+`ctx.GetXmlFragment()` in `Connect` and hand the fragment to `y-prosemirror`.
 
-## Step 0 — spike first (de-risk the boundary before committing)
+**2. A custom nested in a keyed `Encode.map` anchors but does NOT decode.** The drafts/queue
+collections are `Encode.map` (dynamically keyed by `DraftId`/`QueueId`, offline-creatable). In
+Ylmish's decode direction (`Binding.read`), a top-level `EncMap` field is read **structurally**
+via `ElementOfY.ofYValue`, which only recognizes `Y.Text`/`Y.Map`/`Y.Array` — it never yields
+`ElCustom`, and the per-item schema's customs are not overlaid. So today's `Encode.text` body
+decodes fine (a `Y.Text` → `ElText`), but an `Encode.custom` XML body **cannot round-trip its
+value through decode**. (Top-level fixed customs decode via `readSlot`; keyed-map *items* do not —
+and a remote-created item has no local `CustomElement` instance to decode against anyway.)
 
-The Ylmish package (`Ylmish 1.0.0-beta0218`) is not on disk in this environment, and the
-live-handle binding is the riskiest part. Do this before any product edit:
+### The design consequence: the body handle is app-resolved, not decoded
 
-1. `mise run restore`, then read Ylmish's `Codec` surface: the `Encoded` cases, whether an
-   opaque/custom shared-element case (`CustomElement` or similar) already exists, and **how a
-   decoded field reaches the model** (value vs. live handle). Confirm `Fable.Yjs` exposes
-   `Y.XmlFragment`/`Y.XmlElement`.
-2. Throwaway prototype: hand-create a `Y.XmlFragment` on a `Y.Doc`, mount a ProseMirror editor
-   with `ySyncPlugin`/`yCursorPlugin`/`yUndoPlugin`, and confirm two docs converge over a
-   round-trip — proving the `y-prosemirror`↔Yjs wiring independent of Ylmish and of Lit.
-3. Decide the Ylmish change from (1): a first-class `Encode.xmlFragment` / opaque
-   `CustomElement` that yields a **live handle**. If it must land upstream in Ylmish, note the
-   version bump; if an existing escape hatch already suffices, prototype through it first. The
-   proposal is: **add an XML element to Ylmish's `CustomElement` (live-handle) codec.**
+The rich body is still declared in the Ylmish schema via `Encode.custom` — that is what anchors
+the nested `Y.XmlFragment` race-free at `drafts.<id>.body` and keeps the sync boundary honest —
+but its **value is not decoded into the model**. Instead:
+
+- A small **`RichBody` registry** keyed by `DraftId`/`QueueId` lives at the app composition root.
+  `encodeDraft`/`encodeQueued` pull `registry.getOrCreate id` (a stable `RichBody` per id, reused
+  across re-encodes for `Connect`-instance stability). On attach, each `RichBody.Connect` grabs
+  the live fragment via `ctx.GetXmlFragment()` and stashes it.
+- `decodeDraft`/`decodeQueued` **skip the body** (decode author/order only). The model's
+  `DraftState`/`QueuedMessage` no longer carry a body *value*.
+- The **View resolves the live fragment from the registry** by id at editor-mount time and hands
+  it to `y-prosemirror`. Remote drafts get a `RichBody` on the encode pass that follows their
+  decode; the mount tolerates a one-render lag (create-on-demand fallback).
+- Editor edits flow editor → live `Y.XmlFragment` → y-webrtc → peers; they never pass through
+  `EditDraftBodyMsg`/`EditQueuedBodyMsg` (those retire). Start/send/reorder/delete stay, but
+  **send copies fragment *content*** draft→queue (Yjs shared types can't be re-parented): read the
+  draft fragment, write its structure into the queue entry's fragment.
+
+## Step 0 — spike: DONE (Ylmish source read, capability merged)
+
+Read `NickDarvey/Ylmish@master` (`Codec.fs`, `Binding.fs`, `Fable.Yjs/Yjs.fs`). Confirmed the
+`CustomElement` live-handle mechanism and the two findings above; implemented + merged the
+`GetXmlFragment` addition (PR #135, `1.0.0-beta0219`, 113 tests green). `Directory.Packages.props`
+is bumped to `beta0219`. Remaining de-risking (fold into the first build step): the ProseMirror +
+`y-prosemirror` ↔ Yjs wiring and the Lit stable-mount, which are app-side, not Ylmish-side.
 
 ## File-by-file changes (after the spike confirms feasibility)
 
-- **Ylmish (upstream package)** — add/confirm an XML-element codec that yields a **live
-  `Y.XmlFragment` handle** at a named key (`Encode.xmlFragment` + `Decode.xmlFragment`, or an
-  opaque `CustomElement`). Its own unit test in the Ylmish repo (encode → doc → decode of an
-  XML body handle). Consumed here via a version bump in
-  [`Directory.Packages.props`](../../Directory.Packages.props).
-- **[`src/Yession.Domain/SessionState.fs`](../../src/Yession.Domain/SessionState.fs)** —
-  `DraftState.Body` and `QueuedMessage.Body` change from `Ylmish.Text` to the rich-body handle
-  type (`Ylmish.XmlFragment` / a `RichBody` wrapper). `SharedBrief` stays a plain string unless
-  it also needs richness.
-- **[`src/Yession.Domain/Sync.fs`](../../src/Yession.Domain/Sync.fs)** — swap
-  `Encode.text`/`Decode.text` for the XML codec in `encodeDraft`, `encodeQueued`, `decodeDraft`,
-  `decodeQueued`; author/order unchanged. Keep the entry-skipping totality of
-  `draftsToDomain`/`queueToDomain` (the doc is shared with peers we don't control).
+- **Ylmish (upstream) — DONE.** `BindContext.GetXmlFragment` + `ensureXmlFragment` merged
+  (`NickDarvey/Ylmish` PR #135, `1.0.0-beta0219`). Consumed here via
+  [`Directory.Packages.props`](../../Directory.Packages.props) (bumped `beta0218`→`beta0219`).
+- **[`src/Yession.Domain/SessionState.fs`](../../src/Yession.Domain/SessionState.fs)** — drop the
+  `Body : Ylmish.Text` *value* field from `DraftState` and `QueuedMessage` (the body lives in the
+  doc as a `Y.XmlFragment`, resolved via the registry, not carried in the model). Author/order/id
+  stay. `SharedBrief` unchanged.
+- **`RichBody` + registry (new, app composition root)** — `RichBody : CustomElement` wrapping a
+  `Y.XmlFragment` (Connect → `ctx.GetXmlFragment()`; `Value` unused since the body isn't decoded).
+  A registry `getOrCreate : DraftId/QueueId -> RichBody` returns a stable instance per id.
+- **[`src/Yession.Domain/Sync.fs`](../../src/Yession.Domain/Sync.fs)** — `encodeDraft`/`encodeQueued`
+  emit `"body", Encode.custom (registry.getOrCreate id)` (anchors the fragment); the codec gains a
+  registry parameter threaded from `App.makeProgram`. `decodeDraft`/`decodeQueued` **omit body**
+  (author/order only). Keep the entry-skipping totality of `draftsToDomain`/`queueToDomain`.
 - **[`src/Yession.App/Model.fs`](../../src/Yession.App/Model.fs)** — retire
   `EditDraftBodyMsg`/`EditQueuedBodyMsg` (body edits go through the editor→Yjs binding, not the
-  reducer). `StartDraftMsg` seeds an **empty** rich body; `SendDraftMsg` moves the same handle
-  draft→queue; `ReorderQueuedMsg`/`DeleteQueuedMsg` are unaffected.
+  reducer). `StartDraftMsg` just creates the draft (its empty fragment is anchored on encode);
+  `SendDraftMsg` triggers the draft→queue **content copy** of the fragment;
+  `ReorderQueuedMsg`/`DeleteQueuedMsg` unaffected.
 - **JS/Fable rich-editor module (new)** — a ProseMirror/TipTap editor factory bound to a body's
   `Y.XmlFragment`: StarterKit/`prosemirror-inputrules` for markdown-typing (`#`, `-`, `1.`,
   `**`, `` ` ``, ``` ``` ```, `>`, links), `prosemirror-markdown` for markdown **paste**, and

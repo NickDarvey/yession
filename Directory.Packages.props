@@ -10,9 +10,9 @@
 
   <ItemGroup>
     <!-- Ylmish: the Elmish <-> Yjs sync boundary (Fable + FSharp.Data.Adaptive). -->
-    <PackageVersion Include="Ylmish" Version="1.0.0-beta0218" />
+    <PackageVersion Include="Ylmish" Version="1.0.0-beta0219" />
     <!-- Yjs bindings used at the sync boundary (same release train as Ylmish). -->
-    <PackageVersion Include="Fable.Yjs" Version="1.0.0-beta0218" />
+    <PackageVersion Include="Fable.Yjs" Version="1.0.0-beta0219" />
     <!-- The Elmish loop Ylmish binds to (version Ylmish is built against). -->
     <PackageVersion Include="Fable.Elmish" Version="4.2.0" />
     <!-- Incremental values driving Ylmish's encode direction (version Ylmish is built against). -->
