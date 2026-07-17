@@ -145,6 +145,26 @@ let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: 
 let connectClient (signalUrl: string) (token: string) (id: string) (name: string) : Async<Client> =
     connectClientWith App.ConnectOptions.defaults signalUrl token id name
 
+/// Connect one full client to a host over an IN-MEMORY channel pair — the same drivers as
+/// the WebRTC path (`App.makeProgram` + `App.connect` on one end, the Host's real per-peer
+/// pump on the other via `host.Connect`), but with no WebRTC, HTTP, or native addon, so it
+/// runs in the cheap tier. Events come over frames (`FetchEvents = None`). Resolves once the
+/// model reaches `Connected`.
+let connectInMemoryClient (host: Host.SessionHost) (token: string) (id: string) (name: string) : Async<Client> =
+    async {
+        let clientEnd, serverEnd = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+        // The Host drives the server end exactly as it would a WebRTC connection.
+        host.Connect serverEnd
+        let doc = Y.Doc.Create ()
+        let local = peer id name
+        let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
+        let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
+        let connection = App.connect App.ConnectOptions.defaults doc hello (user >> runner.Dispatch) clientEnd
+        Async.StartImmediate connection.Run
+        do! runner.WaitFor (fun m -> m.Connection = Connected)
+        return { Runner = runner; Connection = connection; Channel = clientEnd; Doc = doc; Hello = hello }
+    }
+
 /// Reconnect an existing client on a fresh channel, resuming event consumption from its
 /// model's processed offset (E2E-4's catch-up path). Small pages force multi-page reads.
 let reconnectClient (signalUrl: string) (client: Client) : Async<Client> =

@@ -55,6 +55,22 @@ let private stateTests =
             | Error reason -> Expect.isTrue (reason.Contains "alpha") "named in the rejection"
             | Ok _ -> failwith "duplicate session ids must be rejected"
 
+        testCase "setDisplayName renames the reported title in place, leaving others untouched" <| fun () ->
+            let alpha = SessionId.create "alpha" |> expect
+            let renamed = ManagerState.setDisplayName alpha "Launch plan" twoSessions
+            Expect.equal
+                (ManagerState.tryFind alpha renamed |> Option.map (fun s -> s.DisplayName))
+                (Some "Launch plan")
+                "alpha's display name is the reported title"
+            Expect.equal
+                (ManagerState.tryFind (SessionId.create "beta" |> expect) renamed |> Option.map (fun s -> s.DisplayName))
+                (Some "Beta work")
+                "beta is untouched"
+
+        testCase "setDisplayName on an unknown session is a no-op" <| fun () ->
+            let unchanged = ManagerState.setDisplayName (SessionId.create "ghost" |> expect) "Nope" twoSessions
+            Expect.equal unchanged twoSessions "an unregistered session leaves the state unchanged"
+
         testCase "a missing state file is the empty state; the registry survives a restart" <| fun () ->
             let path = statePath "restart"
             Expect.equal (ManagerStore.load path) ManagerState.empty "first life starts empty"
@@ -189,7 +205,7 @@ let private startControlServer (secrets: (string * SessionEnvironmentCapabilitie
     async {
         let table = Map.ofList secrets
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler

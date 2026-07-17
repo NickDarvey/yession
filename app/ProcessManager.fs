@@ -35,6 +35,9 @@ type ProcessManager =
       Stop : SessionId -> Async<Result<unit, string>>
       /// Every registered session with its runtime status.
       Sessions : unit -> SessionView list
+      /// Set a session's display name (the reported collaborative title); durable, and a
+      /// no-op for unknown sessions or unchanged names.
+      SetDisplayName : SessionId -> string -> unit
       /// Resolves when the session's running child exits (immediately if none runs).
       WaitForExit : SessionId -> Async<unit>
       TryFind : SessionId -> SessionView option
@@ -103,6 +106,31 @@ let createWithUi
     // the Manager granted that launch — the RPC equivalent of the Step 11 closure. A
     // secret dies with its launch.
     let mutable secrets : Map<string, SessionEnvironmentCapabilities> = Map.empty
+    // The same per-launch secret also names which session is reporting its display name
+    // (the collaborative title); this map lives and dies with the secret.
+    let mutable secretSessions : Map<string, SessionId> = Map.empty
+
+    // Update a session's display name (the reported title). Idempotent: unknown sessions and
+    // no-op renames are skipped, and the registry write is durable before it is visible.
+    let setDisplayName (sessionId: SessionId) (displayName: string) : unit =
+        match ManagerState.tryFind sessionId state with
+        | Some record when record.DisplayName <> displayName ->
+            state <- ManagerState.setDisplayName sessionId displayName state
+            ManagerStore.save statePath state
+        | _ -> ()
+
+    // The control channel's name report: the secret identifies the reporting session; a
+    // blank name is ignored (the list keeps the registered name until a real title arrives).
+    let reportName (secret: string) (name: string) : Async<Result<unit, string>> =
+        async {
+            match Map.tryFind secret secretSessions with
+            | Some sessionId ->
+                let trimmed = name.Trim ()
+                if trimmed <> "" then setDisplayName sessionId trimmed
+                return Ok ()
+            | None -> return Error "invalid control secret"
+        }
+
     // The UI handler closes over the Manager record, which exists only after this
     // function returns — route through a slot the record fills in below. Requests
     // cannot arrive before then in practice; a too-early one gets a 503.
@@ -114,7 +142,7 @@ let createWithUi
             async {
                 let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                     let handled =
-                        Control.tryHandle (fun secret -> Map.tryFind secret secrets) req res
+                        Control.tryHandle (fun secret -> Map.tryFind secret secrets) reportName req res
                         || (match ui, self with
                             | Some handle, Some pm -> handle pm req res
                             | Some _, None ->
@@ -175,6 +203,7 @@ let createWithUi
                     | Some grant, Some url ->
                         let secret = Interop.randomSecret ()
                         secrets <- Map.add secret (grant record.SessionId) secrets
+                        secretSessions <- Map.add secret record.SessionId secretSessions
                         [ "YESSION_CONTROL_URL", url; "YESSION_CONTROL_SECRET", secret ], Some secret
                     | _ -> [], None
                 let env =
@@ -187,7 +216,9 @@ let createWithUi
                     @ fst controlEnv
                 let revokeSecret () =
                     match snd controlEnv with
-                    | Some secret -> secrets <- Map.remove secret secrets
+                    | Some secret ->
+                        secrets <- Map.remove secret secrets
+                        secretSessions <- Map.remove secret secretSessions
                     | None -> ()
                 match! Spawn.launch options.SessionCommand options.SessionArgs env options.LaunchTimeoutMs with
                 | Error reason ->
@@ -227,6 +258,7 @@ let createWithUi
           Launch = launch
           Stop = stop
           Sessions = fun () -> state.Sessions |> List.map (fun r -> { Record = r; Status = statusOf r })
+          SetDisplayName = setDisplayName
           WaitForExit =
             fun sessionId ->
                 match Map.tryFind (SessionId.value sessionId) children with

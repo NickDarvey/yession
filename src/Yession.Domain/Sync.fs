@@ -18,6 +18,7 @@ open Ylmish.Codec
 type AdaptiveSyncedState =
     { Drafts : cmap<string, DraftState>
       Queue : cmap<string, QueuedMessage>
+      Title : cval<Text>
       SharedBrief : cval<SharedBrief option> }
 
 module SyncedStateSync =
@@ -32,6 +33,7 @@ module SyncedStateSync =
     let create (m: SyncedSessionState) : AdaptiveSyncedState =
         { Drafts = cmap (draftsByKey m)
           Queue = cmap (queueByKey m)
+          Title = cval m.Title
           SharedBrief = cval m.SharedBrief }
 
     /// `Update` for Ylmish's options: fold the next model into the companion. Setting
@@ -39,6 +41,7 @@ module SyncedStateSync =
     let update (a: AdaptiveSyncedState) (m: SyncedSessionState) : unit =
         a.Drafts.Value <- draftsByKey m
         a.Queue.Value <- queueByKey m
+        a.Title.Value <- m.Title
         a.SharedBrief.Value <- m.SharedBrief
 
     /// Per-draft encoding: the map key *is* the author (one draft per client), so only the
@@ -63,6 +66,9 @@ module SyncedStateSync =
         Encode.object
             [ "drafts", Encode.map encodeDraft (a.Drafts :> amap<_, _>)
               "queue", Encode.map encodeQueued (a.Queue :> amap<_, _>)
+              // A top-level collaborative text: anchors to a named `title` Y.Text root, so
+              // two peers naming the session offline merge rather than clobber (like a body).
+              "title", Encode.text a.Title
               "sharedBrief", Encode.option encodeBrief a.SharedBrief ]
 
     /// The doc-side field shapes, before identifier validation.
@@ -123,10 +129,12 @@ module SyncedStateSync =
         Decode.object {
             let! drafts = Decode.object.optional "drafts" (Decode.map decodeDraft)
             let! queue = Decode.object.optional "queue" (Decode.map decodeQueued)
+            let! title = Decode.object.optional "title" Decode.text
             let! brief = Decode.object.optional "sharedBrief" decodeBrief
             return
                 { Drafts = drafts |> Option.map draftsToDomain |> Option.defaultValue Map.empty
                   Queue = queue |> Option.map queueToDomain |> Option.defaultValue Map.empty
+                  Title = defaultArg title Text.empty
                   SharedBrief = brief }
         }
 
@@ -141,6 +149,8 @@ module SyncedStateSync =
     let private materializeRoots (doc: Yjs.Y.Doc) : unit =
         if shareHas doc "drafts" then (doc.getMap "drafts" : Yjs.Y.Map<obj>) |> ignore
         if shareHas doc "queue" then (doc.getMap "queue" : Yjs.Y.Map<obj>) |> ignore
+        // The title is a named `Y.Text` root, not a map — type it as text before reading.
+        if shareHas doc "title" then (doc.getText "title" : Yjs.Y.Text) |> ignore
         if shareHas doc "sharedBrief" then (doc.getMap "sharedBrief" : Yjs.Y.Map<obj>) |> ignore
 
     /// Read the synced state currently in a doc (the decode direction alone — used by the

@@ -596,6 +596,19 @@ module Codec =
         { Encode = fun (StateSync s) -> Encode.object [ "kind", Encode.string "stateSync"; "state", stateCodec.Encode s ]
           Decode = Decode.field "state" stateCodec.Decode |> Decode.map StateSync }
 
+    let private presencePayload : Codec<PresencePayload> =
+        { Encode =
+            (fun (p: PresencePayload) ->
+                Encode.object
+                    [ "peerId", peerId.Encode p.PeerId
+                      "displayName", Encode.string p.DisplayName
+                      "titleCursor", Encode.option Encode.int p.TitleCursor ])
+          Decode =
+            Decode.object (fun get ->
+                { PresencePayload.PeerId = get.Required.Field "peerId" peerId.Decode
+                  PresencePayload.DisplayName = get.Required.Field "displayName" Decode.string
+                  PresencePayload.TitleCursor = get.Required.Field "titleCursor" (Decode.option Decode.int) }) }
+
     /// A frame codec for any `'State` codec. The transport never inspects the state
     /// payload; the state codec belongs to the sync-boundary layer (Step 05).
     let sessionFrame (stateCodec: Codec<'State>) : Codec<SessionFrame<'State>> =
@@ -606,7 +619,8 @@ module Codec =
                 | State s -> Encode.object [ "tag", Encode.string "state"; "payload", sf.Encode s ]
                 | Command c -> Encode.object [ "tag", Encode.string "command"; "payload", commandFrame.Encode c ]
                 | EventLog e -> Encode.object [ "tag", Encode.string "eventLog"; "payload", eventLogFrame.Encode e ]
-                | Control c -> Encode.object [ "tag", Encode.string "control"; "payload", controlFrame.Encode c ])
+                | Control c -> Encode.object [ "tag", Encode.string "control"; "payload", controlFrame.Encode c ]
+                | Presence p -> Encode.object [ "tag", Encode.string "presence"; "payload", presencePayload.Encode p ])
           Decode =
             Decode.field "tag" Decode.string
             |> Decode.andThen (function
@@ -614,6 +628,7 @@ module Codec =
                 | "command" -> Decode.field "payload" commandFrame.Decode |> Decode.map Command
                 | "eventLog" -> Decode.field "payload" eventLogFrame.Decode |> Decode.map EventLog
                 | "control" -> Decode.field "payload" controlFrame.Decode |> Decode.map Control
+                | "presence" -> Decode.field "payload" presencePayload.Decode |> Decode.map Presence
                 | other -> Decode.fail (sprintf "Unknown session frame: %s" other)) }
 
     /// Serialize a value to a compact JSON string.

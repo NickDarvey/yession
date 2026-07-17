@@ -149,7 +149,9 @@ let private frameSerializationTests =
           Control (PeerAccepted { SessionId = sessionId; AssignedDisplayName = "Ada"; LatestOffset = Some offset })
           Control (PeerRejected "bad token")
           Control Ping
-          Control Pong ]
+          Control Pong
+          Presence { PeerId = peerId; DisplayName = "Ada"; TitleCursor = Some 7 }
+          Presence { PeerId = peerId; DisplayName = "Ada"; TitleCursor = None } ]
 
     testList "Session frame serialization" [
         testCase "every session frame variant round-trips unchanged" <| fun () ->

@@ -23,13 +23,24 @@ type EventConsumerState =
 
 type AgentViewState = { ActiveTurn : AgentTurnId option }
 
+/// A remote peer's caret in the collaborative title: a UTF-16 index plus the peer's name
+/// for the cursor label. Ephemeral presence, delivered over `Presence` frames — never
+/// synced through Yjs, never durable.
+type RemoteCursor = { DisplayName : string; Index : int }
+
 type ClientModel =
     { Peer          : PeerState
       Connection    : ConnectionState
+      /// The serving session's id, learned from `PeerAccepted`; shown as the header's
+      /// secondary identifier beside the editable title.
+      Session       : SessionId option
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
       EventConsumer : EventConsumerState
       Agent         : AgentViewState
+      /// Other peers' live carets in the title, keyed by peer. Cleared when a peer moves
+      /// its caret out of the title or disconnects (Step: collaborative title).
+      Presence      : Map<PeerId, RemoteCursor>
       /// The session environment's UI status, folded from lifecycle events (Step 12).
       Environment   : EnvironmentStatus
       /// The read-only command log, folded from command events (Step 13).
@@ -49,6 +60,12 @@ type ClientMsg =
     /// built by folding pages through the shared projection; offsets track progress.
     | EventsPageMsg of EventPage<SessionEvent>
     | DisconnectedMsg
+    /// Edit the session title (collaborative text, merges like a draft body). A pure CRDT
+    /// write; the Session Process reports the settled title to the Manager for the list.
+    | EditTitleMsg of Ylmish.Text
+    /// A remote peer's cursor moved (or cleared) in the title — ephemeral presence folded
+    /// into `Presence`, never into the synced state.
+    | RemotePresenceMsg of PresencePayload
     /// Edit the draft in the slot keyed by `PeerId`. Drafts are keyed by author, so a peer
     /// owns at most one; editing a peer's own slot materialises it lazily (first keystroke),
     /// editing another peer's slot is collaboration on their draft (bodies merge, Step 05).
@@ -83,6 +100,7 @@ module ClientModel =
     let init (peer: PeerState) : ClientModel =
         { Peer = peer
           Connection = Disconnected
+          Session = None
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
           EventConsumer =
@@ -90,6 +108,7 @@ module ClientModel =
               LatestKnownOffset = None
               IsCatchingUp = false }
           Agent = { ActiveTurn = None }
+          Presence = Map.empty
           Environment = EnvironmentNotStarted
           Commands = CommandLog.empty }
 
@@ -110,6 +129,7 @@ module ClientModel =
         | ConnectedMsg accepted ->
             { model with
                 Connection = Connected
+                Session = Some accepted.SessionId
                 Peer = { model.Peer with DisplayName = accepted.AssignedDisplayName }
                 EventConsumer = withLatestKnown accepted.LatestOffset model.EventConsumer }
         | RejectedMsg _ ->
@@ -159,6 +179,18 @@ module ClientModel =
                       IsCatchingUp = isBehind highWater latestKnown } }
         | DisconnectedMsg ->
             { model with Connection = Reconnecting }
+        | EditTitleMsg title ->
+            model |> withSynced { model.Synced with Title = title }
+        | RemotePresenceMsg payload ->
+            // Never render your own remote caret; a cleared cursor removes the peer's entry.
+            if payload.PeerId = model.Peer.PeerId then model
+            else
+                let presence =
+                    match payload.TitleCursor with
+                    | Some index ->
+                        Map.add payload.PeerId { DisplayName = payload.DisplayName; Index = index } model.Presence
+                    | None -> Map.remove payload.PeerId model.Presence
+                { model with Presence = presence }
         | EditDraftBodyMsg (peerId, body) ->
             // Upsert the slot keyed by `peerId`: the key is the author, so this both
             // materialises a peer's own draft on first keystroke and folds collaborative

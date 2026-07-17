@@ -32,12 +32,16 @@ type SharedBrief = { Body : string }
 type SyncedSessionState =
     { Drafts      : Map<PeerId, DraftState>
       Queue       : Map<QueueId, QueuedMessage>
+      /// The session's human-given title: collaborative text, so concurrent edits
+      /// interleave and merge exactly like a draft body. Empty until first named.
+      Title       : Ylmish.Text
       SharedBrief : SharedBrief option }
 
 module SyncedSessionState =
 
-    /// Nothing synced yet: no drafts, an empty queue, no shared brief.
-    let empty : SyncedSessionState = { Drafts = Map.empty; Queue = Map.empty; SharedBrief = None }
+    /// Nothing synced yet: no drafts, an empty queue, an unnamed title, no shared brief.
+    let empty : SyncedSessionState =
+        { Drafts = Map.empty; Queue = Map.empty; Title = Ylmish.Text.empty; SharedBrief = None }
 
 /// The queue's total order. `Order` is a float register; ties (possible when two peers
 /// mint concurrently) are broken by `QueueId`, so the order is always a total,

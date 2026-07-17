@@ -24,6 +24,10 @@ module Dom =
 
     /// `data-*` hooks on the session client shell (`View`) and its browser delegation.
     module Hooks =
+        // Header — the collaborative session title and its secondary id.
+        let sessionTitle = "data-session-title"
+        let sessionId = "data-session-id"
+        let titleCursor = "data-title-cursor"
         // Sidebar — identity & live sync state.
         let connection = "data-connection"
         let displayName = "data-display-name"

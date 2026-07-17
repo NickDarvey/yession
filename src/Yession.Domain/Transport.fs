@@ -48,12 +48,24 @@ type ControlFrame =
 /// sync-boundary layer (Step 05).
 type StateFrame<'State> = StateSync of 'State
 
+/// Ephemeral presence: where a peer's caret is in the collaborative title. Relayed
+/// peer-to-peer by the Session Process (never durable, never in Yjs, never an event) so a
+/// collaborator's cursor is visible while they edit. `TitleCursor` is a UTF-16 index into
+/// the title, or `None` when the peer's caret is not in the title (or the peer has left,
+/// which clears its cursor everywhere).
+type PresencePayload =
+    { PeerId : PeerId
+      DisplayName : string
+      TitleCursor : int option }
+
 /// Every message exchanged over the session transport is one of these multiplexed frames.
 type SessionFrame<'State> =
     | State of StateFrame<'State>
     | Command of CommandFrame
     | EventLog of EventLogFrame
     | Control of ControlFrame
+    /// Ephemeral cursor presence; relayed to other peers, never logged or persisted.
+    | Presence of PresencePayload
 
 /// An abstract, bidirectional channel of session frames shared by both peers (Session
 /// Process and Browser Client). The real carrier is a WebRTC data channel (with HTTP used

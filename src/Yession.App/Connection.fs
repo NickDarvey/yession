@@ -51,6 +51,10 @@ module Connection =
                     | Some (EventLog (EventsPage (requestId, page))) ->
                         onEventsPage requestId page
                         return! pump ()
+                    | Some (Presence payload) ->
+                        // A collaborator's caret moved (or cleared) in the title.
+                        dispatch (RemotePresenceMsg payload)
+                        return! pump ()
                     | Some _ ->
                         // Anything else (e.g. inbound command requests) is not part of
                         // the client's protocol surface and is drained.

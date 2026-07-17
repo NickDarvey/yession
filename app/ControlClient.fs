@@ -33,6 +33,23 @@ let private postJson (url: string) (secret: string) (body: string) : JS.Promise<
 })()""")>]
 let private postStream (url: string) (secret: string) (body: string) (onLine: string -> unit) : JS.Promise<unit> = jsNative
 
+/// Report the session's display name (its collaborative title) to the Manager, so the
+/// session list reflects it. Best-effort: a transport failure is swallowed — a title that
+/// fails to reach the list is cosmetic, never a reason to disturb the session.
+let nameReporter (baseUrl: string) (secret: string) : string -> Async<unit> =
+    fun name ->
+        async {
+            try
+                let! _ =
+                    postJson
+                        (sprintf "%s/control/name" baseUrl)
+                        secret
+                        (ControlWire.toString ControlWire.sessionNameReport name)
+                    |> Async.AwaitPromise
+                return ()
+            with _ -> return ()
+        }
+
 /// Build the capability record over the Manager's control endpoint.
 let capabilities (baseUrl: string) (secret: string) : SessionEnvironmentCapabilities =
     let url (route: string) = sprintf "%s/control/%s" baseUrl route

@@ -26,7 +26,9 @@ let private bootstrapHtml (sessionId: SessionId) =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
         | Error e -> failwith e
-    Ssr.page sessionId (ClientModel.init placeholderPeer)
+    // Seed the serving session id so the secondary identifier renders on first paint (the
+    // browser re-learns it from `PeerAccepted` once connected).
+    Ssr.page sessionId { ClientModel.init placeholderPeer with Session = Some sessionId }
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
 let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
