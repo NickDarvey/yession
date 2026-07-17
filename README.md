@@ -66,8 +66,11 @@ Fable-compiles the Session Process host; `start` runs it. Tests run on Node with
 (not folders): `test` is the cheap tier (pure/model/protocol tests — fast, no ports, no
 browser, no credentials; what PRs run), and `verify` is the full release gate (the
 tagged expensive suites — real WebRTC, live agent, Docker — plus the real-browser E2E).
-.NET is a build tool only — nothing runs on the CLR; tests exercise the same JavaScript
-the product runs.
+Almost everything runs on Node: .NET is a build tool and tests exercise the same
+JavaScript the product runs. The one exception is the real-browser E2E — a Pyxpecto suite
+in the same test project (`Browser.fs`) that Pyxpecto runs on the .NET CLR
+(`dotnet run --project tests/Yession.Tests`), because it drives Chromium through the
+Microsoft.Playwright .NET driver against a live Session Process.
 
 The Session Process is F# compiled to JavaScript by [Fable](https://fable.io) and run on
 Node (the `app/` host). Its WebRTC transport uses

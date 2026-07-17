@@ -73,7 +73,9 @@ run = [
   "dotnet fsi scripts/build.fsx 0.0.0-verify",
   "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
   "YESSION_TEST_TIER=verify dotnet fsi scripts/run-tests.fsx tests/Yession.Tests/out/Main.js 240000",
-  "dotnet fsi scripts/browser-e2e.fsx",
+  # The real-browser E2E is now a Pyxpecto suite in the test project, run on the .NET CLR
+  # (the Microsoft.Playwright driver lives there). Same project, different runtime.
+  "dotnet run --project tests/Yession.Tests/Yession.Tests.fsproj",
 ]
 
 [tasks.package]

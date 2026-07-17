@@ -30,6 +30,8 @@
          build uses Thoth.Json; the .NET build uses the Thoth.Json.Net backend. -->
     <PackageVersion Include="Thoth.Json" Version="10.5.1" />
     <PackageVersion Include="Thoth.Json.Net" Version="12.0.0" />
+    <!-- Real-browser E2E driver (CLR-only; the test project's .NET run uses it). -->
+    <PackageVersion Include="Microsoft.Playwright" Version="1.61.0" />
     <!-- Test stack (versions taken from the dotnet xunit template for net10.0). -->
     <PackageVersion Include="coverlet.collector" Version="6.0.4" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
