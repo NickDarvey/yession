@@ -159,27 +159,68 @@ it aligns with the existing lifecycle (`AgentTurnStarted → … → AgentMessag
      sink (default `ignore`, keeping `Yession.SessionProcess` OTel-free); `SessionMain`
      reads the env, builds the `Telemetry` emitter, and passes its `record` in.
 
+## Test harness (reuse what exists — no Playwright)
+
+A Manager↔Session e2e harness already exists; the telemetry e2e reuses it. **Playwright is
+not involved** — it drives only the browser *client* E2E (`scripts/browser-e2e.fsx`); the
+session/manager e2es are headless Node, run by Pyxpecto. Two levels:
+
+1. **In-process host (cheap tier, no native addons).** `Host.startFull` + `connectInMemoryClient`
+   (`tests/Yession.Tests/Support.fs`) drive a *real* session — event log, projection,
+   scheduler, agent turn — over an in-memory channel pair. Full turn lifecycle
+   (message → queue → drain → turn → events) with no WebRTC, no spawning, no `node-datachannel`.
+   HTTP-on-localhost is cheap-tier-legal (see the un-tagged `EventsHttp.tests`). **This is
+   where the first telemetry e2e lives.**
+2. **Cross-process (verify tier).** `ProcessManager` spawns real `app/SessionMain.js`
+   children, driven over HTTP + real WebRTC clients (`connectClient`), plus the
+   shipped-bundle composition e2e (`spawnBundle`) — see `tests/Yession.Tests/Phase4.fs`.
+   Needs `node-datachannel`; it is the release gate.
+
+Two small, reusable additions:
+
+- **In-test OTLP logs receiver** — a localhost `POST /v1/logs` server that decodes the OTLP
+  JSON and records the LogRecords to a list, exposing `.Received`. Mirrors Phase4's
+  `startControlServer`. This **is** the Step 31 collector, reused as the test double — one
+  implementation, both roles.
+- **`usage-probe` built-in agent** — a `YESSION_AGENT=usage-probe` runner in `SessionMain`
+  (alongside `diagnostic`) that returns `AgentCompleted ("probe", Some <fixed usage>)` with
+  no Docker and no credentials, so the cross-process e2e can assert real non-zero counts on
+  the release gate.
+
+**The e2e that would have caught the Step 29 bug.** The silent no-op (wrong exporter ctor
+arg → zero records) survives every "looks-wired" check — processor registered, logger
+enabled — but an e2e that asserts *a record actually arrives at the receiver* turns it into
+a red build. Concretely, the cheap-tier first e2e: `Host.startFull` with `Telemetry.record`
+pointed at the in-test receiver → `connectInMemoryClient` sends a message → a scripted agent
+returns usage → assert **exactly one** record at the receiver, tagged with the session +
+turn id, counts intact, and **no body text**. The verify-tier variant runs the same
+assertion over the real spawn + env-injection path (`usage-probe` agent).
+
 ## Delivery steps
 
 | Step | Title | Interfaces / deliverable | Automated verification |
 |---|---|---|---|
 | 28 ✅ | **Capture usage from the SDK** | `AgentUsage` in Domain; `AgentCompleted` carries optional usage; `app/Agent.fs` reads `result.usage` + model | Delivered `6f220a5`: `dotnet build` (0 errors) + `dotnet fable` of tests both green; live-agent smoke (verify tier) confirms real values |
 | 29 ✅ | **`Fable.OpenTelemetry` bindings** | `src/Fable.OpenTelemetry` — hand-trimmed bindings for the logs SDK (`api-logs`/`sdk-logs`) + OTLP HTTP exporter + `resources`; deps pinned in `package.json`; `Telemetry.fs` smoke (in-memory exporter) in the cheap tier | Delivered: `dotnet build` + `dotnet fable` green; the compiled binding drives the real `@opentelemetry/sdk-logs` — one emit → one record with attributes preserved. **Gotcha found & encoded:** `Simple`/`BatchLogRecordProcessor` take `{ exporter }` (SDK 2.x), not the bare exporter — the bare form silently no-ops |
-| 30 | **Session emitter** | `app/Telemetry.fs` — `LoggerProvider`/`Resource`/exporter + `record`; no-op when unset; async/failure isolation | `test` tier: `record` maps an `AgentUsage` → a LogRecord with the expected attributes (in-memory exporter); `record` never throws on a dead/absent endpoint |
-| 31 | **Manager receiver + collector** | `app/TelemetryReceiver.fs` `tryHandle` composed into the shared server; `LogsWire.decode`; `Collector` aggregates + logs; per-launch bearer auth | `test` tier: `LogsWire.decode` of a real exporter payload → expected counts; route returns 401 on bad secret, 200 + record on good; collector running-total assertion |
-| 32 | **Env contract + wiring** | `ProcessManager` injects `YESSION_OTLP_ENDPOINT`/`_SECRET`, mints/revokes the bearer on launch/exit; receiver starts when telemetry enabled; `AgentTurn.run` emit sink; `SessionMain` builds + injects the emitter | Cross-process **verify** tier: launch a session with telemetry on, drive one turn (diagnostic agent), assert the Manager collector recorded the four counts tagged with the session + turn id and **no body text anywhere in the payload** |
+| 30 | **Session emitter** | `app/Telemetry.fs` — `LoggerProvider`/`Resource`/exporter + `record`, exposed as an injectable `emitUsage : AgentTurnId -> AgentUsage -> unit` sink (so `Host.startFull`/`AgentTurn.run` take it); no-op when unset; async/failure isolation | `test` tier: `record` maps an `AgentUsage` → a LogRecord with the expected attributes (in-memory exporter); `record` never throws on a dead/absent endpoint |
+| 31 | **Manager receiver + collector (reusable)** | `app/TelemetryReceiver.fs` `tryHandle` composed into the shared server; `LogsWire.decode`; `Collector` aggregates + logs; per-launch bearer auth. **The same receiver, with a `.Received` list, is the in-test double** (Support helper) | `test` tier: `LogsWire.decode` of a real exporter payload → expected counts; route returns 401 on bad secret, 200 + record on good; collector running-total assertion |
+| 32 | **First e2e (cheap) + env wiring** | Wire the emit sink through `Host.startFull` → `AgentTurn.run`. **Cheap-tier e2e:** in-process host + `Telemetry.record` → in-test receiver, `connectInMemoryClient` sends a message, scripted agent returns usage, assert one record (session+turn id, counts, no body). Plus `ProcessManager` injects `YESSION_OTLP_ENDPOINT`/`_SECRET` (bearer minted/revoked on launch/exit); receiver starts when telemetry enabled; `SessionMain` builds + injects the emitter | `test` tier: the cheap e2e above — **this is the regression guard for the Step 29 bug class** (silent no-op → zero records → red) |
+| 32b | **Cross-process e2e (verify)** | `usage-probe` built-in agent in `SessionMain`; ProcessManager spawns a real child with telemetry on | **verify** tier: launch a real session (`usage-probe`), drive one turn via `connectClient`, assert the Manager collector recorded the four counts tagged with session + turn id and **no body text** — over the real spawn + env-injection path |
 | 33 | **Docs & GAPS update** | README observability note; flip the GAPS "no telemetry" line to "agent-turn token/cache usage over OTLP logs; Manager is the collector"; `mise` task if one helps run the receiver standalone | n/a |
 
 ## Automated verification (tiers)
 
 - **`test` (cheap, PR gate):** bindings smoke (in-memory exporter); emitter
   attribute-mapping + failure isolation; `LogsWire.decode` + receiver auth + collector
-  aggregation — all pure/in-process, no ports, no credentials, no native addons.
-- **`verify` (release gate):** the Step 32 end-to-end — a real Session Process emits over
-  a real socket to a real Manager receiver across the process boundary, asserting the
-  record contains the counts and ids but **no session content**. Reuses the diagnostic
-  agent (`YESSION_AGENT=diagnostic`) so it needs no model credentials; the
-  credential-gated live path additionally confirms real `result.usage` values are
+  aggregation; **and the first telemetry e2e** — in-process host + `connectInMemoryClient`
+  drive a real turn, `Telemetry.record` posts to the in-test receiver over localhost HTTP,
+  asserting one record with the session + turn id and counts, no body. WebRTC-free, so it
+  runs on every PR. This is the regression guard for the Step 29 silent-no-op class.
+- **`verify` (release gate):** the cross-process e2e — `ProcessManager` spawns a real
+  `SessionMain` child with telemetry on and the `usage-probe` agent; a `connectClient` turn
+  drives the full spawn + env-injection + OTLP-over-the-wire path, asserting the Manager
+  collector recorded the counts tagged with session + turn id and **no session content**.
+  The credential-gated live path additionally confirms real `result.usage` values are
   non-zero.
 
 ## Non-goals (later)
