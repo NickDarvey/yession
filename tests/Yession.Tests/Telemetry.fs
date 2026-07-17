@@ -102,4 +102,88 @@ let private emitterTests =
             }
     ]
 
-let tests = testList "Telemetry" [ bindingTests; emitterTests ]
+// fetch helpers for the receiver's HTTP surface.
+[<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/json', 'authorization': $2 }, body: $1 }).then(r => r.status)")>]
+let private postJson (url: string) (body: string) (auth: string) : JS.Promise<int> = jsNative
+
+[<Emit("fetch($0).then(r => r.status)")>]
+let private getStatus (url: string) : JS.Promise<int> = jsNative
+
+/// A running receiver server: its base URL, the collector, and a close.
+let private startReceiver (secret: string) : Async<string * TelemetryReceiver.Collector * (unit -> unit)> =
+    async {
+        let collector = TelemetryReceiver.Collector.inMemory ()
+        let server =
+            Interop.createServer (fun req res ->
+                if not (TelemetryReceiver.tryHandle (fun s -> s = secret) collector req res) then
+                    res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
+                    res.``end`` "not found")
+        let! url =
+            Async.FromContinuations (fun (cont, _, _) ->
+                server.listen (0, "127.0.0.1", fun () -> cont (sprintf "http://127.0.0.1:%d" (Interop.serverPort server)))
+                |> ignore)
+        return url, collector, (fun () -> server.close ignore)
+    }
+
+let private receiverTests =
+    testList "receiver (app/TelemetryReceiver.fs)" [
+        testCase "decode reads records and tolerates intValue as number or string" <| fun () ->
+            let json =
+                """{"resourceLogs":[{"scopeLogs":[{"logRecords":[
+                    {"body":{"stringValue":"agent turn usage"},"attributes":[
+                        {"key":"yession.session.id","value":{"stringValue":"s"}},
+                        {"key":"yession.agent.turn.id","value":{"stringValue":"t"}},
+                        {"key":"gen_ai.usage.input_tokens","value":{"intValue":11}},
+                        {"key":"gen_ai.usage.output_tokens","value":{"intValue":"7"}}]}]}]}]}"""
+            match TelemetryReceiver.LogsWire.decode json with
+            | Ok [ record ] ->
+                match TelemetryReceiver.TurnUsage.ofLog record with
+                | Some usage -> Expect.equal (usage.InputTokens, usage.OutputTokens) (11, 7) "intValue decodes whether number or string"
+                | None -> failwith "not recognised as agent-turn usage"
+            | other -> failwithf "expected exactly one record, got %A" other
+
+        testCase "a non-usage record (no yession ids) is decoded but not read as usage" <| fun () ->
+            match TelemetryReceiver.LogsWire.decode """{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"hi"},"attributes":[]}]}]}]}""" with
+            | Ok [ record ] -> Expect.isTrue (TelemetryReceiver.TurnUsage.ofLog record |> Option.isNone) "no yession ids -> not usage"
+            | other -> failwithf "expected one record, got %A" other
+
+        testCase "malformed JSON is a decode error, never a crash" <| fun () ->
+            match TelemetryReceiver.LogsWire.decode "{not json" with
+            | Error _ -> ()
+            | Ok _ -> failwith "malformed body must not decode"
+
+        testCaseAsync "round-trip: the emitter's real OTLP payload decodes at the receiver into the turn's counts" <|
+            async {
+                let! url, collector, close = startReceiver "rt-secret"
+                let sessionId = SessionId.create "rt-sess" |> expect
+                let emitter = Telemetry.create sessionId url "rt-secret"
+                emitter.Emit (AgentTurnId.create "rt-turn" |> expect)
+                    { InputTokens = 42; OutputTokens = 9; CacheReadTokens = 4; CacheCreationTokens = 6; Model = Some "claude-opus-4-8" }
+                do! emitter.Shutdown () |> Async.AwaitPromise
+
+                let received = collector.Received ()
+                Expect.equal received.Length 1 "the receiver decoded exactly one record"
+                match TelemetryReceiver.TurnUsage.ofLog received.[0] with
+                | Some u ->
+                    Expect.equal u.SessionId "rt-sess" "session id survives the wire"
+                    Expect.equal u.TurnId "rt-turn" "turn id survives the wire"
+                    Expect.equal (u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens) (42, 9, 4, 6) "all four counts survive"
+                    Expect.equal u.Model (Some "claude-opus-4-8") "model survives"
+                | None -> failwith "the decoded record was not recognised as agent-turn usage"
+                close ()
+            }
+
+        testCaseAsync "auth: a wrong bearer is 401; an authorized empty payload is 200; a non-telemetry path falls through" <|
+            async {
+                let! url, _, close = startReceiver "good-secret"
+                let! badBearer = postJson (url + "/v1/logs") """{"resourceLogs":[]}""" "Bearer wrong" |> Async.AwaitPromise
+                Expect.equal badBearer 401 "a wrong bearer is rejected"
+                let! authorized = postJson (url + "/v1/logs") """{"resourceLogs":[]}""" "Bearer good-secret" |> Async.AwaitPromise
+                Expect.equal authorized 200 "an authorized payload is accepted"
+                let! fellThrough = getStatus (url + "/not-telemetry") |> Async.AwaitPromise
+                Expect.equal fellThrough 404 "a non-telemetry path falls through to the composing server"
+                close ()
+            }
+    ]
+
+let tests = testList "Telemetry" [ bindingTests; emitterTests; receiverTests ]
