@@ -1,6 +1,56 @@
-/* The single stylesheet entry: Tailwind's base reset, component, and utility layers.
-   Built by the Tailwind CLI (see mise `build`/`verify`/`package`) into
-   app/out/public/app.css, served locally at /app.css — no CDN. */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* The single stylesheet entry, built by the Tailwind CLI (see mise `build`/`verify`) into
+   app/out/public/app.css, served locally at /app.css — no CDN. Tailwind v4 is CSS-first:
+   the theme lives here (there is no tailwind.config.js). The F#-authored `Style` values
+   compose these utilities, so `@source` points the scanner at the F# sources. */
+
+@import "tailwindcss";
+
+/* Theme — mirrors what the old tailwind.config.js `theme.extend` registered. Namespaced
+   custom properties auto-generate utilities (`--color-blue` -> `bg-blue`/`text-blue`,
+   `--font-mono` -> `font-mono`, `--animate-pulse2` -> `animate-pulse2`). */
+@theme {
+  --color-bg: #000;
+  --color-panel: #0a0a0a;
+  --color-surface: #111;
+  --color-surface-2: #191919;
+  --color-hair: #1f1f1f;
+  --color-ink: #fff;
+  --color-ink-dim: #b4b4b4;
+  --color-ink-faint: #6a6a6a;
+  --color-blue: #1ba1e2;
+  --color-green: #a8dd00;
+  --color-err: #ff4a4a;
+
+  --font-sans: 'Segoe UI', 'Segoe UI Variable', 'Segoe WP', 'Frutiger', 'Helvetica Neue', system-ui, sans-serif;
+  --font-mono: 'Cascadia Code', 'Consolas', monospace;
+
+  --animate-pulse2: pulse2 1.1s ease-in-out infinite;
+  --animate-blink: blink 1s steps(1) infinite;
+
+  @keyframes pulse2 {
+    0%, 100% { opacity: 0.25; }
+    50% { opacity: 1; }
+  }
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+}
+
+/* v4 has no `background-image` theme namespace, so the one custom gradient utility (the
+   composer's focus edge, `Style.fs`) is defined explicitly. */
+@utility bg-grad {
+  background-image: linear-gradient(180deg, #1ba1e2, #a8dd00);
+}
+
+/* v4 auto-detection does not scan `.fs`, so declare the F# sources explicitly (replaces the
+   old `content`). Paths are relative to this stylesheet. */
+@source "../src/**/*.fs";
+@source "../app/**/*.fs";
+
+/* The avatar checkers are assembled at runtime (`Style.checker` in Style.fs) and so never
+   appear as literals for the scanner — declare them inline (replaces the old `safelist`). */
+@source inline("bg-[conic-gradient(from_0deg,#1ba1e2_25%,#0b5d85_0_50%,#1ba1e2_0_75%,#0b5d85_0)]");
+@source inline("bg-[conic-gradient(from_0deg,#a8dd00_25%,#55700a_0_50%,#a8dd00_0_75%,#55700a_0)]");
+@source inline("bg-[conic-gradient(from_0deg,#17c3b2_25%,#0a5c54_0_50%,#17c3b2_0_75%,#0a5c54_0)]");
+@source inline("bg-[conic-gradient(from_0deg,#4ab8f0_25%,#1a6a96_0_50%,#4ab8f0_0_75%,#1a6a96_0)]");
+@source inline("bg-[conic-gradient(from_0deg,#7fb800_25%,#3d5a05_0_50%,#7fb800_0_75%,#3d5a05_0)]");
