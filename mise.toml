@@ -55,7 +55,7 @@ depends = ["restore"]
 run = [
   "dotnet build Yession.slnx",
   "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
-  "node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 120000",
+  "dotnet fsi scripts/run-tests.fsx tests/Yession.Tests/out/Main.js 120000",
 ]
 
 [tasks.verify]
@@ -72,8 +72,8 @@ run = [
   # bundles (dist/npm/manager.js + session.js), so a release is gated on what ships.
   "dotnet fsi scripts/build.fsx 0.0.0-verify",
   "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
-  "YESSION_TEST_TIER=verify node tests/Yession.Tests/run.mjs tests/Yession.Tests/out/Main.js 240000",
-  "node tests/browser/run.mjs",
+  "YESSION_TEST_TIER=verify dotnet fsi scripts/run-tests.fsx tests/Yession.Tests/out/Main.js 240000",
+  "dotnet fsi scripts/browser-e2e.fsx",
 ]
 
 [tasks.package]
