@@ -137,7 +137,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
                         resumed <- true
                         cont result
                 onChunk { Text = "thinking" }
-                pendingRelease <- Some (fun () -> resume (AgentCompleted "turn done"))
+                pendingRelease <- Some (fun () -> resume (AgentCompleted ("turn done", None)))
                 signal.OnAbort (fun () -> resume (AgentFailed "aborted")))
 
     let mintTurnId =

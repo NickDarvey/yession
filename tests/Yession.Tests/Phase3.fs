@@ -72,7 +72,7 @@ let private heldAgent () : RunAgent * (unit -> unit) =
         match pending with
         | Some cont ->
             pending <- None
-            cont (AgentCompleted "held turn done")
+            cont (AgentCompleted ("held turn done", None))
         | None -> failwith "no held agent turn to release"
     runner, release
 
@@ -321,7 +321,7 @@ let private interruptTests =
                     match pending with
                     | Some resume ->
                         pending <- None
-                        resume (AgentCompleted "second turn done")
+                        resume (AgentCompleted ("second turn done", None))
                     | None -> failwith "no held turn to release"
 
                 let! h = Host.startWith (Some runner) (SessionId.create "interrupt-e2e" |> expect) "interrupt-token" 0
@@ -371,7 +371,7 @@ let private interruptTests =
 
         testCaseAsync "interrupting a turn that already finished is rejected (interrupt-vs-completion race)" <|
             async {
-                let scripted : RunAgent = fun _ _ _ _ -> async { return AgentCompleted "instant" }
+                let scripted : RunAgent = fun _ _ _ _ -> async { return AgentCompleted ("instant", None) }
                 let! h = Host.startWith (Some scripted) (SessionId.create "interrupt-late" |> expect) "late-token" 0
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
                 let! a = connectClient signalUrl "late-token" "ada" "Ada"

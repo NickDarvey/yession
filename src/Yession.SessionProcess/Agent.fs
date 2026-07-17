@@ -80,7 +80,9 @@ module AgentTurn =
                 let! result = runAgent context (capabilitiesFor turnId) signal onChunk
                 if not (signal.IsAborted ()) then
                     match result with
-                    | AgentCompleted body ->
+                    // Step 32 will emit `usage` as OTLP telemetry here (turnId is in scope);
+                    // Step 28 only captures it — the body still drives the durable event.
+                    | AgentCompleted (body, _usage) ->
                         do! append (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = body })
                     | AgentFailed reason ->
                         do! append (AgentTurnFailed { AgentTurnId = turnId; Reason = reason })

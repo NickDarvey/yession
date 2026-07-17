@@ -16,6 +16,13 @@ type private RunOutcome =
     abstract ok : bool
     abstract body : string
     abstract reason : string
+    // Plan 04, Step 28: the `result` message's usage block, surfaced instead of
+    // discarded. Zero when the SDK reports no usage; `model` is "" when unknown.
+    abstract inputTokens : int
+    abstract outputTokens : int
+    abstract cacheReadTokens : int
+    abstract cacheCreationTokens : int
+    abstract model : string
 
 [<Emit("""(async () => {
   try {
@@ -57,6 +64,11 @@ type private RunOutcome =
     let body = ''
     let streamed = ''
     let failed = null
+    let inputTokens = 0
+    let outputTokens = 0
+    let cacheReadTokens = 0
+    let cacheCreationTokens = 0
+    let model = ''
     for await (const m of q) {
       if (m.type === 'stream_event') {
         const e = m.event
@@ -65,13 +77,21 @@ type private RunOutcome =
           streamed += e.delta.text
         }
       } else if (m.type === 'result') {
+        // Plan 04, Step 28: read the usage block instead of discarding it.
+        const u = m.usage || {}
+        inputTokens = u.input_tokens || 0
+        outputTokens = u.output_tokens || 0
+        cacheReadTokens = u.cache_read_input_tokens || 0
+        cacheCreationTokens = u.cache_creation_input_tokens || 0
+        if (m.modelUsage) { const ks = Object.keys(m.modelUsage); if (ks.length) model = ks[0] }
         if (m.subtype === 'success') body = (typeof m.result === 'string' && m.result !== '') ? m.result : streamed
         else failed = 'agent run ended: ' + m.subtype
       }
     }
-    return failed ? { ok: false, body: '', reason: failed } : { ok: true, body, reason: '' }
+    const usage = { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, model }
+    return failed ? { ok: false, body: '', reason: failed, ...usage } : { ok: true, body, reason: '', ...usage }
   } catch (err) {
-    return { ok: false, body: '', reason: String((err && err.message) || err) }
+    return { ok: false, body: '', reason: String((err && err.message) || err), inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, model: '' }
   }
 })()""")>]
 let private runQuery
@@ -168,5 +188,11 @@ let run : RunAgent =
                     (fun text -> onChunk { Text = text })
                     signal.OnAbort
                 |> Async.AwaitPromise
-            return if outcome.ok then AgentCompleted outcome.body else AgentFailed outcome.reason
+            let usage =
+                { InputTokens = outcome.inputTokens
+                  OutputTokens = outcome.outputTokens
+                  CacheReadTokens = outcome.cacheReadTokens
+                  CacheCreationTokens = outcome.cacheCreationTokens
+                  Model = if System.String.IsNullOrEmpty outcome.model then None else Some outcome.model }
+            return if outcome.ok then AgentCompleted (outcome.body, Some usage) else AgentFailed outcome.reason
         }

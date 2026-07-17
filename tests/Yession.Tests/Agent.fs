@@ -73,7 +73,7 @@ let private turnTests =
                             Expect.equal context.SessionId sessionId "the context carries the session"
                             onChunk { Text = "Hel" }
                             onChunk { Text = "lo!" }
-                            return AgentCompleted "Hello!"
+                            return AgentCompleted ("Hello!", None)
                         }
                 do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
@@ -212,7 +212,7 @@ let private e2eTests =
                         async {
                             onChunk { Text = "You said: " }
                             onChunk { Text = context.CurrentMessage.Body }
-                            return AgentCompleted (sprintf "You said: %s" context.CurrentMessage.Body)
+                            return AgentCompleted (sprintf "You said: %s" context.CurrentMessage.Body, None)
                         }
                 let! h = Host.startWith (Some scripted) e2eSessionId token port
                 host <- Some h

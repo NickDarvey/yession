@@ -59,7 +59,7 @@ let private diagnosticAgent : RunAgent =
                 match result with
                 | CommandSucceeded 0 ->
                     onChunk { Text = output.Trim () }
-                    return AgentCompleted (sprintf "diagnostic: %s" (output.Trim ()))
+                    return AgentCompleted (sprintf "diagnostic: %s" (output.Trim ()), None)
                 | other -> return AgentFailed (sprintf "diagnostic command failed: %A" other)
         }
 
