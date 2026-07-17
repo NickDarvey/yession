@@ -309,11 +309,19 @@ module View =
         let discard =
             if myBodyStr = "" then Lit.nothing
             else html $"""<button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Discard draft" data-discard-draft @click={Ev(fun _ -> dispatch (DiscardDraftMsg myPeer))}>✕</button>"""
+        // The composer surface: a rich ProseMirror editor when the flag is on (mounted
+        // imperatively by the browser onto this host, seeded from — and writing back — the
+        // same `Ylmish.Text` body), otherwise today's textarea. Side by side, flippable.
+        let composerSurface =
+            if Features.richText then
+                html $"""<div class="{Style.draftInput}" data-rich-composer="{PeerId.value myPeer}" data-draft-input="{PeerId.value myPeer}"></div>"""
+            else
+                html $"""<textarea rows="2" placeholder="Message the session — sending queues while the agent works" class="{Style.draftInput}" data-draft-input="{PeerId.value myPeer}" .value={myBodyStr} @input={EvVal(fun v -> dispatch (EditDraftBodyMsg (myPeer, Ylmish.Text.edit v myBody)))}>{myBodyStr}</textarea>"""
         let mine =
             html $"""
                 <article class="{Style.draftBox}" data-draft-id="{PeerId.value myPeer}" data-draft-author="{PeerId.value myPeer}">
                   <span class="{Style.draftEdge}"></span>
-                  <textarea rows="2" placeholder="Message the session — sending queues while the agent works" class="{Style.draftInput}" data-draft-input="{PeerId.value myPeer}" .value={myBodyStr} @input={EvVal(fun v -> dispatch (EditDraftBodyMsg (myPeer, Ylmish.Text.edit v myBody)))}>{myBodyStr}</textarea>
+                  {composerSurface}
                   <div class="{Style.draftActions}">
                     <button type="button" class="{Style.btnPrimary}" data-send-draft="{PeerId.value myPeer}" @click={Ev(fun _ -> dispatch (SendDraftMsg (myPeer, actions.NewQueueId ())))}>Send</button>
                     {discard}

@@ -10,6 +10,7 @@
     <Compile Include="Connection.fs" />
     <Compile Include="PeerName.fs" />
     <Compile Include="Style.fs" />
+    <Compile Include="Features.fs" />
     <Compile Include="ProseMirror.fs" />
     <Compile Include="Editor.fs" />
     <Compile Include="View.fs" />

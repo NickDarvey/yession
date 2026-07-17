@@ -143,6 +143,17 @@ let private toggleNav () : unit = jsNative
 [<Emit("new URLSearchParams(window.location.search).get($0) || $1")>]
 let private queryParam (name: string) (fallback: string) : string = jsNative
 
+// --- Rich-text composer mount (flagged, ?rich=1) ---------------------------------------
+// The view renders an empty `[data-rich-composer]` host per local composer; the editor is
+// mounted imperatively into it (ProseMirror owns that DOM; Lit leaves the static host's
+// children alone across re-renders, exactly as it preserves the textareas). Off unless
+// flagged, so the default path is untouched.
+[<Emit("Array.from(document.querySelectorAll('[data-rich-composer]'))")>]
+let private richComposerHosts () : obj[] = jsNative
+
+[<Emit("$0.getAttribute('data-rich-composer')")>]
+let private hostPeer (el: obj) : string = jsNative
+
 // --- Client-side doc persistence (Step 20): IndexedDB via y-indexeddb ------------------
 
 [<Import("IndexeddbPersistence", "y-indexeddb")>]
@@ -195,6 +206,40 @@ let private start () =
         let mutable connectionRef : App.Connection option = None
         let mutable dispatchRef : (ClientMsg -> unit) = ignore
 
+        // Rich-text composer flag + mount bookkeeping. `latestModel` gives the mount and each
+        // editor's change handler the current body (edits are computed relative to it, exactly
+        // like the textarea's `Ylmish.Text.edit v myBody`).
+        Features.richText <- (queryParam "rich" "" = "1")
+        let mutable latestModel = initial
+        let mountedComposers = System.Collections.Generic.Dictionary<string, unit -> unit> ()
+
+        let bodyFor (peer: PeerId) : Ylmish.Text =
+            latestModel.Synced.Drafts
+            |> Map.tryFind peer
+            |> Option.map (fun d -> d.Body)
+            |> Option.defaultValue Ylmish.Text.empty
+
+        /// Mount editors on new hosts (seeded from the current body), and dispose editors whose
+        /// host has left the DOM. The editor writes each change back as markdown through the
+        /// same `EditDraftBodyMsg` the textarea uses, so the synced body stays authoritative.
+        let syncRichComposers () =
+            if Features.richText then
+                let seen = System.Collections.Generic.HashSet<string> ()
+                for host in richComposerHosts () do
+                    let peerStr = hostPeer host
+                    seen.Add peerStr |> ignore
+                    if not (mountedComposers.ContainsKey peerStr) then
+                        match PeerId.create peerStr with
+                        | Ok peer ->
+                            let fragment = Editor.newLocalFragment (Ylmish.Text.toString (bodyFor peer))
+                            let onChange (nextMd: string) =
+                                dispatchRef (EditDraftBodyMsg (peer, Ylmish.Text.edit nextMd (bodyFor peer)))
+                            mountedComposers.[peerStr] <- Editor.mountEditor host fragment false onChange
+                        | Error _ -> ()
+                for stale in mountedComposers.Keys |> Seq.filter (seen.Contains >> not) |> Seq.toList do
+                    mountedComposers.[stale] ()
+                    mountedComposers.Remove stale |> ignore
+
         // The side effects a template can't derive from the model. Sending is a pure CRDT
         // write (dispatch `SendDraftMsg` with a fresh queue id), so only the interrupt
         // needs the connection; the sidebar toggle is a root-class bit.
@@ -212,6 +257,7 @@ let private start () =
         // textarea and its caret survive; only the timeline scroll is restored by hand.
         let setState (model: ClientModel) (dispatch: Ylmish.Program.Message<ClientModel, ClientMsg> -> unit) =
             dispatchRef <- fun msg -> dispatch (Ylmish.Program.Message.User msg)
+            latestModel <- model
             let scroll = timelineScroll ()
             Lit.render (unbox el) (View.view actions model dispatchRef)
             match scroll with
@@ -220,6 +266,8 @@ let private start () =
             // Place collaborators' title carets by measurement (native inputs have no
             // per-character geometry); a no-op when there are no remote cursors.
             positionTitleCursors ()
+            // Mount/adopt/dispose rich composers on their hosts (flagged; a no-op when off).
+            syncRichComposers ()
 
         App.makeProgram doc initial
         |> Program.withSetState setState
