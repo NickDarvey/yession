@@ -36,20 +36,42 @@ type [<AllowNullLiteral>] PeerConnection =
     abstract onGatheringStateChange : (string -> unit) -> unit
     abstract onDataChannel : (DataChannel -> unit) -> unit
 
-[<Import("PeerConnection", "node-datachannel")>]
-let private peerConnectionCtor : obj = jsNative
+// `node-datachannel` is a native addon. A static top-level `import` loads its `.node`
+// binary at module-eval — which would force the CHEAP test tier (pure/model/protocol tests
+// that never open a WebRTC connection) to build and ship that binary just to LOAD the test
+// bundle. Resolve it lazily via `createRequire` instead: the addon loads only on the first
+// real connection (the verify tier and production), so the cheap tier runs without it. This
+// mirrors the dynamic-`import()` pattern already used for the agent SDK and Docker backend.
+[<Import("createRequire", "node:module")>]
+let private createRequire (url: string) : obj = jsNative
 
-[<Emit("new $0($1, $2)")>]
-let private newPeerConnection (ctor: obj) (name: string) (config: obj) : PeerConnection = jsNative
+[<Emit("import.meta.url")>]
+let private moduleUrl : string = jsNative
 
-[<Import("cleanup", "node-datachannel")>]
-let cleanup : unit -> unit = jsNative
+[<Emit("$0($1)")>]
+let private callRequire (require: obj) (id: string) : obj = jsNative
+
+let mutable private nodeDataChannel : obj = null
+/// The lazily-required `node-datachannel` module (cached after first use).
+let private ndc () : obj =
+    if isNull nodeDataChannel then
+        nodeDataChannel <- callRequire (createRequire moduleUrl) "node-datachannel"
+    nodeDataChannel
+
+[<Emit("new ($0.PeerConnection)($1, $2)")>]
+let private newPeerConnection (module': obj) (name: string) (config: obj) : PeerConnection = jsNative
+
+[<Emit("$0.cleanup()")>]
+let private ndcCleanup (module': obj) : unit = jsNative
+
+/// libdatachannel's global teardown; lazy like the constructor (loads the addon on demand).
+let cleanup () : unit = ndcCleanup (ndc ())
 
 /// Create a peer connection. Empty `iceServers` keeps gathering to local host candidates,
 /// which is all that is needed for a local-first, same-machine session.
 let createPeerConnection (name: string) : PeerConnection =
     let config = createObj [ "iceServers" ==> ([||]: obj[]) ]
-    newPeerConnection peerConnectionCtor name config
+    newPeerConnection (ndc ()) name config
 
 // --- node:http ---------------------------------------------------------------
 

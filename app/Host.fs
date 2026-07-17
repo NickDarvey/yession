@@ -23,6 +23,11 @@ type SessionHost =
       /// the disconnect you want to observe, then await it — this avoids any reliance on
       /// timing to see the resulting `PeerLeft`.
       WaitForNextSessionEnd : unit -> Async<unit>
+      /// Run a peer session over an arbitrary channel — the exact per-peer pump a WebRTC
+      /// connection drives. Production wires this to the WebRTC listener (`Signalling`);
+      /// tests connect an `InMemoryChannel` pair here to drive the real Host (relay, drain,
+      /// scheduler, presence, title report) with no WebRTC, HTTP, or native addon.
+      Connect : FrameChannel<string> -> unit
       Stop : unit -> Async<unit> }
 
 /// Start a Session Process: create the event log and the session's Yjs document, start
@@ -251,6 +256,7 @@ let startFull
               Doc = doc
               Environment = environment
               WaitForNextSessionEnd = waitForNextSessionEnd
+              Connect = onConnection
               Stop = fun () -> async { server.close ignore } }
     }
 

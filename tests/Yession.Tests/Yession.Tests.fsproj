@@ -28,6 +28,7 @@
     <Compile Include="Hedgehog.fs" />
     <Compile Include="Properties.fs" />
     <Compile Include="Acceptance.fs" />
+    <Compile Include="InMemory.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 

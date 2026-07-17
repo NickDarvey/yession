@@ -26,6 +26,7 @@ let all =
         Phase4.tests
         Properties.tests
         Acceptance.tests
+        InMemory.tests
     ]
 
 [<EntryPoint>]
