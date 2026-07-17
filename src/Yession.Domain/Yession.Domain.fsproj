@@ -13,6 +13,7 @@
     <Compile Include="Agent.fs" />
     <Compile Include="SessionState.fs" />
     <Compile Include="RichText.fs" />
+    <Compile Include="Markdown.fs" />
     <Compile Include="Transport.fs" />
     <Compile Include="Launch.fs" />
     <Compile Include="Serialization.fs" />

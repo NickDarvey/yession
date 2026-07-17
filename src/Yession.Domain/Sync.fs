@@ -44,56 +44,53 @@ module SyncedStateSync =
         a.Title.Value <- m.Title
         a.SharedBrief.Value <- m.SharedBrief
 
-    /// Per-draft encoding: the map key *is* the author (one draft per client), so only the
-    /// body crosses — collaborative text, concurrent edits to the same slot interleave.
-    let private encodeDraft (d: DraftState) : Encoded =
-        Encode.object [ "body", Encode.text (AVal.constant d.Body) ]
+    /// Per-draft encoding: the map key *is* the author (one draft per client). The body is a
+    /// rich-text `Y.XmlFragment` anchored via `Encode.custom` over a `RichBody` (keyed stably
+    /// by `BodyKey.draft`, so every replica binds the same fragment). The body value never
+    /// decodes — the app resolves the live fragment from the registry — so nothing else crosses.
+    let private encodeDraft (registry: BodyRegistry) (d: DraftState) : Encoded =
+        Encode.object [ "body", Encode.custom (registry.GetOrCreate (BodyKey.draft d.Author) :> CustomElement) ]
 
-    /// Per-queue-entry encoding: body is collaborative text; order is an LWW float
-    /// register, so reorder = one register write (never a structural move).
-    let private encodeQueued (q: QueuedMessage) : Encoded =
+    /// Per-queue-entry encoding: rich body via `Encode.custom`; order is an LWW float register,
+    /// so reorder = one register write (never a structural move). Author is a stable string.
+    let private encodeQueued (registry: BodyRegistry) (q: QueuedMessage) : Encoded =
         Encode.object
             [ "author", Encode.string (AVal.constant (PeerId.value q.Author))
-              "body", Encode.text (AVal.constant q.Body)
-              "order", Encode.float (AVal.constant q.Order) ]
+              "order", Encode.float (AVal.constant q.Order)
+              "body", Encode.custom (registry.GetOrCreate (BodyKey.queued q.QueueId) :> CustomElement) ]
 
     let private encodeBrief (b: aval<SharedBrief>) : Encoded =
         Encode.object [ "body", Encode.string (b |> AVal.map (fun x -> x.Body)) ]
 
     /// Which parts of the session sync, and how each merges. Everything else in the
-    /// models — the conversation projection above all — is app-only by omission.
-    let encode (a: AdaptiveSyncedState) : Encoded =
+    /// models — the conversation projection above all — is app-only by omission. `registry`
+    /// supplies each body's `RichBody` (the client's; the Session Process reads the doc
+    /// directly and never encodes).
+    let encode (registry: BodyRegistry) (a: AdaptiveSyncedState) : Encoded =
         Encode.object
-            [ "drafts", Encode.map encodeDraft (a.Drafts :> amap<_, _>)
-              "queue", Encode.map encodeQueued (a.Queue :> amap<_, _>)
+            [ "drafts", Encode.map (encodeDraft registry) (a.Drafts :> amap<_, _>)
+              "queue", Encode.map (encodeQueued registry) (a.Queue :> amap<_, _>)
               // A top-level collaborative text: anchors to a named `title` Y.Text root, so
-              // two peers naming the session offline merge rather than clobber (like a body).
+              // two peers naming the session offline merge rather than clobber.
               "title", Encode.text a.Title
               "sharedBrief", Encode.option encodeBrief a.SharedBrief ]
 
-    /// The doc-side field shapes, before identifier validation.
-    type private DraftFields =
-        { Body : Text }
-
+    /// The doc-side field shapes, before identifier validation. Bodies are omitted: a custom
+    /// nested in a keyed map does not round-trip Ylmish's structural decode, so the body's
+    /// live fragment is resolved from the `BodyRegistry` by the app, never decoded here.
     type private QueuedFields =
         { Author : string
-          Body : Text
           Order : float }
 
-    let private decodeDraft<'m> : Decoder<'m, DraftFields> =
-        Decode.object {
-            let! body = Decode.object.optional "body" Decode.text
-            return { Body = defaultArg body Text.empty }
-        }
+    let private decodeDraft<'m> : Decoder<'m, unit> =
+        Decode.object { return () }
 
     let private decodeQueued<'m> : Decoder<'m, QueuedFields> =
         Decode.object {
             let! author = Decode.object.required "author" Decode.string
-            let! body = Decode.object.optional "body" Decode.text
             let! order = Decode.object.optional "order" Decode.float
             return
                 { Author = author
-                  Body = defaultArg body Text.empty
                   Order = defaultArg order 0.0 }
         }
 
@@ -106,13 +103,13 @@ module SyncedStateSync =
     /// Entries whose identifiers fail the smart constructors are skipped rather than
     /// failing the decode: the doc is shared with peers we don't control, and a decode
     /// must stay total.
-    let private draftsToDomain (h: HashMap<string, DraftFields>) : Map<PeerId, DraftState> =
+    let private draftsToDomain (h: HashMap<string, unit>) : Map<PeerId, DraftState> =
         (Map.empty, HashMap.toSeq h)
-        ||> Seq.fold (fun acc (key, f) ->
+        ||> Seq.fold (fun acc (key, _) ->
             // The key is the author (one draft per client); an invalid key is skipped so
             // the decode stays total over a doc shared with peers we don't control.
             match PeerId.create key with
-            | Ok author -> acc |> Map.add author { Author = author; Body = f.Body }
+            | Ok author -> acc |> Map.add author { Author = author }
             | Error _ -> acc)
 
     let private queueToDomain (h: HashMap<string, QueuedFields>) : Map<QueueId, QueuedMessage> =
@@ -120,7 +117,7 @@ module SyncedStateSync =
         ||> Seq.fold (fun acc (key, f) ->
             match QueueId.create key, PeerId.create f.Author with
             | Ok id, Ok author ->
-                acc |> Map.add id { QueueId = id; Author = author; Body = f.Body; Order = f.Order }
+                acc |> Map.add id { QueueId = id; Author = author; Order = f.Order }
             | _ -> acc)
 
     /// Decode the synced state out of a doc. Total, and decode-empty = init: on an empty
@@ -174,6 +171,20 @@ module SyncedStateSync =
                     let queue : Yjs.Y.Map<obj> = doc.getMap "queue"
                     ids |> List.iter (fun id -> queue.delete (QueueId.value id))),
                 processOrigin)
+
+    /// The Markdown of a queue entry's rich body, read straight from the doc — the drain's
+    /// snapshot into the durable `MessageSent` (the Session Process observes the doc without a
+    /// Ylmish binding, so it reads the nested `Y.XmlFragment` directly). An entry whose body
+    /// was never materialized (empty) snapshots as the empty string.
+    let queuedBodyMarkdown (doc: Yjs.Y.Doc) (id: QueueId) : string =
+        materializeRoots doc
+        let queue : Yjs.Y.Map<obj> = doc.getMap "queue"
+        match queue.get (QueueId.value id) with
+        | Some entryObj ->
+            match (unbox<Yjs.Y.Map<obj>> entryObj).get "body" with
+            | Some frag when not (isNull frag) -> Markdown.ofFragment (unbox<Yjs.Y.XmlFragment> frag)
+            | _ -> ""
+        | None -> ""
 
 /// Moves Yjs updates over the transport's opaque `State` frame. The wire payload is a
 /// base64-encoded Yjs update; lib0 (a yjs dependency) provides base64 in both Node and

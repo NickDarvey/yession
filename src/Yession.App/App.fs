@@ -27,7 +27,7 @@ module App =
     /// by `Program.withSetState` (the browser renders `View.view` with Lit; the headless
     /// test harness captures the model), so the program itself carries a unit view.
     /// `initial` is usually `ClientModel.init peer`.
-    let makeProgram (doc: Y.Doc) (initial: ClientModel) =
+    let makeProgram (doc: Y.Doc) (registry: BodyRegistry) (initial: ClientModel) =
         Program.mkProgram
             (fun () -> initial, Cmd.none)
             (fun msg model -> ClientModel.update msg model, Cmd.none)
@@ -36,7 +36,9 @@ module App =
             { Doc = doc
               Create = fun (m: ClientModel) -> SyncedStateSync.create m.Synced
               Update = fun a m -> SyncedStateSync.update a m.Synced
-              Encode = SyncedStateSync.encode
+              // The registry supplies each body's RichBody so the editor and the codec bind
+              // the same nested Y.XmlFragment (the body's live handle is never decoded).
+              Encode = SyncedStateSync.encode registry
               Decode = decodeModel
               OnError = Ylmish.Program.OnError.log }
 

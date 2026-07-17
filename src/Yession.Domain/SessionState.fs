@@ -6,25 +6,30 @@ namespace Yession.Domain
 
 /// A client's work-in-progress draft: the WIP tail, not yet queued. Keyed by its
 /// `Author` in `SyncedSessionState.Drafts`, so each client owns at most one — the cap is
-/// structural, not a runtime check. The body is collaborative text: any peer may edit any
-/// slot and edits merge (Step 05), so "collaborate" is co-editing someone's slot and
-/// "write your own" is typing in yours.
+/// structural, not a runtime check. The body is a rich-text `Y.XmlFragment` (a ProseMirror
+/// doc) anchored in the doc via `Encode.custom`; it is NOT carried in the model — a custom
+/// nested in a keyed map cannot round-trip Ylmish's structural decode — so the live fragment
+/// is resolved from the `BodyRegistry` by the draft's body key. Concurrent edits merge in the
+/// fragment CRDT, so "collaborate" is co-editing someone's slot and "write your own" is yours.
 type DraftState =
-    { Author  : PeerId
-      Body    : Ylmish.Text }
+    { Author  : PeerId }
 
 /// A message waiting for the agent (Phase 3). Queued messages are collaborative state:
-/// any peer may edit the body (text merge), reorder (one fractional-index write), or
-/// delete — until the Session Process drains the queue, which is the terminal
-/// transition into an immutable `MessageSent` event.
+/// any peer may edit the rich body (the `Y.XmlFragment` merges), reorder (one
+/// fractional-index write), or delete — until the Session Process drains the queue, which
+/// snapshots the body to Markdown in an immutable `MessageSent`.
 type QueuedMessage =
     { QueueId : QueueId
       Author  : PeerId
-      /// Concurrent edits interleave and merge, exactly like draft bodies.
-      Body    : Ylmish.Text
       /// A fractional index: reorder = one register write, never a structural move
       /// (Yjs's concurrent-move duplication is unrepresentable this way).
       Order   : float }
+
+/// The doc key under which a draft/queue body's `Y.XmlFragment` is anchored. Stable across
+/// peers so every replica's `BodyRegistry` and editor bind to the same fragment.
+module BodyKey =
+    let draft (author: PeerId) : string = "draft:" + PeerId.value author
+    let queued (id: QueueId) : string = "queue:" + QueueId.value id
 
 type SharedBrief = { Body : string }
 

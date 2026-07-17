@@ -88,7 +88,7 @@ module Scheduler =
                                     { MessageId = mintMessageId ()
                                       QueueId = Some entry.QueueId
                                       Author = HumanPeer entry.Author
-                                      Body = Ylmish.Text.toString entry.Body }
+                                      Body = SyncedStateSync.queuedBodyMarkdown doc entry.QueueId }
                                 let! _ = log.Append (HumanPeer entry.Author) (MessageSent message)
                                 consumed <- Set.add (QueueId.value entry.QueueId) consumed
                                 lastMessage <- Some message
