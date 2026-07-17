@@ -24,6 +24,7 @@ let all =
         Tag.needs "Domain" [] (fun () -> Domain.tests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
+        Tag.needs "Editor" [] (fun () -> Editor.tests)
         Tag.needs "Agent" [] (fun () -> Agent.tests)
         Tag.needs "WebRTC E2E" [ Tag.Ports ] (fun () -> E2E.tests)
         Tag.needs "Client shell E2E" [ Tag.Ports ] (fun () -> Client.tests)

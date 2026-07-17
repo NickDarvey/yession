@@ -20,6 +20,7 @@
     <Compile Include="SessionProcess.fs" />
     <Compile Include="Support.fs" />
     <Compile Include="Sync.fs" />
+    <Compile Include="Editor.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="Browser.fs" />
     <Compile Include="E2E.fs" />
