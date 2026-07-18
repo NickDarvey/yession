@@ -1,6 +1,8 @@
 # Plan 04 — OpenTelemetry: the Manager as collector, Session Processes emit
 
-> **Status: in progress.** Steps 28–32 delivered; Step 33 (docs) pending.
+> **Status: delivered (Steps 28–33).** The logs-signal telemetry path is complete end to
+> end: sessions emit one OTel log record per completed turn; the Manager is the collector.
+> Metrics pipeline, traces, and downstream re-export remain documented follow-ups (Non-goals).
 >
 > Phase 5 · Observability. Addresses [GAPS.md](../GAPS.md) § Delivery & operations
 > ("No telemetry, structured logging, or crash reporting; the Process logs to stdout")
@@ -206,7 +208,7 @@ assertion over the real spawn + env-injection path (`usage-probe` agent).
 | 31 ✅ | **Manager receiver + collector (reusable)** | `app/TelemetryReceiver.fs`: `LogsWire.decode` (hand-written JS-interop walk of the OTLP JSON subset, tolerant of `intValue` as number *or* string); `TurnUsage.ofLog`; `Collector { Record; Received }` aggregates per-session + logs, with an `onRecord` seam; `tryHandle` composes into the shared server like `Control.tryHandle`, bearer-auth. The `Collector` **is** the in-test double | Delivered: cheap-tier suite (10/10). **Round-trip** — the real emitter's OTLP payload over real localhost HTTP decodes at the receiver into the exact counts (the anti-silent-mismatch guard); plus 401/200/fall-through auth and malformed→error. Import-clean, runs in the PR gate |
 | 32 ✅ | **First e2e (cheap) + env wiring** | Sink threaded `Host.startFull` → `Scheduler.create` → `AgentTurn.run` (default no-op); `SessionMain` builds the emitter via `Telemetry.fromEnv` + flushes on exit; `ProcessManager` gains `Options.Telemetry` (a collector), runs the receiver on its endpoint, and injects `YESSION_OTLP_ENDPOINT`/`_SECRET` (bearer minted/revoked per launch); `Collector.logging` (non-retaining) for the long-lived Manager | Delivered: **cheap-tier e2e** (`TelemetryE2E.fs`) — real Host + real emit sink, a message injected the Phase-3 way drains into a turn, the record crosses real localhost OTLP HTTP into the collector (session+turn id, counts, no body). Runs in the PR gate. **The regression guard for the Step 29 silent-no-op class.** Threading verified across all call sites (build green) |
 | 32b ✅ | **Cross-process e2e (verify)** | `usage-probe` built-in agent in `SessionMain`; `ProcessManager` spawns a real child with `Telemetry = Some collector` | **verify** tier (`Phase4.fs`): a real `usage-probe` child, a `connectClient` turn, the Manager collector receives the counts (111/22/3/4) tagged with the child's session id — over the real spawn + env-injection + OTLP-over-the-wire path. Awaits the collector's `onRecord` signal (no polling). Type-checks here; runs in CI (needs `node-datachannel`) |
-| 33 | **Docs & GAPS update** | README observability note; flip the GAPS "no telemetry" line to "agent-turn token/cache usage over OTLP logs; Manager is the collector"; `mise` task if one helps run the receiver standalone | n/a |
+| 33 ✅ | **Docs & GAPS update** | `GAPS.md` telemetry line rewritten (agent-turn usage over OTLP logs; Manager is the collector; metrics/traces/re-export still absent); README roadmap links this plan | n/a |
 
 ## Automated verification (tiers)
 

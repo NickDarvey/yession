@@ -133,7 +133,12 @@ they matter.
   users need Rosetta or a matrix addition.
 - **No Windows build**; no signing/notarisation for macOS binaries (Gatekeeper will
   warn).
-- **No telemetry, structured logging, or crash reporting**; the Process logs to stdout.
+- **Telemetry is agent-turn usage only** (Plan 04): each completed turn emits one OpenTelemetry
+  **log record** — the token/cache counts plus session/turn/model ids, never message content —
+  over OTLP/HTTP to the Manager, which acts as the collector (`/v1/logs`) and logs + aggregates
+  per-session totals to stdout. Off unless the Manager enables it. Still **no metrics pipeline,
+  no traces, no downstream re-export** (all behind the collector's `onRecord` seam), **no
+  structured app logging or crash reporting** beyond stdout.
 - **Interactive terminal, multi-node/remote sessions, and work-intake integrations
   (Slack/Linear)** remain out of scope, as planned.
 

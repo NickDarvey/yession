@@ -100,5 +100,6 @@ the schemas/interfaces it introduces, and automated verification.
 - **Phase 3 plan (turn scheduling):** [docs/plans/01-turn-scheduling.md](docs/plans/01-turn-scheduling.md)
 - **Phase 4 plan (Manager process split, delivered):** [docs/plans/02-manager-process.md](docs/plans/02-manager-process.md)
 - **One draft per client (collaboration refinement, delivered):** [docs/plans/03-one-draft-per-client.md](docs/plans/03-one-draft-per-client.md)
+- **Telemetry (OpenTelemetry — Manager as collector, sessions emit):** [docs/plans/04-telemetry.md](docs/plans/04-telemetry.md)
 - **Progress & blockers tracker:** [docs/plans/TODO.md](docs/plans/TODO.md)
 - **Known gaps (honest inventory):** [docs/GAPS.md](docs/GAPS.md)
