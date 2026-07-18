@@ -9,16 +9,27 @@ module Yession.Host.Control
 // traffic, plus ONE piece of session metadata — the session's self-assigned display name
 // (a label, never conversation or event content) — so the Manager's list reflects the title.
 //
-// Routes (all POST, secret in the `x-yession-control` header):
-//   /control/start    EnvironmentSpec        -> StartContainerResult
-//   /control/stop     ContainerHandle        -> StopContainerResult
-//   /control/execute  ExecuteRequest         -> NDJSON: chunk* then exactly one result
-//   /control/name     { name }               -> "ok" (updates the registry display name)
+// Routes (secret in the `x-yession-control` header):
+//   POST /control/start          EnvironmentSpec  -> StartContainerResult
+//   POST /control/stop           ContainerHandle  -> StopContainerResult
+//   POST /control/execute        ExecuteRequest   -> NDJSON: chunk* then exactly one result
+//   POST /control/name           { name }         -> "ok" (updates the registry display name)
+//   GET  /control/notifications                   -> text/event-stream (the reverse leg:
+//        the Manager pushing notifications DOWN to this session, multiplexed as SSE frames
+//        of `ControlWire.sessionNotification` JSON — see NotificationHub / SessionNotification)
 
 open Fable.Core.JsInterop
 open Yession.Domain
 open Yession.Manager
 open Yession.Host.Interop
+
+// SSE keep-alive: a comment frame on an interval so an idle stream is not reaped by an
+// HTTP idle timeout (the child also reconnects on drop, so this is belt-and-braces).
+[<Fable.Core.Emit("setInterval($1, $0)")>]
+let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("clearInterval($0)")>]
+let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
@@ -41,6 +52,7 @@ let private respond (res: ServerResponse) (status: int) (text: string) =
 let tryHandle
     (resolve: string -> SessionEnvironmentCapabilities option)
     (reportName: string -> string -> Async<Result<unit, string>>)
+    (registerNotificationSink: string -> (SessionNotification -> unit) -> (unit -> unit))
     (req: IncomingMessage)
     (res: ServerResponse)
     : bool =
@@ -95,5 +107,20 @@ let tryHandle
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))
+            | "GET", "/control/notifications" ->
+                // The reverse leg: a long-lived SSE stream the Manager pushes notifications
+                // down. The secret already resolved to capabilities above, so it is valid —
+                // register a sink that encodes each notification as one SSE `data:` frame.
+                res.writeHead (200, createObj [ "content-type", box "text/event-stream"; "cache-control", box "no-store"; "connection", box "keep-alive" ]) |> ignore
+                // Open the stream with a comment so the client sees headers immediately.
+                res.write ": subscribed\n\n" |> ignore
+                let sink (n: SessionNotification) =
+                    res.write (sprintf "data: %s\n\n" (ControlWire.toString ControlWire.sessionNotification n)) |> ignore
+                let unsubscribe = registerNotificationSink (Option.defaultValue "" secret) sink
+                let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
+                // The subscription lives until the client disconnects: tear down both.
+                req.on ("close", fun _ ->
+                    clearInterval heartbeat
+                    unsubscribe ()) |> ignore
             | _ -> respond res 404 "not found"
         true

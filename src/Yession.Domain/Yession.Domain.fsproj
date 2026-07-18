@@ -9,6 +9,7 @@
     <Compile Include="Events.fs" />
     <Compile Include="EventLog.fs" />
     <Compile Include="Environment.fs" />
+    <Compile Include="Notifications.fs" />
     <Compile Include="Conversation.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="SessionState.fs" />
