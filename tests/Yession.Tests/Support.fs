@@ -178,8 +178,11 @@ module Body =
     /// Y types cannot do by re-parenting).
     let send (registry: BodyRegistry) (runner: Runner) (peer: PeerId) (queueId: QueueId) : unit =
         let md = draft registry peer |> Option.defaultValue ""
-        runner.Dispatch (user (SendDraftMsg (peer, queueId)))
+        // Seed the queue body BEFORE the entry (mirrors `Connection.SendDraft`): over an ordered
+        // transport the body update reaches a draining Session Process before the entry, so the
+        // drain never snapshots an entry whose body has not yet landed.
         if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
+        runner.Dispatch (user (SendDraftMsg (peer, queueId)))
         // The composer empties after send (the body root is durable, not removed with the slot).
         Markdown.intoFragment "" (registry.Fragment (BodyKey.draft peer))
 

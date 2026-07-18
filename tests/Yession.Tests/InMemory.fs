@@ -34,6 +34,28 @@ let tests =
                 do! host.Stop ()
             }
 
+        testCaseAsync "a sent rich draft drains through the Host into both timelines as its markdown body" <|
+            async {
+                let! host = Host.start (sid ()) token 0
+                let! a = connectInMemoryClient host token "ada" "Ada"
+                let! b = connectInMemoryClient host token "bob" "Bob"
+                let ada = a.Hello.PeerId
+                // Ada composes a rich body and sends; the idle Host drains it to exactly one
+                // MessageSent, snapshotted as MARKDOWN — visible in BOTH timelines (the sender's
+                // too), queue cleared. Pins the send atomicity through the real drain: a split
+                // send would either snapshot an empty body OR let the drain's removal Set clobber
+                // the sender's freshly-consumed conversation (the top-level-root regression the
+                // WebRTC E2E only caught in the verify tier).
+                do! compose a ada "# ship it"
+                a.Connection.SendDraft ada
+                let settled (m: ClientModel) =
+                    Map.isEmpty m.Synced.Queue
+                    && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "# ship it" ]
+                do! a.Runner.WaitFor settled
+                do! b.Runner.WaitFor settled
+                do! host.Stop ()
+            }
+
         testCaseAsync "a peer's title cursor relays to others and clears on disconnect" <|
             async {
                 let! host = Host.start (sid ()) token 0

@@ -217,16 +217,24 @@ module App =
           SendDraft =
             fun peerId ->
                 // Enqueue under a fresh queue id (unique keys make concurrent sends safe).
-                // Carry the rich body over: capture the draft fragment as markdown, move the
-                // slot into the queue, then seed the new queue entry's fragment. Body fragments
-                // are top-level roots (`getXmlFragment` is idempotent), so both are available
-                // immediately; shared Y types can't be re-parented, hence the markdown copy.
+                // Carry the rich body over: seed the queue entry's body root AND create the entry
+                // in ONE Yjs transaction, so the send is a SINGLE doc update — exactly as the old
+                // nested-body design was. Two reasons this must be atomic:
+                //   1. the Session Process drains on the entry's arrival, so an entry that arrives
+                //      without its body would be snapshotted as an empty durable message; and
+                //   2. splitting it into multiple interleaved State frames shifts the relay timing
+                //      so a `withYlmish` Set (from applying the drain's queue removal) can clobber
+                //      the SENDER's just-consumed conversation/offset — a Set replaces every
+                //      non-synced model field with a decode-time snapshot.
+                // Body roots are `getXmlFragment` (idempotent), so writing the body inside the
+                // same transaction that creates the entry is safe.
                 match QueueId.create (string (System.Guid.NewGuid ())) with
                 | Ok queueId ->
                     let draftBody = registry.Fragment (BodyKey.draft peerId)
                     let md = Markdown.ofFragment draftBody
-                    dispatch (SendDraftMsg (peerId, queueId))
-                    if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
+                    doc.transact ((fun _ ->
+                        if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
+                        dispatch (SendDraftMsg (peerId, queueId))), null)
                     // The composer empties after send: the sender's body root is a durable
                     // top-level root (it is not removed with the slot), so clear it explicitly.
                     Markdown.intoFragment "" draftBody
