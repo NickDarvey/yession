@@ -66,9 +66,16 @@ let externals =
     [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "zod"; "dockerode" ]
     |> List.map (sprintf "--external:%s")
 
+// The OTel SDK (@opentelemetry/core) does a dynamic `require('util')`; esbuild's ESM output
+// can't satisfy a runtime `require`, so it emits a shim that throws "Dynamic require of ...".
+// Restore a real `require` at the top of each bundle via createRequire — esbuild's own
+// `__require` helper delegates to it when a top-level `require` exists.
+let banner =
+    "--banner:js=import { createRequire as __createRequire } from 'module'; const require = __createRequire(import.meta.url);"
+
 let bundle (entry: string) (outFile: string) =
     run esbuild
-        ([ Path.Combine (repoRoot, entry); "--bundle"; "--platform=node"; "--format=esm" ]
+        ([ Path.Combine (repoRoot, entry); "--bundle"; "--platform=node"; "--format=esm"; banner ]
          @ externals
          @ [ sprintf "--outfile=%s" (Path.Combine (pkg, outFile)) ])
     |> ignore
