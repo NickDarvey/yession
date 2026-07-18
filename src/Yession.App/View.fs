@@ -257,7 +257,7 @@ module View =
                     <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
                       <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
                       <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
-                      <div class="{bodyClass}" data-message-body>{item.Body}{caret}</div>
+                      <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                     </article>""")
         html $"""<section class="{Style.timeline}" data-conversation>{items}</section>"""
 

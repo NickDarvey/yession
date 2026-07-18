@@ -10,8 +10,9 @@ module Yession.Tests.Browser
 //
 // It launches two Chromium peers against a real Session Process (app/out/Main.js), verifies
 // Markdown typed into the rich composer renders as formatted rich text (input rules), that it
-// converges over native WebRTC, and that sending serializes it back to Markdown in both
-// timelines; then proves client-side IndexedDB persistence by wiping the server and reloading
+// converges over native WebRTC, and that sending — whose durable body is Markdown — renders
+// as that same formatted rich text in both timelines; then proves client-side IndexedDB
+// persistence by wiping the server and reloading
 // (the draft can only return from the browser), and that the doc store is session-keyed.
 // Event-driven throughout (WaitForFunctionAsync); Playwright's own per-action timeouts watch.
 
@@ -140,10 +141,12 @@ let tests =
                 do! await (pageB.WaitForFunctionAsync
                             """!!document.querySelector('[data-rich-readonly="true"] .pm-caret')""") |> Async.Ignore
 
-                // A sends; both timelines show the immutable message — serialized back to
-                // MARKDOWN (`# Heading one`), from events (not Yjs).
+                // A sends; both timelines show the immutable message. The durable body is
+                // MARKDOWN (`# Heading one`, from events not Yjs), but the timeline RENDERS it as
+                // formatted rich text — the same heading the composer showed — so the sent view
+                // mirrors the input: an <h1> whose text is "Heading one" (no literal `#`).
                 do! awaitU (pageA.ClickAsync "[data-send-draft]")
-                let inTimeline = """[...document.querySelectorAll('[data-conversation] [data-message-body]')].some(m => m.textContent.trim() === '# Heading one')"""
+                let inTimeline = """[...document.querySelectorAll('[data-conversation] [data-message-body] h1')].some(h => h.textContent.trim() === 'Heading one')"""
                 let! _ = await (pageA.WaitForFunctionAsync inTimeline)
                 do! await (pageB.WaitForFunctionAsync inTimeline) |> Async.Ignore
             }

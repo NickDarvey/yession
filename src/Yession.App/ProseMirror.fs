@@ -57,6 +57,40 @@ module ProseMirror =
     [<Emit("new RegExp($0)")>]
     let regex (pattern: string) : obj = jsNative
 
+    // --- Structural read of a parsed document (read-only markdown rendering) ----------------
+    // A `Node` parsed by `mdParser` is pure data — no DOM — so this walk runs identically on
+    // Node (SSR) and in the browser. Only the members the timeline renderer reads are typed.
+
+    /// The node's type name (`paragraph`, `heading`, `bullet_list`, `text`, …).
+    [<Emit("$0.type.name")>]
+    let nodeTypeName (node: Node) : string = jsNative
+    [<Emit("$0.childCount")>]
+    let nodeChildCount (node: Node) : int = jsNative
+    [<Emit("$0.child($1)")>]
+    let nodeChild (node: Node) (index: int) : Node = jsNative
+    [<Emit("$0.isText")>]
+    let nodeIsText (node: Node) : bool = jsNative
+    /// A text node's literal text (empty for non-text nodes).
+    [<Emit("$0.text || ''")>]
+    let nodeText (node: Node) : string = jsNative
+    /// The concatenated text of a node's descendants (code blocks, fallbacks).
+    [<Emit("$0.textContent")>]
+    let nodeTextContent (node: Node) : string = jsNative
+    /// A text node's marks (`em`/`strong`/`code`/`link`), innermost-last.
+    [<Emit("$0.marks")>]
+    let nodeMarks (node: Node) : obj[] = jsNative
+    /// A heading's level (1–6), defaulting to 1.
+    [<Emit("($0.attrs && $0.attrs.level) || 1")>]
+    let headingLevel (node: Node) : int = jsNative
+    /// An ordered list's first number, defaulting to 1.
+    [<Emit("($0.attrs && $0.attrs.order) || 1")>]
+    let listStart (node: Node) : int = jsNative
+    [<Emit("$0.type.name")>]
+    let markTypeName (mark: obj) : string = jsNative
+    /// A link mark's target (empty when absent).
+    [<Emit("($0.attrs && $0.attrs.href) || ''")>]
+    let markHref (mark: obj) : string = jsNative
+
     // --- prosemirror-state / -view ---------------------------------------------------------
 
     [<Import("EditorState", "prosemirror-state")>]
