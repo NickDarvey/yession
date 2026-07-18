@@ -27,7 +27,7 @@ module Dom =
         // Header — the collaborative session title and its secondary id.
         let sessionTitle = "data-session-title"
         let sessionId = "data-session-id"
-        let titleCursor = "data-title-cursor"
+        let cursorPeer = "data-cursor-peer"
         // Sidebar — identity & live sync state.
         let connection = "data-connection"
         let displayName = "data-display-name"

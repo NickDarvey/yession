@@ -217,7 +217,7 @@ let startFull
                                     connections <- Map.remove connectionId connections
                                     // Clear this peer's cursor on every remaining peer.
                                     broadcastPresenceExcept connectionId
-                                        { PeerId = peerId; DisplayName = ""; TitleCursor = None }
+                                        { PeerId = peerId; DisplayName = ""; Focus = None }
                         } }
             Async.StartImmediate(
                 async {

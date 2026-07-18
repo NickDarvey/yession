@@ -169,6 +169,40 @@ let private registryTests =
             Expect.equal ((Markdown.ofFragment (reg.Fragment "never-written")).Trim ()) "" "an untouched body is empty"
     ]
 
+// Presence cursors travel the wire as base64 Yjs *relative* positions (Transport.CursorPos), so
+// a caret survives concurrent edits by peers. The encode→base64→decode→absolute pipeline and the
+// relative-position bindings are pure Yjs/lib0 (no DOM), so they run headless — only the on-screen
+// ProseMirror decorations need a browser (covered in the verify-tier E2E).
+let private cursorWireTests =
+    testList "cursor wire form (relative positions)" [
+        testCase "an index round-trips through encode → base64 → decode → absolute" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let text = doc.getText "title"
+            text.insert (0, "hello world")
+            let encoded = ProseMirror.relPosFromTypeIndex (box text) 6 |> ProseMirror.encodeRel
+            Expect.equal (ProseMirror.absIndexInDoc doc encoded) (Some 6) "the caret resolves back to its own index"
+
+        testCase "a relative position follows its anchor past a concurrent insert before it" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let text = doc.getText "title"
+            text.insert (0, "world")
+            // A caret at the end of "world" (index 5), captured as a relative position.
+            let encoded = ProseMirror.relPosFromTypeIndex (box text) 5 |> ProseMirror.encodeRel
+            // Another edit inserts six characters ahead of the caret; a plain index would now be
+            // wrong, but the relative position tracks the content it was anchored to.
+            text.insert (0, "hello ")
+            Expect.equal (ProseMirror.absIndexInDoc doc encoded) (Some 11) "the caret shifts right with its anchor"
+
+        testCase "the base64 wire form survives a full encode/decode round-trip verbatim" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let text = doc.getText "title"
+            text.insert (0, "abcdef")
+            let encoded = ProseMirror.relPosFromTypeIndex (box text) 3 |> ProseMirror.encodeRel
+            // Re-encoding the decoded position yields the same bytes — the wire form is stable.
+            let reEncoded = ProseMirror.decodeRel encoded |> ProseMirror.encodeRel
+            Expect.equal reEncoded encoded "decode∘encode is identity on the wire form"
+    ]
+
 let tests =
     testList "Rich-text editor" [
         serializationTests
@@ -176,4 +210,5 @@ let tests =
         sendCopyTests
         convergenceTests
         registryTests
+        cursorWireTests
     ]

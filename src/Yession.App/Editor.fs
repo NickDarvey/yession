@@ -11,6 +11,21 @@ open Yession.App.ProseMirror
 /// Exposed to the browser host as `mountEditor`; fragment↔markdown lives in `Domain.Markdown`.
 module Editor =
 
+    /// One remote peer's caret+selection to overlay on a body editor. Positions are base64 Yjs
+    /// relative positions over this body's fragment; colours are precomputed (`PeerColour`).
+    type RemoteBodyCursor =
+        { Colour : string      // solid — the caret bar and name label
+          Selection : string   // translucent — the selection highlight
+          Name : string
+          Anchor : string      // base64 relative position
+          Head : string }      // base64 relative position
+
+    /// A mounted editor: dispose it, and push the current set of remote cursors into it (which
+    /// re-derives the on-screen decorations from their relative positions).
+    type EditorHandle =
+        { Dispose : unit -> unit
+          PushPresences : RemoteBodyCursor list -> unit }
+
     // Tiny boundary lambdas for the input-rule attribute/predicate callbacks (JS functions
     // ProseMirror invokes with its match array). Kept minimal — the composition is in F#.
     [<Emit("(m => ({ order: +m[1] }))")>]
@@ -78,12 +93,72 @@ module Editor =
             keys?("Mod-]") <- sinkListItem li
         keys
 
-    let private plugins (fragment: Y.XmlFragment) : Plugin[] =
-        [| ySyncPlugin fragment
-           yUndoPlugin ()
-           markdownInputRules ()
-           keymap (editorKeymap ())
-           keymap baseKeymap |]
+    // --- Presence: report the local selection, overlay remote ones -------------------------
+
+    /// Reports the local caret+selection (as base64 relative anchor/head) whenever it moves
+    /// while focused, on focus, and clears (`None`) on blur/destroy. Added only to editable
+    /// editors. The Browser tags the report with this body's field and rAF-throttles it.
+    let private presenceReportPlugin (report: (string * string) option -> unit) : Plugin =
+        makePlugin (createObj [
+            "props" ==> createObj [
+                "handleDOMEvents" ==> createObj [
+                    "focus" ==> System.Func<EditorView, obj, bool>(fun v _ -> report (relSelectionOf v.state); false)
+                    "blur" ==> System.Func<EditorView, obj, bool>(fun _ _ -> report None; false) ] ]
+            "view" ==> System.Func<EditorView, obj>(fun _ ->
+                let mutable last : (string * string) option = None
+                createObj [
+                    "update" ==> System.Func<EditorView, EditorState, unit>(fun v _prev ->
+                        if viewHasFocus v then
+                            let cur = relSelectionOf v.state
+                            if cur <> last then
+                                last <- cur
+                                report cur)
+                    "destroy" ==> System.Func<unit, unit>(fun () -> report None) ]) ])
+
+    /// The decoration plugin's key — private so remote cursors can only be pushed through
+    /// `EditorHandle.PushPresences`, never by reaching into plugin state.
+    let private presenceDecoKey = pluginKey "yession-presence-cursors"
+
+    /// Build the `DecorationSet` for a set of remote cursors: a translucent selection span
+    /// `min..max` (when non-empty) and a caret widget + name label at `head`, per peer. A
+    /// position that no longer resolves (its content was deleted) is skipped.
+    let private buildBodyDecorations (state: EditorState) (remotes: RemoteBodyCursor[]) : obj =
+        let decos = ResizeArray<obj> ()
+        for r in remotes do
+            match absPosInBody state r.Anchor, absPosInBody state r.Head with
+            | Some a, Some h ->
+                let lo, hi = (min a h), (max a h)
+                if lo <> hi then
+                    decos.Add (decoInline lo hi (createObj [ "style" ==> sprintf "background-color:%s" r.Selection ]))
+                decos.Add (decoWidget h (caretDom r.Colour r.Name) (createObj [ "side" ==> 10 ]))
+            | _ -> ()
+        decoSetCreate (stateDoc state) (decos.ToArray ())
+
+    /// Holds a `DecorationSet` in plugin state: a `setMeta` push rebuilds it from the remote
+    /// cursors; any other transaction remaps the existing set through the doc change.
+    let private presenceDecorationsPlugin () : Plugin =
+        makePlugin (createObj [
+            "key" ==> presenceDecoKey
+            "state" ==> createObj [
+                "init" ==> System.Func<obj, EditorState, obj>(fun _ _ -> decoSetEmpty)
+                "apply" ==> System.Func<Transaction, obj, EditorState, EditorState, obj>(fun tr old _oldS newS ->
+                    match trGetMeta tr presenceDecoKey with
+                    | null -> if trDocChanged tr then decoSetMap old (trMapping tr) (trDoc tr) else old
+                    | remotes -> buildBodyDecorations newS (unbox<RemoteBodyCursor[]> remotes)) ]
+            "props" ==> createObj [
+                "decorations" ==> System.Func<EditorState, obj>(fun s -> pluginKeyGetState presenceDecoKey s) ] ])
+
+    let private plugins (fragment: Y.XmlFragment) (report: ((string * string) option -> unit) option) : Plugin[] =
+        let ps =
+            ResizeArray<Plugin> [
+                ySyncPlugin fragment
+                yUndoPlugin ()
+                markdownInputRules ()
+                keymap (editorKeymap ())
+                keymap baseKeymap
+                presenceDecorationsPlugin () ]
+        report |> Option.iter (fun r -> ps.Add (presenceReportPlugin r))
+        ps.ToArray ()
 
     /// Plain-text (Markdown) paste -> parsed as Markdown; HTML paste falls through to
     /// ProseMirror's normal clipboard handling.
@@ -102,13 +177,19 @@ module Editor =
 
     /// Mount a ProseMirror editor onto `host`, bound to the live `fragment`. The fragment is
     /// the synced, doc-backed body, so edits flow straight into the CRDT and to peers through
-    /// the doc — no change callback. Returns a dispose thunk; `readOnly` renders another peer's
-    /// content without an edit surface. Serialization for the drain lives in `Domain.Markdown`.
-    let mountEditor (host: obj) (fragment: Y.XmlFragment) (readOnly: bool) : (unit -> unit) =
-        let state = createState (createObj [ "schema" ==> schema; "plugins" ==> plugins fragment ])
+    /// the doc — no change callback. `readOnly` renders another peer's content without an edit
+    /// surface (and without reporting presence). `reportFocus` receives the local selection as
+    /// base64 relative anchor/head (or `None`); the returned handle pushes remote cursors in.
+    /// Serialization for the drain lives in `Domain.Markdown`.
+    let mountEditor (host: obj) (fragment: Y.XmlFragment) (readOnly: bool) (reportFocus: (string * string) option -> unit) : EditorHandle =
+        let report = if readOnly then None else Some reportFocus
+        let state = createState (createObj [ "schema" ==> schema; "plugins" ==> plugins fragment report ])
         let view =
             createView host (createObj [
                 "state" ==> state
                 "editable" ==> (System.Func<bool>(fun () -> not readOnly))
                 "handlePaste" ==> handlePaste ])
-        fun () -> view.destroy ()
+        { Dispose = fun () -> view.destroy ()
+          PushPresences =
+            fun remotes ->
+                view.dispatch (trSetMeta view.state.tr presenceDecoKey (box (List.toArray remotes))) }

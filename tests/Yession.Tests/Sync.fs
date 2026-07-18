@@ -471,15 +471,17 @@ let private titlePresenceTests =
             Expect.equal next.Session (Some (SessionId.create "demo-session" |> expect)) "the session id is learned from PeerAccepted"
 
         testCase "RemotePresenceMsg adds, updates, and clears a peer's cursor" <| fun () ->
-            let added = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = "brave-owl"; TitleCursor = Some 3 }) base'
-            Expect.equal (Map.tryFind bob added.Presence) (Some { DisplayName = "brave-owl"; Index = 3 }) "the peer's caret is recorded"
-            let moved = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = "brave-owl"; TitleCursor = Some 7 }) added
-            Expect.equal (Map.tryFind bob moved.Presence |> Option.map (fun c -> c.Index)) (Some 7) "the caret moves"
-            let cleared = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = ""; TitleCursor = None }) moved
+            let focusAt (a: string) : Focus = { Field = Title; Pos = { Anchor = a; Head = a } }
+            let added = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = "brave-owl"; Focus = Some (focusAt "aa") }) base'
+            Expect.equal (Map.tryFind bob added.Presence) (Some { DisplayName = "brave-owl"; Focus = focusAt "aa" }) "the peer's caret is recorded"
+            let moved = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = "brave-owl"; Focus = Some (focusAt "bb") }) added
+            Expect.equal (Map.tryFind bob moved.Presence |> Option.map (fun c -> c.Focus.Pos.Anchor)) (Some "bb") "the caret moves"
+            let cleared = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = ""; Focus = None }) moved
             Expect.isFalse (Map.containsKey bob cleared.Presence) "a cleared cursor removes the peer"
 
         testCase "RemotePresenceMsg ignores the local peer's own cursor" <| fun () ->
-            let next = ClientModel.update (RemotePresenceMsg { PeerId = base'.Peer.PeerId; DisplayName = "Ada"; TitleCursor = Some 2 }) base'
+            let focus : Focus = { Field = Title; Pos = { Anchor = "aa"; Head = "aa" } }
+            let next = ClientModel.update (RemotePresenceMsg { PeerId = base'.Peer.PeerId; DisplayName = "Ada"; Focus = Some focus }) base'
             Expect.isFalse (Map.containsKey base'.Peer.PeerId next.Presence) "you never render your own remote caret"
     ]
 

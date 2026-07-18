@@ -145,10 +145,12 @@ module Style =
     /// The session id, shown small and dim under the title as a stable secondary identifier.
     let titleId = "font-mono text-[11px] leading-4 text-ink-faint truncate mt-0.5"
 
-    /// A collaborator's caret in the title, positioned by measurement in the browser (the
-    /// `left` and accent colour are set as inline styles post-render). Two-px bar the height
-    /// of the input, ignoring pointer events so it never blocks typing.
-    let remoteCursor = "absolute top-0 w-0.5 h-8 -ml-px pointer-events-none"
+    /// A collaborator's selection highlight in the title: an absolutely-positioned span the
+    /// browser sizes to `lo..hi` by measurement (the translucent background is set inline).
+    /// Ignores pointer events so it never blocks typing; a collapsed selection has zero width.
+    let remoteCursor = "absolute top-0 h-8 pointer-events-none rounded-sm"
+    /// The caret bar inside a remote selection, offset to the peer's `head` by the browser.
+    let remoteCursorCaret = "absolute top-0 w-0.5 h-8 -ml-px"
     /// The peer-name pill floating just above a remote caret.
     let remoteCursorLabel =
         "absolute -top-3 left-0 whitespace-nowrap font-semibold text-[9px] leading-3 "

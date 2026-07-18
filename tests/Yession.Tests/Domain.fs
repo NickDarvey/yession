@@ -150,8 +150,10 @@ let private frameSerializationTests =
           Control (PeerRejected "bad token")
           Control Ping
           Control Pong
-          Presence { PeerId = peerId; DisplayName = "Ada"; TitleCursor = Some 7 }
-          Presence { PeerId = peerId; DisplayName = "Ada"; TitleCursor = None } ]
+          Presence { PeerId = peerId; DisplayName = "Ada"; Focus = Some { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } } }
+          Presence { PeerId = peerId; DisplayName = "Ada"; Focus = Some { Field = DraftBody peerId; Pos = { Anchor = "AQI="; Head = "AQI=" } } }
+          Presence { PeerId = peerId; DisplayName = "Ada"; Focus = Some { Field = QueueBody (QueueId.create "q-1" |> expect); Pos = { Anchor = "AQI="; Head = "AwQ=" } } }
+          Presence { PeerId = peerId; DisplayName = "Ada"; Focus = None } ]
 
     testList "Session frame serialization" [
         testCase "every session frame variant round-trips unchanged" <| fun () ->

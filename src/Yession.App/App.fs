@@ -56,10 +56,10 @@ module App =
           /// outcome arrives as events: `AgentTurnInterrupted` on success, or nothing
           /// if the turn already finished (the request is then rejected).
           InterruptTurn : AgentTurnId -> unit
-          /// Broadcast the local peer's caret position in the title (or `None` when it
-          /// leaves the title), so collaborators see the cursor. Ephemeral presence — the
+          /// Broadcast the local peer's caret+selection focus (or `None` when it leaves every
+          /// collaborative field), so collaborators see the cursor. Ephemeral presence — the
           /// Session Process relays it to other peers and never persists it.
-          ReportCursor : int option -> unit }
+          ReportPresence : Focus option -> unit }
 
     /// How a connection consumes the event log (Step 07).
     type ConnectOptions =
@@ -243,9 +243,9 @@ module App =
             fun turnId ->
                 Async.StartImmediate (
                     channel.Send (Command (Request (RequestId.fresh (), InterruptAgentTurn turnId))))
-          ReportCursor =
-            fun index ->
+          ReportPresence =
+            fun focus ->
                 // Presence carries the local peer's identity so collaborators can label
                 // and colour the caret; the Session Process relays it to other peers.
                 Async.StartImmediate (
-                    channel.Send (Presence { PeerId = hello.PeerId; DisplayName = hello.DisplayName; TitleCursor = index })) }
+                    channel.Send (Presence { PeerId = hello.PeerId; DisplayName = hello.DisplayName; Focus = focus })) }

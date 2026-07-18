@@ -50,7 +50,7 @@ let private representativeModel : ClientModel =
           LatestKnownOffset = Some (EventOffset.create 7L |> expect)
           IsCatchingUp = true }
       Agent = { ActiveTurn = Some turnId }
-      Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Index = 4 } ]
+      Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } } } ]
       Environment = EnvironmentNotStarted
       Commands = CommandLog.empty }
 
@@ -64,7 +64,7 @@ let private uiChecklistTests =
                   "editable session title", Dom.Hooks.sessionTitle
                   "title body", "planning the launch"
                   "session id secondary identifier", Dom.hookText Dom.Hooks.sessionId "demo-session"
-                  "remote collaborator cursor", Dom.attr Dom.Hooks.titleCursor "4"
+                  "remote collaborator cursor", Dom.attr Dom.Hooks.cursorPeer (PeerId.value bob)
                   "remote cursor peer label", "brave-owl"
                   "peer display name", Dom.hookText Dom.Hooks.displayName "swift-heron"
                   "collaborative draft editor", Dom.Hooks.draftEditor

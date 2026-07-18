@@ -596,18 +596,47 @@ module Codec =
         { Encode = fun (StateSync s) -> Encode.object [ "kind", Encode.string "stateSync"; "state", stateCodec.Encode s ]
           Decode = Decode.field "state" stateCodec.Decode |> Decode.map StateSync }
 
+    let private focusField : Codec<FocusField> =
+        { Encode =
+            (fun f ->
+                match f with
+                | Title -> Encode.object [ "kind", Encode.string "title" ]
+                | DraftBody p -> Encode.object [ "kind", Encode.string "draft"; "peerId", peerId.Encode p ]
+                | QueueBody q -> Encode.object [ "kind", Encode.string "queue"; "queueId", queueId.Encode q ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "title" -> Decode.succeed Title
+                | "draft" -> Decode.field "peerId" peerId.Decode |> Decode.map DraftBody
+                | "queue" -> Decode.field "queueId" queueId.Decode |> Decode.map QueueBody
+                | other -> Decode.fail (sprintf "Unknown focus field: %s" other)) }
+
+    let private cursorPos : Codec<CursorPos> =
+        { Encode = fun (p: CursorPos) -> Encode.object [ "anchor", Encode.string p.Anchor; "head", Encode.string p.Head ]
+          Decode =
+            Decode.object (fun get ->
+                { Anchor = get.Required.Field "anchor" Decode.string
+                  Head = get.Required.Field "head" Decode.string }) }
+
+    let private focus : Codec<Focus> =
+        { Encode = fun (f: Focus) -> Encode.object [ "field", focusField.Encode f.Field; "pos", cursorPos.Encode f.Pos ]
+          Decode =
+            Decode.object (fun get ->
+                { Field = get.Required.Field "field" focusField.Decode
+                  Pos = get.Required.Field "pos" cursorPos.Decode }) }
+
     let private presencePayload : Codec<PresencePayload> =
         { Encode =
             (fun (p: PresencePayload) ->
                 Encode.object
                     [ "peerId", peerId.Encode p.PeerId
                       "displayName", Encode.string p.DisplayName
-                      "titleCursor", Encode.option Encode.int p.TitleCursor ])
+                      "focus", Encode.option focus.Encode p.Focus ])
           Decode =
             Decode.object (fun get ->
                 { PresencePayload.PeerId = get.Required.Field "peerId" peerId.Decode
                   PresencePayload.DisplayName = get.Required.Field "displayName" Decode.string
-                  PresencePayload.TitleCursor = get.Required.Field "titleCursor" (Decode.option Decode.int) }) }
+                  PresencePayload.Focus = get.Required.Field "focus" (Decode.option focus.Decode) }) }
 
     /// A frame codec for any `'State` codec. The transport never inspects the state
     /// payload; the state codec belongs to the sync-boundary layer (Step 05).
