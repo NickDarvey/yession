@@ -130,13 +130,13 @@ type Collector =
       Received : unit -> ReceivedLog list }
 
 module Collector =
-    let create (onRecord: ReceivedLog -> unit) : Collector =
+    let private make (retain: bool) (onRecord: ReceivedLog -> unit) : Collector =
         let received = ResizeArray<ReceivedLog> ()
         let mutable totals : Map<string, int * int> = Map.empty
         { Received = fun () -> List.ofSeq received
           Record =
             fun r ->
-                received.Add r
+                if retain then received.Add r
                 match TurnUsage.ofLog r with
                 | Some u ->
                     let inSoFar, outSoFar = Map.tryFind u.SessionId totals |> Option.defaultValue (0, 0)
@@ -149,8 +149,15 @@ module Collector =
                 | None -> printfn "telemetry non-usage record: %s" r.Body
                 onRecord r }
 
-    /// A collector that only records — the common case and the in-test double.
+    /// A collector with a downstream seam that retains every record — the in-test double.
+    let create (onRecord: ReceivedLog -> unit) : Collector = make true onRecord
+
+    /// Retains every record (the in-test double).
     let inMemory () : Collector = create ignore
+
+    /// The Manager's production collector: logs + aggregates per-session totals but retains
+    /// no records (the Manager is long-lived — unbounded retention would leak).
+    let logging () : Collector = make false ignore
 
 // --- The route handler -------------------------------------------------------------------
 

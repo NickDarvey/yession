@@ -67,7 +67,11 @@ type Options =
       /// None = OS-assigned. A management UI wants a bookmarkable address, so the
       /// product default is fixed — a second Manager instance must choose its own
       /// (the bind fails loudly on conflict, never a silent fallback).
-      ManagerPort : int option }
+      ManagerPort : int option
+      /// Telemetry (Plan 04): when set, the Manager runs an OTLP `/v1/logs` receiver on its
+      /// endpoint feeding this collector, and injects `YESSION_OTLP_ENDPOINT`/`_SECRET` into
+      /// every launch. None = telemetry off (children run with telemetry disabled).
+      Telemetry : TelemetryReceiver.Collector option }
 
 module Options =
     let defaults (dataDir: string) (sessionCommand: string) (sessionArgs: string list) : Options =
@@ -78,7 +82,8 @@ module Options =
           LaunchTimeoutMs = 15000
           StopGraceMs = 3000
           Grant = None
-          ManagerPort = None }
+          ManagerPort = None
+          Telemetry = None }
 
 [<Fable.Core.Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
@@ -109,6 +114,9 @@ let createWithUi
     // The same per-launch secret also names which session is reporting its display name
     // (the collaborative title); this map lives and dies with the secret.
     let mutable secretSessions : Map<string, SessionId> = Map.empty
+    // Per-launch telemetry bearer secrets (Plan 04): a session posts OTLP logs authenticated
+    // with its bearer; the secret lives and dies with the launch, like the control secret.
+    let mutable telemetrySecrets : Set<string> = Set.empty
 
     // Update a session's display name (the reported title). Idempotent: unknown sessions and
     // no-op renames are skipped, and the registry write is durable before it is visible.
@@ -136,13 +144,17 @@ let createWithUi
     // cannot arrive before then in practice; a too-early one gets a 503.
     let mutable self : ProcessManager option = None
     let! controlServer =
-        if Option.isNone options.Grant && Option.isNone ui && Option.isNone options.ManagerPort then
+        if Option.isNone options.Grant && Option.isNone ui && Option.isNone options.ManagerPort && Option.isNone options.Telemetry then
             async { return None }
         else
             async {
                 let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                     let handled =
                         Control.tryHandle (fun secret -> Map.tryFind secret secrets) reportName req res
+                        || (match options.Telemetry with
+                            | Some collector ->
+                                TelemetryReceiver.tryHandle (fun secret -> Set.contains secret telemetrySecrets) collector req res
+                            | None -> false)
                         || (match ui, self with
                             | Some handle, Some pm -> handle pm req res
                             | Some _, None ->
@@ -206,6 +218,15 @@ let createWithUi
                         secretSessions <- Map.add secret record.SessionId secretSessions
                         [ "YESSION_CONTROL_URL", url; "YESSION_CONTROL_SECRET", secret ], Some secret
                     | _ -> [], None
+                // Telemetry (Plan 04): the child exports OTLP logs to the Manager's own
+                // endpoint, authenticated with a per-launch bearer, when telemetry is enabled.
+                let telemetryEnv =
+                    match options.Telemetry, controlUrl () with
+                    | Some _, Some url ->
+                        let secret = Interop.randomSecret ()
+                        telemetrySecrets <- Set.add secret telemetrySecrets
+                        [ "YESSION_OTLP_ENDPOINT", url; "YESSION_OTLP_SECRET", secret ], Some secret
+                    | _ -> [], None
                 let env =
                     [ "YESSION_SESSION", SessionId.value record.SessionId
                       "YESSION_TOKEN", record.Token
@@ -214,11 +235,16 @@ let createWithUi
                       // The child watches its stdin and exits when this Manager dies.
                       "YESSION_PARENT_GUARD", "1" ]
                     @ fst controlEnv
+                    @ fst telemetryEnv
                 let revokeSecret () =
-                    match snd controlEnv with
-                    | Some secret ->
-                        secrets <- Map.remove secret secrets
-                        secretSessions <- Map.remove secret secretSessions
+                    (match snd controlEnv with
+                     | Some secret ->
+                         secrets <- Map.remove secret secrets
+                         secretSessions <- Map.remove secret secretSessions
+                     | None -> ())
+                    // The launch's telemetry authority dies with it too.
+                    match snd telemetryEnv with
+                    | Some secret -> telemetrySecrets <- Set.remove secret telemetrySecrets
                     | None -> ()
                 match! Spawn.launch options.SessionCommand options.SessionArgs env options.LaunchTimeoutMs with
                 | Error reason ->

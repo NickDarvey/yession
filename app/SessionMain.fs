@@ -68,11 +68,29 @@ let private diagnosticAgent : RunAgent =
                 | other -> return AgentFailed (sprintf "diagnostic command failed: %A" other)
         }
 
+/// A built-in probe (`YESSION_AGENT=usage-probe`, Plan 04): completes a turn with fixed,
+/// non-zero usage and no credentials, so the cross-process telemetry e2e can assert the
+/// counts reach the Manager collector over the real spawn + OTLP path.
+let private usageProbeAgent : RunAgent =
+    fun _ _ _ _ ->
+        async {
+            return
+                AgentCompleted (
+                    "usage probe",
+                    Some
+                        { InputTokens = 111
+                          OutputTokens = 22
+                          CacheReadTokens = 3
+                          CacheCreationTokens = 4
+                          Model = Some "probe-model" })
+        }
+
 // The real agent runs only when the process has credentials; without them the session
 // still works as a human-only collaborative session.
 let private runAgent =
     match Interop.envOr "YESSION_AGENT" "" with
     | "diagnostic" -> Some diagnosticAgent
+    | "usage-probe" -> Some usageProbeAgent
     | _ ->
         if Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> "" then Some Agent.run
         else None
