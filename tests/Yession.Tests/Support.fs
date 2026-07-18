@@ -62,8 +62,8 @@ let render (model: ClientModel) : string = Ssr.renderModel model
 /// `verify` runner but not in the dev container, so the gate makes availability explicit
 /// instead of the old silent no-op: present -> run the body; absent + `YESSION_REQUIRE_DOCKER`
 /// (set on the release gate) -> FAIL, so a daemon-less gate can never pass green; absent
-/// otherwise -> a reported skip. These cases also sit under `Tag.verify`, so the cheap tier
-/// never reaches them.
+/// otherwise -> a reported skip. These cases also sit under `Tag.needs [Docker]`, so the cheap
+/// tier never reaches them.
 module Docker =
 
     [<Fable.Core.Emit("process.env[$0] || ''")>]

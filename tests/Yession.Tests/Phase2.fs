@@ -705,10 +705,10 @@ let tests =
         environmentProjectionTests
         commandFoldTests
         acceptanceTests
-        // Verify tier: everything that binds ports / spawns hosts over real WebRTC.
-        Tag.verify launchTests
-        Tag.verify lazyLifecycleTests
-        Tag.verify commandTests
-        Tag.verify acceptanceE2eTests
-        Tag.verify persistenceTests
+        // Needs ports: everything that binds ports / spawns hosts over real WebRTC.
+        Tag.needs "Session Manager launch" [ Tag.Ports ] (fun () -> launchTests)
+        Tag.needs "Lazy environment lifecycle" [ Tag.Ports ] (fun () -> lazyLifecycleTests)
+        Tag.needs "Command execution" [ Tag.Ports ] (fun () -> commandTests)
+        Tag.needs "Phase 2 acceptance E2E" [ Tag.Ports ] (fun () -> acceptanceE2eTests)
+        Tag.needs "Durable event log" [ Tag.Ports ] (fun () -> persistenceTests)
     ]

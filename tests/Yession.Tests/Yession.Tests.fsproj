@@ -6,6 +6,9 @@
   -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
+    <!-- Exe so the CLR target is runnable: `dotnet run` executes the real-browser E2E
+         (Browser.fs) through the Microsoft.Playwright driver. Fable ignores OutputType. -->
+    <OutputType>Exe</OutputType>
     <!-- Pyxpecto pulls Fable.Python transitively (pinned to an older Fable.Core). We only
          compile to JS, so the version skew is irrelevant. -->
     <NoWarn>$(NoWarn);NU1608</NoWarn>
@@ -18,6 +21,7 @@
     <Compile Include="Support.fs" />
     <Compile Include="Sync.fs" />
     <Compile Include="Agent.fs" />
+    <Compile Include="Browser.fs" />
     <Compile Include="E2E.fs" />
     <Compile Include="Client.fs" />
     <Compile Include="Phase2.fs" />
@@ -35,6 +39,9 @@
   <ItemGroup>
     <PackageReference Include="Fable.Core" />
     <PackageReference Include="Fable.Pyxpecto" />
+    <!-- CLR-only: drives the real-browser E2E (Browser.fs). Fable never sees it (that code
+         is #if-compiled out under Fable), so it does not need Fable bindings. -->
+    <PackageReference Include="Microsoft.Playwright" />
     <PackageReference Include="Fable.Elmish" />
     <PackageReference Include="Ylmish" />
     <PackageReference Include="Fable.Yjs" />

@@ -5,8 +5,8 @@ module Yession.Tests.DockerIntegration
 // backend now interprets (env vars, working dir, timeout, mounts + the named workspace
 // volume, build spec, secret refs). Every case runs behind `Docker.gate`, so it executes
 // where a daemon exists (the CI verify runner) and reports a skip otherwise — except under
-// YESSION_REQUIRE_DOCKER, where a missing daemon fails the gate. The whole suite is
-// `Tag.verify`, so the cheap tier never reaches it.
+// YESSION_REQUIRE_DOCKER, where a missing daemon fails the gate. The whole suite declares
+// `Tag.needs [Docker]` (Node + verify tier), so the cheap tier never reaches it.
 
 open System
 open Fable.Core
@@ -81,7 +81,7 @@ let private label (sessionId: SessionId) = sprintf "yession-session=%s" (Session
 // --- The suite ---------------------------------------------------------------------------
 
 let tests =
-    Tag.verify (
+    Tag.needs "Docker integration" [ Tag.Docker ] (fun () ->
         testList "Docker integration" [
 
             // -- Tier 2: the current engine ------------------------------------------------

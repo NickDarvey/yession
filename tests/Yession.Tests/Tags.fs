@@ -1,34 +1,78 @@
 module Yession.Tests.Tag
 
-// Test tiers as tags in code, not folders (Phase 4, Step 21). Expensive suites —
-// anything that binds real ports, spawns processes, drives a browser, needs a Docker
-// daemon, or calls a live model — are wrapped in `Tag.verify` and run only in the
-// verify tier (`YESSION_TEST_TIER=verify`, the release gate). The default tier stays
-// cheap, fast, and credential-free. A tagged suite excluded from the current tier is
-// reported as one visible skipped case — skips are reported, never hidden.
+// Unified test requirements (replaces the old `Tag.verify` tier flag + the `#if`-gated
+// runtime split). A suite declares the capabilities it NEEDS; the harness runs it only when
+// the current run can satisfy them, and stands in one visible skip otherwise. Every need pins
+// the runtime that can host it, so a suite runs on exactly ONE runtime — never twice, never
+// hidden.
+//
+//   Tag.needs "WebRTC E2E"  [Ports]   (fun () -> E2E.tests)      // Node,   verify tier
+//   Tag.needs "Docker"      [Docker]  (fun () -> Docker.tests)   // Node,   verify + daemon
+//   Tag.needs "Browser E2E" [Browser] (fun () -> Browser.tests)  // .NET CLR, verify tier
+//   Tag.needs "Domain"      []        (fun () -> Domain.tests)   // Node,   cheap tier
+//
+// The suite is a thunk, forced only when it will actually run, so a suite is never even
+// constructed on a runtime that cannot host it — its module-level interop never executes.
+//
+// `Compiler.isDotnet` (Fable 5.2) is the runtime discriminator: a compile-time constant under
+// Fable (the CLR branch is dead-code-eliminated out of the JS) and a runtime `true` on .NET.
+// That is what lets one shared test list serve both runtimes without a `#if` in `Main`.
 
+open Fable.Core
 open Fable.Pyxpecto
 open Fable.Pyxpecto.Model
 
-[<Fable.Core.Emit("process.env[$0] || ''")>]
-let private env (name: string) : string = Fable.Core.Util.jsNative
+/// A capability a suite needs. Each need pins the runtime that can host it (see `satisfies`).
+type Need =
+    | Browser     // a real browser via the Microsoft.Playwright .NET driver -> .NET CLR
+    | Ports       // binds TCP ports / spawns processes (WebRTC, HTTP, topology) -> Node
+    | Docker      // a reachable Docker daemon -> Node
+    | LiveAgent   // real model credentials -> Node
 
-let private tier = env "YESSION_TEST_TIER"
+// process.env under Node; the CLR reads it through System.Environment below. Guarded so this
+// branch is dead-code-eliminated out of the .NET build path — jsNative would throw there.
+[<Emit("(typeof process !== 'undefined' && process.env[$0]) || ''")>]
+let private jsEnv (name: string) : string = Fable.Core.Util.jsNative
 
-/// Is the verify tier active in this run?
-let verifyEnabled = tier = "verify" || tier = "all"
+/// Read an environment variable on whichever runtime we are on.
+let private getEnv (name: string) : string =
+    if Compiler.isDotnet then
+        match System.Environment.GetEnvironmentVariable name with null -> "" | v -> v
+    else jsEnv name
 
-let private nameOf =
+/// This run executes on the .NET CLR (vs Fable/JS on Node).
+let private onDotnet = Compiler.isDotnet
+
+/// Verify tier active? (`YESSION_TEST_TIER=verify|all`, the release gate.)
+let verifyEnabled =
+    let t = getEnv "YESSION_TEST_TIER"
+    t = "verify" || t = "all"
+
+let private hasCreds =
+    getEnv "ANTHROPIC_API_KEY" <> "" || getEnv "CLAUDE_CODE_OAUTH_TOKEN" <> ""
+
+/// Can this run satisfy one need? Each arm fixes the runtime, so no test runs on both.
+let private satisfies =
     function
-    | SyncTest (name, _, _) -> name
-    | AsyncTest (name, _, _) -> name
-    | TestList (name, _, _) -> name
-    | TestListSequential (name, _, _) -> name
+    | Browser   -> onDotnet && verifyEnabled
+    | Ports     -> not onDotnet && verifyEnabled
+    | Docker    -> not onDotnet && verifyEnabled
+    | LiveAgent -> not onDotnet && verifyEnabled && hasCreds
 
-/// Include `test` only in the verify tier; otherwise stand in one visible skip.
-let verify (test: TestCase) : TestCase =
-    if verifyEnabled then test
-    else
-        testList (nameOf test) [
-            testCase "skipped: verify tier (run with YESSION_TEST_TIER=verify)" <| fun () -> ()
-        ]
+/// A suite with no needs is a cheap, pure suite: it runs on Node (the runtime the product
+/// actually runs on), never on the CLR — so it too executes exactly once.
+let private canRun =
+    function
+    | []    -> not onDotnet
+    | needs -> needs |> List.forall satisfies
+
+let private reason =
+    function
+    | []    -> "runs on Node (Fable/JS), not the .NET CLR"
+    | needs -> needs |> List.map (sprintf "%A") |> String.concat ", " |> sprintf "needs %s"
+
+/// Include a suite only when the current run can satisfy its needs; otherwise stand in one
+/// visible skip labelled with why. The suite thunk is forced only when it will run.
+let needs (label: string) (need: Need list) (suite: unit -> TestCase) : TestCase =
+    if canRun need then suite ()
+    else testList label [ testCase (sprintf "skipped: %s" (reason need)) <| fun () -> () ]
