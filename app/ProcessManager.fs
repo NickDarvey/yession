@@ -45,6 +45,10 @@ type ProcessManager =
       /// RPC): fans out over that session's live `/control/notifications` subscriptions.
       /// A no-op for a session that is not running or has no control channel.
       Notify : SessionId -> SessionNotification -> unit
+      /// Announce the current MCP tool list to every session (the `/control/mcp` reverse
+      /// leg): replaces the retained list and pushes it to all live subscribers, and every
+      /// session that subscribes later receives it as its initial snapshot.
+      PublishMcpTools : McpToolList -> unit
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
       /// Stop every running child and the Manager endpoint (Manager shutdown).
@@ -126,6 +130,10 @@ let createWithUi
     // same per-launch secret, so a session's stream dies exactly when its launch does.
     let notifications = NotificationHub.create ()
 
+    // The MCP tool stream (the second reverse leg): a Manager-level retained list broadcast to
+    // every subscribed session, so all sessions see the same available MCP services.
+    let mcp = McpHub.create ()
+
     // Push a notification to a session: fan out over every live secret that names it
     // (in practice one — a running session has a single launch). Inert for a session
     // that is not running or whose launch granted no control channel.
@@ -165,7 +173,7 @@ let createWithUi
             async {
                 let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                     let handled =
-                        Control.tryHandle (fun secret -> Map.tryFind secret secrets) reportName notifications.Register req res
+                        Control.tryHandle (fun secret -> Map.tryFind secret secrets) reportName notifications.Register mcp.Register req res
                         || (match options.Telemetry with
                             | Some collector ->
                                 TelemetryReceiver.tryHandle (fun secret -> Set.contains secret telemetrySecrets) collector req res
@@ -313,6 +321,7 @@ let createWithUi
                 ManagerState.tryFind sessionId state
                 |> Option.map (fun r -> { Record = r; Status = statusOf r })
           Notify = notify
+          PublishMcpTools = mcp.Publish
           EndpointPort = controlServer |> Option.map Interop.serverPort
           StopAll =
             fun () ->

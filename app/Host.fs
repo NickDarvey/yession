@@ -51,6 +51,7 @@ let startFull
     // scheduler. `ignore` in the layered helpers below and whenever telemetry is off.
     (emitUsage: AgentTurnId -> AgentUsage -> unit)
     (subscribeNotifications: ((SessionNotification -> unit) -> (unit -> unit)) option)
+    (subscribeMcp: ((McpToolList -> unit) -> (unit -> unit)) option)
     (sessionId: SessionId)
     (token: string)
     (port: int)
@@ -186,6 +187,18 @@ let startFull
             unsubscribeNotifications <- Some (subscribe handle)
         | None -> ()
 
+        // The MCP tool stream (the second reverse leg): subscribe when the launch handed us a
+        // channel. The current list arrives immediately, then a fresh list on every change. The
+        // DEFAULT handler just logs the count — making the tools available to agent turns is
+        // left to whatever handler a later composition wants.
+        let mutable unsubscribeMcp : (unit -> unit) option = None
+        match subscribeMcp with
+        | Some subscribe ->
+            let handle (list: McpToolList) : unit =
+                eprintfn "[session %s] mcp tools available: %d" (SessionId.value sessionId) (List.length list.Tools)
+            unsubscribeMcp <- Some (subscribe handle)
+        | None -> ()
+
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the
         // crash window — the log-anchored dedup repairs them without re-consuming).
@@ -280,6 +293,7 @@ let startFull
                 fun () ->
                     async {
                         unsubscribeNotifications |> Option.iter (fun cancel -> cancel ())
+                        unsubscribeMcp |> Option.iter (fun cancel -> cancel ())
                         server.close ignore
                     } }
     }
@@ -293,7 +307,7 @@ let startWithCapabilities
     (token: string)
     (port: int)
     : Async<SessionHost> =
-    startFull runAgent environmentCapabilities baseLog None None (fun _ _ -> ()) None sessionId token port
+    startFull runAgent environmentCapabilities baseLog None None (fun _ _ -> ()) None None sessionId token port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =

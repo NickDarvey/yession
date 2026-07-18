@@ -83,6 +83,18 @@ let subscribeNotifications (baseUrl: string) (secret: string) (onNotification: S
             | Ok notification -> onNotification notification
             | Error e -> eprintfn "notification decode failed: %s" e)
 
+/// Subscribe to the Manager's MCP tool stream. The current list arrives immediately, then a
+/// fresh `McpToolList` on every change; each is handed to `onList`. A malformed frame is
+/// logged and skipped. Returns a cancel that stops the subscription and closes the connection.
+let subscribeMcp (baseUrl: string) (secret: string) (onList: McpToolList -> unit) : unit -> unit =
+    openEventStream
+        (sprintf "%s/control/mcp" baseUrl)
+        secret
+        (fun data ->
+            match ControlWire.fromString ControlWire.mcpToolList data with
+            | Ok list -> onList list
+            | Error e -> eprintfn "mcp list decode failed: %s" e)
+
 /// Report the session's display name (its collaborative title) to the Manager, so the
 /// session list reflects it. Best-effort: a transport failure is swallowed — a title that
 /// fails to reach the list is cosmetic, never a reason to disturb the session.

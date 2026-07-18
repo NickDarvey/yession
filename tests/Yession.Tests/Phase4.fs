@@ -201,21 +201,22 @@ let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNat
 [<Emit("delete process.env[$0]")>]
 let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
-/// Start a bare control server over the given secret→capabilities table, plus a real
-/// notification hub wired to the `/control/notifications` route. Returns the hub so a test
-/// can push notifications down the same wire the Manager uses.
-let private startControlServer (secrets: (string * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub> =
+/// Start a bare control server over the given secret→capabilities table, plus the real
+/// notification and MCP hubs wired to their SSE routes. Returns both hubs so a test can push
+/// down the same wires the Manager uses.
+let private startControlServer (secrets: (string * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub * McpHub.McpHub> =
     async {
         let table = Map.ofList secrets
         let hub = NotificationHub.create ()
+        let mcp = McpHub.create ()
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
         let! listening =
             Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
-        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening), hub
+        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening), hub, mcp
     }
 
 let private controlRpcTests =
@@ -236,7 +237,7 @@ let private controlRpcTests =
                         }
                 let backend = InMemoryBackend.create recorder scriptedExec
                 let grant = Authority.grant registry backend
-                let! server, url, _ = startControlServer [ "secret-a", grant sessionA; "secret-b", grant sessionB ]
+                let! server, url, _, _ = startControlServer [ "secret-a", grant sessionA; "secret-b", grant sessionB ]
 
                 let capsA = ControlClient.capabilities url "secret-a"
                 let capsB = ControlClient.capabilities url "secret-b"
@@ -677,7 +678,7 @@ let private notificationStreamTests =
     testList "Manager→Session notifications over SSE (reverse control leg)" [
         testCaseAsync "a pushed notification reaches the subscribed session, is scoped to it, and stops on cancel" <|
             async {
-                let! server, url, hub =
+                let! server, url, hub, _ =
                     startControlServer [ "secret-a", stubCapabilities; "secret-b", stubCapabilities ]
 
                 let mutable receivedA : SessionNotification list = []
@@ -715,14 +716,117 @@ let private notificationStreamTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// MCP tool stream — the second reverse leg of the control RPC. The wire codec
+// (standard ListToolsResult, incl. raw-JSON inputSchema passthrough) and the
+// hub's retained-snapshot fan-out are cheap-tier; the SSE stream end to end is
+// verify-tier (Ports — real sockets, no native addon).
+// -----------------------------------------------------------------------------
+
+// A tool with a real JSON-Schema input. The schema is written compact so the codec's
+// re-serialisation round-trips it byte-for-byte (Thoth renders with no spaces at indent 0).
+let private searchTool : McpTool =
+    { Name = "search"
+      Title = Some "Search"
+      Description = Some "Full-text search"
+      InputSchema = """{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}""" }
+
+let private mcpTests =
+    testList "MCP tool stream: codec & hub" [
+        testCase "a tool list round-trips through the control wire codec, inputSchema intact" <| fun () ->
+            let original = { Tools = [ searchTool; { Name = "noop"; Title = None; Description = None; InputSchema = "{}" } ] }
+            let roundTripped =
+                ControlWire.toString ControlWire.mcpToolList original
+                |> ControlWire.fromString ControlWire.mcpToolList
+                |> expect
+            Expect.equal roundTripped original "tool list round-trip is identity (schema stays a JSON object, optionals preserved)"
+
+        testCase "inputSchema is a real JSON object on the wire, not a quoted string" <| fun () ->
+            let json = ControlWire.toString ControlWire.mcpToolList { Tools = [ searchTool ] }
+            Expect.isTrue (json.Contains "\"inputSchema\":{") "the schema serialises as an embedded object"
+
+        testCase "the hub hands a new subscriber the current list at once, then every change" <| fun () ->
+            let hub = McpHub.create ()
+            let mutable received : McpToolList list = []
+            let _ = hub.Register (fun l -> received <- received @ [ l ])
+            // The retained snapshot: an empty list arrives immediately on subscribe.
+            Expect.equal received [ McpToolList.empty ] "the subscriber gets the current (empty) list at once"
+
+            hub.Publish { Tools = [ searchTool ] }
+            Expect.equal (List.last received) { Tools = [ searchTool ] } "a publish pushes the new list"
+            Expect.equal (hub.Current ()) { Tools = [ searchTool ] } "the hub retains the latest list"
+
+            // A LATER subscriber gets the retained list as its initial snapshot, no publish needed.
+            let mutable late : McpToolList list = []
+            let unsubLate = hub.Register (fun l -> late <- late @ [ l ])
+            Expect.equal late [ { Tools = [ searchTool ] } ] "a late subscriber gets the retained list immediately"
+
+            // Unsubscribe stops delivery to that sink only.
+            unsubLate ()
+            hub.Publish McpToolList.empty
+            Expect.equal (List.last late) { Tools = [ searchTool ] } "the unsubscribed sink received nothing further"
+            Expect.equal (List.last received) McpToolList.empty "the still-subscribed sink got the change"
+    ]
+
+let private mcpStreamTests =
+    testList "MCP tool stream over SSE (reverse control leg)" [
+        testCaseAsync "a subscriber gets the current list on connect, then every change, and stops on cancel" <|
+            async {
+                let! server, url, _, mcp =
+                    startControlServer [ "secret-a", stubCapabilities ]
+                // Seed a list before anyone subscribes: a connecting session must still see it.
+                mcp.Publish { Tools = [ searchTool ] }
+
+                let mutable received : McpToolList list = []
+                let cancel = ControlClient.subscribeMcp url "secret-a" (fun l -> received <- received @ [ l ])
+
+                // The retained snapshot arrives on connect without any further publish.
+                let rec waitFor (remaining: int) =
+                    async {
+                        if not (List.isEmpty received) || remaining <= 0 then return ()
+                        else
+                            do! Async.Sleep 50
+                            return! waitFor (remaining - 1)
+                    }
+                do! waitFor 60
+                Expect.isTrue (not (List.isEmpty received)) "the initial (retained) list arrived on connect"
+                Expect.equal (List.head received) { Tools = [ searchTool ] } "the initial snapshot is the current list, decoded across the wire"
+
+                // A subsequent change is pushed to the live subscriber.
+                let before = List.length received
+                mcp.Publish { Tools = [ searchTool; { Name = "fetch"; Title = None; Description = None; InputSchema = "{}" } ] }
+                let rec waitGrow (remaining: int) =
+                    async {
+                        if List.length received > before || remaining <= 0 then return ()
+                        else
+                            do! Async.Sleep 50
+                            return! waitGrow (remaining - 1)
+                    }
+                do! waitGrow 60
+                Expect.equal (List.last received |> fun l -> List.length l.Tools) 2 "the change was pushed to the live subscriber"
+
+                // Cancel closes the stream; later changes never arrive.
+                cancel ()
+                do! Async.Sleep 200
+                let settled = List.length received
+                mcp.Publish McpToolList.empty
+                do! Async.Sleep 200
+                Expect.equal (List.length received) settled "after cancel, no further lists arrive"
+
+                server.close ignore
+            }
+    ]
+
 let tests =
     testList "Phase4" [
         stateTests
         uiRenderTests
         notificationTests
+        mcpTests
         Tag.needs "Session Process as an OS process (Step 23)" [ Tag.Ports; Tag.Native ] (fun () -> processTests)
         Tag.needs "Authority over the control RPC (Step 24)" [ Tag.Ports; Tag.Native ] (fun () -> controlRpcTests)
         Tag.needs "Manager→Session notifications over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> notificationStreamTests)
+        Tag.needs "MCP tool stream over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports; Tag.Native ] (fun () -> compositionTests)
         Tag.needs "Telemetry over the process boundary (Plan 04)" [ Tag.Ports; Tag.Native ] (fun () -> telemetryTests)

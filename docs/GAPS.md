@@ -60,6 +60,14 @@ they matter.
   default handler only logs. The intended first producer — the Manager autonomously
   detecting an out-of-band environment change (e.g. a container it owns dying without
   the session having stopped it) — and the real notification payload are the follow-up.
+- **The MCP tool stream is a transport without a producer yet.** A second reverse leg
+  exists end to end — the child subscribes to `GET /control/mcp` (SSE), gets the current
+  `ListToolsResult` immediately (McpHub's retained snapshot) and a fresh list on every
+  change, and the Manager announces lists via `ProcessManager.PublishMcpTools`. But
+  **nothing calls `PublishMcpTools` in production yet** (the list is always empty), the
+  child's default handler only logs the count, and no MCP client actually consumes the
+  list. Discovering real MCP services and exposing their tools to agent turns is the
+  follow-up; the tool set is currently Manager-global (not scoped per session).
 - **Peer-to-peer is star-shaped through the Process.** Clients sync Yjs state via the
   Session Process relay, not directly with each other; y-webrtc-style meshes are not
   used.
