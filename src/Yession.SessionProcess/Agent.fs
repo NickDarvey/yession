@@ -37,6 +37,9 @@ module AgentTurn =
         (runAgent: RunAgent)
         (signal: AgentAbortSignal)
         (capabilitiesFor: AgentTurnId -> AgentCapabilities)
+        // Telemetry (Plan 04): fired with the turn's usage on completion. Injected (default
+        // `ignore` off the Host) so this module stays OTel-free. Never throws into the turn.
+        (emitUsage: AgentTurnId -> AgentUsage -> unit)
         (mintTurnId: unit -> AgentTurnId)
         (mintMessageId: unit -> MessageId)
         (sessionId: SessionId)
@@ -80,8 +83,13 @@ module AgentTurn =
                 let! result = runAgent context (capabilitiesFor turnId) signal onChunk
                 if not (signal.IsAborted ()) then
                     match result with
-                    | AgentCompleted body ->
+                    | AgentCompleted (body, usage) ->
                         do! append (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = body })
+                        // Telemetry after the durable event: the body is the fact, usage is
+                        // observability. `emitUsage` never throws (guarded at the sink).
+                        match usage with
+                        | Some u -> emitUsage turnId u
+                        | None -> ()
                     | AgentFailed reason ->
                         do! append (AgentTurnFailed { AgentTurnId = turnId; Reason = reason })
             with e ->

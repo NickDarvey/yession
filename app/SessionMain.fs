@@ -7,6 +7,7 @@ module Yession.Host.SessionMain
 // control endpoint + per-launch secret: the capability calls cross back to the
 // Manager, which owns the registry and the engines.
 
+open Fable.Core
 open Yession.Domain
 open Yession.Host
 
@@ -37,6 +38,10 @@ let private reportName =
     | _, "" -> None
     | url, secret -> Some (ControlClient.nameReporter url secret)
 
+// Telemetry (Plan 04): one OTel log record per completed turn, exported to the Manager's
+// collector. Configured from `YESSION_OTLP_ENDPOINT`/`_SECRET`; a pure no-op when absent.
+let private telemetry = Telemetry.fromEnv sessionId
+
 /// A built-in diagnostic runner (`YESSION_AGENT=diagnostic`): exercises the session's
 /// environment capability end to end — ensure, execute, stream — without model
 /// credentials. The verify suite drives it across real process boundaries; it doubles
@@ -59,8 +64,25 @@ let private diagnosticAgent : RunAgent =
                 match result with
                 | CommandSucceeded 0 ->
                     onChunk { Text = output.Trim () }
-                    return AgentCompleted (sprintf "diagnostic: %s" (output.Trim ()))
+                    return AgentCompleted (sprintf "diagnostic: %s" (output.Trim ()), None)
                 | other -> return AgentFailed (sprintf "diagnostic command failed: %A" other)
+        }
+
+/// A built-in probe (`YESSION_AGENT=usage-probe`, Plan 04): completes a turn with fixed,
+/// non-zero usage and no credentials, so the cross-process telemetry e2e can assert the
+/// counts reach the Manager collector over the real spawn + OTLP path.
+let private usageProbeAgent : RunAgent =
+    fun _ _ _ _ ->
+        async {
+            return
+                AgentCompleted (
+                    "usage probe",
+                    Some
+                        { InputTokens = 111
+                          OutputTokens = 22
+                          CacheReadTokens = 3
+                          CacheCreationTokens = 4
+                          Model = Some "probe-model" })
         }
 
 // The real agent runs only when the process has credentials; without them the session
@@ -68,6 +90,7 @@ let private diagnosticAgent : RunAgent =
 let private runAgent =
     match Interop.envOr "YESSION_AGENT" "" with
     | "diagnostic" -> Some diagnosticAgent
+    | "usage-probe" -> Some usageProbeAgent
     | _ ->
         if Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> "" then Some Agent.run
         else None
@@ -80,11 +103,17 @@ Async.StartImmediate (
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
-        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName sessionId token port
+        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit sessionId token port
         // Sessions never outlive their Manager: spawned under the guard, the Manager's
         // death closes our stdin (the kernel does this even on SIGKILL) and we exit.
         if Interop.envOr "YESSION_PARENT_GUARD" "" = "1" then
-            onStdinClosed (fun () -> Interop.exit 0)
+            // Flush buffered telemetry before exiting (the Manager's death closes stdin).
+            onStdinClosed (fun () ->
+                Async.StartImmediate (
+                    async {
+                        do! telemetry.Shutdown () |> Async.AwaitPromise
+                        Interop.exit 0
+                    }))
         // The one readiness line of the spawn contract — last, so the Manager can
         // treat everything before it as logs and everything after as a live session.
         printfn """{"yession":"ready","port":%d}""" host.Port

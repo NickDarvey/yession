@@ -16,8 +16,19 @@ type AgentContextPack =
 
 type AgentResponseChunk = { Text : string }
 
+/// Token/cache usage the runner reports for one completed turn (Plan 04, Step 28).
+/// Telemetry only — never a durable session fact and never written to the event log.
+/// `None` on `AgentCompleted` when the runner reports no usage (scripted runners, or an
+/// SDK result with no usage block).
+type AgentUsage =
+    { InputTokens         : int
+      OutputTokens        : int
+      CacheReadTokens     : int
+      CacheCreationTokens : int
+      Model               : string option }
+
 type AgentRunResult =
-    | AgentCompleted of body: string
+    | AgentCompleted of body: string * usage: AgentUsage option
     | AgentFailed of reason: string
 
 type EnsureEnvironmentResult =

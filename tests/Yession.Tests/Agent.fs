@@ -73,9 +73,9 @@ let private turnTests =
                             Expect.equal context.SessionId sessionId "the context carries the session"
                             onChunk { Text = "Hel" }
                             onChunk { Text = "lo!" }
-                            return AgentCompleted "Hello!"
+                            return AgentCompleted ("Hello!", None)
                         }
-                do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 Expect.equal
                     events
@@ -92,7 +92,7 @@ let private turnTests =
             async {
                 let log = newLog ()
                 let failing : RunAgent = fun _ _ _ _ -> async { return AgentFailed "boom" }
-                do! AgentTurn.run log failing AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                do! AgentTurn.run log failing AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 Expect.equal
                     (List.last events)
@@ -104,7 +104,7 @@ let private turnTests =
             async {
                 let log = newLog ()
                 let throwing : RunAgent = fun _ _ _ _ -> failwith "runner exploded"
-                do! AgentTurn.run log throwing AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
+                do! AgentTurn.run log throwing AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] trigger
                 let! events = eventsOf log
                 match List.last events with
                 | AgentTurnFailed f -> Expect.equal f.Reason "runner exploded" "the thrown reason is captured"
@@ -212,7 +212,7 @@ let private e2eTests =
                         async {
                             onChunk { Text = "You said: " }
                             onChunk { Text = context.CurrentMessage.Body }
-                            return AgentCompleted (sprintf "You said: %s" context.CurrentMessage.Body)
+                            return AgentCompleted (sprintf "You said: %s" context.CurrentMessage.Body, None)
                         }
                 let! h = Host.startWith (Some scripted) e2eSessionId token port
                 host <- Some h
@@ -280,7 +280,7 @@ let private liveTests =
                     let log = newLog ()
                     let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
                     let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                    do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
+                    do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
                     let! events = eventsOf log
                     match List.last events with
                     | AgentMessageCompleted completed ->

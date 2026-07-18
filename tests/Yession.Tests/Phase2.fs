@@ -265,7 +265,7 @@ let private lazyLifecycleTests =
                     fun _ _ _signal onChunk ->
                         async {
                             onChunk { Text = "just an answer" }
-                            return AgentCompleted "just an answer"
+                            return AgentCompleted ("just an answer", None)
                         }
                 let m = Manager.create (Some conversational) (Some backend) lazyEnvironmentPort
                 let! _ =
@@ -302,7 +302,7 @@ let private lazyLifecycleTests =
                             match first, second with
                             | EnvironmentAvailable, EnvironmentAvailable ->
                                 onChunk { Text = "environment is up" }
-                                return AgentCompleted "environment is up"
+                                return AgentCompleted ("environment is up", None)
                             | other -> return AgentFailed (sprintf "%A" other)
                         }
                 let m = Manager.create (Some taskAgent) (Some backend) (lazyEnvironmentPort + 1)
@@ -478,7 +478,7 @@ let private commandTests =
                             match result with
                             | CommandSucceeded 0 ->
                                 onChunk { Text = "ran it" }
-                                return AgentCompleted "ran it"
+                                return AgentCompleted ("ran it", None)
                             | other -> return AgentFailed (sprintf "%A" other)
                         }
                 let m = Manager.create (Some devAgent) (Some (Backends.LocalProcessBackend.create ())) commandPort
@@ -576,7 +576,7 @@ let private acceptanceE2eTests =
                             let! _ = capabilities.EnsureEnvironment "work to do"
                             let! _ = capabilities.ExecuteCommand (nodeCommand "cmd-catchup" "console.log('made progress')") ignore
                             onChunk { Text = "done" }
-                            return AgentCompleted "done"
+                            return AgentCompleted ("done", None)
                         }
                 let m = Manager.create (Some devAgent) (Some (Backends.LocalProcessBackend.create ())) acceptancePort
                 let! _ =

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Fable bindings to the OpenTelemetry JS SDK (the *logs* signal). Fable-only, like
+    Fable.Dockerode: `dotnet build` only type-checks it; the runnable JS comes from Fable.
+    Kept a standalone project so the bindings are a distinct layer — the session-process
+    telemetry emitter (app/Telemetry.fs) is the only thing above it that knows OTel exists.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="OpenTelemetry.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>

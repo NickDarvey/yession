@@ -557,6 +557,64 @@ let private compositionTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Plan 04 — telemetry over the process boundary. The Manager runs its OTLP `/v1/logs`
+// receiver on its own endpoint and injects `YESSION_OTLP_ENDPOINT`/`_SECRET` into the
+// launch; a real child (the credential-free `usage-probe` agent) runs one turn and its
+// token/cache counts reach the Manager's collector over real OTLP HTTP. Verify tier: a
+// real child process + a real WebRTC client trigger the turn.
+// -----------------------------------------------------------------------------
+
+let private telemetryTests =
+    testList "Telemetry over the process boundary (Plan 04)" [
+        testCaseAsync "a real child session's turn usage reaches the Manager collector over OTLP" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/tel-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+
+                // The Manager's collector, with an onRecord signal so the test awaits the
+                // arriving record instead of polling the async batch export.
+                let mutable fired = false
+                let mutable waiter : (unit -> unit) option = None
+                let collector =
+                    TelemetryReceiver.Collector.create (fun _ ->
+                        fired <- true
+                        match waiter with
+                        | Some resume -> waiter <- None; resume ()
+                        | None -> ())
+
+                let! pm =
+                    ProcessManager.create
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Telemetry = Some collector }
+                let record = pm.CreateSession "tel-child" "Tel child" "tel-token" |> expect
+
+                // The child inherits our environment: run its built-in usage-probe agent.
+                setEnv "YESSION_AGENT" "usage-probe"
+                let! launched = pm.Launch record.SessionId
+                unsetEnv "YESSION_AGENT"
+                let port = launched |> expect
+
+                // A real client messages the child; the probe turn runs and emits usage back
+                // to the Manager's receiver over the injected OTLP endpoint.
+                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) "tel-token" "ada" "Ada"
+                do! compose a a.Hello.PeerId "probe a turn"
+                a.Connection.SendDraft a.Hello.PeerId
+
+                do! Async.FromContinuations (fun (cont, _, _) -> if fired then cont () else waiter <- Some cont)
+
+                match collector.Received () |> List.choose TelemetryReceiver.TurnUsage.ofLog with
+                | u :: _ ->
+                    Expect.equal u.SessionId "tel-child" "the record is tagged with the child's session id"
+                    Expect.equal (u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens) (111, 22, 3, 4) "the probe's counts crossed the process boundary"
+                    Expect.equal u.Model (Some "probe-model") "the model crossed the boundary"
+                | [] -> failwith "no usage record reached the Manager collector"
+
+                do! a.Channel.Close ()
+                do! pm.StopAll ()
+            }
+    ]
+
 let tests =
     testList "Phase4" [
         stateTests
@@ -565,4 +623,5 @@ let tests =
         Tag.needs "Authority over the control RPC (Step 24)" [ Tag.Ports; Tag.Native ] (fun () -> controlRpcTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports; Tag.Native ] (fun () -> compositionTests)
+        Tag.needs "Telemetry over the process boundary (Plan 04)" [ Tag.Ports; Tag.Native ] (fun () -> telemetryTests)
     ]
