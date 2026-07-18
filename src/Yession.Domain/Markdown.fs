@@ -32,9 +32,40 @@ module Markdown =
     [<Import("prosemirrorToYXmlFragment", "y-prosemirror")>]
     let private rootNodeToFragment (node: Node) (fragment: Y.XmlFragment) : unit = jsNative
 
-    /// Serialize a fragment's ProseMirror doc to Markdown (durable body / agent input).
+    // Reading a *live* fragment with `yXmlFragmentToProseMirrorRootNode` is not side-effect-free:
+    // y-prosemirror's adjacent-`Y.Text` merge (its issue #160 fix) DELETES a neighbouring text
+    // node when it was authored by the reading doc's own client — which, on a body the local
+    // editor is bound to, can silently drop a whole block (e.g. a second linked paragraph). So
+    // serialization reads from a DETACHED SNAPSHOT on a throwaway doc: a fresh doc has a
+    // different clientID, the merge is skipped, and the live body is left untouched.
+    [<Import("Doc", "yjs")>]
+    let private docClass : obj = jsNative
+    [<Import("encodeStateAsUpdate", "yjs")>]
+    let private encodeStateAsUpdate (doc: obj) : obj = jsNative
+    [<Import("applyUpdate", "yjs")>]
+    let private applyUpdate (doc: obj) (update: obj) : unit = jsNative
+    [<Emit("new $0()")>]
+    let private newDoc (cls: obj) : obj = jsNative
+    [<Emit("$0.getXmlFragment($1)")>]
+    let private docXmlFragment (doc: obj) (name: string) : Y.XmlFragment = jsNative
+    /// The top-level root name of a doc-attached fragment (its key in `doc.share`), or `null`
+    /// when the fragment is already detached / nested.
+    [<Emit("(function (f) { const d = f.doc; if (!d) return null; for (const [k, v] of d.share) { if (v === f) return k; } return null; })($0)")>]
+    let private rootName (fragment: Y.XmlFragment) : string = jsNative
+    [<Emit("$0.doc")>]
+    let private fragDoc (fragment: Y.XmlFragment) : obj = jsNative
+
+    /// Serialize a fragment's ProseMirror doc to Markdown (durable body / agent input). Reads a
+    /// detached snapshot so the live body is never mutated (see the note above).
     let ofFragment (fragment: Y.XmlFragment) : string =
-        serializer.serialize (fragmentToRootNode fragment schema)
+        let name = rootName fragment
+        let node =
+            if isNull (box name) then fragmentToRootNode fragment schema
+            else
+                let snapshot = newDoc docClass
+                applyUpdate snapshot (encodeStateAsUpdate (fragDoc fragment))
+                fragmentToRootNode (docXmlFragment snapshot name) schema
+        serializer.serialize node
 
     /// Parse Markdown into an (empty) fragment — seeds a queue body on send.
     let intoFragment (markdown: string) (fragment: Y.XmlFragment) : unit =

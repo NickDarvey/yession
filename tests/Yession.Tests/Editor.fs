@@ -82,6 +82,21 @@ let private serializationTests =
             let out = md (fromMd "1. first\n2. second")
             Expect.stringContains out "1. first" "first ordered item"
             Expect.stringContains out "2. second" "second ordered item"
+
+        testCase "multiple links across blocks all survive serialization" <| fun () ->
+            let out = md (fromMd "[one](https://a.test)\n\n[two](https://b.test)")
+            Expect.stringContains out "[one](https://a.test)" "first link kept"
+            Expect.stringContains out "[two](https://b.test)" "second link kept"
+
+        // `ofFragment` reads through `yXmlFragmentToProseMirrorRootNode`, which can MUTATE a
+        // live, locally-authored doc (y-prosemirror's adjacent-Y.Text merge) and silently drop
+        // a block. `ofFragment` guards against that by reading a detached snapshot; this pins
+        // that a read never changes what the next read sees.
+        testCase "ofFragment does not mutate the source fragment" <| fun () ->
+            let f = fromMd "[one](https://a.test)\n\n[two](https://b.test)"
+            let first = md f
+            let second = md f
+            Expect.equal second first "re-reading the same fragment is stable (the read is side-effect-free)"
     ]
 
 // The strongest non-brittle guard: parsing then serializing is a FIXED POINT — running it

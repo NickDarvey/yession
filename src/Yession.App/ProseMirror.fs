@@ -22,16 +22,33 @@ module ProseMirror =
     type [<AllowNullLiteral>] Transaction =
         abstract delete : int * int -> Transaction
         abstract addMark : int * int * obj -> Transaction
+        abstract removeMark : int * int * obj -> Transaction
         abstract removeStoredMark : obj -> Transaction
+        abstract insertText : string * int * int -> Transaction
         abstract replaceSelectionWith : Node * bool -> Transaction
+
+    /// The current selection. `from`/`to` are document positions; `empty` is the collapsed
+    /// caret case (a link then targets the surrounding link mark, not a range).
+    type [<AllowNullLiteral>] Selection =
+        abstract from : int
+        abstract ``to`` : int
+        abstract empty : bool
 
     type [<AllowNullLiteral>] EditorState =
         abstract tr : Transaction
+        abstract selection : Selection
 
     type [<AllowNullLiteral>] EditorView =
         abstract state : EditorState
         abstract dispatch : Transaction -> unit
         abstract destroy : unit -> unit
+        /// `false` for the read-only peer-draft mirrors — the link editor stays inert there.
+        abstract editable : bool
+        /// Return focus to the editable surface after the link popover closes.
+        abstract focus : unit -> unit
+        /// Viewport coordinates (`{ left, top, right, bottom }`) of a document position —
+        /// where the link popover anchors.
+        abstract coordsAtPos : int -> obj
 
     // --- prosemirror-markdown: the schema + parser/serializer (markdown round-trip) --------
 
@@ -52,9 +69,59 @@ module ProseMirror =
     let present (x: obj) : bool = jsNative
     [<Emit("$0.create()")>]
     let markCreate (m: MarkType) : obj = jsNative
+    /// A mark carrying attributes — `link.create({ href })`.
+    [<Emit("$0.create($1)")>]
+    let markCreateAttrs (m: MarkType) (attrs: obj) : obj = jsNative
     /// A fresh JS RegExp from a pattern string (input-rule triggers).
     [<Emit("new RegExp($0)")>]
     let regex (pattern: string) : obj = jsNative
+
+    /// A single bare URL (no surrounding whitespace) — the Slack paste trigger: a URL dropped
+    /// over a selection links the selection rather than replacing it.
+    [<Emit("/^(https?:\\/\\/|mailto:)\\S+$/.test(($0 || '').trim())")>]
+    let isBareUrl (s: string) : bool = jsNative
+
+    /// The link mark touching the current selection, as `{ from; to; href }`, or `null`.
+    /// A collapsed caret expands to the whole surrounding link run (so Mod-K edits the link
+    /// the cursor sits in); a range returns its own bounds and the href at its start (empty
+    /// when the range carries no link — the create case). The mark-run walk is the standard
+    /// ProseMirror idiom (`ResolvedPos` index arithmetic), kept in one emit.
+    type [<AllowNullLiteral>] LinkRange =
+        abstract from : int
+        abstract ``to`` : int
+        abstract href : string
+    [<Emit("""(function (state, markType) {
+      const sel = state.selection
+      if (sel.empty) {
+        const $pos = sel.$from
+        const parent = $pos.parent
+        const at = $pos.parentOffset
+        // A caret carries a mark via marks() only mid-run; at a run edge (link is
+        // inclusive:false) it does not. So scan the parent's inline children for the linked
+        // run the caret sits in or against, then expand over contiguous same-link children.
+        let mark = null, startIndex = -1, offset = 0
+        for (let i = 0; i < parent.childCount; i++) {
+          const child = parent.child(i)
+          const m = markType.isInSet(child.marks)
+          if (m && at >= offset && at <= offset + child.nodeSize) { mark = m; startIndex = i; break }
+          offset += child.nodeSize
+        }
+        if (!mark) return null
+        let endIndex = startIndex + 1
+        while (startIndex > 0 && mark.isInSet(parent.child(startIndex - 1).marks)) startIndex--
+        while (endIndex < parent.childCount && mark.isInSet(parent.child(endIndex).marks)) endIndex++
+        let from = $pos.start(), to = from
+        for (let i = 0; i < endIndex; i++) {
+          const size = parent.child(i).nodeSize
+          if (i < startIndex) from += size
+          to += size
+        }
+        return { from: from, to: to, href: (mark.attrs && mark.attrs.href) || '' }
+      }
+      const mark = markType.isInSet(state.doc.resolve(sel.from).marks())
+      return { from: sel.from, to: sel.to, href: (mark && mark.attrs && mark.attrs.href) || '' }
+    })($0, $1)""")>]
+    let linkRangeAt (state: EditorState) (markType: MarkType) : LinkRange = jsNative
 
     // --- prosemirror-state / -view ---------------------------------------------------------
 

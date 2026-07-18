@@ -264,6 +264,89 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+
+        testCaseAsync "Slack-style: pasting a URL over a selection turns it into a hyperlink" <|
+            async {
+                let server = serveStatic harnessRoot EDITOR_PORT
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                // Clipboard permissions let the test drive a real paste (Ctrl+V), the path a
+                // user takes — not a synthetic ClipboardEvent.
+                let! ctx = await (br.NewContextAsync ())
+                do! awaitU (ctx.GrantPermissionsAsync ([| "clipboard-read"; "clipboard-write" |]))
+                let! page = await (ctx.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync editorBase)
+                let! _ = await (page.WaitForSelectorAsync ".ProseMirror")
+
+                // Type a label, select it, paste a bare URL over the selection → the selected
+                // text stays as the link's label and gains the pasted URL as its href.
+                do! awaitU (page.ClickAsync ".ProseMirror")
+                do! awaitU (page.Keyboard.TypeAsync "the docs")
+                do! awaitU (page.Keyboard.PressAsync "Control+a")
+                let! _ = await (page.EvaluateAsync<obj> "() => navigator.clipboard.writeText('https://example.com/docs')")
+                do! awaitU (page.Keyboard.PressAsync "Control+v")
+                let! _ = await (page.WaitForFunctionAsync """document.querySelector('.ProseMirror a[href="https://example.com/docs"]')?.textContent === 'the docs'""")
+
+                // It serializes back to a Markdown link (the durable form the drain snapshots).
+                let! md = await (page.EvaluateAsync<string> "() => window.__md()")
+                Expect.stringContains md "[the docs](https://example.com/docs)" "pasted URL links the selection"
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+
+        testCaseAsync "Linear-style: Mod-K inserts a hyperlink, and edits/removes an existing one" <|
+            async {
+                let server = serveStatic harnessRoot EDITOR_PORT
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync editorBase)
+                let! _ = await (page.WaitForSelectorAsync ".ProseMirror")
+
+                // Select text, press Mod-K → a floating link input appears; a URL + Enter links
+                // the selection. (Headless Linux Chromium maps Mod → Control.)
+                do! awaitU (page.ClickAsync ".ProseMirror")
+                do! awaitU (page.Keyboard.TypeAsync "linear")
+                do! awaitU (page.Keyboard.PressAsync "Shift+Home")
+                // The DOM selection reaches ProseMirror's state asynchronously; wait for the
+                // selected text before Mod-K so the popover targets the range, not a caret.
+                let! _ = await (page.WaitForFunctionAsync "window.getSelection().toString() === 'linear'")
+                do! awaitU (page.Keyboard.PressAsync "Control+k")
+                let! _ = await (page.WaitForSelectorAsync "[data-link-input]")
+                do! awaitU (page.FillAsync ("[data-link-input]", "https://kmd.example.com"))
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! _ = await (page.WaitForFunctionAsync """document.querySelector('.ProseMirror a[href="https://kmd.example.com"]')?.textContent === 'linear'""")
+                let! md2 = await (page.EvaluateAsync<string> "() => window.__md()")
+                Expect.stringContains md2 "[linear](https://kmd.example.com)" "Mod-K links the selection"
+
+                // Mod-K with the caret inside that link re-opens the editor pre-filled (edit
+                // mode); Remove strips the link while keeping the text. A click's caret reaches
+                // ProseMirror's own state a tick after the DOM selection updates, so settle
+                // briefly before Mod-K reads it (else the editor opens in create mode).
+                do! awaitU (page.ClickAsync """.ProseMirror a[href="https://kmd.example.com"]""")
+                do! awaitU (page.WaitForTimeoutAsync 300.0f)
+                do! awaitU (page.Keyboard.PressAsync "Control+k")
+                let! _ = await (page.WaitForSelectorAsync "[data-link-remove]")
+                let! prefilled = await (page.InputValueAsync "[data-link-input]")
+                Expect.equal prefilled "https://kmd.example.com" "the editor pre-fills the existing href"
+                do! awaitU (page.ClickAsync "[data-link-remove]")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('.ProseMirror a[href="https://kmd.example.com"]')""")
+                let! md3 = await (page.EvaluateAsync<string> "() => window.__md()")
+                Expect.stringContains md3 "linear" "the text survives"
+                Expect.isFalse (md3.Contains "[linear](https://kmd.example.com)") "the link mark is gone"
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 #else

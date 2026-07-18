@@ -42,6 +42,16 @@
   background-image: linear-gradient(180deg, #1ba1e2, #a8dd00);
 }
 
+/* Links inside the rich editor (and its read-only peer mirrors). ProseMirror renders the
+   markdown `link` mark as a bare <a>; give it the interactive blue so a hyperlink reads as
+   one. The class is emitted by y-prosemirror/ProseMirror, not by the F# `Style` scanner, so
+   it is declared here directly. */
+.ProseMirror a {
+  color: #1ba1e2;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 /* v4 auto-detection does not scan `.fs`, so declare the F# sources explicitly (replaces the
    old `content`). Paths are relative to this stylesheet. */
 @source "../src/**/*.fs";
