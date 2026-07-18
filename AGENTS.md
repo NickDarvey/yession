@@ -18,6 +18,26 @@ Auto-Clarity: drop caveman for security warnings, irreversible actions, user con
 
 Boundaries: code/commits/PRs written normal.
 
+## Bootstrap
+
+Dev container has Node + .NET on disk but NOT `mise` — and `mise` is the repo interface
+(everything is `mise run <task>`). Install it first, ONCE per fresh container:
+
+```
+curl -fsSL https://mise.run | sh          # -> /root/.local/bin/mise
+export PATH="/root/.local/bin:$PATH"       # every shell that runs mise
+mise trust && mise install                 # pinned node 24.16 + dotnet 10 (~235 MB, first run only)
+```
+
+Then use tasks (`mise tasks` lists them): `mise run test` / `build` / `verify`. `restore`
+(npm + dotnet tools) is a `depends` of the others — no need to run it by hand. Do NOT invoke
+`dotnet`/`fable`/`esbuild` directly to "run the suite"; go through `mise run` so tool versions
+and PATH match CI.
+
+Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-browsers`) — the
+`Browser` cap works here. NOT built: the `node-datachannel` WebRTC addon — so `Native`-capped
+suites can't run in this container (see Testing).
+
 ## Testing
 
 Tests gated by CAPABILITIES the run declares, not folders (`tests/Yession.Tests/Tags.fs`). A
