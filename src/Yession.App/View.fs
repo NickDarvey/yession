@@ -19,8 +19,10 @@ open Lit
 /// so the view stays free of Guid/random and of the connection; the browser supplies real
 /// implementations, tests and SSR supply no-ops.
 type ViewActions =
-    { /// Mint a fresh queue id for "send" (draft → queue).
-      NewQueueId : unit -> QueueId
+    { /// Send the local peer's draft: mint a queue id, copy the draft body fragment into the
+      /// new queue entry, and enqueue. Imperative because the fragment content-copy (shared
+      /// types can't be re-parented) can't live in the pure reducer.
+      SendDraft : PeerId -> unit
       /// Ask the Session Process to cancel the running agent turn.
       Interrupt : AgentTurnId -> unit
       /// Toggle the sidebar drawer (a presentation bit on the shell root, not model).
@@ -31,10 +33,9 @@ type ViewActions =
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
-    /// are never invoked while rendering — they fire on user events in the live browser —
-    /// so the minters return fixed valid ids and the effects are no-ops.
+    /// are never invoked while rendering — they fire on user events in the live browser.
     let ssr : ViewActions =
-        { NewQueueId = fun () -> match QueueId.create "ssr-queue" with Ok q -> q | Error e -> failwith e
+        { SendDraft = ignore
           Interrupt = ignore
           ToggleNav = ignore
           ReportTitleCursor = ignore }
@@ -274,7 +275,7 @@ module View =
                 html $"""
                     <article class="{Style.queueItem}" data-queue-id="{QueueId.value id}" data-queue-author="{PeerId.value entry.Author}" data-queue-order="{string entry.Order}">
                       <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value entry.Author) ]}"></span>
-                      <textarea rows="1" class="{Style.queueInput}" data-queue-input="{QueueId.value id}" .value={Ylmish.Text.toString entry.Body} @input={EvVal(fun v -> dispatch (EditQueuedBodyMsg (id, Ylmish.Text.edit v entry.Body)))}>{Ylmish.Text.toString entry.Body}</textarea>
+                      <div class="{Style.queueInput}" data-rich-body="{BodyKey.queued id}" data-rich-readonly="false" data-queue-input="{QueueId.value id}"></div>
                       <div class="{Style.queueTools}">
                         <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>↑</button>
                         <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>↓</button>
@@ -285,46 +286,29 @@ module View =
 
     let private drafts (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         let myPeer = model.Peer.PeerId
-        // Other peers' active drafts: visible and joinable (edits merge into their slot),
-        // author-badged, but not sendable — owner-sends. One textarea each, no cursors.
+        // Other peers' drafts: a read-only rich editor bound to their body fragment (the
+        // browser mounts it onto this host). Author-badged, not sendable — owner-sends.
         let others =
             model.Synced.Drafts
             |> Map.toList
             |> List.filter (fun (peerId, _) -> peerId <> myPeer)
-            |> List.map (fun (peerId, draft) ->
+            |> List.map (fun (peerId, _) ->
                 html $"""
                     <article class="{Style.draftBox}" data-draft-id="{PeerId.value peerId}" data-draft-author="{PeerId.value peerId}">
                       <span class="{Style.draftEdge}"></span>
-                      <textarea rows="2" placeholder="Add to {PeerId.value peerId}'s draft" class="{Style.draftInput}" data-draft-input="{PeerId.value peerId}" .value={Ylmish.Text.toString draft.Body} @input={EvVal(fun v -> dispatch (EditDraftBodyMsg (peerId, Ylmish.Text.edit v draft.Body)))}>{Ylmish.Text.toString draft.Body}</textarea>
+                      <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft peerId}" data-rich-readonly="true" data-draft-input="{PeerId.value peerId}"></div>
                       <div class="{Style.draftActions}"><span class="{Style.draftAuthor}">{PeerId.value peerId}</span></div>
                     </article>""")
-        // The local composer: always present (materialises on first keystroke), the only
-        // one with Send (owner-sends) and Discard.
-        let myBody =
-            model.Synced.Drafts
-            |> Map.tryFind myPeer
-            |> Option.map (fun d -> d.Body)
-            |> Option.defaultValue Ylmish.Text.empty
-        let myBodyStr = Ylmish.Text.toString myBody
-        let discard =
-            if myBodyStr = "" then Lit.nothing
-            else html $"""<button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Discard draft" data-discard-draft @click={Ev(fun _ -> dispatch (DiscardDraftMsg myPeer))}>✕</button>"""
-        // The composer surface: a rich ProseMirror editor when the flag is on (mounted
-        // imperatively by the browser onto this host, seeded from — and writing back — the
-        // same `Ylmish.Text` body), otherwise today's textarea. Side by side, flippable.
-        let composerSurface =
-            if Features.richText then
-                html $"""<div class="{Style.draftInput}" data-rich-composer="{PeerId.value myPeer}" data-draft-input="{PeerId.value myPeer}"></div>"""
-            else
-                html $"""<textarea rows="2" placeholder="Message the session — sending queues while the agent works" class="{Style.draftInput}" data-draft-input="{PeerId.value myPeer}" .value={myBodyStr} @input={EvVal(fun v -> dispatch (EditDraftBodyMsg (myPeer, Ylmish.Text.edit v myBody)))}>{myBodyStr}</textarea>"""
+        // The local composer: always present; a rich ProseMirror editor bound to the local
+        // peer's body fragment (mounted imperatively by the browser). Send + Discard.
         let mine =
             html $"""
                 <article class="{Style.draftBox}" data-draft-id="{PeerId.value myPeer}" data-draft-author="{PeerId.value myPeer}">
                   <span class="{Style.draftEdge}"></span>
-                  {composerSurface}
+                  <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft myPeer}" data-rich-readonly="false" data-draft-input="{PeerId.value myPeer}"></div>
                   <div class="{Style.draftActions}">
-                    <button type="button" class="{Style.btnPrimary}" data-send-draft="{PeerId.value myPeer}" @click={Ev(fun _ -> dispatch (SendDraftMsg (myPeer, actions.NewQueueId ())))}>Send</button>
-                    {discard}
+                    <button type="button" class="{Style.btnPrimary}" data-send-draft="{PeerId.value myPeer}" @click={Ev(fun _ -> actions.SendDraft myPeer)}>Send</button>
+                    <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Discard draft" data-discard-draft @click={Ev(fun _ -> dispatch (DiscardDraftMsg myPeer))}>✕</button>
                   </div>
                 </article>"""
         html $"""

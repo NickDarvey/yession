@@ -8,8 +8,7 @@ open Yession.App.ProseMirror
 /// The Linear-style rich-text editor: type or paste Markdown, rendered live as formatted
 /// rich text. Pure F# over the `ProseMirror` bindings (no authored JS). The document lives
 /// in a `Y.XmlFragment` (via `ySyncPlugin`), so edits flow straight into the CRDT and merge.
-/// Exposed to the browser host as `mountEditor`; the drain path uses `fragmentToMarkdown`
-/// and send uses `copyFragment`.
+/// Exposed to the browser host as `mountEditor`; fragment↔markdown lives in `Domain.Markdown`.
 module Editor =
 
     // Tiny boundary lambdas for the input-rule attribute/predicate callbacks (JS functions
@@ -101,47 +100,15 @@ module Editor =
                         view.dispatch ((view.state.tr).replaceSelectionWith (doc, false))
                         true)
 
-    /// Serialize a fragment's ProseMirror doc to Markdown (the durable body / agent input).
-    let fragmentToMarkdown (fragment: Y.XmlFragment) : string =
-        mdSerializer.serialize (fragmentToRootNode fragment schema)
-
-    /// Parse Markdown into an (empty) fragment — seeds a queue body on send / a composer.
-    let markdownIntoFragment (markdown: string) (fragment: Y.XmlFragment) : unit =
-        rootNodeToFragment (mdParser.parse (if isNull (box markdown) then "" else markdown)) fragment
-
-    // Observe a fragment's edits (the editor writes through `ySyncPlugin`) and defer the
-    // callback out of the Yjs transaction, so pushing markdown into the Elmish model never
-    // re-enters the editor's own dispatch. Observing — rather than overriding
-    // `dispatchTransaction` — is what keeps y-prosemirror's binding intact (the override read
-    // the view before its constructor had returned and dropped the initial sync).
-    [<Emit("$0.observeDeep(() => $1())")>]
-    let private observeFragment (fragment: Y.XmlFragment) (cb: unit -> unit) : unit = jsNative
-    [<Emit("queueMicrotask(() => $0())")>]
-    let private defer (cb: unit -> unit) : unit = jsNative
-
-    /// Mount a ProseMirror editor onto `host`, bound to `fragment`. `onChange` receives the
-    /// document as **markdown** after each edit (the flagged composer writes that back into the
-    /// synced `Ylmish.Text` body). Returns a dispose thunk; `readOnly` renders another peer's
-    /// content without an edit surface.
-    let mountEditor (host: obj) (fragment: Y.XmlFragment) (readOnly: bool) (onChange: string -> unit) : (unit -> unit) =
+    /// Mount a ProseMirror editor onto `host`, bound to the live `fragment`. The fragment is
+    /// the synced, doc-backed body, so edits flow straight into the CRDT and to peers through
+    /// the doc — no change callback. Returns a dispose thunk; `readOnly` renders another peer's
+    /// content without an edit surface. Serialization for the drain lives in `Domain.Markdown`.
+    let mountEditor (host: obj) (fragment: Y.XmlFragment) (readOnly: bool) : (unit -> unit) =
         let state = createState (createObj [ "schema" ==> schema; "plugins" ==> plugins fragment ])
         let view =
             createView host (createObj [
                 "state" ==> state
                 "editable" ==> (System.Func<bool>(fun () -> not readOnly))
                 "handlePaste" ==> handlePaste ])
-        observeFragment fragment (fun () -> defer (fun () -> onChange (fragmentToMarkdown fragment)))
         fun () -> view.destroy ()
-
-    /// Content-copy one fragment's document into another (draft -> queue on send). Shared
-    /// types cannot be re-parented, so copy via the Markdown round-trip.
-    let copyFragment (src: Y.XmlFragment) (dst: Y.XmlFragment) : unit =
-        markdownIntoFragment (fragmentToMarkdown src) dst
-
-    /// A fresh LOCAL fragment (its own doc) seeded from markdown — the editor's backing store
-    /// in the flagged side-by-side composer, where the synced body stays `Ylmish.Text` markdown
-    /// and the fragment is a local rendering surface.
-    let newLocalFragment (markdown: string) : Y.XmlFragment =
-        let f = (Y.Doc.Create ()).getXmlFragment "body"
-        if markdown <> "" then markdownIntoFragment markdown f
-        f

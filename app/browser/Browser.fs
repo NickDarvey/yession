@@ -143,16 +143,19 @@ let private toggleNav () : unit = jsNative
 [<Emit("new URLSearchParams(window.location.search).get($0) || $1")>]
 let private queryParam (name: string) (fallback: string) : string = jsNative
 
-// --- Rich-text composer mount (flagged, ?rich=1) ---------------------------------------
-// The view renders an empty `[data-rich-composer]` host per local composer; the editor is
-// mounted imperatively into it (ProseMirror owns that DOM; Lit leaves the static host's
-// children alone across re-renders, exactly as it preserves the textareas). Off unless
-// flagged, so the default path is untouched.
-[<Emit("Array.from(document.querySelectorAll('[data-rich-composer]'))")>]
-let private richComposerHosts () : obj[] = jsNative
+// --- Rich-text editor mount ------------------------------------------------------------
+// The view renders empty `[data-rich-body="<key>"]` hosts; the editor is mounted imperatively
+// into each, bound to the body's live Y.XmlFragment (resolved from the BodyRegistry).
+// ProseMirror owns that DOM; Lit leaves the static host's children alone across re-renders
+// (as it preserved the textareas).
+[<Emit("Array.from(document.querySelectorAll('[data-rich-body]'))")>]
+let private richBodyHosts () : obj[] = jsNative
 
-[<Emit("$0.getAttribute('data-rich-composer')")>]
-let private hostPeer (el: obj) : string = jsNative
+[<Emit("$0.getAttribute('data-rich-body')")>]
+let private hostBodyKey (el: obj) : string = jsNative
+
+[<Emit("$0.getAttribute('data-rich-readonly') === 'true'")>]
+let private hostReadOnly (el: obj) : bool = jsNative
 
 // --- Client-side doc persistence (Step 20): IndexedDB via y-indexeddb ------------------
 
@@ -206,45 +209,60 @@ let private start () =
         let mutable connectionRef : App.Connection option = None
         let mutable dispatchRef : (ClientMsg -> unit) = ignore
 
-        // Rich-text composer flag + mount bookkeeping. `latestModel` gives the mount and each
-        // editor's change handler the current body (edits are computed relative to it, exactly
-        // like the textarea's `Ylmish.Text.edit v myBody`).
-        Features.richText <- (queryParam "rich" "" = "1")
+        // Rich-text editor mounts. `registry` supplies each body's live Y.XmlFragment (shared
+        // with the codec, so the editor and the sync boundary bind the same nested fragment);
+        // `latestModel` lets the mount see the current draft slots.
+        let registry = BodyRegistry ()
         let mutable latestModel = initial
-        let mountedComposers = System.Collections.Generic.Dictionary<string, unit -> unit> ()
+        let mountedBodies = System.Collections.Generic.Dictionary<string, unit -> unit> ()
+        // Markdown captured at send, applied to the new queue body fragment once it anchors.
+        let pendingSeeds = System.Collections.Generic.Dictionary<string, string> ()
 
-        let bodyFor (peer: PeerId) : Ylmish.Text =
-            latestModel.Synced.Drafts
-            |> Map.tryFind peer
-            |> Option.map (fun d -> d.Body)
-            |> Option.defaultValue Ylmish.Text.empty
+        /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; ensure the
+        /// local draft slot exists (so its fragment anchors); apply pending send-seeds; and
+        /// dispose editors whose host has left the DOM. Body edits sync through the doc, so the
+        /// editor needs no change callback.
+        let syncRichBodies () =
+            let seen = System.Collections.Generic.HashSet<string> ()
+            for host in richBodyHosts () do
+                let key = hostBodyKey host
+                seen.Add key |> ignore
+                if key = BodyKey.draft peerId && not (Map.containsKey peerId latestModel.Synced.Drafts) then
+                    dispatchRef (EnsureDraftMsg peerId)
+                match registry.TryFragment key with
+                | Some fragment ->
+                    (match pendingSeeds.TryGetValue key with
+                     | true, md ->
+                         if md <> "" then Markdown.intoFragment md fragment
+                         pendingSeeds.Remove key |> ignore
+                     | _ -> ())
+                    if not (mountedBodies.ContainsKey key) then
+                        mountedBodies.[key] <- Editor.mountEditor host fragment (hostReadOnly host)
+                | None -> ()
+            for stale in mountedBodies.Keys |> Seq.filter (seen.Contains >> not) |> Seq.toList do
+                mountedBodies.[stale] ()
+                mountedBodies.Remove stale |> ignore
 
-        /// Mount editors on new hosts (seeded from the current body), and dispose editors whose
-        /// host has left the DOM. The editor writes each change back as markdown through the
-        /// same `EditDraftBodyMsg` the textarea uses, so the synced body stays authoritative.
-        let syncRichComposers () =
-            if Features.richText then
-                let seen = System.Collections.Generic.HashSet<string> ()
-                for host in richComposerHosts () do
-                    let peerStr = hostPeer host
-                    seen.Add peerStr |> ignore
-                    if not (mountedComposers.ContainsKey peerStr) then
-                        match PeerId.create peerStr with
-                        | Ok peer ->
-                            let fragment = Editor.newLocalFragment (Ylmish.Text.toString (bodyFor peer))
-                            let onChange (nextMd: string) =
-                                dispatchRef (EditDraftBodyMsg (peer, Ylmish.Text.edit nextMd (bodyFor peer)))
-                            mountedComposers.[peerStr] <- Editor.mountEditor host fragment false onChange
-                        | Error _ -> ()
-                for stale in mountedComposers.Keys |> Seq.filter (seen.Contains >> not) |> Seq.toList do
-                    mountedComposers.[stale] ()
-                    mountedComposers.Remove stale |> ignore
+        /// Send the local draft: capture its body as markdown, dispose its editor (the slot's
+        /// fragment is about to be removed), enqueue, and seed the new queue entry's fragment
+        /// when it anchors on a following render.
+        let sendDraft (peer: PeerId) =
+            match QueueId.create (mintId "queue") with
+            | Ok queueId ->
+                let md =
+                    registry.TryFragment (BodyKey.draft peer)
+                    |> Option.map Markdown.ofFragment
+                    |> Option.defaultValue ""
+                (match mountedBodies.TryGetValue (BodyKey.draft peer) with
+                 | true, dispose -> dispose (); mountedBodies.Remove (BodyKey.draft peer) |> ignore
+                 | _ -> ())
+                pendingSeeds.[BodyKey.queued queueId] <- md
+                dispatchRef (SendDraftMsg (peer, queueId))
+            | Error e -> failwith e
 
-        // The side effects a template can't derive from the model. Sending is a pure CRDT
-        // write (dispatch `SendDraftMsg` with a fresh queue id), so only the interrupt
-        // needs the connection; the sidebar toggle is a root-class bit.
+        // The side effects a template can't derive from the model.
         let actions : ViewActions =
-            { NewQueueId = fun () -> match QueueId.create (mintId "queue") with Ok q -> q | Error e -> failwith e
+            { SendDraft = sendDraft
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
               ToggleNav = toggleNav
               ReportTitleCursor = fun index -> connectionRef |> Option.iter (fun c -> c.ReportCursor index) }
@@ -266,10 +284,10 @@ let private start () =
             // Place collaborators' title carets by measurement (native inputs have no
             // per-character geometry); a no-op when there are no remote cursors.
             positionTitleCursors ()
-            // Mount/adopt/dispose rich composers on their hosts (flagged; a no-op when off).
-            syncRichComposers ()
+            // Mount/dispose the rich editors on their body hosts (bound to live fragments).
+            syncRichBodies ()
 
-        App.makeProgram doc initial
+        App.makeProgram doc registry initial
         |> Program.withSetState setState
         |> Program.run
 

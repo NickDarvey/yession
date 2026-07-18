@@ -37,15 +37,11 @@ module ProseMirror =
 
     type [<AllowNullLiteral>] MarkdownParser =
         abstract parse : string -> Node
-    type [<AllowNullLiteral>] MarkdownSerializer =
-        abstract serialize : Node -> string
 
     [<Import("schema", "prosemirror-markdown")>]
     let schema : Schema = jsNative
     [<Import("defaultMarkdownParser", "prosemirror-markdown")>]
     let mdParser : MarkdownParser = jsNative
-    [<Import("defaultMarkdownSerializer", "prosemirror-markdown")>]
-    let mdSerializer : MarkdownSerializer = jsNative
 
     /// `schema.nodes[name]` / `schema.marks[name]`, and a JS truthiness test for "present".
     [<Emit("$0.nodes[$1]")>]
@@ -129,7 +125,3 @@ module ProseMirror =
     let yUndo : Command = jsNative
     [<Import("redo", "y-prosemirror")>]
     let yRedo : Command = jsNative
-    [<Import("yXmlFragmentToProseMirrorRootNode", "y-prosemirror")>]
-    let fragmentToRootNode (fragment: Y.XmlFragment) (schema: Schema) : Node = jsNative
-    [<Import("prosemirrorToYXmlFragment", "y-prosemirror")>]
-    let rootNodeToFragment (node: Node) (fragment: Y.XmlFragment) : unit = jsNative
