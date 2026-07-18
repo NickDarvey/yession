@@ -62,9 +62,10 @@ run = "dotnet fable watch app/main/Yession.Host.Main.fsproj -o app/out --runWatc
 [tasks.test]
 description = "Run tests. Default = cheap tier. Pass capabilities as args: `mise run test -- Browser`, `-- Ports Native`, etc. (see mise.toml / Tags.fs)."
 depends = ["restore"]
+usage = 'arg "caps" help="capabilities to enable (Browser Ports Native Docker LiveAgent)" var=#true required=#false'
 run = """
 set -eu
-caps="$*"
+caps="${usage_caps:-}"
 export YESSION_TEST_CAPS="$caps"
 dotnet build Yession.slnx
 
