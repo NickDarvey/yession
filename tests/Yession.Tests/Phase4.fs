@@ -598,7 +598,7 @@ let private telemetryTests =
                 // A real client messages the child; the probe turn runs and emits usage back
                 // to the Manager's receiver over the injected OTLP endpoint.
                 let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) "tel-token" "ada" "Ada"
-                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "probe a turn"))
+                do! compose a a.Hello.PeerId "probe a turn"
                 a.Connection.SendDraft a.Hello.PeerId
 
                 do! Async.FromContinuations (fun (cont, _, _) -> if fired then cont () else waiter <- Some cont)
