@@ -44,40 +44,63 @@ description = "Run the Session Process in watch mode (recompiles and restarts on
 depends = ["restore"]
 run = "dotnet fable watch app/main/Yession.Host.Main.fsproj -o app/out --runWatch node app/out/Main.js"
 
-# Two test tiers, tagged in code (tests/Yession.Tests/Tags.fs), not folders:
-# `test` is the cheap tier — every PR, no ports, no browser, no credentials;
-# `verify` is the release gate — everything, including the tagged expensive suites
-# and the real-browser E2E.
+# Tests are gated by CAPABILITIES declared in code (tests/Yession.Tests/Tags.fs), not folders.
+# `mise run test` runs the cheap tier (Node, no caps). Pass the capabilities THIS environment
+# has as args to enable gated suites — the harness runs a suite only when every capability it
+# needs is present, and reports a skip otherwise (never an error):
+#
+#   mise run test                         # cheap tier (pure/model/protocol), fast, credential-free
+#   mise run test -- Browser              # + the host-free rich-editor E2E (needs only Chromium)
+#   mise run test -- Ports Native         # + the WebRTC/host suites (need node-datachannel)
+#   mise run test -- Browser Ports Native Docker LiveAgent   # == verify (everything)
+#
+# Capabilities: Browser (Chromium via the .NET Playwright driver, pins the CLR runtime),
+# Ports (binds ports / spawns processes), Native (the node-datachannel WebRTC addon, loaded by
+# the real Session Process), Docker (a reachable daemon), LiveAgent (real model credentials).
+# `verify` is the release gate: every capability, on a runner that actually has them all.
 
 [tasks.test]
-description = "Run the cheap test tier (pure/model/protocol tests; fast, credential-free)."
+description = "Run tests. Default = cheap tier. Pass capabilities as args: `mise run test -- Browser`, `-- Ports Native`, etc. (see mise.toml / Tags.fs)."
 depends = ["restore"]
-run = [
-  "dotnet build Yession.slnx",
-  "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
-  "dotnet fsi scripts/run-tests.fsx tests/Yession.Tests/out/Main.js 120000",
-]
+run = """
+set -eu
+caps="$*"
+export YESSION_TEST_CAPS="$caps"
+dotnet build Yession.slnx
+
+# The Fable-compiled browser output is needed by the host-spawning Node suites (the app they
+# run) and by the editor Browser E2E (its harness bundle) — build it once if either applies.
+case " $caps " in
+  *" Ports "*|*" Native "*|*" Docker "*|*" LiveAgent "*|*" Browser "*)
+    dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser ;;
+esac
+
+# Host-spawning Node suites drive the real app entry + assembled npm package.
+case " $caps " in
+  *" Ports "*|*" Native "*|*" Docker "*|*" LiveAgent "*)
+    dotnet fable app/main/Yession.Host.Main.fsproj -o app/out
+    esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=app/out/public/client.js
+    tailwindcss -i app/tailwind.css -o app/out/public/app.css --minify
+    dotnet fsi scripts/build.fsx 0.0.0-test ;;
+esac
+
+# The Node (Fable/JS) test path — always runs; self-skips suites whose caps/runtime don't match.
+dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out
+dotnet fsi scripts/run-tests.fsx tests/Yession.Tests/out/Main.js 240000
+
+# The .NET CLR (Playwright) test path — only when a Browser-tagged suite is enabled. The
+# editor E2E serves app/browser/EditorHarness.fs, esbuilt to tests/browser/out/harness.js.
+case " $caps " in
+  *" Browser "*)
+    esbuild app/out/browser/EditorHarness.js --bundle --format=esm --outfile=tests/browser/out/harness.js
+    dotnet run --project tests/Yession.Tests/Yession.Tests.fsproj ;;
+esac
+"""
 
 [tasks.verify]
-description = "Run the FULL verification gate (verify tier + real-browser E2E). Gates releases."
-depends = ["restore"]
-run = [
-  "dotnet build Yession.slnx",
-  # App entry first: the verify tier spawns real session processes from the output.
-  "dotnet fable app/main/Yession.Host.Main.fsproj -o app/out",
-  "dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser",
-  "esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=app/out/public/client.js",
-  "tailwindcss -i app/tailwind.css -o app/out/public/app.css --minify",
-  # Assemble the real npm package: the composition E2E in the verify tier drives its
-  # bundles (dist/npm/manager.js + session.js), so a release is gated on what ships.
-  "dotnet fsi scripts/build.fsx 0.0.0-verify",
-  "dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out",
-  "YESSION_TEST_TIER=verify dotnet fsi scripts/run-tests.fsx tests/Yession.Tests/out/Main.js 240000",
-  # The real-browser E2E is a Pyxpecto suite in the SAME test project, selected by its
-  # `[Browser]` need and run on the .NET CLR (the Microsoft.Playwright driver lives there).
-  # Same list, different runtime; the verify tier is what enables the browser need.
-  "YESSION_TEST_TIER=verify dotnet run --project tests/Yession.Tests/Yession.Tests.fsproj",
-]
+description = "Run the FULL verification gate (every capability + real-browser E2E). Gates releases; needs a runner with all native deps."
+# Delegates to `test` with every capability enabled (which carries its own `restore`).
+run = "mise run test -- Browser Ports Native Docker LiveAgent"
 
 [tasks.package]
 description = "Assemble the npm package (one package, two bins) and npm-pack it. Usage: mise run package -- <version>"

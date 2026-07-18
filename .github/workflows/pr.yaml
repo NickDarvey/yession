@@ -1,8 +1,10 @@
 name: pr
 
-# Every pull request runs the cheap test tier — no browser, no ports, no credentials, fast.
-# The full verification gate (verify-tagged suites + real-browser E2E) runs on master push in
-# release.yml, which is what publishes a release.
+# Every pull request runs the capabilities a PR runner can satisfy WITHOUT the native
+# node-datachannel addon: the cheap tier plus the host-free rich-editor browser E2E
+# (`-- Browser` needs only Chromium). The full gate — the WebRTC/host suites (`Native`),
+# Docker, and the live-agent smoke — needs the addon/daemon/credentials and runs on master
+# push in release.yml (`mise run verify`), which is what publishes a release.
 
 on:
   pull_request:
@@ -14,5 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
-      - name: Cheap test tier
-        run: mise run test
+      # Chromium for the host-free editor E2E (the .NET Playwright driver drives it).
+      - name: Install Chromium for the editor E2E
+        run: npx --yes playwright@1.61.1 install --with-deps chromium
+      - name: Cheap tier + host-free editor browser E2E
+        run: mise run test -- Browser

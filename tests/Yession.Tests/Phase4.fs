@@ -561,8 +561,8 @@ let tests =
     testList "Phase4" [
         stateTests
         uiRenderTests
-        Tag.needs "Session Process as an OS process (Step 23)" [ Tag.Ports ] (fun () -> processTests)
-        Tag.needs "Authority over the control RPC (Step 24)" [ Tag.Ports ] (fun () -> controlRpcTests)
-        Tag.needs "Management UI flow (Step 25)" [ Tag.Ports ] (fun () -> uiFlowTests)
-        Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports ] (fun () -> compositionTests)
+        Tag.needs "Session Process as an OS process (Step 23)" [ Tag.Ports; Tag.Native ] (fun () -> processTests)
+        Tag.needs "Authority over the control RPC (Step 24)" [ Tag.Ports; Tag.Native ] (fun () -> controlRpcTests)
+        Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
+        Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports; Tag.Native ] (fun () -> compositionTests)
     ]

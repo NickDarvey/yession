@@ -10,6 +10,9 @@
 
   <ItemGroup>
     <Compile Include="Browser.fs" />
+    <!-- Host-free harness for the rich-editor browser E2E; bundled only by the test build,
+         never imported by the app entry (Browser.fs), so it does not ship. -->
+    <Compile Include="EditorHarness.fs" />
   </ItemGroup>
 
   <ItemGroup>

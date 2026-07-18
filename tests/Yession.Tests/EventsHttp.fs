@@ -87,7 +87,7 @@ let private endpointTests =
                 do! h.Stop ()
             }
 
-        Tag.needs "HTTP fetcher client" [ Tag.Ports ] (fun () ->
+        Tag.needs "HTTP fetcher client" [ Tag.Ports; Tag.Native ] (fun () ->
             testCaseAsync "a client consuming over the HTTP fetcher builds the same timeline as the frame path" <|
             async {
                 let! h = Host.start (SessionId.create "events-http-client" |> expect) "fetch-token" 0

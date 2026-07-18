@@ -21,6 +21,7 @@ open Fable.Pyxpecto
 
 open System
 open System.IO
+open System.Net
 open System.Diagnostics
 open System.Threading.Tasks
 open Microsoft.Playwright
@@ -188,11 +189,89 @@ let tests =
             }
     ]
 
+// --- The host-free editor rendering E2E ([Browser], no Native) ---------------------------
+// Serves the static harness (app/browser/EditorHarness.fs, esbuilt to tests/browser/out/) and
+// drives one Chromium page. No Session Process, no WebRTC — so this runs wherever Chromium
+// exists, decoupled from the native node-datachannel addon. It guards exactly what the DOM-free
+// cheap tests cannot: the input-rule → live formatting → Markdown round-trip in a real browser.
+
+let private EDITOR_PORT = 8181
+let private editorBase = sprintf "http://127.0.0.1:%d/" EDITOR_PORT
+let private harnessRoot = "tests/browser"
+
+/// A tiny read-only static file server over `HttpListener` (the harness page + its bundle).
+/// Returns the listener so the caller can stop it; requests are served on a background loop.
+let private serveStatic (root: string) (port: int) : HttpListener =
+    let listener = new HttpListener ()
+    listener.Prefixes.Add (sprintf "http://127.0.0.1:%d/" port)
+    listener.Start ()
+    let rec loop () =
+        async {
+            match! Async.Catch (listener.GetContextAsync () |> Async.AwaitTask) with
+            | Choice1Of2 ctx ->
+                let rel = ctx.Request.Url.AbsolutePath.TrimStart '/'
+                let rel = if rel = "" then "editor-harness.html" else rel
+                let path = Path.Combine (root, rel)
+                if File.Exists path then
+                    let bytes = File.ReadAllBytes path
+                    ctx.Response.ContentType <-
+                        if path.EndsWith ".js" then "text/javascript"
+                        elif path.EndsWith ".html" then "text/html"
+                        else "application/octet-stream"
+                    ctx.Response.OutputStream.Write (bytes, 0, bytes.Length)
+                else ctx.Response.StatusCode <- 404
+                ctx.Response.Close ()
+                return! loop ()
+            | Choice2Of2 _ -> ()   // listener stopped
+        }
+    Async.Start (loop ())
+    listener
+
+let editorTests =
+    testList "Editor rendering (browser)" [
+        testCaseAsync "Markdown typed in the rich editor renders formatted and round-trips to Markdown" <|
+            async {
+                let server = serveStatic harnessRoot EDITOR_PORT
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync editorBase)
+                let! _ = await (page.WaitForSelectorAsync ".ProseMirror")
+
+                // Type Markdown with REAL key events so the input rules fire: "# " turns the
+                // block into a heading rendered live as <h1> — the syntax is never left literal.
+                do! awaitU (page.ClickAsync ".ProseMirror")
+                do! awaitU (page.Keyboard.TypeAsync "# Heading one")
+                let! _ = await (page.WaitForFunctionAsync "document.querySelector('.ProseMirror h1')?.textContent === 'Heading one'")
+                // `**bold**` -> a <strong> mark; `- ` -> a bullet list <ul><li>.
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                do! awaitU (page.Keyboard.TypeAsync "text with **bold** now")
+                let! _ = await (page.WaitForFunctionAsync "!!document.querySelector('.ProseMirror strong')")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                do! awaitU (page.Keyboard.TypeAsync "- item one")
+                let! _ = await (page.WaitForFunctionAsync "!!document.querySelector('.ProseMirror ul li')")
+
+                // The document serializes back to Markdown (the durable form the drain snapshots).
+                let! md = await (page.EvaluateAsync<string> "() => window.__md()")
+                Expect.stringContains md "# Heading one" "heading serialized to markdown"
+                Expect.stringContains md "**bold**" "bold serialized to markdown"
+                Expect.stringContains md "* item one" "bullet serialized to markdown"
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+    ]
+
 #else
 
-// Fable (JS on Node): Playwright is a .NET driver and does not exist here, so the flow above
-// is compiled out. This stub only exists so the module compiles under Fable; it is never
-// forced — `Tag.needs "Browser E2E" [Browser]` fails on Node and reports the skip itself.
+// Fable (JS on Node): Playwright is a .NET driver and does not exist here, so the flows above
+// are compiled out. These stubs only exist so the module compiles under Fable; they are never
+// forced — the `[Browser]` need fails on Node and reports the skip itself.
 let tests : Fable.Pyxpecto.Model.TestCase = testList "Browser E2E" []
+let editorTests : Fable.Pyxpecto.Model.TestCase = testList "Editor rendering (browser)" []
 
 #endif

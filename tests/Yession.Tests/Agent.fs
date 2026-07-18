@@ -337,6 +337,6 @@ let private liveTests =
 let tests =
     testList "Agent" [
         turnTests
-        Tag.needs "Agent E2E" [ Tag.Ports ] (fun () -> e2eTests)
-        Tag.needs "Agent live SDK" [ Tag.LiveAgent ] (fun () -> liveTests)
+        Tag.needs "Agent E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
+        Tag.needs "Agent live SDK" [ Tag.LiveAgent; Tag.Native ] (fun () -> liveTests)
     ]

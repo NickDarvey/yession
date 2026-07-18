@@ -539,5 +539,5 @@ let tests =
         crashRepairTests
         docPersistenceTests
         // Interrupt runs over real WebRTC clients: needs ports.
-        Tag.needs "Interrupt (Step 17)" [ Tag.Ports ] (fun () -> interruptTests)
+        Tag.needs "Interrupt (Step 17)" [ Tag.Ports; Tag.Native ] (fun () -> interruptTests)
     ]

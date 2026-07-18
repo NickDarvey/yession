@@ -488,5 +488,5 @@ let tests =
         codecTests
         queueUnitTests
         titlePresenceTests
-        Tag.needs "Draft sync E2E" [ Tag.Ports ] (fun () -> e2eTests)
+        Tag.needs "Draft sync E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
     ]

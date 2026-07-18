@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yession rich-editor harness</title>
+  </head>
+  <body>
+    <!-- The editor mounts here; window.__md() returns the fragment's serialized Markdown.
+         The bundle is the Fable-compiled app/browser/EditorHarness.fs, esbuilt by the
+         `Browser`-cap test build (mise). No inline JS — the no-authored-JS invariant holds. -->
+    <div id="host"></div>
+    <script type="module" src="./out/harness.js"></script>
+  </body>
+</html>
