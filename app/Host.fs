@@ -50,6 +50,7 @@ let startFull
     // Telemetry sink (Plan 04): the completed-turn usage emitter, threaded to the
     // scheduler. `ignore` in the layered helpers below and whenever telemetry is off.
     (emitUsage: AgentTurnId -> AgentUsage -> unit)
+    (subscribeNotifications: ((SessionNotification -> unit) -> (unit -> unit)) option)
     (sessionId: SessionId)
     (token: string)
     (port: int)
@@ -170,6 +171,21 @@ let startFull
                 | Error _ -> ())
         | None -> ()
 
+        // Manager→Session notifications (the reverse leg of the control RPC): subscribe
+        // when the launch handed us a channel. The DEFAULT handler just logs — dispatching
+        // a notification into a durable `SessionEvent` (via `log.Append`), or re-draining,
+        // is left to whatever handler a later composition wants. A notification is a signal
+        // the session MAY act on, never a fact it is obliged to persist.
+        let mutable unsubscribeNotifications : (unit -> unit) option = None
+        match subscribeNotifications with
+        | Some subscribe ->
+            let handle (notification: SessionNotification) : unit =
+                match notification with
+                | EnvironmentChanged () ->
+                    eprintfn "[session %s] notification: environment changed" (SessionId.value sessionId)
+            unsubscribeNotifications <- Some (subscribe handle)
+        | None -> ()
+
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the
         // crash window — the log-anchored dedup repairs them without re-consuming).
@@ -260,7 +276,12 @@ let startFull
               Environment = environment
               WaitForNextSessionEnd = waitForNextSessionEnd
               Connect = onConnection
-              Stop = fun () -> async { server.close ignore } }
+              Stop =
+                fun () ->
+                    async {
+                        unsubscribeNotifications |> Option.iter (fun cancel -> cancel ())
+                        server.close ignore
+                    } }
     }
 
 /// `startFull` without doc persistence — collaborative state is memory-only.
@@ -272,7 +293,7 @@ let startWithCapabilities
     (token: string)
     (port: int)
     : Async<SessionHost> =
-    startFull runAgent environmentCapabilities baseLog None None (fun _ _ -> ()) sessionId token port
+    startFull runAgent environmentCapabilities baseLog None None (fun _ _ -> ()) None sessionId token port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =

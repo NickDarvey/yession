@@ -33,6 +33,56 @@ let private postJson (url: string) (secret: string) (body: string) : JS.Promise<
 })()""")>]
 let private postStream (url: string) (secret: string) (body: string) (onLine: string -> unit) : JS.Promise<unit> = jsNative
 
+// Subscribe to the Manager's notification SSE stream (the reverse leg). Manages the whole
+// lifecycle in one place: connect, parse `data:` frames, reconnect on drop with a fixed
+// backoff, and return a cancel that both stops reconnecting and aborts the live fetch.
+// Best-effort by design — a transport error is a dropped connection, retried, never thrown.
+[<Emit("""(() => {
+  const controller = new AbortController()
+  let cancelled = false
+  const run = async () => {
+    while (!cancelled) {
+      try {
+        const res = await fetch($0, { method: 'GET', headers: { 'x-yession-control': $1, 'accept': 'text/event-stream' }, signal: controller.signal })
+        if (!res.ok) throw new Error('notifications rpc failed: ' + res.status)
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let idx
+          while ((idx = buffer.indexOf('\n\n')) >= 0) {
+            const frame = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+            for (const line of frame.split('\n')) {
+              if (line.startsWith('data:')) $2(line.slice(5).trim())
+            }
+          }
+        }
+      } catch (e) { if (cancelled) return }
+      if (cancelled) return
+      await new Promise(r => setTimeout(r, 1000))
+    }
+  }
+  run()
+  return () => { cancelled = true; controller.abort() }
+})()""")>]
+let private openEventStream (url: string) (secret: string) (onData: string -> unit) : (unit -> unit) = jsNative
+
+/// Subscribe to the Manager's notification stream. Each decoded `SessionNotification` is
+/// handed to `onNotification`; a malformed frame is logged and skipped (never fatal to the
+/// stream). Returns a cancel that stops the subscription and closes the connection.
+let subscribeNotifications (baseUrl: string) (secret: string) (onNotification: SessionNotification -> unit) : unit -> unit =
+    openEventStream
+        (sprintf "%s/control/notifications" baseUrl)
+        secret
+        (fun data ->
+            match ControlWire.fromString ControlWire.sessionNotification data with
+            | Ok notification -> onNotification notification
+            | Error e -> eprintfn "notification decode failed: %s" e)
+
 /// Report the session's display name (its collaborative title) to the Manager, so the
 /// session list reflects it. Best-effort: a transport failure is swallowed — a title that
 /// fails to reach the list is cosmetic, never a reason to disturb the session.

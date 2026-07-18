@@ -50,6 +50,16 @@ they matter.
   URL is not stable across resumes; the management UI's open link is the way in.
 - **No health checks beyond the readiness line**: a child that wedges after readiness
   shows as running until it exits.
+- **The Manager→Session notification channel is a transport without a producer yet.**
+  The reverse leg of the control RPC exists end to end — the child subscribes to
+  `GET /control/notifications` (SSE, per-launch secret), the Manager multiplexes and
+  fans out via `ProcessManager.Notify : SessionId -> SessionNotification -> unit`, and
+  the child dispatches each notification through a handler that MAY record a durable
+  `SessionEvent` — but **nothing calls `Notify` in production yet**, the payload
+  (`SessionNotification.EnvironmentChanged of unit`) is an explicit placeholder, and the
+  default handler only logs. The intended first producer — the Manager autonomously
+  detecting an out-of-band environment change (e.g. a container it owns dying without
+  the session having stopped it) — and the real notification payload are the follow-up.
 - **Peer-to-peer is star-shaped through the Process.** Clients sync Yjs state via the
   Session Process relay, not directly with each other; y-webrtc-style meshes are not
   used.

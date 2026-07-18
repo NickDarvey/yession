@@ -42,6 +42,15 @@ let private reportName =
 // collector. Configured from `YESSION_OTLP_ENDPOINT`/`_SECRET`; a pure no-op when absent.
 let private telemetry = Telemetry.fromEnv sessionId
 
+// The reverse leg over the same control channel: subscribe to the Manager's notification
+// stream so an out-of-band change can reach this session. Absent a control channel, the
+// session simply runs without it (nothing pushes notifications in-process).
+let private subscribeNotifications =
+    match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
+    | "", _
+    | _, "" -> None
+    | url, secret -> Some (fun handler -> ControlClient.subscribeNotifications url secret handler)
+
 /// A built-in diagnostic runner (`YESSION_AGENT=diagnostic`): exercises the session's
 /// environment capability end to end — ensure, execute, stream — without model
 /// credentials. The verify suite drives it across real process boundaries; it doubles
@@ -103,7 +112,7 @@ Async.StartImmediate (
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
-        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit sessionId token port
+        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications sessionId token port
         // Sessions never outlive their Manager: spawned under the guard, the Manager's
         // death closes our stdin (the kernel does this even on SIGKILL) and we exit.
         if Interop.envOr "YESSION_PARENT_GUARD" "" = "1" then

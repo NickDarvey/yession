@@ -201,17 +201,21 @@ let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNat
 [<Emit("delete process.env[$0]")>]
 let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
-let private startControlServer (secrets: (string * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string> =
+/// Start a bare control server over the given secret→capabilities table, plus a real
+/// notification hub wired to the `/control/notifications` route. Returns the hub so a test
+/// can push notifications down the same wire the Manager uses.
+let private startControlServer (secrets: (string * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub> =
     async {
         let table = Map.ofList secrets
+        let hub = NotificationHub.create ()
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
         let! listening =
             Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
-        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening)
+        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening), hub
     }
 
 let private controlRpcTests =
@@ -232,7 +236,7 @@ let private controlRpcTests =
                         }
                 let backend = InMemoryBackend.create recorder scriptedExec
                 let grant = Authority.grant registry backend
-                let! server, url = startControlServer [ "secret-a", grant sessionA; "secret-b", grant sessionB ]
+                let! server, url, _ = startControlServer [ "secret-a", grant sessionA; "secret-b", grant sessionB ]
 
                 let capsA = ControlClient.capabilities url "secret-a"
                 let capsB = ControlClient.capabilities url "secret-b"
@@ -615,12 +619,110 @@ let private telemetryTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Manager→Session notifications — the reverse leg of the control RPC. The wire
+// codec and the subscriber hub's fan-out are cheap-tier; the SSE stream end to
+// end (real sockets, real client parser) is verify-tier.
+// -----------------------------------------------------------------------------
+
+let private notificationTests =
+    testList "Manager→Session notifications: codec & hub" [
+        testCase "a notification round-trips through the control wire codec" <| fun () ->
+            let original = EnvironmentChanged ()
+            let roundTripped =
+                ControlWire.toString ControlWire.sessionNotification original
+                |> ControlWire.fromString ControlWire.sessionNotification
+                |> expect
+            Expect.equal roundTripped original "notification round-trip is identity"
+
+        testCase "an unknown notification kind decodes to an error, never a crash" <| fun () ->
+            Expect.isError
+                (ControlWire.fromString ControlWire.sessionNotification """{"kind":"someFutureThing"}""")
+                "unknown kinds are a decode error (older decoders reject a newer case)"
+
+        testCase "the hub fans a notification out to a secret's sinks, and only that secret's" <| fun () ->
+            let hub = NotificationHub.create ()
+            let mutable a1 = 0
+            let mutable a2 = 0
+            let mutable b = 0
+            let _ = hub.Register "secret-a" (fun _ -> a1 <- a1 + 1)
+            let unsubA2 = hub.Register "secret-a" (fun _ -> a2 <- a2 + 1)
+            let _ = hub.Register "secret-b" (fun _ -> b <- b + 1)
+
+            hub.NotifySecret "secret-a" (EnvironmentChanged ())
+            Expect.equal (a1, a2, b) (1, 1, 0) "both A sinks fired; B's did not (per-secret scoping)"
+
+            // Unsubscribe removes exactly one sink; the sibling keeps receiving.
+            unsubA2 ()
+            hub.NotifySecret "secret-a" (EnvironmentChanged ())
+            Expect.equal (a1, a2, b) (2, 1, 0) "the unsubscribed sink stopped; the other continued"
+
+            // Dropping the secret (its launch ended) silences everything under it.
+            hub.Drop "secret-a"
+            hub.NotifySecret "secret-a" (EnvironmentChanged ())
+            Expect.equal (a1, a2, b) (2, 1, 0) "a dropped secret receives nothing"
+
+            // Notifying an unknown secret is a no-op, never a throw.
+            hub.NotifySecret "secret-unknown" (EnvironmentChanged ())
+    ]
+
+// A valid-but-inert capability set: notifications only need the secret to resolve past the
+// control endpoint's 401 gate, not any real environment authority.
+let private stubCapabilities : SessionEnvironmentCapabilities =
+    { StartContainer = fun _ -> async { return ContainerStartFailed "stub" }
+      StopContainer = fun _ -> async { return ContainerStopped }
+      Execute = fun _ _ _ -> async { return CommandExecutionFailed "stub" } }
+
+let private notificationStreamTests =
+    testList "Manager→Session notifications over SSE (reverse control leg)" [
+        testCaseAsync "a pushed notification reaches the subscribed session, is scoped to it, and stops on cancel" <|
+            async {
+                let! server, url, hub =
+                    startControlServer [ "secret-a", stubCapabilities; "secret-b", stubCapabilities ]
+
+                let mutable receivedA : SessionNotification list = []
+                let mutable receivedB : SessionNotification list = []
+                let cancelA = ControlClient.subscribeNotifications url "secret-a" (fun n -> receivedA <- receivedA @ [ n ])
+                let cancelB = ControlClient.subscribeNotifications url "secret-b" (fun n -> receivedB <- receivedB @ [ n ])
+
+                // The subscription connects asynchronously and notifications are not
+                // buffered, so push until the first arrives (or a generous timeout).
+                let rec pump (remaining: int) =
+                    async {
+                        if not (List.isEmpty receivedA) || remaining <= 0 then return ()
+                        else
+                            hub.NotifySecret "secret-a" (EnvironmentChanged ())
+                            do! Async.Sleep 50
+                            return! pump (remaining - 1)
+                    }
+                do! pump 60
+
+                Expect.isTrue (not (List.isEmpty receivedA)) "A received the notification pushed to its secret"
+                Expect.equal (List.head receivedA) (EnvironmentChanged ()) "the notification decoded correctly across the wire"
+                Expect.isTrue (List.isEmpty receivedB) "B never received a notification pushed to A's secret (per-session scoping)"
+
+                // Cancel closes the stream; the server unsubscribes the sink, so further
+                // pushes never arrive.
+                cancelA ()
+                do! Async.Sleep 200
+                let settled = List.length receivedA
+                hub.NotifySecret "secret-a" (EnvironmentChanged ())
+                do! Async.Sleep 200
+                Expect.equal (List.length receivedA) settled "after cancel, no further notifications arrive"
+
+                cancelB ()
+                server.close ignore
+            }
+    ]
+
 let tests =
     testList "Phase4" [
         stateTests
         uiRenderTests
+        notificationTests
         Tag.needs "Session Process as an OS process (Step 23)" [ Tag.Ports; Tag.Native ] (fun () -> processTests)
         Tag.needs "Authority over the control RPC (Step 24)" [ Tag.Ports; Tag.Native ] (fun () -> controlRpcTests)
+        Tag.needs "Manager→Session notifications over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> notificationStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports; Tag.Native ] (fun () -> compositionTests)
         Tag.needs "Telemetry over the process boundary (Plan 04)" [ Tag.Ports; Tag.Native ] (fun () -> telemetryTests)

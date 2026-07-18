@@ -41,6 +41,10 @@ type ProcessManager =
       /// Resolves when the session's running child exits (immediately if none runs).
       WaitForExit : SessionId -> Async<unit>
       TryFind : SessionId -> SessionView option
+      /// Push a notification down to a running session (the reverse leg of the control
+      /// RPC): fans out over that session's live `/control/notifications` subscriptions.
+      /// A no-op for a session that is not running or has no control channel.
+      Notify : SessionId -> SessionNotification -> unit
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
       /// Stop every running child and the Manager endpoint (Manager shutdown).
@@ -118,6 +122,17 @@ let createWithUi
     // with its bearer; the secret lives and dies with the launch, like the control secret.
     let mutable telemetrySecrets : Set<string> = Set.empty
 
+    // Manager→Session notifications (the reverse leg): live subscriber sinks keyed by the
+    // same per-launch secret, so a session's stream dies exactly when its launch does.
+    let notifications = NotificationHub.create ()
+
+    // Push a notification to a session: fan out over every live secret that names it
+    // (in practice one — a running session has a single launch). Inert for a session
+    // that is not running or whose launch granted no control channel.
+    let notify (sessionId: SessionId) (notification: SessionNotification) : unit =
+        secretSessions
+        |> Map.iter (fun secret sid -> if sid = sessionId then notifications.NotifySecret secret notification)
+
     // Update a session's display name (the reported title). Idempotent: unknown sessions and
     // no-op renames are skipped, and the registry write is durable before it is visible.
     let setDisplayName (sessionId: SessionId) (displayName: string) : unit =
@@ -150,7 +165,7 @@ let createWithUi
             async {
                 let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                     let handled =
-                        Control.tryHandle (fun secret -> Map.tryFind secret secrets) reportName req res
+                        Control.tryHandle (fun secret -> Map.tryFind secret secrets) reportName notifications.Register req res
                         || (match options.Telemetry with
                             | Some collector ->
                                 TelemetryReceiver.tryHandle (fun secret -> Set.contains secret telemetrySecrets) collector req res
@@ -241,6 +256,8 @@ let createWithUi
                      | Some secret ->
                          secrets <- Map.remove secret secrets
                          secretSessions <- Map.remove secret secretSessions
+                         // The launch's notification subscriptions die with its authority.
+                         notifications.Drop secret
                      | None -> ())
                     // The launch's telemetry authority dies with it too.
                     match snd telemetryEnv with
@@ -295,6 +312,7 @@ let createWithUi
             fun sessionId ->
                 ManagerState.tryFind sessionId state
                 |> Option.map (fun r -> { Record = r; Status = statusOf r })
+          Notify = notify
           EndpointPort = controlServer |> Option.map Interop.serverPort
           StopAll =
             fun () ->

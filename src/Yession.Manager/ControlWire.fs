@@ -238,6 +238,20 @@ module ControlWire =
         { Encode = fun name -> Encode.object [ "name", Encode.string name ]
           Decode = Decode.field "name" Decode.string }
 
+    /// A Manager→Session notification (the reverse leg, Manager-pushed): the payload of the
+    /// `/control/notifications` SSE stream. Tagged by `kind` like every other control shape,
+    /// so new cases extend it without breaking older decoders. See `SessionNotification`.
+    let sessionNotification : Codec<SessionNotification> =
+        { Encode =
+            (fun n ->
+                match n with
+                | EnvironmentChanged () -> Encode.object [ "kind", Encode.string "environmentChanged" ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "environmentChanged" -> Decode.succeed (EnvironmentChanged ())
+                | other -> Decode.fail (sprintf "Unknown notification: %s" other)) }
+
     let toString (codec: Codec<'a>) (value: 'a) : string = codec.Encode value |> Encode.toString 0
 
     let fromString (codec: Codec<'a>) (json: string) : Result<'a, string> = Decode.fromString codec.Decode json

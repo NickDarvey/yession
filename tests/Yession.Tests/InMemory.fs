@@ -83,7 +83,7 @@ let tests =
                 let awaitReport = Async.FromContinuations (fun (cont, _, _) -> reportCont <- Some cont)
                 let report (name: string) = async { match reportCont with Some c -> reportCont <- None; c name | None -> () }
 
-                let! host = Host.startFull None None None None (Some report) (fun _ _ -> ()) (sid ()) token 0
+                let! host = Host.startFull None None None None (Some report) (fun _ _ -> ()) None (sid ()) token 0
                 let! a = connectInMemoryClient host token "ada" "Ada"
                 let! reportWaiter = Async.StartChild awaitReport
                 a.Runner.Dispatch (user (EditTitleMsg (Text.insert 0 "ship it" (a.Runner.Model ()).Synced.Title)))
