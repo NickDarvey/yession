@@ -7,6 +7,7 @@ module Yession.Host.SessionMain
 // control endpoint + per-launch secret: the capability calls cross back to the
 // Manager, which owns the registry and the engines.
 
+open Fable.Core
 open Yession.Domain
 open Yession.Host
 
@@ -36,6 +37,10 @@ let private reportName =
     | "", _
     | _, "" -> None
     | url, secret -> Some (ControlClient.nameReporter url secret)
+
+// Telemetry (Plan 04): one OTel log record per completed turn, exported to the Manager's
+// collector. Configured from `YESSION_OTLP_ENDPOINT`/`_SECRET`; a pure no-op when absent.
+let private telemetry = Telemetry.fromEnv sessionId
 
 /// A built-in diagnostic runner (`YESSION_AGENT=diagnostic`): exercises the session's
 /// environment capability end to end — ensure, execute, stream — without model
@@ -80,11 +85,17 @@ Async.StartImmediate (
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
-        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName sessionId token port
+        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit sessionId token port
         // Sessions never outlive their Manager: spawned under the guard, the Manager's
         // death closes our stdin (the kernel does this even on SIGKILL) and we exit.
         if Interop.envOr "YESSION_PARENT_GUARD" "" = "1" then
-            onStdinClosed (fun () -> Interop.exit 0)
+            // Flush buffered telemetry before exiting (the Manager's death closes stdin).
+            onStdinClosed (fun () ->
+                Async.StartImmediate (
+                    async {
+                        do! telemetry.Shutdown () |> Async.AwaitPromise
+                        Interop.exit 0
+                    }))
         // The one readiness line of the spawn contract — last, so the Manager can
         // treat everything before it as logs and everything after as a live session.
         printfn """{"yession":"ready","port":%d}""" host.Port

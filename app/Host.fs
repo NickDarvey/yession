@@ -47,6 +47,9 @@ let startFull
     (baseLog: EventLog<SessionEvent> option)
     (docStore: DocStore.DocStore option)
     (reportName: (string -> Async<unit>) option)
+    // Telemetry sink (Plan 04): the completed-turn usage emitter, threaded to the
+    // scheduler. `ignore` in the layered helpers below and whenever telemetry is off.
+    (emitUsage: AgentTurnId -> AgentUsage -> unit)
     (sessionId: SessionId)
     (token: string)
     (port: int)
@@ -135,7 +138,7 @@ let startFull
         // `Scheduler` (shared with the property harness); the Host wires it to this
         // session's doc, log, environment capabilities, and command surface.
         let scheduler =
-            Scheduler.create sessionId doc log runAgent capabilitiesFor mintTurnId mintMessageId initialConsumed
+            Scheduler.create sessionId doc log runAgent capabilitiesFor emitUsage mintTurnId mintMessageId initialConsumed
         let drain () = scheduler.Drain ()
         let requestInterrupt = scheduler.RequestInterrupt
 
@@ -269,7 +272,7 @@ let startWithCapabilities
     (token: string)
     (port: int)
     : Async<SessionHost> =
-    startFull runAgent environmentCapabilities baseLog None None sessionId token port
+    startFull runAgent environmentCapabilities baseLog None None (fun _ _ -> ()) sessionId token port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =

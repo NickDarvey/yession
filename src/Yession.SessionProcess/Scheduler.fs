@@ -37,6 +37,8 @@ module Scheduler =
         (log: EventLog<SessionEvent>)
         (runAgent: RunAgent option)
         (capabilitiesFor: AgentTurnId -> AgentCapabilities)
+        // Telemetry sink (Plan 04): passed straight to `AgentTurn.run`. Default `ignore`.
+        (emitUsage: AgentTurnId -> AgentUsage -> unit)
         (mintTurnId: unit -> AgentTurnId)
         (mintMessageId: unit -> MessageId)
         (initialConsumed: Set<string>)
@@ -109,7 +111,7 @@ module Scheduler =
                                 let! page = log.Read None System.Int32.MaxValue
                                 let projection, _ =
                                     ConversationProjection.applyEvents None page.Events ConversationProjection.empty
-                                do! AgentTurn.run log agent (signalFor turn) capabilitiesFor (fun () -> turn.TurnId) mintMessageId sessionId projection.Items trigger
+                                do! AgentTurn.run log agent (signalFor turn) capabilitiesFor emitUsage (fun () -> turn.TurnId) mintMessageId sessionId projection.Items trigger
                                 // Release the slot and re-arm — unless an interrupt
                                 // already released it (and possibly started a successor).
                                 match running with

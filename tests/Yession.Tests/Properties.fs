@@ -190,7 +190,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
             DocSync.applyRemote shadowDoc payload)
         let sched =
             Scheduler.create sessionId processDoc log (Some runner)
-                (fun _ -> AgentCapabilities.none) mintTurnId mintMessageId (consumedNow ())
+                (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId (consumedNow ())
         scheduler <- sched
         let thisProcess = processDoc
         let thisShadow = shadowDoc

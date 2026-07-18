@@ -29,6 +29,7 @@ let all =
         Tag.needs "Editor" [] (fun () -> Editor.tests)
         Tag.needs "Agent" [] (fun () -> Agent.tests)
         Tag.needs "Telemetry" [] (fun () -> Telemetry.tests)
+        Tag.needs "Telemetry E2E" [] (fun () -> TelemetryE2E.tests)
         Tag.needs "WebRTC E2E" [ Tag.Ports; Tag.Native ] (fun () -> E2E.tests)
         Tag.needs "Client shell E2E" [ Tag.Ports; Tag.Native ] (fun () -> Client.tests)
         Tag.needs "Phase2" [] (fun () -> Phase2.tests)
