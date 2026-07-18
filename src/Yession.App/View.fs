@@ -27,9 +27,10 @@ type ViewActions =
       Interrupt : AgentTurnId -> unit
       /// Toggle the sidebar drawer (a presentation bit on the shell root, not model).
       ToggleNav : unit -> unit
-      /// Broadcast the local caret position in the title (`None` = caret left the title),
-      /// so collaborators see the cursor. Ephemeral presence, relayed to other peers.
-      ReportTitleCursor : int option -> unit }
+      /// Broadcast the local selection in the title as `(anchor, head)` UTF-16 indices
+      /// (`None` = caret left the title), so collaborators see the cursor. The Browser turns
+      /// the indices into relative positions and relays them; ephemeral presence.
+      ReportTitleSelection : (int * int) option -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -38,7 +39,7 @@ module ViewActions =
         { SendDraft = ignore
           Interrupt = ignore
           ToggleNav = ignore
-          ReportTitleCursor = ignore }
+          ReportTitleSelection = ignore }
 
 module View =
 
@@ -187,25 +188,36 @@ module View =
         | Disconnected ->
             html $"""<span class="{Style.cls [ Style.statusFaint; Style.headerStatus ]}">disconnected</span>"""
 
-    /// The caret index (`selectionStart`) of the event's target input, or `None` when it
-    /// has no collapsed caret. Read live from the DOM; only ever invoked in the browser
-    /// (SSR drops event bindings), so the `.NET` type-check sees a signature it never runs.
-    [<Fable.Core.Emit("($0 && $0.target && typeof $0.target.selectionStart === 'number') ? $0.target.selectionStart : null")>]
-    let private caretOf (e: obj) : int option = Fable.Core.Util.jsNative
+    /// The `(selectionStart, selectionEnd)` of the event's target input, or `None`. Read live
+    /// from the DOM; only ever invoked in the browser (SSR drops event bindings), so the `.NET`
+    /// type-check sees a signature it never runs. (A Fable tuple is a 2-array at runtime.)
+    [<Fable.Core.Emit("($0 && $0.target && typeof $0.target.selectionStart === 'number') ? [$0.target.selectionStart, $0.target.selectionEnd] : null")>]
+    let private selectionOf (e: obj) : (int * int) option = Fable.Core.Util.jsNative
 
-    /// One collaborator's caret marker: an empty bar the browser positions and colours by
-    /// measurement after render (its `left` and accent are inline styles set there). The
-    /// index and peer ride `data-*` so the measurement pass finds and places them.
-    let private remoteCursor (peerId: PeerId) (cursor: RemoteCursor) : TemplateResult =
+    /// One collaborator's title caret+selection marker: a selection highlight span and a caret
+    /// bar with a name label. The browser positions all three by measurement after render (from
+    /// the peer's relative positions, decoded against the title `Y.Text`); colour is fixed here.
+    let private remoteCursor (peerId: PeerId) (presence: RemotePresence) : TemplateResult =
+        let colour = PeerColour.ofPeer peerId
+        // Container = the translucent selection highlight (positioned `lo..hi` by the browser);
+        // the caret bar is offset to `head` inside it; the label rides above the caret.
         html $"""
-            <span class="{Style.remoteCursor}" data-title-cursor="{string cursor.Index}" data-cursor-peer="{PeerId.value peerId}">
-              <span class="{Style.remoteCursorLabel}">{cursor.DisplayName}</span>
+            <span class="{Style.remoteCursor}" data-cursor-peer="{PeerId.value peerId}" style="background:{PeerColour.translucent peerId}">
+              <span class="{Style.remoteCursorCaret}" style="background:{colour}">
+                <span class="{Style.remoteCursorLabel}" style="background:{colour}">{presence.DisplayName}</span>
+              </span>
             </span>"""
 
     let private header (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         let titleStr = Ylmish.Text.toString model.Synced.Title
         let sessionIdText = model.Session |> Option.map SessionId.value |> Option.defaultValue ""
-        let cursors = model.Presence |> Map.toList |> List.map (fun (peerId, cursor) -> remoteCursor peerId cursor)
+        // Only peers whose caret is in the title get a marker here; each other field renders
+        // its own overlay (bodies decorate their editors).
+        let cursors =
+            model.Presence
+            |> Map.toList
+            |> List.filter (fun (_, p) -> p.Focus.Field = Title)
+            |> List.map (fun (peerId, p) -> remoteCursor peerId p)
         html $"""
             <header class="{Style.header}">
               <button type="button" class="{Style.cls [ Style.navChevron; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}>›</button>
@@ -214,11 +226,11 @@ module View =
                        value="{titleStr}"
                        .value={titleStr}
                        @input={EvVal(fun v -> dispatch (EditTitleMsg (Ylmish.Text.edit v model.Synced.Title)))}
-                       @keyup={Ev(fun e -> actions.ReportTitleCursor (caretOf e))}
-                       @click={Ev(fun e -> actions.ReportTitleCursor (caretOf e))}
-                       @select={Ev(fun e -> actions.ReportTitleCursor (caretOf e))}
-                       @focus={Ev(fun e -> actions.ReportTitleCursor (caretOf e))}
-                       @blur={Ev(fun _ -> actions.ReportTitleCursor None)}>
+                       @keyup={Ev(fun e -> actions.ReportTitleSelection (selectionOf e))}
+                       @click={Ev(fun e -> actions.ReportTitleSelection (selectionOf e))}
+                       @select={Ev(fun e -> actions.ReportTitleSelection (selectionOf e))}
+                       @focus={Ev(fun e -> actions.ReportTitleSelection (selectionOf e))}
+                       @blur={Ev(fun _ -> actions.ReportTitleSelection None)}>
                 {cursors}
                 <span class="{Style.titleId}" data-session-id>{sessionIdText}</span>
               </div>

@@ -23,10 +23,11 @@ type EventConsumerState =
 
 type AgentViewState = { ActiveTurn : AgentTurnId option }
 
-/// A remote peer's caret in the collaborative title: a UTF-16 index plus the peer's name
-/// for the cursor label. Ephemeral presence, delivered over `Presence` frames — never
-/// synced through Yjs, never durable.
-type RemoteCursor = { DisplayName : string; Index : int }
+/// A remote peer's live caret+selection: the peer's name (for the cursor label) plus its
+/// `Focus` — which collaborative field it is in and its position there. Ephemeral presence,
+/// delivered over `Presence` frames — never synced through Yjs, never durable. The peer's
+/// colour is derived from its id (`PeerColour`), not carried.
+type RemotePresence = { DisplayName : string; Focus : Focus }
 
 type ClientModel =
     { Peer          : PeerState
@@ -38,9 +39,9 @@ type ClientModel =
       Conversation  : ConversationProjection
       EventConsumer : EventConsumerState
       Agent         : AgentViewState
-      /// Other peers' live carets in the title, keyed by peer. Cleared when a peer moves
-      /// its caret out of the title or disconnects (Step: collaborative title).
-      Presence      : Map<PeerId, RemoteCursor>
+      /// Other peers' live carets+selections, keyed by peer. Cleared when a peer moves its
+      /// caret out of every collaborative field, or disconnects (its `Focus` becomes `None`).
+      Presence      : Map<PeerId, RemotePresence>
       /// The session environment's UI status, folded from lifecycle events (Step 12).
       Environment   : EnvironmentStatus
       /// The read-only command log, folded from command events (Step 13).
@@ -180,13 +181,13 @@ module ClientModel =
         | EditTitleMsg title ->
             model |> withSynced { model.Synced with Title = title }
         | RemotePresenceMsg payload ->
-            // Never render your own remote caret; a cleared cursor removes the peer's entry.
+            // Never render your own remote caret; a cleared focus removes the peer's entry.
             if payload.PeerId = model.Peer.PeerId then model
             else
                 let presence =
-                    match payload.TitleCursor with
-                    | Some index ->
-                        Map.add payload.PeerId { DisplayName = payload.DisplayName; Index = index } model.Presence
+                    match payload.Focus with
+                    | Some focus ->
+                        Map.add payload.PeerId { DisplayName = payload.DisplayName; Focus = focus } model.Presence
                     | None -> Map.remove payload.PeerId model.Presence
                 { model with Presence = presence }
         | EnsureDraftMsg peerId ->

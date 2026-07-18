@@ -106,33 +106,33 @@ let private timelineScroll () : float option = jsNative
 })()""")>]
 let private restoreTimelineScroll (position: float) : unit = jsNative
 
-// Remote cursors carry a character index; a native <input> has no per-character DOM
-// geometry, so we measure the pixel offset of the substring before the caret with a canvas
-// using the input's own font, then place each caret absolutely (and colour it by a stable
-// hash of the peer id). Runs after every Lit render — the DOM is up to date synchronously.
-[<Emit("""(() => {
+// A native <input> has no per-character DOM geometry, so we measure the pixel offset of a
+// substring with a canvas using the input's own font. Given a peer's decoded selection
+// (`anchor`,`head` indices), size its highlight span to `lo..hi` and offset the caret bar to
+// `head`. Colour is set by the view (`PeerColour`); this only positions. Called per Title peer
+// after every render — the DOM is up to date synchronously.
+[<Emit("""(function(peer, a, h){
   const input = document.querySelector('input[data-session-title]')
-  const markers = document.querySelectorAll('[data-title-cursor]')
-  if (!input || !markers.length) return
+  const marker = document.querySelector('[data-cursor-peer="' + peer + '"]')
+  if (!input || !marker) return
   const cs = getComputedStyle(input)
   const canvas = (window.__yTitleCanvas || (window.__yTitleCanvas = document.createElement('canvas')))
   const ctx = canvas.getContext('2d')
   ctx.font = cs.font && cs.font.trim() ? cs.font : (cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily)
   const value = input.value || ''
-  const padLeft = parseFloat(cs.paddingLeft) || 0
-  for (const m of markers) {
-    const raw = parseInt(m.getAttribute('data-title-cursor'), 10)
-    const idx = Math.max(0, Math.min(value.length, isNaN(raw) ? 0 : raw))
-    const w = ctx.measureText(value.slice(0, idx)).width
-    m.style.left = (padLeft + w - (input.scrollLeft || 0)) + 'px'
-    const peer = m.getAttribute('data-cursor-peer') || ''
-    let h = 0; for (let i = 0; i < peer.length; i++) h = (h * 31 + peer.charCodeAt(i)) | 0
-    const color = 'hsl(' + ((((h % 360) + 360) % 360)) + ', 70%, 55%)'
-    m.style.background = color
-    if (m.firstElementChild) m.firstElementChild.style.background = color
-  }
-})()""")>]
-let private positionTitleCursors () : unit = jsNative
+  const clamp = (i) => Math.max(0, Math.min(value.length, i | 0))
+  const lo = Math.min(clamp(a), clamp(h)), up = Math.max(clamp(a), clamp(h)), head = clamp(h)
+  const padLeft = parseFloat(cs.paddingLeft) || 0, scroll = input.scrollLeft || 0
+  const xOf = (i) => padLeft + ctx.measureText(value.slice(0, i)).width - scroll
+  const loX = xOf(lo)
+  marker.style.left = loX + 'px'
+  marker.style.width = Math.max(0, xOf(up) - loX) + 'px'
+  if (marker.firstElementChild) marker.firstElementChild.style.left = (xOf(head) - loX) + 'px'
+})($0, $1, $2)""")>]
+let private placeTitleCursor (peer: string) (anchor: int) (head: int) : unit = jsNative
+
+[<Emit("requestAnimationFrame(() => $0())")>]
+let private raf (f: unit -> unit) : unit = jsNative
 
 // The sidebar/drawer state is one bit on the root element, outside `#app`, so it survives
 // every re-render: default = sidebar visible on desktop, off-canvas on mobile; `nav-alt`
@@ -216,12 +216,39 @@ let private start () =
         // triggers a remount.
         let registry = BodyRegistry doc
         let mutable latestModel = initial
-        let mountedBodies = System.Collections.Generic.Dictionary<string, Y.XmlFragment * (unit -> unit)> ()
+        let mountedBodies = System.Collections.Generic.Dictionary<string, Y.XmlFragment * Editor.EditorHandle> ()
+
+        /// The collaborative field a body host names — parsed back from its `BodyKey` so a body
+        /// editor's presence report (and the remote cursors pushed into it) carry the right field.
+        let fieldOfKey (key: string) : FocusField option =
+            if key.StartsWith "draft:" then
+                match PeerId.create (key.Substring 6) with
+                | Ok p -> Some (DraftBody p)
+                | Error _ -> None
+            elif key.StartsWith "queue:" then
+                match QueueId.create (key.Substring 6) with
+                | Ok q -> Some (QueueBody q)
+                | Error _ -> None
+            else None
+
+        // Presence is reported at most once per animation frame: a caret sweep or drag fires many
+        // selection events, but the peer only needs the latest. `latestFocus` is coalesced; the
+        // rAF callback ships whatever it is at paint time.
+        let mutable focusScheduled = false
+        let mutable latestFocus : Focus option = None
+        let sendFocus (focus: Focus option) =
+            latestFocus <- focus
+            if not focusScheduled then
+                focusScheduled <- true
+                raf (fun () ->
+                    focusScheduled <- false
+                    connectionRef |> Option.iter (fun c -> c.ReportPresence latestFocus))
 
         /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; ensure the
         /// local draft slot exists (so its fragment anchors); remount when a host's fragment
         /// identity changes; and dispose editors whose host has left the DOM. Body edits sync
-        /// through the doc, so the editor needs no change callback.
+        /// through the doc, so the editor needs no change callback — but an editable body reports
+        /// its local selection (tagged with the host's field) as rAF-throttled presence.
         let syncRichBodies () =
             let seen = System.Collections.Generic.HashSet<string> ()
             for host in richBodyHosts () do
@@ -230,15 +257,50 @@ let private start () =
                 if key = BodyKey.draft peerId && not (Map.containsKey peerId latestModel.Synced.Drafts) then
                     dispatchRef (EnsureDraftMsg peerId)
                 let fragment = registry.Fragment key
-                let mount () = mountedBodies.[key] <- (fragment, Editor.mountEditor host fragment (hostReadOnly host))
+                let mount () =
+                    let reportFocus (sel: (string * string) option) =
+                        match fieldOfKey key, sel with
+                        | Some field, Some (a, h) -> sendFocus (Some { Field = field; Pos = { Anchor = a; Head = h } })
+                        | _ -> sendFocus None
+                    mountedBodies.[key] <- (fragment, Editor.mountEditor host fragment (hostReadOnly host) reportFocus)
                 match mountedBodies.TryGetValue key with
-                | true, (bound, dispose) when not (System.Object.ReferenceEquals (bound, fragment)) ->
-                    dispose (); mount ()
+                | true, (bound, handle) when not (System.Object.ReferenceEquals (bound, fragment)) ->
+                    handle.Dispose (); mount ()
                 | true, _ -> ()
                 | _ -> mount ()
             for stale in mountedBodies.Keys |> Seq.filter (seen.Contains >> not) |> Seq.toList do
-                snd mountedBodies.[stale] ()
+                (snd mountedBodies.[stale]).Dispose ()
                 mountedBodies.Remove stale |> ignore
+
+        /// Push each mounted body's remote cursors into its editor: the peers whose focus is in
+        /// that body, coloured per peer (`PeerColour`), positioned by their relative anchor/head.
+        let pushPresences () =
+            for kv in mountedBodies do
+                let handle = snd kv.Value
+                let cursors =
+                    match fieldOfKey kv.Key with
+                    | Some field ->
+                        latestModel.Presence
+                        |> Map.toList
+                        |> List.filter (fun (_, p) -> p.Focus.Field = field)
+                        |> List.map (fun (peerId, p) ->
+                            ({ Colour = PeerColour.ofPeer peerId
+                               Selection = PeerColour.translucent peerId
+                               Name = p.DisplayName
+                               Anchor = p.Focus.Pos.Anchor
+                               Head = p.Focus.Pos.Head } : Editor.RemoteBodyCursor))
+                    | None -> []
+                handle.PushPresences cursors
+
+        /// Place collaborators' title carets by measurement (native inputs have no per-character
+        /// geometry): decode each title-focused peer's relative anchor/head against the title
+        /// `Y.Text`, then size/offset its marker. A no-op when no remote caret is in the title.
+        let placeTitleCursorsAll () =
+            for (peerId, p) in Map.toList latestModel.Presence do
+                if p.Focus.Field = Title then
+                    match ProseMirror.absIndexInDoc doc p.Focus.Pos.Anchor, ProseMirror.absIndexInDoc doc p.Focus.Pos.Head with
+                    | Some a, Some h -> placeTitleCursor (PeerId.value peerId) a h
+                    | _ -> ()
 
         // The side effects a template can't derive from the model. Send routes to the one
         // implementation in `App.connect` (capture markdown, enqueue, seed the queue fragment).
@@ -246,7 +308,17 @@ let private start () =
             { SendDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.SendDraft peer)
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
               ToggleNav = toggleNav
-              ReportTitleCursor = fun index -> connectionRef |> Option.iter (fun c -> c.ReportCursor index) }
+              ReportTitleSelection =
+                fun sel ->
+                    // The title lives in the `title` Y.Text root; turn the input's char offsets
+                    // into relative positions over it, so a title caret survives concurrent edits
+                    // exactly like a body one. rAF-throttled through the same path as bodies.
+                    let focus =
+                        sel |> Option.map (fun (anchor, head) ->
+                            let title = box (doc.getText "title")
+                            let enc i = ProseMirror.relPosFromTypeIndex title i |> ProseMirror.encodeRel
+                            { Field = Title; Pos = { Anchor = enc anchor; Head = enc head } })
+                    sendFocus focus }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
@@ -262,11 +334,12 @@ let private start () =
             match scroll with
             | Some position -> restoreTimelineScroll position
             | None -> ()
-            // Place collaborators' title carets by measurement (native inputs have no
-            // per-character geometry); a no-op when there are no remote cursors.
-            positionTitleCursors ()
-            // Mount/dispose the rich editors on their body hosts (bound to live fragments).
+            // Mount/dispose the rich editors on their body hosts (bound to live fragments), then
+            // overlay collaborators' cursors: remote carets in each body editor, and title carets
+            // measured against the just-rendered input.
             syncRichBodies ()
+            pushPresences ()
+            placeTitleCursorsAll ()
 
         App.makeProgram doc initial
         |> Program.withSetState setState

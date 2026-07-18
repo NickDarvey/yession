@@ -48,15 +48,29 @@ type ControlFrame =
 /// sync-boundary layer (Step 05).
 type StateFrame<'State> = StateSync of 'State
 
-/// Ephemeral presence: where a peer's caret is in the collaborative title. Relayed
-/// peer-to-peer by the Session Process (never durable, never in Yjs, never an event) so a
-/// collaborator's cursor is visible while they edit. `TitleCursor` is a UTF-16 index into
-/// the title, or `None` when the peer's caret is not in the title (or the peer has left,
-/// which clears its cursor everywhere).
+/// The collaborative field a peer's cursor is in — the extension point for presence "in many
+/// places": add a case plus its report/render sites. `DraftBody`/`QueueBody` name the same body
+/// roots as `BodyKey`.
+type FocusField =
+    | Title
+    | DraftBody of PeerId
+    | QueueBody of QueueId
+
+/// A peer's caret+selection within its focused field, as base64-encoded Yjs *relative positions*
+/// over that field's shared type (the title `Y.Text` / a body `Y.XmlFragment`). Relative positions
+/// survive concurrent edits; a collapsed selection (`Anchor = Head`) is a bare caret.
+type CursorPos = { Anchor : string; Head : string }
+
+type Focus = { Field : FocusField; Pos : CursorPos }
+
+/// Ephemeral presence: where a peer's caret+selection is. Relayed peer-to-peer by the Session
+/// Process (never durable, never in Yjs, never an event) so a collaborator's cursor is visible
+/// while they edit. `Focus = None` when the peer's caret is nowhere collaborative, or the peer
+/// has left (which clears it everywhere).
 type PresencePayload =
     { PeerId : PeerId
       DisplayName : string
-      TitleCursor : int option }
+      Focus : Focus option }
 
 /// Every message exchanged over the session transport is one of these multiplexed frames.
 type SessionFrame<'State> =

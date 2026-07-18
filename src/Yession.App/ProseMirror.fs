@@ -1,6 +1,7 @@
 namespace Yession.App
 
 open Fable.Core
+open Fable.Core.JsInterop
 open Yjs
 
 /// Fable bindings for the focused ProseMirror + y-prosemirror surface the rich-text editor
@@ -125,3 +126,133 @@ module ProseMirror =
     let yUndo : Command = jsNative
     [<Import("redo", "y-prosemirror")>]
     let yRedo : Command = jsNative
+
+    // --- Presence: selection, plugin-with-state, decorations, relative positions ------------
+    // Everything below powers the collaborative cursor overlays. Positions travel the wire as
+    // Yjs RELATIVE positions (base64), which survive concurrent edits; a body's positions ride
+    // the y-prosemirror ySync mapping, the title's ride the raw `Y.Text`.
+
+    // State/transaction/view members not on the minimal interfaces above.
+    [<Emit("$0.selection")>]
+    let selection (state: EditorState) : obj = jsNative
+    [<Emit("$0.doc")>]
+    let stateDoc (state: EditorState) : obj = jsNative
+    [<Emit("$0.hasFocus()")>]
+    let viewHasFocus (view: EditorView) : bool = jsNative
+    [<Emit("$0.anchor")>]
+    let selAnchor (sel: obj) : int = jsNative
+    [<Emit("$0.head")>]
+    let selHead (sel: obj) : int = jsNative
+    [<Emit("$0.setMeta($1, $2)")>]
+    let trSetMeta (tr: Transaction) (key: obj) (value: obj) : Transaction = jsNative
+    [<Emit("$0.getMeta($1)")>]
+    let trGetMeta (tr: Transaction) (key: obj) : obj = jsNative
+    [<Emit("$0.docChanged")>]
+    let trDocChanged (tr: Transaction) : bool = jsNative
+    [<Emit("$0.selectionSet")>]
+    let trSelectionSet (tr: Transaction) : bool = jsNative
+    [<Emit("$0.mapping")>]
+    let trMapping (tr: Transaction) : obj = jsNative
+    [<Emit("$0.doc")>]
+    let trDoc (tr: Transaction) : obj = jsNative
+    [<Emit("$0")>]
+    let asTransaction (tr: obj) : Transaction = jsNative
+
+    // prosemirror-state: PluginKey + a Plugin carrying state + props.
+    [<Import("PluginKey", "prosemirror-state")>]
+    let private pluginKeyClass : obj = jsNative
+    [<Emit("new $0($1)")>]
+    let private pluginKeyNew (cls: obj) (name: string) : obj = jsNative
+    let pluginKey (name: string) : obj = pluginKeyNew pluginKeyClass name
+    [<Emit("$0.getState($1)")>]
+    let pluginKeyGetState (key: obj) (state: EditorState) : obj = jsNative
+    [<Import("Plugin", "prosemirror-state")>]
+    let private pluginClass : obj = jsNative
+    [<Emit("new $0($1)")>]
+    let private pluginNew (cls: obj) (spec: obj) : Plugin = jsNative
+    let makePlugin (spec: obj) : Plugin = pluginNew pluginClass spec
+
+    // prosemirror-view: Decoration widgets/inlines + a DecorationSet.
+    [<Import("Decoration", "prosemirror-view")>]
+    let private decorationClass : obj = jsNative
+    [<Emit("$0.widget($1, $2, $3)")>]
+    let private decorationWidget (cls: obj) (pos: int) (dom: obj) (spec: obj) : obj = jsNative
+    let decoWidget (pos: int) (dom: obj) (spec: obj) : obj = decorationWidget decorationClass pos dom spec
+    [<Emit("$0.inline($1, $2, $3)")>]
+    let private decorationInline (cls: obj) (from: int) (to': int) (attrs: obj) : obj = jsNative
+    let decoInline (from: int) (to': int) (attrs: obj) : obj = decorationInline decorationClass from to' attrs
+    [<Import("DecorationSet", "prosemirror-view")>]
+    let private decorationSetClass : obj = jsNative
+    [<Emit("$0.create($1, $2)")>]
+    let private decorationSetCreate (cls: obj) (doc: obj) (decos: obj[]) : obj = jsNative
+    let decoSetCreate (doc: obj) (decos: obj[]) : obj = decorationSetCreate decorationSetClass doc decos
+    [<Emit("$0.empty")>]
+    let private decorationSetEmpty (cls: obj) : obj = jsNative
+    let decoSetEmpty : obj = decorationSetEmpty decorationSetClass
+    [<Emit("$0.map($1, $2)")>]
+    let decoSetMap (set: obj) (mapping: obj) (doc: obj) : obj = jsNative
+
+    // The DOM for one caret + name label (a widget decoration). Authored via `[<Emit>]` interop,
+    // never a `.js` file — the repo's no-authored-JS invariant is about source files, not interop.
+    [<Emit("""(function(color, name){
+      var c = document.createElement('span'); c.className = 'pm-caret'; c.style.borderColor = color;
+      var l = document.createElement('span'); l.className = 'pm-caret-label'; l.textContent = name; l.style.background = color;
+      c.appendChild(l); return c;
+    })($0, $1)""")>]
+    let caretDom (color: string) (name: string) : obj = jsNative
+
+    // --- Yjs relative positions (survive concurrent edits) + lib0 base64 for the wire --------
+
+    [<Import("encodeRelativePosition", "yjs")>]
+    let private encodeRelPos (rp: obj) : JS.Uint8Array = jsNative
+    [<Import("decodeRelativePosition", "yjs")>]
+    let private decodeRelPos (bytes: JS.Uint8Array) : obj = jsNative
+    [<Import("createRelativePositionFromTypeIndex", "yjs")>]
+    let relPosFromTypeIndex (typ: obj) (index: int) : obj = jsNative
+    [<Import("createAbsolutePositionFromRelativePosition", "yjs")>]
+    let private createAbsPos (rp: obj) (doc: Y.Doc) : obj = jsNative
+    [<Import("toBase64", "lib0/buffer")>]
+    let private toBase64 (b: JS.Uint8Array) : string = jsNative
+    [<Import("fromBase64", "lib0/buffer")>]
+    let private fromBase64 (s: string) : JS.Uint8Array = jsNative
+
+    /// A relative position -> its base64 wire form.
+    let encodeRel (relPos: obj) : string = toBase64 (encodeRelPos relPos)
+    /// Base64 wire form -> a relative position.
+    let decodeRel (encoded: string) : obj = decodeRelPos (fromBase64 encoded)
+    /// The absolute index of a base64 relative position in a `Y.Text`/`Y.XmlFragment` on `doc`,
+    /// or `None` if it no longer resolves (its anchor content was deleted).
+    let absIndexInDoc (doc: Y.Doc) (encoded: string) : int option =
+        match createAbsPos (decodeRel encoded) doc with
+        | null -> None
+        | abs -> Some (abs?index |> unbox<int>)
+
+    // --- y-prosemirror position bridging (ProseMirror positions <-> Yjs relative positions) --
+
+    [<Import("ySyncPluginKey", "y-prosemirror")>]
+    let ySyncPluginKey : obj = jsNative
+    [<Import("getRelativeSelection", "y-prosemirror")>]
+    let private getRelativeSelection (binding: obj) (state: EditorState) : obj = jsNative
+    [<Import("relativePositionToAbsolutePosition", "y-prosemirror")>]
+    let private relToAbs (doc: Y.Doc) (typ: obj) (relPos: obj) (mapping: obj) : obj = jsNative
+
+    /// The ySync binding for a state (holds the ProseMirror<->Yjs `mapping`, the `type`, `doc`).
+    let syncBinding (state: EditorState) : obj = (pluginKeyGetState ySyncPluginKey state)?binding
+
+    /// The editor's current selection as base64 relative anchor/head over its body fragment.
+    let relSelectionOf (state: EditorState) : (string * string) option =
+        match syncBinding state with
+        | null -> None
+        | binding ->
+            let rs = getRelativeSelection binding state
+            Some (encodeRel rs?anchor, encodeRel rs?head)
+
+    /// Map a base64 relative position back to an absolute ProseMirror position in this editor,
+    /// or `None` if it no longer resolves.
+    let absPosInBody (state: EditorState) (encoded: string) : int option =
+        match syncBinding state with
+        | null -> None
+        | binding ->
+            match relToAbs binding?doc binding?``type`` (decodeRel encoded) binding?mapping with
+            | null -> None
+            | pos -> Some (unbox<int> pos)

@@ -264,6 +264,43 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+
+        testCaseAsync "a remote peer's selection renders as a caret widget, label, and highlight" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 1)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 1)))
+                let! _ = await (page.WaitForSelectorAsync ".ProseMirror")
+
+                // Give the editor some content, then select a RANGE (not a bare caret) so the
+                // reported selection has distinct anchor/head — the editor relays it via
+                // `reportFocus`, which the harness stashes.
+                do! awaitU (page.ClickAsync ".ProseMirror")
+                do! awaitU (page.Keyboard.TypeAsync "hello world")
+                do! awaitU (page.Keyboard.PressAsync "Control+a")
+
+                // Replay that selection as a REMOTE peer's cursor. The decorations are built from
+                // its relative positions: a caret widget + name label at `head`, and a translucent
+                // highlight across the (non-empty) range.
+                do! awaitU (page.EvaluateAsync "() => window.__pushRemote('remote-peer')")
+                let! _ = await (page.WaitForFunctionAsync "!!document.querySelector('.ProseMirror .pm-caret')")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "[...document.querySelectorAll('.ProseMirror .pm-caret-label')].some(l => l.textContent === 'remote-peer')")
+                // The selection highlight is an inline decoration carrying our translucent colour.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "[...document.querySelectorAll('.ProseMirror [style*=\"background-color\"]')].length > 0")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 #else

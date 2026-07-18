@@ -42,6 +42,30 @@
   background-image: linear-gradient(180deg, #1ba1e2, #a8dd00);
 }
 
+/* Presence carets in a body editor (widget decorations built in `Editor.buildBodyDecorations`;
+   the DOM + per-peer colour are set inline by `ProseMirror.caretDom`). The colour rides on
+   `border-color`/`background`; these rules give the bar its shape and float the name label. */
+.pm-caret {
+  position: relative;
+  margin-left: -1px;
+  border-left: 2px solid;
+  pointer-events: none;
+  word-break: normal;
+}
+.pm-caret-label {
+  position: absolute;
+  top: -1.25em;
+  left: -2px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  color: #fff;
+  pointer-events: none;
+  user-select: none;
+}
+
 /* v4 auto-detection does not scan `.fs`, so declare the F# sources explicitly (replaces the
    old `content`). Paths are relative to this stylesheet. */
 @source "../src/**/*.fs";

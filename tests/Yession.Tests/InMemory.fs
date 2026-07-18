@@ -56,18 +56,28 @@ let tests =
                 do! host.Stop ()
             }
 
-        testCaseAsync "a peer's title cursor relays to others and clears on disconnect" <|
+        testCaseAsync "a peer's cursor presence relays to others in any field and clears on disconnect" <|
             async {
                 let! host = Host.start (sid ()) token 0
                 let! a = connectInMemoryClient host token "ada" "Ada"
                 let! b = connectInMemoryClient host token "bob" "Bob"
-                // Ada moves her caret in the title; the Host relays the presence frame to Bob.
-                a.Connection.ReportCursor (Some 3)
+                // Ada's caret is in the title; the Host relays the presence frame to Bob.
+                let titleFocus : Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } }
+                a.Connection.ReportPresence (Some titleFocus)
                 do! b.Runner.WaitFor (fun m -> Map.containsKey a.Hello.PeerId m.Presence)
                 Expect.equal
-                    (Map.tryFind a.Hello.PeerId (b.Runner.Model ()).Presence |> Option.map (fun c -> c.Index))
-                    (Some 3)
-                    "B sees A's caret at the reported index"
+                    (Map.tryFind a.Hello.PeerId (b.Runner.Model ()).Presence |> Option.map (fun c -> c.Focus))
+                    (Some titleFocus)
+                    "B sees A's title caret with the reported anchor/head"
+                // Ada moves into her own draft body: the field changes, and it still relays.
+                let bodyFocus : Focus = { Field = DraftBody a.Hello.PeerId; Pos = { Anchor = "BQY="; Head = "BQY=" } }
+                a.Connection.ReportPresence (Some bodyFocus)
+                do! b.Runner.WaitFor (fun m ->
+                        Map.tryFind a.Hello.PeerId m.Presence |> Option.map (fun c -> c.Focus) = Some bodyFocus)
+                Expect.equal
+                    (Map.tryFind a.Hello.PeerId (b.Runner.Model ()).Presence |> Option.map (fun c -> c.Focus.Field))
+                    (Some (DraftBody a.Hello.PeerId))
+                    "B sees A's caret move into the draft-body field"
                 // Ada leaves; the Host clears her cursor on the remaining peer.
                 do! a.Channel.Close ()
                 do! b.Runner.WaitFor (fun m -> not (Map.containsKey a.Hello.PeerId m.Presence))
