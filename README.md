@@ -61,16 +61,24 @@ process.
 Core tasks: `restore`, `build`, `start`, `dev`, `test`, `verify`, `package`, `clean`. Prefer
 `mise run <task>` (or `mise exec -- <cmd>`) over invoking `node`/`dotnet` directly so
 the pinned versions are always used. `build` type-checks the F# solution and
-Fable-compiles the Session Process host; `start` runs it. Tests run on Node with
-[Pyxpecto](https://github.com/Freymaurer/Fable.Pyxpecto) in two tiers, tagged in code
-(not folders): `test` is the cheap tier (pure/model/protocol tests — fast, no ports, no
-browser, no credentials; what PRs run), and `verify` is the full release gate (the
-tagged expensive suites — real WebRTC, live agent, Docker — plus the real-browser E2E).
-Almost everything runs on Node: .NET is a build tool and tests exercise the same
-JavaScript the product runs. The one exception is the real-browser E2E — a Pyxpecto suite
-in the same test project (`Browser.fs`) that Pyxpecto runs on the .NET CLR
-(`dotnet run --project tests/Yession.Tests`), because it drives Chromium through the
-Microsoft.Playwright .NET driver against a live Session Process.
+Fable-compiles the Session Process host; `start` runs it. There is one test project, run by
+[Pyxpecto](https://github.com/Freymaurer/Fable.Pyxpecto). Each suite declares what it *needs*
+in code (not folders) — `Tag.needs "…" [Ports] …`, `[Docker]`, `[LiveAgent]`, `[Browser]`, or
+`[]` for a pure suite — and the harness runs it only where those needs are met, reporting one
+visible skip otherwise (`tests/Yession.Tests/Tags.fs`). Every need pins a runtime, so a suite
+runs on exactly one and nothing runs twice:
+
+- `test` is the cheap tier — pure/model/protocol suites on Node; fast, no ports, browser, or
+  credentials. What PRs run.
+- `verify` is the full release gate — the same suites plus the port-bound ones (real WebRTC,
+  HTTP, process topology), live agent, Docker, and the real-browser E2E.
+
+Almost everything runs on Node: .NET is a build tool and the tests exercise the same
+JavaScript the product runs. The one exception is the real-browser E2E (`Browser.fs`, need
+`[Browser]`), which Pyxpecto runs on the .NET CLR (`dotnet run --project tests/Yession.Tests`)
+because it drives Chromium through the Microsoft.Playwright .NET driver against a live Session
+Process. The harness discriminates the runtime with Fable's `Compiler.isDotnet`, so the one
+shared test list serves both Node and the CLR with no conditional compilation in `Main.fs`.
 
 The Session Process is F# compiled to JavaScript by [Fable](https://fable.io) and run on
 Node (the `app/` host). Its WebRTC transport uses

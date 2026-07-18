@@ -9,37 +9,34 @@ let inline (!!) (any: 'a) = any
 open Fable.Core.JsInterop
 #endif
 
-/// The repo's test suite. Pyxpecto is multi-runtime, so the entry point serves two targets:
-///   * Fable → JS on Node (`mise run test` / `verify`): the domain/process model + protocol
-///     unit tests and the real WebRTC end-to-end test — the same JavaScript the product runs.
-///   * .NET CLR (`dotnet run --project tests/Yession.Tests`): the real-browser E2E, which needs
-///     the Microsoft.Playwright driver and so lives on the CLR, not under Fable.
-/// The Node suites cannot run on the CLR (Fable interop stubs are JS-only), so each target
-/// selects the suites it can actually run; the other side is a visible one-case placeholder.
+/// The repo's one test suite, shared by both runtimes Pyxpecto runs on. Each suite declares
+/// what it NEEDS (`Tag.needs`), and the harness runs it only where those needs are met — so
+/// the SAME list serves both targets with no `#if` here:
+///   * Fable → JS on Node (`mise run test` / `verify`): the model/protocol/WebRTC suites — the
+///     JavaScript the product actually runs.
+///   * .NET CLR (`dotnet run --project tests/Yession.Tests`): the real-browser E2E, driven
+///     through the Microsoft.Playwright driver.
+/// A suite with no needs runs on Node (the product runtime); `[Ports]`/`[Docker]`/`[LiveAgent]`
+/// add the verify tier and its env; `[Browser]` pins the .NET CLR. Each need fixes a runtime,
+/// so nothing runs twice; whatever this run cannot host shows as one visible skip.
 let all =
-#if FABLE_COMPILER
     testList "Yession" [
-        Domain.tests
-        SessionProcess.tests
-        Sync.tests
-        Agent.tests
-        Tag.verify E2E.tests
-        Tag.verify Client.tests
-        Phase2.tests
-        DockerIntegration.tests
-        Phase3.tests
-        EventsHttp.tests
-        Phase4.tests
-        Properties.tests
-        Acceptance.tests
-        InMemory.tests
-        Browser.tests
+        Tag.needs "Domain" [] (fun () -> Domain.tests)
+        Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
+        Tag.needs "Sync" [] (fun () -> Sync.tests)
+        Tag.needs "Agent" [] (fun () -> Agent.tests)
+        Tag.needs "WebRTC E2E" [ Tag.Ports ] (fun () -> E2E.tests)
+        Tag.needs "Client shell E2E" [ Tag.Ports ] (fun () -> Client.tests)
+        Tag.needs "Phase2" [] (fun () -> Phase2.tests)
+        Tag.needs "Docker integration" [] (fun () -> DockerIntegration.tests)
+        Tag.needs "Phase3" [] (fun () -> Phase3.tests)
+        Tag.needs "EventsHttp" [] (fun () -> EventsHttp.tests)
+        Tag.needs "Phase4" [] (fun () -> Phase4.tests)
+        Tag.needs "Properties" [] (fun () -> Properties.tests)
+        Tag.needs "Acceptance" [] (fun () -> Acceptance.tests)
+        Tag.needs "InMemory" [] (fun () -> InMemory.tests)
+        Tag.needs "Browser E2E" [ Tag.Browser ] (fun () -> Browser.tests)
     ]
-#else
-    testList "Yession" [
-        Browser.tests
-    ]
-#endif
 
 [<EntryPoint>]
 let main argv = !! Pyxpecto.runTests [||] all

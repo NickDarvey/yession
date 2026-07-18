@@ -520,5 +520,5 @@ let tests =
         codecTests
         queueUnitTests
         titlePresenceTests
-        Tag.verify e2eTests
+        Tag.needs "Draft sync E2E" [ Tag.Ports ] (fun () -> e2eTests)
     ]

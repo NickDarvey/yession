@@ -172,11 +172,9 @@ let tests =
 
 #else
 
-// Fable (JS on Node): Playwright is a .NET driver and does not exist here. The browser E2E
-// runs on the CLR — this single case records that so the Node run shows where it lives.
-let tests =
-    testList "Browser E2E" [
-        testCase "runs on the .NET CLR: dotnet run --project tests/Yession.Tests" <| fun () -> ()
-    ]
+// Fable (JS on Node): Playwright is a .NET driver and does not exist here, so the flow above
+// is compiled out. This stub only exists so the module compiles under Fable; it is never
+// forced — `Tag.needs "Browser E2E" [Browser]` fails on Node and reports the skip itself.
+let tests : Fable.Pyxpecto.Model.TestCase = testList "Browser E2E" []
 
 #endif

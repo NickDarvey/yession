@@ -522,6 +522,6 @@ let tests =
         raceTests
         crashRepairTests
         docPersistenceTests
-        // Interrupt runs over real WebRTC clients: verify tier.
-        Tag.verify interruptTests
+        // Interrupt runs over real WebRTC clients: needs ports.
+        Tag.needs "Interrupt (Step 17)" [ Tag.Ports ] (fun () -> interruptTests)
     ]
