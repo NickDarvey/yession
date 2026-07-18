@@ -20,6 +20,7 @@
     <Compile Include="DocStore.fs" />
     <Compile Include="ManagerStore.fs" />
     <Compile Include="NotificationHub.fs" />
+    <Compile Include="McpHub.fs" />
     <Compile Include="Control.fs" />
     <Compile Include="TelemetryReceiver.fs" />
     <Compile Include="ControlClient.fs" />

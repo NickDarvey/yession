@@ -51,6 +51,14 @@ let private subscribeNotifications =
     | _, "" -> None
     | url, secret -> Some (fun handler -> ControlClient.subscribeNotifications url secret handler)
 
+// The MCP tool stream over the same control channel: the current tool list on subscribe, then
+// updates as MCP services come and go. Absent a control channel, the session runs without it.
+let private subscribeMcp =
+    match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
+    | "", _
+    | _, "" -> None
+    | url, secret -> Some (fun handler -> ControlClient.subscribeMcp url secret handler)
+
 /// A built-in diagnostic runner (`YESSION_AGENT=diagnostic`): exercises the session's
 /// environment capability end to end — ensure, execute, stream — without model
 /// credentials. The verify suite drives it across real process boundaries; it doubles
@@ -112,7 +120,7 @@ Async.StartImmediate (
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
-        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications sessionId token port
+        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp sessionId token port
         // Sessions never outlive their Manager: spawned under the guard, the Manager's
         // death closes our stdin (the kernel does this even on SIGKILL) and we exit.
         if Interop.envOr "YESSION_PARENT_GUARD" "" = "1" then

@@ -58,7 +58,7 @@ let tests =
                     | Some resume -> waiter <- None; resume ()
                     | None -> ()
 
-                let! host = Host.startFull (Some (usageAgent usage)) None None None None sink None sessionId "e2e-token" 0
+                let! host = Host.startFull (Some (usageAgent usage)) None None None None sink None None sessionId "e2e-token" 0
 
                 // Inject a human message the Phase-3 way: an offline peer builds the enqueue on
                 // its own doc, then we deliver that state into the Host's doc, which drains it

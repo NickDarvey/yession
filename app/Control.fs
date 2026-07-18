@@ -17,6 +17,9 @@ module Yession.Host.Control
 //   GET  /control/notifications                   -> text/event-stream (the reverse leg:
 //        the Manager pushing notifications DOWN to this session, multiplexed as SSE frames
 //        of `ControlWire.sessionNotification` JSON — see NotificationHub / SessionNotification)
+//   GET  /control/mcp                             -> text/event-stream (a second reverse leg:
+//        the current MCP tool list on subscribe, then a fresh list on every change, as SSE
+//        frames of `ControlWire.mcpToolList` — the standard `ListToolsResult` — see McpHub)
 
 open Fable.Core.JsInterop
 open Yession.Domain
@@ -53,6 +56,7 @@ let tryHandle
     (resolve: string -> SessionEnvironmentCapabilities option)
     (reportName: string -> string -> Async<Result<unit, string>>)
     (registerNotificationSink: string -> (SessionNotification -> unit) -> (unit -> unit))
+    (registerMcpSink: (McpToolList -> unit) -> (unit -> unit))
     (req: IncomingMessage)
     (res: ServerResponse)
     : bool =
@@ -119,6 +123,21 @@ let tryHandle
                 let unsubscribe = registerNotificationSink (Option.defaultValue "" secret) sink
                 let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
                 // The subscription lives until the client disconnects: tear down both.
+                req.on ("close", fun _ ->
+                    clearInterval heartbeat
+                    unsubscribe ()) |> ignore
+            | "GET", "/control/mcp" ->
+                // The MCP reverse leg: the standard tool list, streamed. The secret already
+                // resolved to capabilities above, so it is valid. Registering the sink
+                // immediately writes the current list (McpHub's retained snapshot); every
+                // later change writes a fresh list. Headers first, so that snapshot write lands
+                // after them.
+                res.writeHead (200, createObj [ "content-type", box "text/event-stream"; "cache-control", box "no-store"; "connection", box "keep-alive" ]) |> ignore
+                res.write ": subscribed\n\n" |> ignore
+                let sink (list: McpToolList) =
+                    res.write (sprintf "data: %s\n\n" (ControlWire.toString ControlWire.mcpToolList list)) |> ignore
+                let unsubscribe = registerMcpSink sink
+                let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
                 req.on ("close", fun _ ->
                     clearInterval heartbeat
                     unsubscribe ()) |> ignore
