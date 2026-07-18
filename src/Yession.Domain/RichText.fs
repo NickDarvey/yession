@@ -1,57 +1,25 @@
 namespace Yession.Domain
 
-// Rich-text bodies (docs/plans/03-rich-text-editing.md). A draft/queue body is a
-// structured ProseMirror document synced as a Yjs `XmlFragment`. It is declared in the
-// Ylmish schema via `Encode.custom` so the fragment is anchored race-free at
-// `drafts.<id>.body` / `queue.<id>.body` — the sync boundary stays honest — but its VALUE
-// is never decoded: a custom nested in a keyed `Encode.map` cannot round-trip through
-// Ylmish's structural map read (it never yields `ElCustom`). The app instead resolves the
-// live fragment from the `BodyRegistry` by id and hands it to the `y-prosemirror` editor.
+// Rich-text bodies (docs/plans/03-rich-text-editing.md). A draft/queue body is a structured
+// ProseMirror document held as a Yjs `XmlFragment`. It is a top-level named root on the doc,
+// keyed by `BodyKey`, NOT nested inside the `drafts`/`queue` maps and NOT declared in the
+// Ylmish schema. Two reasons the body stays out of the Ylmish-encoded state:
+//   1. a custom nested in a keyed `Encode.map` cannot round-trip Ylmish's structural decode
+//      (it never yields `ElCustom`), so the value would never decode anyway; and
+//   2. Ylmish's structural reader walks a `Y.XmlFragment` as a plain object and recurses into
+//      its cyclic internals — so an XmlFragment reachable anywhere in the decoded tree crashes
+//      the decode. Keeping bodies as sibling roots (never in the decoded tree) avoids both.
+// The body is therefore a CRDT the app co-manages on the doc — synced by the same update
+// transport as everything else, and read by the Session Process straight from the doc (it has
+// no Ylmish binding). `getXmlFragment key` is idempotent and merges by name, so every replica
+// binds the same fragment with no creation race.
 
-open System.Collections.Generic
 open Yjs
-open Ylmish.Codec
 
-/// A rich-text body backed by a live `Y.XmlFragment`. As a `CustomElement` it exists only
-/// to (a) anchor the fragment when Ylmish attaches the schema (Connect grabs the live,
-/// integrated fragment via `ctx.GetXmlFragment ()` — the capability added in Ylmish
-/// beta0219) and (b) expose that fragment to the editor. `Value` is never read because the
-/// body is not decoded.
-type RichBody () =
-    let mutable fragment : Y.XmlFragment = Unchecked.defaultof<Y.XmlFragment>
-    let mutable connected = false
-    /// The live, integrated `Y.XmlFragment` — valid only once `Connected`. Handed to
-    /// `y-prosemirror` (`ySyncPlugin`) so editor edits flow straight into the CRDT.
-    member _.Fragment = fragment
-    /// True once Ylmish has attached the schema and `Connect` has run. Until then the
-    /// fragment is not yet materialized and the editor mount must wait one render.
-    member _.Connected = connected
-    interface CustomElement with
-        member _.Connect ctx =
-            fragment <- ctx.GetXmlFragment ()
-            connected <- true
-            { new System.IDisposable with member _.Dispose () = () }
-        member _.Value = box ()
-
-/// One stable `RichBody` per body id, shared by the codec (which anchors the fragment via
-/// `Encode.custom`) and the view (which binds the editor to the same live fragment). The
-/// instance must be stable across re-encodes so Ylmish's attach never re-integrates the
-/// fragment (U5); the registry guarantees that by key.
-type BodyRegistry () =
-    let bodies = Dictionary<string, RichBody> ()
-    /// The `RichBody` for this id, created on first use and reused thereafter.
-    member _.GetOrCreate (id: string) : RichBody =
-        match bodies.TryGetValue id with
-        | true, body -> body
-        | _ ->
-            let body = RichBody ()
-            bodies.[id] <- body
-            body
-    /// The live fragment for this id, if a `RichBody` exists and Ylmish has connected it.
-    member _.TryFragment (id: string) : Y.XmlFragment option =
-        match bodies.TryGetValue id with
-        | true, body when body.Connected -> Some body.Fragment
-        | _ -> None
-    /// Forget a body id (a draft consumed/deleted). The fragment itself is owned by the
-    /// doc; this only drops the registry's handle so the map does not grow unbounded.
-    member _.Forget (id: string) : unit = bodies.Remove id |> ignore
+/// Binds body ids to their live top-level `Y.XmlFragment` on a given doc. Thin by design: the
+/// doc's root registry already guarantees one stable, race-free fragment per key, so this just
+/// names the anchor. The editor binds the returned fragment to `y-prosemirror`; the codec never
+/// sees it.
+type BodyRegistry (doc: Y.Doc) =
+    /// The live fragment for this body id — created on first access, stable thereafter.
+    member _.Fragment (id: string) : Y.XmlFragment = doc.getXmlFragment id

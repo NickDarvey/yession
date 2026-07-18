@@ -209,3 +209,34 @@ is bumped to `beta0219`. Remaining de-risking (fold into the first build step): 
 4. Add the editor module + deps; wire the stable Lit mount host (`View.fs`, `Browser.fs`).
 5. Markdown serialization at the drain (`Scheduler.fs`) and formatted timeline rendering.
 6. Extend the E2E/browser suite; `mise run test`, then `mise run verify`.
+
+## Implementation note — the body is a top-level fragment root, not a nested custom (revised)
+
+The shipped design anchors each rich body as a **top-level `Y.XmlFragment` root** keyed by
+`BodyKey` (`draft:<peer>` / `queue:<id>`), managed directly by a doc-aware `BodyRegistry`
+(`getXmlFragment` is idempotent and merges by name, so there is no creation race). It is a
+sibling CRDT root the app co-manages on the doc — synced by the same update transport, read by
+the Session Process straight from the doc — and is **deliberately not part of the Ylmish-encoded
+state** (`encode`/`decode` name only `drafts`/`queue`/`title`/`sharedBrief`).
+
+This replaces the earlier plan of nesting the body under the draft/queue map via `Encode.custom`
+over a `RichBody`. Two findings forced the change:
+
+1. A custom nested in a keyed `Encode.map` never yields `ElCustom` on Ylmish's structural decode,
+   so the value would never round-trip anyway (already known).
+2. **Ylmish's structural reader (`ElementOfY.ofYValue`) walks a `Y.XmlFragment` as a plain object
+   and recurses into its cyclic internals — a stack overflow.** So a fragment reachable *anywhere*
+   in the decoded tree crashes the decode. Both the client's `Binding.read` (which reads keyed-map
+   entries structurally) and `SyncedStateSync.ofDoc` (a whole-doc structural read) hit this the
+   instant a body exists. Keeping bodies out of the decoded tree — as sibling roots — is what makes
+   the decode total.
+
+Consequences in code:
+- `SyncedStateSync.encode`/`encodeDraft`/`encodeQueued` carry no body; `encodeDraft` re-states the
+  author only so the (otherwise empty) slot actually materializes a Yjs key.
+- `SyncedStateSync.ofDoc` reads the four named roots directly (never a whole-doc structural read),
+  sidestepping the body roots.
+- `queuedBodyMarkdown`/`draftBodyMarkdown` read `doc.getXmlFragment(BodyKey…)`.
+- `Connection.SendDraft` copies draft→queue markdown and then clears the (durable) draft root so
+  the composer empties on send.
+- `RichBody`/`CustomElement` are gone; `BodyRegistry(doc).Fragment key` is the whole surface.

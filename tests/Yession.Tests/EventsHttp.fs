@@ -98,7 +98,7 @@ let private endpointTests =
                         FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) baseUrl "fetch-token") }
                 let! a = connectClientWith options signalUrl "fetch-token" "ada" "Ada"
 
-                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "fetched over http"))
+                do! compose a a.Hello.PeerId "fetched over http"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         not m.EventConsumer.IsCatchingUp

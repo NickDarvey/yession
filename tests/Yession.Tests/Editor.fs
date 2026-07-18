@@ -2,13 +2,13 @@ module Yession.Tests.Editor
 
 // Regression guards for the rich-text editor (docs/plans/03-rich-text-editing.md). These are
 // the DOM-free half — markdown serialization, the send-time content copy, CRDT convergence,
-// and the RichBody/registry foundation — so they run in the cheap tier on Node (no browser).
+// and the BodyRegistry root anchoring — so they run in the cheap tier on Node (no browser).
 // They assert on MARKDOWN output, a serialize idempotence PROPERTY, and reference equality —
 // never on brittle DOM structure. The input-rule *typing* behaviour needs contenteditable +
 // real key events and is covered by the verify-tier browser E2E against the composer.
 //
-// `prosemirror-markdown` and `y-prosemirror` are pure JS (no DOM), so `Editor.fragmentToMarkdown`
-// / `markdownIntoFragment` / `copyFragment` work headless — only `mountEditor` needs a browser.
+// `prosemirror-markdown` and `y-prosemirror` are pure JS (no DOM), so `Markdown.ofFragment`
+// / `Markdown.intoFragment` / `Markdown.copy` work headless — only `mountEditor` needs a browser.
 
 open Fable.Pyxpecto
 open Yjs
@@ -23,10 +23,10 @@ let private freshFragment () : Y.XmlFragment =
 /// A fragment seeded from markdown, and its serialized-back markdown (trimmed).
 let private fromMd (markdown: string) : Y.XmlFragment =
     let f = freshFragment ()
-    Editor.markdownIntoFragment markdown f
+    Markdown.intoFragment markdown f
     f
 
-let private md (f: Y.XmlFragment) : string = (Editor.fragmentToMarkdown f).Trim ()
+let private md (f: Y.XmlFragment) : string = (Markdown.ofFragment f).Trim ()
 
 /// A document exercising every node/mark the Linear-like schema supports.
 let private canonical =
@@ -57,7 +57,7 @@ let private serializationTests =
 
         testCase "fragmentToMarkdown is deterministic" <| fun () ->
             let f = fromMd canonical
-            Expect.equal (Editor.fragmentToMarkdown f) (Editor.fragmentToMarkdown f) "same fragment, same output"
+            Expect.equal (Markdown.ofFragment f) (Markdown.ofFragment f) "same fragment, same output"
 
         testCase "every schema feature survives the round-trip" <| fun () ->
             let out = md (fromMd canonical)
@@ -108,20 +108,20 @@ let private sendCopyTests =
         testCase "copyFragment duplicates a draft body into a queue body" <| fun () ->
             let src = fromMd "# hi\n\n* x\n* y"
             let dst = freshFragment ()
-            Editor.copyFragment src dst
+            Markdown.copy src dst
             Expect.equal (md dst) (md src) "the queue body is a content copy of the draft body"
 
         testCase "copyFragment does not mutate the source" <| fun () ->
             let src = fromMd canonical
             let before = md src
-            Editor.copyFragment src (freshFragment ())
+            Markdown.copy src (freshFragment ())
             Expect.equal (md src) before "copying leaves the draft body untouched"
 
         testCase "copying an empty draft yields an empty queue body" <| fun () ->
             let dst = fromMd "# will be replaced by nothing? no — copy is additive into empty"
             // copy from an empty source into a fresh dst
             let dst2 = freshFragment ()
-            Editor.copyFragment (freshFragment ()) dst2
+            Markdown.copy (freshFragment ()) dst2
             Expect.equal (md dst2) "" "empty source copies to empty"
             ignore dst
     ]
@@ -131,7 +131,7 @@ let private convergenceTests =
         testCase "edits converge across two docs (y-prosemirror over the shared fragment)" <| fun () ->
             let a = Y.Doc.Create ()
             let b = Y.Doc.Create ()
-            Editor.markdownIntoFragment "# From A" (a.getXmlFragment "body")
+            Markdown.intoFragment "# From A" (a.getXmlFragment "body")
             Y.applyUpdate (b, Y.encodeStateAsUpdate a)
             Expect.equal (md (b.getXmlFragment "body")) "# From A" "B sees A's content after a CRDT sync"
 
@@ -139,54 +139,34 @@ let private convergenceTests =
             let a = Y.Doc.Create ()
             let b = Y.Doc.Create ()
             let fa = a.getXmlFragment "body"
-            Editor.markdownIntoFragment "# one" fa
+            Markdown.intoFragment "# one" fa
             Y.applyUpdate (b, Y.encodeStateAsUpdate a)
-            Editor.markdownIntoFragment "# one\n\n## two" fa
+            Markdown.intoFragment "# one\n\n## two" fa
             Y.applyUpdate (b, Y.encodeStateAsUpdate a)
             Expect.equal (md (b.getXmlFragment "body")) (md fa) "B converges on A's latest"
     ]
 
 let private registryTests =
-    testList "RichBody / registry" [
-        testCase "BodyRegistry returns a stable RichBody per id" <| fun () ->
-            let reg = BodyRegistry ()
-            let a1 = reg.GetOrCreate "d1"
-            let a2 = reg.GetOrCreate "d1"
-            Expect.isTrue (System.Object.ReferenceEquals (a1, a2)) "same instance for the same id (U5 stability)"
-            Expect.isFalse (System.Object.ReferenceEquals (a1, reg.GetOrCreate "d2")) "distinct ids give distinct bodies"
+    testList "BodyRegistry" [
+        testCase "Fragment returns a stable top-level root per id" <| fun () ->
+            let reg = BodyRegistry (Y.Doc.Create ())
+            let a1 = reg.Fragment "d1"
+            let a2 = reg.Fragment "d1"
+            Expect.isTrue (System.Object.ReferenceEquals (a1, a2)) "same fragment for the same id (idempotent root)"
+            Expect.isFalse (System.Object.ReferenceEquals (a1, reg.Fragment "d2")) "distinct ids give distinct fragments"
 
-        testCase "TryFragment is None until the body is connected" <| fun () ->
-            let reg = BodyRegistry ()
-            reg.GetOrCreate "d1" |> ignore
-            Expect.isNone (reg.TryFragment "d1") "no live fragment before Ylmish attaches (Connect)"
+        testCase "Fragment binds the doc's named root (edits are visible through it)" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let reg = BodyRegistry doc
+            Markdown.intoFragment "# hi" (reg.Fragment "d1")
+            // The same key resolves to the same live root, so the write is visible on re-read
+            // and via the doc's own getXmlFragment.
+            Expect.equal ((Markdown.ofFragment (reg.Fragment "d1")).Trim ()) "# hi" "re-read sees the write"
+            Expect.equal ((Markdown.ofFragment (doc.getXmlFragment "d1")).Trim ()) "# hi" "it is the doc's named root"
 
-        testCase "Forget drops the handle" <| fun () ->
-            let reg = BodyRegistry ()
-            let frag = freshFragment ()
-            let body = reg.GetOrCreate "d1"
-            let ctx : BindContext =
-                { GetText = fun () -> failwith "unused"
-                  GetMap = fun () -> failwith "unused"
-                  GetArray = fun () -> failwith "unused"
-                  GetXmlFragment = fun () -> frag
-                  Origin = box () }
-            use _d = (body :> CustomElement).Connect ctx
-            Expect.isSome (reg.TryFragment "d1") "present after connect"
-            reg.Forget "d1"
-            Expect.isNone (reg.TryFragment "d1") "gone after forget"
-
-        testCase "RichBody exposes the live fragment after Connect" <| fun () ->
-            let frag = freshFragment ()
-            let body = RichBody ()
-            let ctx : BindContext =
-                { GetText = fun () -> failwith "unused"
-                  GetMap = fun () -> failwith "unused"
-                  GetArray = fun () -> failwith "unused"
-                  GetXmlFragment = fun () -> frag
-                  Origin = box () }
-            use _d = (body :> CustomElement).Connect ctx
-            Expect.isTrue body.Connected "connected after Connect"
-            Expect.isTrue (System.Object.ReferenceEquals (body.Fragment, frag)) "exposes the fragment GetXmlFragment gave"
+        testCase "a fresh id's fragment is empty" <| fun () ->
+            let reg = BodyRegistry (Y.Doc.Create ())
+            Expect.equal ((Markdown.ofFragment (reg.Fragment "never-written")).Trim ()) "" "an untouched body is empty"
     ]
 
 let tests =

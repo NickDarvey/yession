@@ -23,13 +23,16 @@ open Yession.Tests.Support
 // Updates move only when a test explicitly delivers them.
 type private OfflinePeer =
     { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
+      Registry : BodyRegistry
       Doc : Y.Doc }
 
 let private offlinePeer (clientId: float) (id: string) (name: string) : OfflinePeer =
     let doc = Y.Doc.Create ()
     // Pin the Yjs clientID so concurrent ties resolve the same way every run.
     doc.clientID <- clientId
+    let registry = BodyRegistry doc
     { Runner = Harness.run (App.makeProgram doc (ClientModel.init (peer id name)))
+      Registry = registry
       Doc = doc }
 
 /// Deliver `source`'s full state into `target` (idempotent, order-tolerant — exactly
@@ -38,13 +41,26 @@ let private deliver (source: Y.Doc) (target: Y.Doc) : unit =
     Y.applyUpdate (target, Y.encodeStateAsUpdate source)
 
 // The draft slot is the peer's own (drafts are keyed by author); `_draftKey` is kept only
-// so the offline-race call sites still read as (draft, queue) pairs.
+// so the offline-race call sites still read as (draft, queue) pairs. `Body.author`/`Body.send`
+// are the bare-runner analogues of the composer + `Connection.SendDraft` (they seed and then
+// content-copy the rich body fragment draft->queue).
 let private enqueue (p: OfflinePeer) (_draftKey: string) (queueKey: string) (text: string) : QueueId =
     let queueId = QueueId.create queueKey |> expect
     let peerId = (p.Runner.Model ()).Peer.PeerId
-    p.Runner.Dispatch (user (setDraft peerId text))
-    p.Runner.Dispatch (user (SendDraftMsg (peerId, queueId)))
+    Body.author p.Registry p.Runner peerId text
+    Body.send p.Registry p.Runner peerId queueId
     queueId
+
+/// This peer's queue as `(queueId, markdown)` in consumption order — read from its own doc
+/// (the drain's read). Replaces the old `queueView` over the model's plain-text bodies.
+let private queueView (p: OfflinePeer) : (string * string) list =
+    QueueOrder.sorted (p.Runner.Model ()).Synced.Queue
+    |> List.map (fun m -> QueueId.value m.QueueId, Body.queued p.Doc m.QueueId)
+
+/// Edit a queued entry's rich body on this peer (replace its markdown). The old `editQueued`
+/// spliced into a `Y.Text`; the body is now a fragment, so this rewrites the fragment.
+let private editQueued (p: OfflinePeer) (queueId: QueueId) (markdown: string) : unit =
+    Markdown.intoFragment markdown (p.Registry.Fragment (BodyKey.queued queueId))
 
 /// A `RunAgent` that suspends until the test releases it — the deterministic stand-in
 /// for "a turn is running" in every race below. Re-armed per turn.
@@ -124,7 +140,7 @@ let private raceTests =
 
                 // The stale peer converges: entry gone, nothing resurrected.
                 deliver h.Doc o.Doc
-                Expect.equal (queueView (o.Runner.Model ())) [] "the peer's queue converges to empty"
+                Expect.equal (queueView o) [] "the peer's queue converges to empty"
                 do! h.Stop ()
             }
 
@@ -139,7 +155,7 @@ let private raceTests =
                 Expect.equal (accepted |> List.map (fun m -> m.Body)) [ "already accepted" ] "consumed on arrival (idle, no agent)"
 
                 // The peer — which has not yet seen the removal — deletes the entry.
-                Expect.equal (queueView (o.Runner.Model ())) [ "q-1", "already accepted" ] "the stale peer still sees it"
+                Expect.equal (queueView o) [ "q-1", "already accepted" ] "the stale peer still sees it"
                 o.Runner.Dispatch (user (DeleteQueuedMsg q1))
                 deliver o.Doc h.Doc
 
@@ -162,7 +178,7 @@ let private raceTests =
                 let q2 = enqueue o "d-2" "q-2" "rough" // will be edited while queued
                 deliver o.Doc h.Doc
                 // Edit BEFORE the snapshot: reaches the Process while the turn still runs.
-                o.Runner.Dispatch (user (editQueued q2 (Text.insert 5 " but improved") (o.Runner.Model ())))
+                editQueued o q2 "rough but improved"
                 deliver o.Doc h.Doc
                 release ()
 
@@ -173,7 +189,7 @@ let private raceTests =
                     "the consumed body is the snapshot including the pre-drain edit"
 
                 // Edit AFTER acceptance: the stale peer types into the consumed entry.
-                o.Runner.Dispatch (user (editQueued q2 (Text.insert 0 "TOO LATE ") (o.Runner.Model ())))
+                editQueued o q2 "TOO LATE rough but improved"
                 deliver o.Doc h.Doc
                 release () // second turn (for m2) finishes; drain finds nothing new
 
@@ -184,7 +200,7 @@ let private raceTests =
                     "late edits target a removed entry: discarded, never resurrected"
                 Expect.isTrue (Map.isEmpty (hostQueue h)) "the process queue is empty"
                 deliver h.Doc o.Doc
-                Expect.equal (queueView (o.Runner.Model ())) [] "the editor's replica converges to empty"
+                Expect.equal (queueView o) [] "the editor's replica converges to empty"
                 do! h.Stop ()
             }
 
@@ -275,7 +291,7 @@ let private crashRepairTests =
                 Expect.isTrue (Map.isEmpty (hostQueue h2)) "the leftover entry is repaired out of the doc"
 
                 deliver h2.Doc o.Doc
-                Expect.equal (queueView (o.Runner.Model ())) [] "the stale peer converges to the repaired state"
+                Expect.equal (queueView o) [] "the stale peer converges to the repaired state"
                 do! h2.Stop ()
             }
     ]
@@ -313,7 +329,7 @@ let private interruptTests =
                 let! a = connectClient signalUrl "interrupt-token" "ada" "Ada"
 
                 // First send: the turn starts and streams its partial response.
-                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "go research this"))
+                do! compose a a.Hello.PeerId "go research this"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         m.Agent.ActiveTurn.IsSome
@@ -323,7 +339,7 @@ let private interruptTests =
                 // A second message queues behind the running turn (Cursor default);
                 // the ordered channel guarantees it reaches the Process before the
                 // interrupt that follows.
-                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "queued behind"))
+                do! compose a a.Hello.PeerId "queued behind"
                 a.Connection.SendDraft a.Hello.PeerId
 
                 // Interrupt: partial body kept (Interrupted status), and the queued
@@ -360,7 +376,7 @@ let private interruptTests =
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
                 let! a = connectClient signalUrl "late-token" "ada" "Ada"
 
-                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "quick one"))
+                do! compose a a.Hello.PeerId "quick one"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         (m.Conversation.Items |> List.exists (fun i -> i.Body = "instant"))
@@ -437,7 +453,7 @@ let private docPersistenceTests =
                 let q2 = enqueue o "d-2" "q-2" "pending at crash"
                 deliver o.Doc h1.Doc
                 let oPeer = (o.Runner.Model ()).Peer.PeerId
-                o.Runner.Dispatch (user (setDraft oPeer "durable words"))
+                Body.author o.Registry o.Runner oPeer "durable words"
                 deliver o.Doc h1.Doc
                 let! firstLife = sentMessages h1.Log
                 Expect.equal (firstLife |> List.map (fun m -> m.QueueId)) [ Some q1 ] "only e1 consumed; e2 waits behind the held turn"
@@ -457,9 +473,9 @@ let private docPersistenceTests =
 
                 let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
                 Expect.equal
-                    (synced.Drafts |> Map.tryFind oPeer |> Option.map (fun d -> Text.toString d.Body))
+                    (synced.Drafts |> Map.tryFind oPeer |> Option.map (fun _ -> SyncedStateSync.draftBodyMarkdown h2.Doc oPeer))
                     (Some "durable words")
-                    "the unsent draft survived the restart"
+                    "the unsent draft (slot + body fragment) survived the restart"
                 do! h2.Stop ()
 
                 // Compaction: the second open collapsed the history to one snapshot
@@ -480,7 +496,7 @@ let private docPersistenceTests =
                 let! h1 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None sessionId "t" 0
                 let o = offlinePeer 22.0 "olive" "Olive"
                 let oPeer = (o.Runner.Model ()).Peer.PeerId
-                o.Runner.Dispatch (user (setDraft oPeer "acknowledged"))
+                Body.author o.Registry o.Runner oPeer "acknowledged"
                 deliver o.Doc h1.Doc
                 do! h1.Stop ()
 
@@ -490,7 +506,7 @@ let private docPersistenceTests =
                 let! h2 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None sessionId "t" 0
                 let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
                 Expect.equal
-                    (synced.Drafts |> Map.tryFind oPeer |> Option.map (fun d -> Text.toString d.Body))
+                    (synced.Drafts |> Map.tryFind oPeer |> Option.map (fun _ -> SyncedStateSync.draftBodyMarkdown h2.Doc oPeer))
                     (Some "acknowledged")
                     "every acknowledged update survived; only the torn tail was dropped"
                 do! h2.Stop ()

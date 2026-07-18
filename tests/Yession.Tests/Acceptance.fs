@@ -26,14 +26,12 @@ let private representativeModel : ClientModel =
       Connection = Connected
       Session = Some sessionId
       Synced =
-        { Drafts =
-            Map.ofList
-                [ ada,
-                  { Author = ada; Body = Ylmish.Text.ofString "half-typed idea" } ]
-          Queue =
-            Map.ofList
-                [ queueId,
-                  { QueueId = queueId; Author = ada; Body = Ylmish.Text.ofString "queued for the agent"; Order = 1.0 } ]
+        // Draft/queue bodies are rich-text `Y.XmlFragment`s mounted by the browser editor,
+        // not fields on the model — so the SSR fixture carries only the slot's identity; the
+        // checklist below asserts the mount *hosts* render (`data-rich-body`/`data-*-input`),
+        // and the body-content rendering is a browser concern covered by the editor E2E.
+        { Drafts = Map.ofList [ ada, { Author = ada } ]
+          Queue = Map.ofList [ queueId, { QueueId = queueId; Author = ada; Order = 1.0 } ]
           Title = Ylmish.Text.ofString "planning the launch"
           SharedBrief = None }
       Conversation =
@@ -70,7 +68,7 @@ let private uiChecklistTests =
                   "remote cursor peer label", "brave-owl"
                   "peer display name", Dom.hookText Dom.Hooks.displayName "swift-heron"
                   "collaborative draft editor", Dom.Hooks.draftEditor
-                  "draft body", "half-typed idea"
+                  "draft editor mount host", Dom.attr Dom.Hooks.draftInput "ada"
                   "send button", Dom.attr Dom.Hooks.sendDraft "ada"
                   "conversation timeline", Dom.Hooks.conversation
                   "sent message in timeline", Dom.hookText Dom.Hooks.messageBody "ship it"
@@ -83,7 +81,6 @@ let private uiChecklistTests =
                   "environment status (Phase 2)", Dom.Hooks.environment
                   "read-only command log (Phase 2)", Dom.Hooks.commandLog
                   "message queue (Phase 3)", Dom.Hooks.messageQueue
-                  "queued message body", "queued for the agent"
                   "queued message editor", Dom.attr Dom.Hooks.queueInput "queue-ui"
                   "queue reorder up", Dom.attr Dom.Hooks.queueUp "queue-ui"
                   "queue reorder down", Dom.attr Dom.Hooks.queueDown "queue-ui"

@@ -87,3 +87,30 @@ Agent `turnTests`; Phase2 `authorityTests`/`environmentProjectionTests`/`command
 - `mise run test` (cheap tier, Node) green — the reworked model/property/integration suites.
 - `mise run verify` (adds Browser E2E on the CLR) — the editor typing + real-app flow.
 - Invariant intact: `git ls-files '*.js' '*.mjs' '*.cjs'` stays empty.
+
+## Outcome (executed)
+
+The seam and per-suite decisions above landed as planned. Executing them **surfaced a real,
+committed-source bug** the old (never-run-with-fragments) tests had masked: any draft/queue body
+`Y.XmlFragment` made both the client's Ylmish decode and `SyncedStateSync.ofDoc` stack-overflow,
+because Ylmish's structural reader recurses into a fragment's cyclic internals. The rich-text
+feature was broken end-to-end, not just the tests. Fixed by moving bodies to **top-level fragment
+roots** out of the decoded tree and reading the codec's named roots directly in `ofDoc`
+(docs/plans/03 "Implementation note"). Net test result:
+
+- Body-agnostic seam (`Body.author`/`send`/`draft`/`queued`, `compose`/`draftBody`/`queueBodies`/
+  `queueBody`) — the ~83 body-coupled sites collapse to these helpers.
+- Deleted: the in-memory draft-interleave codec test, the in-memory title-converge test, and the
+  trivial `EditTitleMsg`-sets-title reducer test (all redundant/obsolete).
+- Reworked: Sync codec/E2E, Phase3 races + durability, Properties inv-2/inv-4 + `queueViewOfDoc`,
+  Acceptance UI checklist (mount hosts, not body text), Editor registry tests (new `BodyRegistry`).
+- Folded `scripts/editor-e2e.fsx` into `Browser.tests`: it now types Markdown into the rich
+  composer, asserts it renders formatted (input rules) and converges, and that sending serializes
+  back to Markdown in the timeline.
+
+Verification: `mise run test` (cheap tier, Node) — **136 passing, 0 failing**. The editor's
+Markdown-typing→formatted rendering was additionally confirmed directly in headless Chromium
+(`# ` → `<h1>`, `**x**` → `<strong>`, `- ` → `<ul><li>`, serializing back to Markdown). The
+verify-tier Ports/Browser suites need the native `node-datachannel` WebRTC addon, which is not
+built in the dev container, so they can't execute here (a pre-existing infra gap, unrelated to
+these changes). Invariant intact: `git ls-files '*.js' '*.mjs' '*.cjs'` stays empty.

@@ -209,19 +209,19 @@ let private start () =
         let mutable connectionRef : App.Connection option = None
         let mutable dispatchRef : (ClientMsg -> unit) = ignore
 
-        // Rich-text editor mounts. `registry` supplies each body's live Y.XmlFragment (shared
-        // with the codec, so the editor and the sync boundary bind the same nested fragment);
-        // `latestModel` lets the mount see the current draft slots.
-        let registry = BodyRegistry ()
+        // Rich-text editor mounts. `registry` resolves each body's live Y.XmlFragment (a
+        // top-level doc root keyed by BodyKey, so the editor and the Session Process bind the
+        // same fragment); `latestModel` lets the mount see the current draft slots. Each mount
+        // records the fragment it bound so a fragment swap (a sent draft's slot recreated)
+        // triggers a remount.
+        let registry = BodyRegistry doc
         let mutable latestModel = initial
-        let mountedBodies = System.Collections.Generic.Dictionary<string, unit -> unit> ()
-        // Markdown captured at send, applied to the new queue body fragment once it anchors.
-        let pendingSeeds = System.Collections.Generic.Dictionary<string, string> ()
+        let mountedBodies = System.Collections.Generic.Dictionary<string, Y.XmlFragment * (unit -> unit)> ()
 
         /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; ensure the
-        /// local draft slot exists (so its fragment anchors); apply pending send-seeds; and
-        /// dispose editors whose host has left the DOM. Body edits sync through the doc, so the
-        /// editor needs no change callback.
+        /// local draft slot exists (so its fragment anchors); remount when a host's fragment
+        /// identity changes; and dispose editors whose host has left the DOM. Body edits sync
+        /// through the doc, so the editor needs no change callback.
         let syncRichBodies () =
             let seen = System.Collections.Generic.HashSet<string> ()
             for host in richBodyHosts () do
@@ -229,40 +229,21 @@ let private start () =
                 seen.Add key |> ignore
                 if key = BodyKey.draft peerId && not (Map.containsKey peerId latestModel.Synced.Drafts) then
                     dispatchRef (EnsureDraftMsg peerId)
-                match registry.TryFragment key with
-                | Some fragment ->
-                    (match pendingSeeds.TryGetValue key with
-                     | true, md ->
-                         if md <> "" then Markdown.intoFragment md fragment
-                         pendingSeeds.Remove key |> ignore
-                     | _ -> ())
-                    if not (mountedBodies.ContainsKey key) then
-                        mountedBodies.[key] <- Editor.mountEditor host fragment (hostReadOnly host)
-                | None -> ()
+                let fragment = registry.Fragment key
+                let mount () = mountedBodies.[key] <- (fragment, Editor.mountEditor host fragment (hostReadOnly host))
+                match mountedBodies.TryGetValue key with
+                | true, (bound, dispose) when not (System.Object.ReferenceEquals (bound, fragment)) ->
+                    dispose (); mount ()
+                | true, _ -> ()
+                | _ -> mount ()
             for stale in mountedBodies.Keys |> Seq.filter (seen.Contains >> not) |> Seq.toList do
-                mountedBodies.[stale] ()
+                snd mountedBodies.[stale] ()
                 mountedBodies.Remove stale |> ignore
 
-        /// Send the local draft: capture its body as markdown, dispose its editor (the slot's
-        /// fragment is about to be removed), enqueue, and seed the new queue entry's fragment
-        /// when it anchors on a following render.
-        let sendDraft (peer: PeerId) =
-            match QueueId.create (mintId "queue") with
-            | Ok queueId ->
-                let md =
-                    registry.TryFragment (BodyKey.draft peer)
-                    |> Option.map Markdown.ofFragment
-                    |> Option.defaultValue ""
-                (match mountedBodies.TryGetValue (BodyKey.draft peer) with
-                 | true, dispose -> dispose (); mountedBodies.Remove (BodyKey.draft peer) |> ignore
-                 | _ -> ())
-                pendingSeeds.[BodyKey.queued queueId] <- md
-                dispatchRef (SendDraftMsg (peer, queueId))
-            | Error e -> failwith e
-
-        // The side effects a template can't derive from the model.
+        // The side effects a template can't derive from the model. Send routes to the one
+        // implementation in `App.connect` (capture markdown, enqueue, seed the queue fragment).
         let actions : ViewActions =
-            { SendDraft = sendDraft
+            { SendDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.SendDraft peer)
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
               ToggleNav = toggleNav
               ReportTitleCursor = fun index -> connectionRef |> Option.iter (fun c -> c.ReportCursor index) }
@@ -287,7 +268,7 @@ let private start () =
             // Mount/dispose the rich editors on their body hosts (bound to live fragments).
             syncRichBodies ()
 
-        App.makeProgram doc registry initial
+        App.makeProgram doc initial
         |> Program.withSetState setState
         |> Program.run
 
@@ -310,7 +291,7 @@ let private start () =
         let options =
             { App.ConnectOptions.defaults with
                 FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" token) }
-        let connection = App.connect options doc hello (fun msg -> dispatchRef msg) channel
+        let connection = App.connect options doc registry hello (fun msg -> dispatchRef msg) channel
         connectionRef <- Some connection
 
         do! connection.Run

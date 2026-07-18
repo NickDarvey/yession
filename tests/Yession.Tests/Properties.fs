@@ -86,15 +86,19 @@ let private peerIdOf (i: int) : PeerId = PeerId.create (sprintf "peer-%d" i) |> 
 let private epoch = System.DateTimeOffset (1970, 1, 1, 0, 0, 0, System.TimeSpan.Zero)
 
 let private runSchedule (ops: ScheduleOp list) : CaseResult =
-    // Peers: real client programs on pinned-clientID docs, never on a channel.
+    // Peers: real client programs on pinned-clientID docs, never on a channel. Each carries
+    // its own `BodyRegistry` (over its doc) so the rich body seam binds the same top-level
+    // fragment roots the Session Process reads.
     let mkPeer (i: int) =
         let doc = Y.Doc.Create ()
         doc.clientID <- float (i + 1)
+        let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init (peer (sprintf "peer-%d" i) (sprintf "Peer %d" i))))
-        doc, runner
+        doc, runner, registry
     let peers = [| mkPeer 0; mkPeer 1 |]
-    let peerDoc i = fst peers.[i]
-    let peerRunner i = snd peers.[i]
+    let peerDoc i = let (d, _, _) = peers.[i] in d
+    let peerRunner i = let (_, r, _) = peers.[i] in r
+    let peerRegistry i = let (_, _, reg) = peers.[i] in reg
 
     // The recorded event stream: the single source for consumed-set, invariants, marks.
     let recorded = ResizeArray<SessionEvent> ()
@@ -166,7 +170,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
         | Error _ -> []
         | Ok s ->
             (QueueDrain.plan (consumedNow ()) s.Queue).Batch
-            |> List.map (fun m -> QueueId.value m.QueueId, Text.toString m.Body)
+            |> List.map (fun m -> QueueId.value m.QueueId, SyncedStateSync.queuedBodyMarkdown shadowDoc m.QueueId)
 
     /// Run an action that may drain, recording predicted vs actual consumption.
     let checkedDrain (expected: (string * string) list) (action: unit -> unit) =
@@ -229,14 +233,14 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
         | None -> ()
 
     let mutable enqueueCounter = 0
+    let mutable editCounter = 0
     let enqueue (i: int) =
         enqueueCounter <- enqueueCounter + 1
         let queueId = QueueId.create (sprintf "queue-%d" enqueueCounter) |> expect
-        let r = peerRunner i
-        // Peer i writes its own slot (keyed by its peer id) and sends: send clears the
-        // slot, so a peer can enqueue repeatedly.
-        r.Dispatch (user (setDraft (peerIdOf i) (sprintf "message %d" enqueueCounter)))
-        r.Dispatch (user (SendDraftMsg (peerIdOf i, queueId)))
+        // Peer i writes its own slot (keyed by its peer id) and sends: `Body.send` clears the
+        // slot AND content-copies the rich body draft->queue, so a peer can enqueue repeatedly.
+        Body.author (peerRegistry i) (peerRunner i) (peerIdOf i) (sprintf "message %d" enqueueCounter)
+        Body.send (peerRegistry i) (peerRunner i) (peerIdOf i) queueId
         enqueuedIds.Add (QueueId.value queueId)
 
     let pickEntry (i: int) (pick: int) : QueueId option =
@@ -250,8 +254,11 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
         | EditQueued (i, pick) ->
             match pickEntry i pick with
             | Some q ->
-                let r = peerRunner i
-                r.Dispatch (user (editQueued q (Text.insert 0 "edit ") (r.Model ())))
+                // Edit the queued rich body directly (the body is a top-level fragment root,
+                // not a model field). The oracle predicts from the same doc state, so the edit
+                // stays consistent whether or not it has yet reached the process/shadow.
+                editCounter <- editCounter + 1
+                Markdown.intoFragment (sprintf "edited %d" editCounter) ((peerRegistry i).Fragment (BodyKey.queued q))
             | None -> ()
         | Reorder (i, pick) ->
             match pickEntry i pick with
@@ -295,7 +302,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
 
     let queueViewOfDoc (doc: Y.Doc) =
         match SyncedStateSync.ofDoc doc with
-        | Ok s -> QueueOrder.sorted s.Queue |> List.map (fun m -> QueueId.value m.QueueId, Text.toString m.Body)
+        | Ok s -> QueueOrder.sorted s.Queue |> List.map (fun m -> QueueId.value m.QueueId, SyncedStateSync.queuedBodyMarkdown doc m.QueueId)
         | Error e -> failwithf "decode failed at quiescence: %A" e
 
     { Events = List.ofSeq recorded
@@ -345,47 +352,50 @@ let private genDraftSchedule : Gen<DraftOp list> =
 
 /// Drive the ops through one client program; return the (queueId, snapshot-at-send) pairs
 /// and the doc's decoded synced state after every op (post-send edits included).
-let private runDraftSchedule (ops: DraftOp list) : (string * string) list * PeerId * SyncedSessionState =
+let private runDraftSchedule (ops: DraftOp list) : (string * string) list * PeerId * SyncedSessionState * Y.Doc =
     let doc = Y.Doc.Create ()
     doc.clientID <- 1.0
     let owner = peerIdOf 0
+    let registry = BodyRegistry doc
     let runner = Harness.run (App.makeProgram doc (ClientModel.init (peer "peer-0" "Peer 0")))
     let snapshots = ResizeArray<string * string> ()
     let mutable qn = 0
     let apply op =
         match op with
-        | SetBody text -> runner.Dispatch (user (setDraft owner text))
+        | SetBody text -> Body.author registry runner owner text
         | Send ->
             match (runner.Model ()).Synced.Drafts |> Map.tryFind owner with
-            | Some draft ->
+            | Some _ ->
                 qn <- qn + 1
                 let queueId = QueueId.create (sprintf "q-%d" qn) |> expect
-                let snapshot = Text.toString draft.Body
-                runner.Dispatch (user (SendDraftMsg (owner, queueId)))
+                let snapshot = Body.draft registry owner |> Option.defaultValue ""
+                Body.send registry runner owner queueId
                 snapshots.Add (QueueId.value queueId, snapshot)
                 // Clean send, part 1: the sender's slot is gone the instant it is sent.
                 Expect.isFalse
                     (Map.containsKey owner (runner.Model ()).Synced.Drafts)
                     "a send removes exactly the sender's slot"
-            | None -> ()   // an empty slot: SendDraftMsg is a no-op, nothing enqueued
+            | None -> ()   // an empty slot: send is a no-op, nothing enqueued
     ops |> List.iter apply
     let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
-    List.ofSeq snapshots, owner, decoded
+    List.ofSeq snapshots, owner, decoded, doc
 
 let private draftInvariant4 =
     testCase "clean send: removes the slot, appends one snapshotted entry, and later edits never mutate it" <| fun () ->
         Property.check (property {
             let! ops = genDraftSchedule
-            let snapshots, owner, decoded = runDraftSchedule ops
+            let snapshots, owner, decoded, doc = runDraftSchedule ops
             // Exactly one queue entry per successful send — no send appends two or drops one.
             Expect.equal (Map.count decoded.Queue) (List.length snapshots)
                 "exactly one queue entry per send"
             // Every send's snapshot survives verbatim through all later slot edits, and each
-            // entry is attributed to the slot owner (owner-sends).
+            // entry is attributed to the slot owner (owner-sends). The queue body is read from
+            // the doc (the drain's read); the re-materialised draft fragment is a distinct Y
+            // type, so a later slot edit cannot alias into the sent entry.
             for (qid, snapshotBody) in snapshots do
                 match decoded.Queue |> Map.tryFind (QueueId.create qid |> expect) with
                 | Some entry ->
-                    Expect.equal (Text.toString entry.Body) snapshotBody
+                    Expect.equal (SyncedStateSync.queuedBodyMarkdown doc entry.QueueId) snapshotBody
                         "the queued body is the send-time snapshot; later slot edits never mutate it"
                     Expect.equal entry.Author owner "the queue entry is attributed to the slot owner"
                 | None -> failwithf "sent entry %s missing from the queue" qid

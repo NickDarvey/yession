@@ -140,7 +140,7 @@ let private processTests =
                 Expect.isTrue (html.Contains (Dom.sessionMetaName + "\" " + Dom.attr "content" "proc-1")) "the child serves ITS session's page"
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" port
                 let! a = connectClient signalUrl "proc-token" "ada" "Ada"
-                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "hello from another process"))
+                do! compose a a.Hello.PeerId "hello from another process"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         m.Conversation.Items |> List.exists (fun i -> i.Body = "hello from another process"))
@@ -299,7 +299,7 @@ let private controlRpcTests =
                 let port = launched |> expect
 
                 let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) "rpc-token" "ada" "Ada"
-                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "run the diagnostic"))
+                do! compose a a.Hello.PeerId "run the diagnostic"
                 a.Connection.SendDraft a.Hello.PeerId
 
                 // Everything below happened ACROSS process boundaries: the child asked
@@ -519,7 +519,7 @@ let private compositionTests =
                 // A real client messages the packaged child; the diagnostic agent runs a
                 // real command through the packaged manager's control RPC.
                 let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" sessionPort) "comp-token" "ada" "Ada"
-                a.Runner.Dispatch (user (setDraft a.Hello.PeerId "built binaries talking"))
+                do! compose a a.Hello.PeerId "built binaries talking"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
                         (m.Conversation.Items |> List.exists (fun i -> i.Body = "built binaries talking"))

@@ -9,10 +9,11 @@ module Yession.Tests.Browser
 //     dotnet run --project tests/Yession.Tests/Yession.Tests.fsproj
 //
 // It launches two Chromium peers against a real Session Process (app/out/Main.js), verifies
-// they converge over native WebRTC and see the sent message in both timelines, then proves
-// client-side IndexedDB persistence by wiping the server and reloading (the draft can only
-// return from the browser), and that the doc store is session-keyed. Event-driven throughout
-// (WaitForFunctionAsync); Playwright's own per-action timeouts are the watchdog.
+// Markdown typed into the rich composer renders as formatted rich text (input rules), that it
+// converges over native WebRTC, and that sending serializes it back to Markdown in both
+// timelines; then proves client-side IndexedDB persistence by wiping the server and reloading
+// (the draft can only return from the browser), and that the doc store is session-keyed.
+// Event-driven throughout (WaitForFunctionAsync); Playwright's own per-action timeouts watch.
 
 open Fable.Pyxpecto
 
@@ -85,9 +86,13 @@ let private awaitU (t: Task) : Async<unit> = Async.AwaitTask t
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
 let private connected = """document.querySelector('[data-connection]')?.textContent === 'Connected'"""
 
+// The local peer's rich composer is a ProseMirror editable (`.ProseMirror`) inside the
+// editable (`data-rich-readonly="false"`) body-mount host; peers' drafts are read-only mirrors.
+let private composer = """[data-rich-readonly="false"] .ProseMirror"""
+
 let tests =
     testList "Browser E2E" [
-        testCaseAsync "two real browser peers converge and see the sent message" <|
+        testCaseAsync "markdown typed in the rich composer renders formatted, converges, and sends as markdown" <|
             async {
                 if Directory.Exists dataDir then Directory.Delete (dataDir, true)
                 startHost ()
@@ -111,14 +116,24 @@ let tests =
                 let! _ = await (pageA.WaitForFunctionAsync connected)
                 let! _ = await (pageB.WaitForFunctionAsync connected)
 
-                // A types in its always-present composer; B converges (renders as a peer's draft).
-                let! _ = await (pageA.WaitForSelectorAsync "textarea[data-draft-input]")
-                do! awaitU (pageA.FillAsync ("textarea[data-draft-input]", "hello from a real browser"))
-                let! _ = await (pageB.WaitForFunctionAsync """[...document.querySelectorAll('textarea[data-draft-input]')].some(t => t.value === 'hello from a real browser')""")
+                // A types Markdown into its rich composer with REAL key events, so the input
+                // rules fire: "# " turns the block into a heading rendered live as an <h1> —
+                // the syntax itself is never left as literal text (Linear-style WYSIWYG).
+                let! _ = await (pageA.WaitForSelectorAsync composer)
+                do! awaitU (pageA.ClickAsync composer)
+                do! awaitU (pageA.Keyboard.TypeAsync "# Heading one")
+                let renderedHeading =
+                    """document.querySelector('[data-rich-readonly="false"] .ProseMirror h1')?.textContent === 'Heading one'"""
+                let! _ = await (pageA.WaitForFunctionAsync renderedHeading)
 
-                // A sends; both timelines show the immutable message (from events, not Yjs).
+                // B converges: it renders A's draft (read-only) as the same formatted heading.
+                do! await (pageB.WaitForFunctionAsync
+                            """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one')""") |> Async.Ignore
+
+                // A sends; both timelines show the immutable message — serialized back to
+                // MARKDOWN (`# Heading one`), from events (not Yjs).
                 do! awaitU (pageA.ClickAsync "[data-send-draft]")
-                let inTimeline = """[...document.querySelectorAll('[data-conversation] [data-message-body]')].some(m => m.textContent === 'hello from a real browser')"""
+                let inTimeline = """[...document.querySelectorAll('[data-conversation] [data-message-body]')].some(m => m.textContent.trim() === '# Heading one')"""
                 let! _ = await (pageA.WaitForFunctionAsync inTimeline)
                 do! await (pageB.WaitForFunctionAsync inTimeline) |> Async.Ignore
             }
@@ -129,9 +144,12 @@ let tests =
                 // when the first one sent), then the server is killed and its data wiped. After
                 // A reloads against the fresh server, the draft can only have come back from the
                 // browser's IndexedDB — and it re-syncs to B via the server.
-                let! _ = await (pageA.WaitForFunctionAsync """document.querySelectorAll('textarea[data-draft-input]').length === 1""")
-                do! awaitU (pageA.FillAsync ("textarea[data-draft-input]", "persisted in the browser"))
-                let! _ = await (pageA.WaitForFunctionAsync """[...document.querySelectorAll('textarea[data-draft-input]')].some(t => t.value === 'persisted in the browser')""")
+                let! _ = await (pageA.WaitForFunctionAsync """document.querySelectorAll('[data-rich-readonly="false"] .ProseMirror').length === 1""")
+                do! awaitU (pageA.ClickAsync composer)
+                do! awaitU (pageA.Keyboard.TypeAsync "persisted in the browser")
+                let hasDraft =
+                    """[...document.querySelectorAll('.ProseMirror')].some(p => p.textContent === 'persisted in the browser')"""
+                let! _ = await (pageA.WaitForFunctionAsync hasDraft)
 
                 host.Kill true
                 host.WaitForExit ()
@@ -140,11 +158,11 @@ let tests =
 
                 let! _ = await (pageA.ReloadAsync ())
                 let! _ = await (pageA.WaitForFunctionAsync connected)
-                let! _ = await (pageA.WaitForFunctionAsync """[...document.querySelectorAll('textarea[data-draft-input]')].some(t => t.value === 'persisted in the browser')""")
+                let! _ = await (pageA.WaitForFunctionAsync hasDraft)
 
                 let! _ = await (pageB.ReloadAsync ())
                 let! _ = await (pageB.WaitForFunctionAsync connected)
-                do! await (pageB.WaitForFunctionAsync """[...document.querySelectorAll('textarea[data-draft-input]')].some(t => t.value === 'persisted in the browser')""") |> Async.Ignore
+                do! await (pageB.WaitForFunctionAsync hasDraft) |> Async.Ignore
             }
 
         testCaseAsync "the doc store is keyed by session" <|

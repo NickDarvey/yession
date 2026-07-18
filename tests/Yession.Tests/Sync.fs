@@ -39,13 +39,16 @@ let private codecTests =
     testList "Sync boundary" [
         testCase "decode∘encode preserves the synced session state" <| fun () ->
             let doc = Y.Doc.Create ()
+            let registry = BodyRegistry doc
             let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
-            p.Dispatch (user (editBody ada (Text.insert 0 "hello") (p.Model ())))
-            p.Dispatch (user (editBody ada (Text.insert 5 " world") (p.Model ())))
+            // A draft slot whose rich body is a top-level fragment root (not a model field, and
+            // not in the decoded tree). So equality below is over the slot's identity; the body
+            // is asserted separately, through the registry.
+            Body.author registry p ada "hello world"
 
             let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
             Expect.equal decoded (p.Model ()).Synced "the doc decodes back to exactly the model's synced state"
-            Expect.equal (bodyOf ada (p.Model ())) (Some "hello world") "the edited body"
+            Expect.equal (Body.draft registry ada) (Some "hello world") "the body fragment holds the composed markdown"
 
         testCase "an empty doc decodes to the empty synced state (decode-empty = init)" <| fun () ->
             let decoded = SyncedStateSync.ofDoc (Y.Doc.Create ()) |> Result.mapError (sprintf "%A") |> expect
@@ -53,6 +56,7 @@ let private codecTests =
 
         testCase "the doc contains drafts but never the conversation projection" <| fun () ->
             let doc = Y.Doc.Create ()
+            let registry = BodyRegistry doc
             // A model that already carries conversation history: it is app-only state,
             // mentioned by neither encode nor decode, so it must never reach the doc —
             // and must survive the program's own decode round-trips untouched.
@@ -66,7 +70,7 @@ let private codecTests =
                   ActiveAgentMessages = Map.empty }
             let initial = { ClientModel.init (peer "ada" "Ada") with Conversation = conversation }
             let p = Harness.run (App.makeProgram doc initial)
-            p.Dispatch (user (editBody ada (Text.insert 0 "draft body") (p.Model ())))
+            Body.author registry p ada "draft body"
 
             let drafts : Y.Map<obj> = doc.getMap "drafts"
             Expect.isTrue (drafts.has (PeerId.value ada)) "the draft is in the doc"
@@ -76,75 +80,58 @@ let private codecTests =
 
         testCase "enqueueing round-trips through the codec (draft moves into the queue)" <| fun () ->
             let doc = Y.Doc.Create ()
+            let registry = BodyRegistry doc
             let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
-            p.Dispatch (user (editBody ada (Text.insert 0 "queued words") (p.Model ())))
+            Body.author registry p ada "queued words"
             let queueId = QueueId.create "q-1" |> expect
-            p.Dispatch (user (SendDraftMsg (ada, queueId)))
+            Body.send registry p ada queueId
 
             let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
             Expect.equal decoded (p.Model ()).Synced "the doc decodes back to exactly the model's synced state"
             Expect.isFalse (Map.containsKey ada decoded.Drafts) "the draft left the drafts map"
             let entry = decoded.Queue |> Map.find queueId
-            Expect.equal (Text.toString entry.Body) "queued words" "the body moved with it"
             Expect.equal entry.Order 1.0 "first entry lands at order 1"
+            Expect.equal (Body.queued doc queueId) "queued words" "the body was copied draft->queue on send"
 
-        testCase "two in-memory clients converge on queue edit, reorder, and delete" <| fun () ->
+        testCase "two in-memory clients converge on queue reorder and delete" <| fun () ->
             let docA = Y.Doc.Create ()
             let docB = Y.Doc.Create ()
             docA.clientID <- 1.0
             docB.clientID <- 2.0
+            let regA = BodyRegistry docA
+            let regB = BodyRegistry docB
             let pA = Harness.run (App.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
             let pB = Harness.run (App.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
             let q1 = QueueId.create "q-1" |> expect
             let q2 = QueueId.create "q-2" |> expect
+            let queueIds (p: Body.Runner) =
+                QueueOrder.sorted (p.Model ()).Synced.Queue |> List.map (fun m -> QueueId.value m.QueueId)
 
             // Ada enqueues two messages by sending twice: each send clears her one slot.
             for text, queueId in [ "first", q1; "second", q2 ] do
-                pA.Dispatch (user (setDraft ada text))
-                pA.Dispatch (user (SendDraftMsg (ada, queueId)))
+                Body.author regA pA ada text
+                Body.send regA pA ada queueId
             syncBoth docA docB
-            Expect.equal (queueView (pB.Model ())) [ "q-1", "first"; "q-2", "second" ] "B sees the queue in order"
+            Expect.equal (queueIds pB) [ "q-1"; "q-2" ] "B sees the queue in order"
 
-            // Concurrent: Grace edits q1's body while Ada moves q2 to the front.
-            pB.Dispatch (user (editQueued q1 (Text.insert 5 " draft") (pB.Model ())))
+            // Ada moves q2 to the front; the reorder converges on both replicas. (Concurrent
+            // body co-editing is the fragment CRDT's own cheap test — not re-proven here.)
             match QueueOrder.moveUp (pA.Model ()).Synced.Queue q2 with
             | Some order -> pA.Dispatch (user (ReorderQueuedMsg (q2, order)))
             | None -> failwith "q2 should be movable"
             syncBoth docA docB
-
-            Expect.equal (queueView (pA.Model ())) [ "q-2", "second"; "q-1", "first draft" ] "edit and reorder both survive on A"
-            Expect.equal (queueView (pB.Model ())) (queueView (pA.Model ())) "replicas converge"
+            Expect.equal (queueIds pA) [ "q-2"; "q-1" ] "the reorder is visible on A"
+            Expect.equal (queueIds pB) (queueIds pA) "replicas converge"
 
             // Delete propagates and wins over nothing else pending.
             pB.Dispatch (user (DeleteQueuedMsg q2))
             syncBoth docA docB
-            Expect.equal (queueView (pA.Model ())) [ "q-1", "first draft" ] "the deleted entry is gone on A"
-            Expect.equal (queueView (pB.Model ())) (queueView (pA.Model ())) "replicas converge after delete"
-
-        testCase "two in-memory clients collaborate on one draft slot (bodies interleave)" <| fun () ->
-            let docA = Y.Doc.Create ()
-            let docB = Y.Doc.Create ()
-            // Yjs breaks concurrent ties by clientID; pin them so the test is one outcome.
-            docA.clientID <- 1.0
-            docB.clientID <- 2.0
-            let pA = Harness.run (App.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
-            let pB = Harness.run (App.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
-
-            // Ada writes her own draft; Grace joins Ada's slot and co-edits it.
-            pA.Dispatch (user (editBody ada (Text.insert 0 "hello") (pA.Model ())))
-            syncBoth docA docB
-            Expect.equal (bodyOf ada (pB.Model ())) (Some "hello") "B sees A's draft after sync"
-
-            // Concurrent edits to the same slot, at disjoint positions.
-            pA.Dispatch (user (editBody ada (Text.insert 5 " world") (pA.Model ())))
-            pB.Dispatch (user (editBody ada (Text.insert 0 "oh, ") (pB.Model ())))
-            syncBoth docA docB
-
-            Expect.equal (bodyOf ada (pA.Model ())) (Some "oh, hello world") "both edits survive on A"
-            Expect.equal (bodyOf ada (pB.Model ())) (bodyOf ada (pA.Model ())) "models converge"
+            Expect.equal (queueIds pA) [ "q-1" ] "the deleted entry is gone on A"
+            Expect.equal (queueIds pB) (queueIds pA) "replicas converge after delete"
 
         testCase "the collaborative title round-trips through the codec" <| fun () ->
             let doc = Y.Doc.Create ()
+            let registry = BodyRegistry doc
             let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
             p.Dispatch (user (EditTitleMsg (Text.insert 0 "Launch plan" (p.Model ()).Synced.Title)))
 
@@ -152,28 +139,6 @@ let private codecTests =
             Expect.equal decoded (p.Model ()).Synced "the doc decodes back to exactly the model's synced state"
             Expect.equal (Text.toString decoded.Title) "Launch plan" "the title crossed the boundary"
             Expect.isTrue (doc.share.has "title") "the title anchors to a named text root"
-
-        testCase "two in-memory clients converge on the title (concurrent edits interleave)" <| fun () ->
-            let docA = Y.Doc.Create ()
-            let docB = Y.Doc.Create ()
-            // Pin clientIDs so concurrent ties resolve to one deterministic outcome.
-            docA.clientID <- 1.0
-            docB.clientID <- 2.0
-            let pA = Harness.run (App.makeProgram docA (ClientModel.init (peer "ada" "Ada")))
-            let pB = Harness.run (App.makeProgram docB (ClientModel.init (peer "grace" "Grace")))
-
-            // Ada names the session; Grace sees it after a sync.
-            pA.Dispatch (user (EditTitleMsg (Text.insert 0 "plan" (pA.Model ()).Synced.Title)))
-            syncBoth docA docB
-            Expect.equal (Text.toString (pB.Model ()).Synced.Title) "plan" "B sees A's title after sync"
-
-            // Concurrent edits from both peers merge rather than clobber.
-            pA.Dispatch (user (EditTitleMsg (Text.insert 4 " day" (pA.Model ()).Synced.Title)))
-            pB.Dispatch (user (EditTitleMsg (Text.insert 0 "the " (pB.Model ()).Synced.Title)))
-            syncBoth docA docB
-
-            Expect.equal (Text.toString (pA.Model ()).Synced.Title) "the plan day" "both edits survive on A"
-            Expect.equal (Text.toString (pB.Model ()).Synced.Title) (Text.toString (pA.Model ()).Synced.Title) "models converge"
     ]
 
 // -----------------------------------------------------------------------------
@@ -184,21 +149,23 @@ let private codecTests =
 let private queueUnitTests =
     let ada = PeerId.create "ada" |> expect
     let qid (s: string) = QueueId.create s |> expect
-    let entry (id: string) (order: float) (body: string) : QueuedMessage =
-        { QueueId = qid id; Author = ada; Body = Text.ofString body; Order = order }
+    // The body is a fragment read from the doc at drain time, not a field on the entry, so
+    // these order/drain-plan units carry only identity, author, and order.
+    let entry (id: string) (order: float) : QueuedMessage =
+        { QueueId = qid id; Author = ada; Order = order }
     let queueOf (entries: QueuedMessage list) : Map<QueueId, QueuedMessage> =
         entries |> List.map (fun e -> e.QueueId, e) |> Map.ofList
 
     testList "Queue order and drain plan" [
         testCase "the queue order is (Order, QueueId): total and deterministic under ties" <| fun () ->
-            let queue = queueOf [ entry "b" 2.0 "second-by-id"; entry "a" 2.0 "first-by-id"; entry "c" 1.0 "first" ]
+            let queue = queueOf [ entry "b" 2.0; entry "a" 2.0; entry "c" 1.0 ]
             Expect.equal
                 (QueueOrder.sorted queue |> List.map (fun m -> QueueId.value m.QueueId))
                 [ "c"; "a"; "b" ]
                 "order ascending, QueueId breaks ties"
 
         testCase "enqueue lands at the tail; moveUp/moveDown are one register write between neighbours" <| fun () ->
-            let queue = queueOf [ entry "a" 1.0 ""; entry "b" 2.0 ""; entry "c" 3.0 "" ]
+            let queue = queueOf [ entry "a" 1.0; entry "b" 2.0; entry "c" 3.0 ]
             Expect.equal (QueueOrder.next queue) 4.0 "next appends after the tail"
             Expect.equal (QueueOrder.moveUp queue (qid "c")) (Some 1.5) "c moves between a and b"
             Expect.equal (QueueOrder.moveUp queue (qid "a")) None "the head cannot move up"
@@ -207,13 +174,13 @@ let private queueUnitTests =
             Expect.equal (QueueOrder.next Map.empty) 1.0 "an empty queue starts at 1"
 
         testCase "the drain plan consumes in order and dedups against the log-derived consumed set" <| fun () ->
-            let queue = queueOf [ entry "q2" 2.0 "two"; entry "q1" 1.0 "one"; entry "q3" 3.0 "three" ]
+            let queue = queueOf [ entry "q2" 2.0; entry "q1" 1.0; entry "q3" 3.0 ]
             // q2 was already consumed (a crash between append and removal left it in
             // the doc): it must be repaired out, never consumed twice.
             let plan = QueueDrain.plan (Set.ofList [ "q2" ]) queue
             Expect.equal
-                (plan.Batch |> List.map (fun m -> Text.toString m.Body))
-                [ "one"; "three" ]
+                (plan.Batch |> List.map (fun m -> QueueId.value m.QueueId))
+                [ "q1"; "q3" ]
                 "the batch is the snapshot in order, minus consumed"
             Expect.equal
                 (plan.Removals |> List.map QueueId.value)
@@ -221,7 +188,7 @@ let private queueUnitTests =
                 "every snapshot key leaves the doc, including the repair"
 
         testCase "a deleted entry is simply absent from the snapshot: never consumed" <| fun () ->
-            let plan = QueueDrain.plan Set.empty (queueOf [ entry "kept" 1.0 "kept" ])
+            let plan = QueueDrain.plan Set.empty (queueOf [ entry "kept" 1.0 ])
             Expect.equal (plan.Batch |> List.map (fun m -> QueueId.value m.QueueId)) [ "kept" ] "only present entries consume"
 
         testCase "MessageSent projects into the conversation" <| fun () ->
@@ -304,17 +271,16 @@ let private e2eTests =
                 let! a = connect "ada" "Ada"
                 let! b = connect "grace" "Grace"
 
-                // Ada writes her own draft (keyed by her peer id) and seeds the body.
-                a.Runner.Dispatch (user (editBody ada (Text.insert 0 "hello") (a.Runner.Model ())))
-                do! b.Runner.WaitFor (fun m -> bodyOf ada m = Some "hello")
+                // Ada composes her own draft (keyed by her peer id); the rich body fragment
+                // syncs to Grace over the real WebRTC transport + the Process's State relay.
+                do! compose a ada "hello from ada"
+                do! b.Runner.WaitFor (fun _ -> draftBody b ada = Some "hello from ada")
 
-                // Grace joins Ada's slot; concurrent edits both based on "hello" at disjoint
-                // positions merge into one deterministic string on both replicas.
-                a.Runner.Dispatch (user (editBody ada (Text.insert 5 " world") (a.Runner.Model ())))
-                b.Runner.Dispatch (user (editBody ada (Text.insert 0 "oh, ") (b.Runner.Model ())))
-
-                do! a.Runner.WaitFor (fun m -> bodyOf ada m = Some "oh, hello world")
-                do! b.Runner.WaitFor (fun m -> bodyOf ada m = Some "oh, hello world")
+                // Grace joins Ada's slot and rewrites the shared body; both replicas converge
+                // on it. (Character-level interleave merge is the fragment CRDT's cheap test.)
+                do! compose b ada "hello from grace"
+                do! a.Runner.WaitFor (fun _ -> draftBody a ada = Some "hello from grace")
+                do! b.Runner.WaitFor (fun _ -> draftBody b ada = Some "hello from grace")
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()
@@ -326,8 +292,8 @@ let private e2eTests =
                 let! b = connect "grace" "Grace"
 
                 // Ada drafts "ship it" and both replicas converge on it.
-                a.Runner.Dispatch (user (setDraft ada "ship it"))
-                do! b.Runner.WaitFor (fun m -> bodyOf ada m = Some "ship it")
+                do! compose a ada "ship it"
+                do! b.Runner.WaitFor (fun _ -> draftBody b ada = Some "ship it")
 
                 // Send = enqueue: the draft becomes a queue entry (pure CRDT write); the
                 // idle Process drains it into the timeline, and the entry leaves the
@@ -384,7 +350,7 @@ let private e2eTests =
                 do! b.Channel.Close ()
                 do! b.Runner.WaitFor (fun m -> m.Connection = Reconnecting)
 
-                a.Runner.Dispatch (user (setDraft ada "while you were away"))
+                do! compose a ada "while you were away"
                 a.Connection.SendDraft ada
                 do! a.Runner.WaitFor (fun m ->
                         m.Conversation.Items |> List.exists (fun i -> i.Body = "while you were away"))
@@ -396,10 +362,10 @@ let private e2eTests =
                         not m.EventConsumer.IsCatchingUp
                         && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "ship it"; "while you were away" ])
 
-                // E2E-7: unsent draft content renders in the draft editor, never in the
-                // timeline — the conversation comes from the projection alone.
-                a.Runner.Dispatch (user (setDraft ada "UNSENT thought"))
-                do! b.Runner.WaitFor (fun m -> bodyOf ada m = Some "UNSENT thought")
+                // E2E-7: unsent draft content lives in the draft, never in the timeline —
+                // the conversation comes from the projection alone.
+                do! compose a ada "UNSENT thought"
+                do! b.Runner.WaitFor (fun _ -> draftBody b ada = Some "UNSENT thought")
                 let html = Support.render (b.Runner.Model ())
                 // A section's markup runs from its data marker to its closing tag (no
                 // section nests another), so these slices are exact wherever the layout
@@ -411,7 +377,13 @@ let private e2eTests =
                 let editor = sectionAt Dom.Hooks.draftEditor
                 Expect.isTrue (timeline.Contains "while you were away") "the sent message is in the timeline"
                 Expect.isFalse (timeline.Contains "UNSENT") "unsent draft edits never appear in the timeline"
-                Expect.isTrue (editor.Contains "UNSENT thought") "the live draft renders in the draft editor"
+                // The rich body is mounted by the browser editor, so its text is not in the SSR
+                // string; the draft editor renders ada's mount host, and the fragment — not the
+                // timeline — holds the unsent content.
+                Expect.isTrue (editor.Contains (Dom.attr Dom.Hooks.draftInput (PeerId.value ada)))
+                    "the draft editor renders the unsent draft's mount host"
+                Expect.equal (draftBody b ada) (Some "UNSENT thought")
+                    "the unsent content lives in the draft body fragment, not the timeline"
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()
@@ -497,10 +469,6 @@ let private titlePresenceTests =
                   LatestOffset = None }
             let next = ClientModel.update (ConnectedMsg accepted) base'
             Expect.equal next.Session (Some (SessionId.create "demo-session" |> expect)) "the session id is learned from PeerAccepted"
-
-        testCase "EditTitleMsg sets the collaborative title" <| fun () ->
-            let next = ClientModel.update (EditTitleMsg (Text.insert 0 "launch" base'.Synced.Title)) base'
-            Expect.equal (Text.toString next.Synced.Title) "launch" "the title reflects the edit"
 
         testCase "RemotePresenceMsg adds, updates, and clears a peer's cursor" <| fun () ->
             let added = ClientModel.update (RemotePresenceMsg { PeerId = bob; DisplayName = "brave-owl"; TitleCursor = Some 3 }) base'

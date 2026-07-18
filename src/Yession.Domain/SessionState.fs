@@ -7,10 +7,10 @@ namespace Yession.Domain
 /// A client's work-in-progress draft: the WIP tail, not yet queued. Keyed by its
 /// `Author` in `SyncedSessionState.Drafts`, so each client owns at most one — the cap is
 /// structural, not a runtime check. The body is a rich-text `Y.XmlFragment` (a ProseMirror
-/// doc) anchored in the doc via `Encode.custom`; it is NOT carried in the model — a custom
-/// nested in a keyed map cannot round-trip Ylmish's structural decode — so the live fragment
-/// is resolved from the `BodyRegistry` by the draft's body key. Concurrent edits merge in the
-/// fragment CRDT, so "collaborate" is co-editing someone's slot and "write your own" is yours.
+/// doc) held as a top-level doc root keyed by `BodyKey.draft` (RichText.fs), NOT in the model
+/// and NOT in the synced-state tree — so this record carries only the slot's identity. Concurrent
+/// edits merge in the fragment CRDT, so "collaborate" is co-editing someone's slot and "write
+/// your own" is yours.
 type DraftState =
     { Author  : PeerId }
 
@@ -25,8 +25,9 @@ type QueuedMessage =
       /// (Yjs's concurrent-move duplication is unrepresentable this way).
       Order   : float }
 
-/// The doc key under which a draft/queue body's `Y.XmlFragment` is anchored. Stable across
-/// peers so every replica's `BodyRegistry` and editor bind to the same fragment.
+/// The name of the top-level `Y.XmlFragment` root that holds a draft/queue body. Stable across
+/// peers so every replica's `BodyRegistry` and editor bind to the same fragment (root types
+/// merge by name, so there is no creation race).
 module BodyKey =
     let draft (author: PeerId) : string = "draft:" + PeerId.value author
     let queued (id: QueueId) : string = "queue:" + QueueId.value id

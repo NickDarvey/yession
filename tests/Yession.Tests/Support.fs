@@ -84,43 +84,12 @@ module Docker =
 let peer (id: string) (name: string) : PeerState =
     { PeerId = PeerId.create id |> expect; DisplayName = name }
 
-/// The body of the draft in `peerId`'s slot (drafts are keyed by author, one per client).
-let bodyOf (peerId: PeerId) (m: ClientModel) : string option =
-    m.Synced.Drafts |> Map.tryFind peerId |> Option.map (fun d -> Ylmish.Text.toString d.Body)
-
-/// An edit to `peerId`'s draft slot; materialises the slot lazily if it does not exist
-/// yet (the first keystroke into your own composer, or joining a peer's draft).
-let editBody (peerId: PeerId) (edit: Ylmish.Text -> Ylmish.Text) (m: ClientModel) : ClientMsg =
-    match Map.tryFind peerId m.Synced.Drafts with
-    | Some draft -> EditDraftBodyMsg (peerId, edit draft.Body)
-    | None -> EditDraftBodyMsg (peerId, edit Ylmish.Text.empty)
-
-/// Materialise (or overwrite) `peerId`'s draft with `body` — the model message a
-/// keystroke produces; send it afterwards with `Connection.SendDraft peerId` (owner-sends).
-let setDraft (peerId: PeerId) (body: string) : ClientMsg =
-    EditDraftBodyMsg (peerId, Ylmish.Text.edit body Ylmish.Text.empty)
-
-let queueBodyOf (queueId: QueueId) (m: ClientModel) : string option =
-    m.Synced.Queue |> Map.tryFind queueId |> Option.map (fun e -> Ylmish.Text.toString e.Body)
-
-let editQueued (queueId: QueueId) (edit: Ylmish.Text -> Ylmish.Text) (m: ClientModel) : ClientMsg =
-    match Map.tryFind queueId m.Synced.Queue with
-    | Some entry -> EditQueuedBodyMsg (queueId, edit entry.Body)
-    | None ->
-        failwithf
-            "editQueued: entry %s not in the model (queue: %A)"
-            (QueueId.value queueId)
-            (m.Synced.Queue |> Map.toList |> List.map (fst >> QueueId.value))
-
-/// The queue as (id, body) in consumption order — the shape most assertions want.
-let queueView (m: ClientModel) : (string * string) list =
-    QueueOrder.sorted m.Synced.Queue
-    |> List.map (fun e -> QueueId.value e.QueueId, Ylmish.Text.toString e.Body)
-
-/// One full connected client against a host.
+/// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
+/// its doc), so the body seam below binds the same top-level fragment roots the app does.
 type Client =
     { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
       Connection : App.Connection
+      Registry : BodyRegistry
       Channel : FrameChannel<string>
       Doc : Y.Doc
       Hello : PeerHelloPayload }
@@ -133,12 +102,13 @@ let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: 
         let! channel = WebRtc.connect signalUrl
         let doc = Y.Doc.Create ()
         let local = peer id name
+        let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
-        let connection = App.connect options doc hello (user >> runner.Dispatch) channel
+        let connection = App.connect options doc registry hello (user >> runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
-        return { Runner = runner; Connection = connection; Channel = channel; Doc = doc; Hello = hello }
+        return { Runner = runner; Connection = connection; Registry = registry; Channel = channel; Doc = doc; Hello = hello }
     }
 
 /// `connectClientWith` under the default options (frame-based event reads).
@@ -157,12 +127,13 @@ let connectInMemoryClient (host: Host.SessionHost) (token: string) (id: string) 
         host.Connect serverEnd
         let doc = Y.Doc.Create ()
         let local = peer id name
+        let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
-        let connection = App.connect App.ConnectOptions.defaults doc hello (user >> runner.Dispatch) clientEnd
+        let connection = App.connect App.ConnectOptions.defaults doc registry hello (user >> runner.Dispatch) clientEnd
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
-        return { Runner = runner; Connection = connection; Channel = clientEnd; Doc = doc; Hello = hello }
+        return { Runner = runner; Connection = connection; Registry = registry; Channel = clientEnd; Doc = doc; Hello = hello }
     }
 
 /// Reconnect an existing client on a fresh channel, resuming event consumption from its
@@ -174,8 +145,70 @@ let reconnectClient (signalUrl: string) (client: Client) : Async<Client> =
             { App.ConnectOptions.defaults with
                 ResumeAfter = (client.Runner.Model ()).EventConsumer.LastProcessedOffset
                 PageSize = 2 }
-        let connection = App.connect options client.Doc client.Hello (user >> client.Runner.Dispatch) channel
+        let connection = App.connect options client.Doc client.Registry client.Hello (user >> client.Runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! client.Runner.WaitFor (fun m -> m.Connection = Connected)
         return { client with Connection = connection; Channel = channel }
     }
+
+/// The body-agnostic seam. These helpers are the ONLY test code that touches a body
+/// fragment; every suite drives drafts/queues through them, so no test outside the seam
+/// knows the body is a `Y.XmlFragment`. Bodies are markdown strings at this boundary.
+///
+/// Body fragments are top-level doc roots (`BodyKey`), created idempotently by
+/// `BodyRegistry.Fragment` (`doc.getXmlFragment`), so they are always available — no waiting to
+/// anchor. Reading a peer's fragment before its content has synced yields the empty string
+/// until the owner's update arrives (an empty root merges with the incoming one by name).
+module Body =
+
+    type Runner = Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
+
+    /// Author a peer's draft body on a bare runner: ensure the slot, then write the markdown
+    /// into its top-level body fragment.
+    let author (registry: BodyRegistry) (runner: Runner) (peer: PeerId) (markdown: string) : unit =
+        runner.Dispatch (user (EnsureDraftMsg peer))
+        Markdown.intoFragment markdown (registry.Fragment (BodyKey.draft peer))
+
+    /// Read a peer's draft body as markdown (the empty string before any content exists).
+    let draft (registry: BodyRegistry) (peer: PeerId) : string option =
+        Some (Markdown.ofFragment (registry.Fragment (BodyKey.draft peer)))
+
+    /// The bare-runner analogue of `Connection.SendDraft`: capture the draft body, dispatch
+    /// the enqueue, and seed the new queue fragment (the draft->queue content copy that shared
+    /// Y types cannot do by re-parenting).
+    let send (registry: BodyRegistry) (runner: Runner) (peer: PeerId) (queueId: QueueId) : unit =
+        let md = draft registry peer |> Option.defaultValue ""
+        runner.Dispatch (user (SendDraftMsg (peer, queueId)))
+        if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
+        // The composer empties after send (the body root is durable, not removed with the slot).
+        Markdown.intoFragment "" (registry.Fragment (BodyKey.draft peer))
+
+    /// One queue entry's markdown, read straight from the doc (exactly the drain's read).
+    let queued (doc: Y.Doc) (queueId: QueueId) : string =
+        SyncedStateSync.queuedBodyMarkdown doc queueId
+
+/// Author a draft body on a full Client: ensure the peer's slot, then write the markdown into
+/// its body fragment. The write flows through the fragment CRDT and syncs like any edit.
+/// Replaces the old `editBody`/`setDraft`.
+let compose (client: Client) (peer: PeerId) (markdown: string) : Async<unit> =
+    async {
+        client.Runner.Dispatch (user (EnsureDraftMsg peer))
+        do! client.Runner.WaitFor (fun m -> Map.containsKey peer m.Synced.Drafts)
+        Markdown.intoFragment markdown (client.Registry.Fragment (BodyKey.draft peer))
+    }
+
+/// Read a peer's draft body as markdown (the empty string until content has synced). Replaces
+/// the old `bodyOf`.
+let draftBody (client: Client) (peer: PeerId) : string option =
+    Body.draft client.Registry peer
+
+/// Read one queued entry's body as markdown, straight from the doc (the same read the
+/// drain uses). Replaces the old `queueBodyOf`.
+let queueBody (client: Client) (queueId: QueueId) : string =
+    Body.queued client.Doc queueId
+
+/// Every queued entry as `(queueId, markdown)`, in consumption order. Replaces `queueView`.
+let queueBodies (client: Client) : (string * string) list =
+    (client.Runner.Model ()).Synced.Queue
+    |> QueueOrder.sorted
+    |> List.map (fun entry -> QueueId.value entry.QueueId, queueBody client entry.QueueId)

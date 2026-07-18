@@ -44,40 +44,42 @@ module SyncedStateSync =
         a.Title.Value <- m.Title
         a.SharedBrief.Value <- m.SharedBrief
 
-    /// Per-draft encoding: the map key *is* the author (one draft per client). The body is a
-    /// rich-text `Y.XmlFragment` anchored via `Encode.custom` over a `RichBody` (keyed stably
-    /// by `BodyKey.draft`, so every replica binds the same fragment). The body value never
-    /// decodes — the app resolves the live fragment from the registry — so nothing else crosses.
-    let private encodeDraft (registry: BodyRegistry) (d: DraftState) : Encoded =
-        Encode.object [ "body", Encode.custom (registry.GetOrCreate (BodyKey.draft d.Author) :> CustomElement) ]
+    /// Per-draft encoding: the map key *is* the author (one draft per client). The entry
+    /// re-states the author as its one field — an empty object would write no Yjs key at all
+    /// (Ylmish creates a nested map lazily, only when a field writes), so the slot would never
+    /// materialize. The rich body is a top-level `Y.XmlFragment` root (`BodyKey.draft`), NOT
+    /// nested here: a fragment in a keyed-map entry crashes Ylmish's structural decode, so it is
+    /// a sibling root the app co-manages (RichText.fs).
+    let private encodeDraft (d: DraftState) : Encoded =
+        Encode.object [ "author", Encode.string (AVal.constant (PeerId.value d.Author)) ]
 
-    /// Per-queue-entry encoding: rich body via `Encode.custom`; order is an LWW float register,
-    /// so reorder = one register write (never a structural move). Author is a stable string.
-    let private encodeQueued (registry: BodyRegistry) (q: QueuedMessage) : Encoded =
+    /// Per-queue-entry encoding: author (stable string) and order (an LWW float register, so
+    /// reorder = one register write, never a structural move). The rich body is a top-level
+    /// `Y.XmlFragment` root (`BodyKey.queued`), not nested — see `encodeDraft`.
+    let private encodeQueued (q: QueuedMessage) : Encoded =
         Encode.object
             [ "author", Encode.string (AVal.constant (PeerId.value q.Author))
-              "order", Encode.float (AVal.constant q.Order)
-              "body", Encode.custom (registry.GetOrCreate (BodyKey.queued q.QueueId) :> CustomElement) ]
+              "order", Encode.float (AVal.constant q.Order) ]
 
     let private encodeBrief (b: aval<SharedBrief>) : Encoded =
         Encode.object [ "body", Encode.string (b |> AVal.map (fun x -> x.Body)) ]
 
     /// Which parts of the session sync, and how each merges. Everything else in the
-    /// models — the conversation projection above all — is app-only by omission. `registry`
-    /// supplies each body's `RichBody` (the client's; the Session Process reads the doc
-    /// directly and never encodes).
-    let encode (registry: BodyRegistry) (a: AdaptiveSyncedState) : Encoded =
+    /// models — the conversation projection above all — is app-only by omission. Rich bodies
+    /// are deliberately absent: they live as sibling `Y.XmlFragment` roots the app manages
+    /// directly (RichText.fs), so they never enter this decoded tree.
+    let encode (a: AdaptiveSyncedState) : Encoded =
         Encode.object
-            [ "drafts", Encode.map (encodeDraft registry) (a.Drafts :> amap<_, _>)
-              "queue", Encode.map (encodeQueued registry) (a.Queue :> amap<_, _>)
+            [ "drafts", Encode.map encodeDraft (a.Drafts :> amap<_, _>)
+              "queue", Encode.map encodeQueued (a.Queue :> amap<_, _>)
               // A top-level collaborative text: anchors to a named `title` Y.Text root, so
               // two peers naming the session offline merge rather than clobber.
               "title", Encode.text a.Title
               "sharedBrief", Encode.option encodeBrief a.SharedBrief ]
 
-    /// The doc-side field shapes, before identifier validation. Bodies are omitted: a custom
-    /// nested in a keyed map does not round-trip Ylmish's structural decode, so the body's
-    /// live fragment is resolved from the `BodyRegistry` by the app, never decoded here.
+    /// The doc-side field shapes, before identifier validation. Bodies are omitted here: they
+    /// are top-level `Y.XmlFragment` roots the app resolves via the `BodyRegistry`, never part
+    /// of the decoded tree (a fragment reachable there would crash the structural reader).
     type private QueuedFields =
         { Author : string
           Order : float }
@@ -140,6 +142,12 @@ module SyncedStateSync =
     [<Emit("$0.share.has($1)")>]
     let private shareHas (doc: Yjs.Y.Doc) (name: string) : bool = jsNative
 
+    [<Emit("Array.from($0.keys())")>]
+    let private mapKeys (m: Yjs.Y.Map<obj>) : string[] = jsNative
+
+    [<Emit("$0.toString()")>]
+    let private textString (t: Yjs.Y.Text) : string = jsNative
+
     /// Yjs materializes root types created by a *remote* update as untyped placeholders
     /// until they are first `get` locally; a structural read of such a doc would miss
     /// them. Type the codec's roots (and only those that exist) before reading.
@@ -152,9 +160,46 @@ module SyncedStateSync =
 
     /// Read the synced state currently in a doc (the decode direction alone — used by the
     /// Session Process, which observes the doc without running its own Ylmish binding).
+    ///
+    /// This reads the codec's named roots (`drafts`/`queue`/`title`/`sharedBrief`) directly and
+    /// structurally, rather than through a whole-doc structural decode. Rich bodies are sibling
+    /// `Y.XmlFragment` roots (RichText.fs), and Ylmish's structural reader walks a fragment as a
+    /// cyclic plain object — so a whole-doc read crashes the instant any body exists. Reading the
+    /// known roots by hand sidesteps the body roots entirely. Total: an entry with an invalid id
+    /// is skipped (`draftsToDomain`/`queueToDomain`); an absent root reads as empty.
     let ofDoc (doc: Yjs.Y.Doc) : Result<SyncedSessionState, Error list> =
         materializeRoots doc
-        Decode.run SyncedSessionState.empty decode doc
+        let draftsH =
+            if shareHas doc "drafts" then
+                let m : Yjs.Y.Map<obj> = doc.getMap "drafts"
+                (HashMap.empty, mapKeys m) ||> Array.fold (fun acc k -> HashMap.add k () acc)
+            else HashMap.empty
+        let queueH =
+            if shareHas doc "queue" then
+                let m : Yjs.Y.Map<obj> = doc.getMap "queue"
+                (HashMap.empty, mapKeys m)
+                ||> Array.fold (fun acc k ->
+                    match m.get k with
+                    | Some entryObj when not (isNull entryObj) ->
+                        let entry = unbox<Yjs.Y.Map<obj>> entryObj
+                        let author = entry.get "author" |> Option.map (unbox<string>) |> Option.defaultValue ""
+                        let order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
+                        HashMap.add k { Author = author; Order = order } acc
+                    | _ -> acc)
+            else HashMap.empty
+        let title =
+            if shareHas doc "title" then Text.ofString (textString (doc.getText "title")) else Text.empty
+        let brief =
+            if shareHas doc "sharedBrief" then
+                match (doc.getMap "sharedBrief" : Yjs.Y.Map<obj>).get "body" with
+                | Some b when not (isNull b) -> Some { SharedBrief.Body = unbox<string> b }
+                | _ -> None
+            else None
+        Ok
+            { Drafts = draftsToDomain draftsH
+              Queue = queueToDomain queueH
+              Title = title
+              SharedBrief = brief }
 
     /// The origin tag on the Session Process's own doc writes (the drain's removals),
     /// distinct from the remote-apply origin so they broadcast like any local update.
@@ -172,19 +217,19 @@ module SyncedStateSync =
                     ids |> List.iter (fun id -> queue.delete (QueueId.value id))),
                 processOrigin)
 
-    /// The Markdown of a queue entry's rich body, read straight from the doc — the drain's
-    /// snapshot into the durable `MessageSent` (the Session Process observes the doc without a
-    /// Ylmish binding, so it reads the nested `Y.XmlFragment` directly). An entry whose body
-    /// was never materialized (empty) snapshots as the empty string.
+    /// The Markdown of a queue entry's rich body, read straight from its top-level fragment
+    /// root — the drain's snapshot into the durable `MessageSent` (the Session Process observes
+    /// the doc without a Ylmish binding, so it reads the body fragment directly). An entry whose
+    /// body was never written snapshots as the empty string.
     let queuedBodyMarkdown (doc: Yjs.Y.Doc) (id: QueueId) : string =
-        materializeRoots doc
-        let queue : Yjs.Y.Map<obj> = doc.getMap "queue"
-        match queue.get (QueueId.value id) with
-        | Some entryObj ->
-            match (unbox<Yjs.Y.Map<obj>> entryObj).get "body" with
-            | Some frag when not (isNull frag) -> Markdown.ofFragment (unbox<Yjs.Y.XmlFragment> frag)
-            | _ -> ""
-        | None -> ""
+        Markdown.ofFragment (doc.getXmlFragment (BodyKey.queued id))
+
+    /// The Markdown of a draft slot's rich body, read straight from its top-level fragment root
+    /// (keyed by the draft's author). An empty/never-written body reads as the empty string.
+    /// Used where a body must be asserted from a doc that has no client registry (e.g. a
+    /// restarted Session Process).
+    let draftBodyMarkdown (doc: Yjs.Y.Doc) (author: PeerId) : string =
+        Markdown.ofFragment (doc.getXmlFragment (BodyKey.draft author))
 
 /// Moves Yjs updates over the transport's opaque `State` frame. The wire payload is a
 /// base64-encoded Yjs update; lib0 (a yjs dependency) provides base64 in both Node and

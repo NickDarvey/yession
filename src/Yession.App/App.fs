@@ -27,7 +27,7 @@ module App =
     /// by `Program.withSetState` (the browser renders `View.view` with Lit; the headless
     /// test harness captures the model), so the program itself carries a unit view.
     /// `initial` is usually `ClientModel.init peer`.
-    let makeProgram (doc: Y.Doc) (registry: BodyRegistry) (initial: ClientModel) =
+    let makeProgram (doc: Y.Doc) (initial: ClientModel) =
         Program.mkProgram
             (fun () -> initial, Cmd.none)
             (fun msg model -> ClientModel.update msg model, Cmd.none)
@@ -36,9 +36,9 @@ module App =
             { Doc = doc
               Create = fun (m: ClientModel) -> SyncedStateSync.create m.Synced
               Update = fun a m -> SyncedStateSync.update a m.Synced
-              // The registry supplies each body's RichBody so the editor and the codec bind
-              // the same nested Y.XmlFragment (the body's live handle is never decoded).
-              Encode = SyncedStateSync.encode registry
+              // Rich bodies are NOT encoded here — they are sibling `Y.XmlFragment` roots the
+              // app manages directly (RichText.fs), so the sync boundary carries only structure.
+              Encode = SyncedStateSync.encode
               Decode = decodeModel
               OnError = Ylmish.Program.OnError.log }
 
@@ -146,6 +146,7 @@ module App =
     let connect
         (options: ConnectOptions)
         (doc: Y.Doc)
+        (registry: BodyRegistry)
         (hello: PeerHelloPayload)
         (dispatch: ClientMsg -> unit)
         (channel: FrameChannel<string>)
@@ -215,10 +216,20 @@ module App =
             Connection.run hello dispatchAndConsume (DocSync.applyRemote doc) onResponse onEventsPage channel
           SendDraft =
             fun peerId ->
-                // Enqueue under a fresh queue id (unique keys make concurrent sends
-                // safe); the model update moves the peer's own draft into the shared queue.
+                // Enqueue under a fresh queue id (unique keys make concurrent sends safe).
+                // Carry the rich body over: capture the draft fragment as markdown, move the
+                // slot into the queue, then seed the new queue entry's fragment. Body fragments
+                // are top-level roots (`getXmlFragment` is idempotent), so both are available
+                // immediately; shared Y types can't be re-parented, hence the markdown copy.
                 match QueueId.create (string (System.Guid.NewGuid ())) with
-                | Ok queueId -> dispatch (SendDraftMsg (peerId, queueId))
+                | Ok queueId ->
+                    let draftBody = registry.Fragment (BodyKey.draft peerId)
+                    let md = Markdown.ofFragment draftBody
+                    dispatch (SendDraftMsg (peerId, queueId))
+                    if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
+                    // The composer empties after send: the sender's body root is a durable
+                    // top-level root (it is not removed with the slot), so clear it explicitly.
+                    Markdown.intoFragment "" draftBody
                 | Error e -> failwithf "queue id invariant violated: %s" e
           InterruptTurn =
             fun turnId ->
