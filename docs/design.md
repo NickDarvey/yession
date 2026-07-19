@@ -150,7 +150,11 @@ Process may read plaintext.
 Command-to-container encryption is designed for but not implemented yet.
 ```
 
-A random session token is acceptable for local development.
+User access to a session is authorized through the Manager as an OIDC provider
+(authorization code + PKCE; each Session Process registers as a client with its
+per-launch control secret — see docs/plans/04-session-authorization.md). The shipped
+authentication strategy trusts localhost, matching this threat model; upstream OIDC is
+a strategy swap, not a redesign.
 
 ---
 

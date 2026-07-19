@@ -30,7 +30,6 @@ let private statePath (name: string) =
 let private record (id: string) (name: string) : SessionRecord =
     { SessionId = SessionId.create id |> expect
       DisplayName = name
-      Token = sprintf "%s-token" id
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
       DataDir = sprintf "sessions/%s" id }
 
@@ -45,6 +44,8 @@ let private stateTests =
             Expect.equal decoded twoSessions "decode∘encode is the identity"
 
         testCase "unknown fields decode tolerantly (a newer schema's file still loads)" <| fun () ->
+            // `token` here is a REMOVED field (the pre-OIDC shared session token): the
+            // same tolerance that accepts future fields also lets an old file load.
             let withExtras =
                 """{"version":1,"futureField":true,"sessions":[{"sessionId":"alpha","displayName":"Alpha work","token":"alpha-token","createdAt":"2026-07-15T12:00:00.0000000+00:00","dataDir":"sessions/alpha","colour":"teal"}]}"""
             let decoded = ManagerCodec.fromString withExtras |> expect
@@ -115,9 +116,9 @@ let private processTests =
                 let! pm = ProcessManager.create options
 
                 // Create: durable registration, not running.
-                let record = pm.CreateSession "proc-1" "Process One" "proc-token" |> expect
+                let record = pm.CreateSession "proc-1" "Process One" |> expect
                 Expect.equal (pm.Sessions () |> List.map (fun v -> v.Status)) [ ProcessManager.NotRunning ] "registered, not running"
-                match pm.CreateSession "proc-1" "Again" "other" with
+                match pm.CreateSession "proc-1" "Again" with
                 | Error _ -> ()
                 | Ok _ -> failwith "duplicate session ids must be rejected"
 
@@ -139,7 +140,10 @@ let private processTests =
                 let! html = Interop.getText (sprintf "http://127.0.0.1:%d/" port) |> Async.AwaitPromise
                 Expect.isTrue (html.Contains (Dom.sessionMetaName + "\" " + Dom.attr "content" "proc-1")) "the child serves ITS session's page"
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" port
-                let! a = connectClient signalUrl "proc-token" "ada" "Ada"
+                // Access rides the OIDC bounce: login against the child, which round-trips
+                // through this Manager's authorize endpoint and back.
+                let! opened = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" port)
+                let! a = connectClient signalUrl opened.PeerToken "ada" "Ada"
                 do! compose a a.Hello.PeerId "hello from another process"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
@@ -152,7 +156,8 @@ let private processTests =
                 Expect.equal (pm.TryFind record.SessionId).Value.Status ProcessManager.NotRunning "stopped"
                 let! resumed = pm.Launch record.SessionId
                 let resumedPort = resumed |> expect
-                let! b = connectClient (sprintf "http://127.0.0.1:%d/signal" resumedPort) "proc-token" "grace" "Grace"
+                let! reopened = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" resumedPort)
+                let! b = connectClient (sprintf "http://127.0.0.1:%d/signal" resumedPort) reopened.PeerToken "grace" "Grace"
                 do! b.Runner.WaitFor (fun m ->
                         not m.EventConsumer.IsCatchingUp
                         && (m.Conversation.Items |> List.exists (fun i -> i.Body = "hello from another process")))
@@ -201,16 +206,24 @@ let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNat
 [<Emit("delete process.env[$0]")>]
 let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
-/// Start a bare control server over the given secret→capabilities table, plus the real
-/// notification and MCP hubs wired to their SSE routes. Returns both hubs so a test can push
-/// down the same wires the Manager uses.
-let private startControlServer (secrets: (string * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub * McpHub.McpHub> =
+/// Start a bare control server over the given secret→(session, capabilities) table, plus
+/// the real notification and MCP hubs wired to their SSE routes. Returns both hubs so a
+/// test can push down the same wires the Manager uses.
+let private startControlServer (secrets: (string * SessionId * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub * McpHub.McpHub> =
     async {
-        let table = Map.ofList secrets
+        let table =
+            secrets
+            |> List.map (fun (secret, sessionId, capabilities) ->
+                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities }
+                secret, caller)
+            |> Map.ofList
         let hub = NotificationHub.create ()
         let mcp = McpHub.create ()
+        // This bare control server has no OIDC provider; the DCR route is not under test.
+        let registerClient _ (sessionId: SessionId) _ : Yession.Oidc.RegisterClientResponse =
+            { ClientId = SessionId.value sessionId; ClientSecret = "unused"; Issuer = "http://unused" }
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
@@ -237,7 +250,7 @@ let private controlRpcTests =
                         }
                 let backend = InMemoryBackend.create recorder scriptedExec
                 let grant = Authority.grant registry backend
-                let! server, url, _, _ = startControlServer [ "secret-a", grant sessionA; "secret-b", grant sessionB ]
+                let! server, url, _, _ = startControlServer [ "secret-a", sessionA, grant sessionA; "secret-b", sessionB, grant sessionB ]
 
                 let capsA = ControlClient.capabilities url "secret-a"
                 let capsB = ControlClient.capabilities url "secret-b"
@@ -295,7 +308,7 @@ let private controlRpcTests =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
                             Grant = Some (Authority.grant registry backend) }
-                let record = pm.CreateSession "rpc-child" "RPC child" "rpc-token" |> expect
+                let record = pm.CreateSession "rpc-child" "RPC child" |> expect
 
                 // The child inherits our environment: run its built-in diagnostic agent.
                 setEnv "YESSION_AGENT" "diagnostic"
@@ -303,7 +316,8 @@ let private controlRpcTests =
                 unsetEnv "YESSION_AGENT"
                 let port = launched |> expect
 
-                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) "rpc-token" "ada" "Ada"
+                let! opened = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" port)
+                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) opened.PeerToken "ada" "Ada"
                 do! compose a a.Hello.PeerId "run the diagnostic"
                 a.Connection.SendDraft a.Hello.PeerId
 
@@ -333,7 +347,6 @@ let private controlRpcTests =
 let private uiRecord : SessionRecord =
     { SessionId = SessionId.create "ui-render" |> expect
       DisplayName = "UI <Render>"
-      Token = "t"
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
       DataDir = "sessions/ui-render" }
 
@@ -345,7 +358,7 @@ let private uiRenderTests =
             Expect.isTrue (stopped.Contains "UI &lt;Render&gt;") "display names are escaped"
             let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.stop "ui-render")) "running rows can stop"
-            Expect.isTrue (running.Contains "http://127.0.0.1:8199/?token=t") "the open link targets the child's port with the token"
+            Expect.isTrue (running.Contains "href=\"http://127.0.0.1:8199/\"") "the open link is a plain URL to the child's port (no token — access is the OIDC bounce)"
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.session "ui-render")) "the row is a poll unit keyed by session id"
             let crashed = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)) "a crash is visible"
@@ -387,10 +400,10 @@ let private uiFlowTests =
                 Expect.isTrue (css.Length > 500) "the shared local stylesheet serves from the endpoint (no CDN)"
 
                 // Create over the form endpoint.
-                let! created = postForm (baseUrl + "/sessions") "id=ui-1&name=UI+One&token=ui-token" |> Async.AwaitPromise
+                let! created = postForm (baseUrl + "/sessions") "id=ui-1&name=UI+One" |> Async.AwaitPromise
                 Expect.equal (statusOfReply created) 200 "created"
                 Expect.isTrue ((bodyOfReply created).Contains (Dom.attr Dom.Manager.session "ui-1")) "the refreshed table holds the new session"
-                let! duplicate = postForm (baseUrl + "/sessions") "id=ui-1&name=Again&token=x" |> Async.AwaitPromise
+                let! duplicate = postForm (baseUrl + "/sessions") "id=ui-1&name=Again" |> Async.AwaitPromise
                 Expect.equal (statusOfReply duplicate) 400 "duplicates are rejected"
 
                 // Launch from the UI; the fragment reflects it and the child REALLY serves.
@@ -401,7 +414,7 @@ let private uiFlowTests =
                     match (pm.TryFind (SessionId.create "ui-1" |> expect)).Value.Status with
                     | ProcessManager.Running (port, _) -> port
                     | other -> failwithf "expected Running, got %A" other
-                Expect.isTrue (row.Contains (sprintf "http://127.0.0.1:%d/?token=ui-token" sessionPort)) "the open link is live"
+                Expect.isTrue (row.Contains (sprintf "href=\"http://127.0.0.1:%d/\"" sessionPort)) "the open link is live (plain URL, no token)"
                 let! shell = Interop.getText (sprintf "http://127.0.0.1:%d/" sessionPort) |> Async.AwaitPromise
                 Expect.isTrue (shell.Contains (Dom.sessionMetaName + "\" " + Dom.attr "content" "ui-1")) "the opened session serves its shell"
 
@@ -514,16 +527,18 @@ let private compositionTests =
                 let! manager = startPackagedManager env
 
                 // Create and launch a session from the management UI.
-                let! created = postForm (manager.UiUrl + "sessions") "id=composed&name=Composed&token=comp-token" |> Async.AwaitPromise
+                let! created = postForm (manager.UiUrl + "sessions") "id=composed&name=Composed" |> Async.AwaitPromise
                 Expect.equal (statusOfReply created) 200 "created via the UI"
                 let! launched = postForm (manager.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
                 let row = bodyOfReply launched
                 Expect.isTrue (row.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "launched via the UI"
                 let sessionPort = portOfRow row
 
-                // A real client messages the packaged child; the diagnostic agent runs a
-                // real command through the packaged manager's control RPC.
-                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" sessionPort) "comp-token" "ada" "Ada"
+                // A real client messages the packaged child; access rides the OIDC bounce
+                // through the packaged manager; the diagnostic agent runs a real command
+                // through the packaged manager's control RPC.
+                let! openedA = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" sessionPort)
+                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" sessionPort) openedA.PeerToken "ada" "Ada"
                 do! compose a a.Hello.PeerId "built binaries talking"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun m ->
@@ -539,7 +554,8 @@ let private compositionTests =
                 Expect.isTrue ((bodyOfReply stopped).Contains (Dom.attr Dom.Manager.status Dom.Manager.statusStopped)) "stopped via the UI"
                 let! resumed = postForm (manager.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
                 let resumedPort = portOfRow (bodyOfReply resumed)
-                let! b = connectClient (sprintf "http://127.0.0.1:%d/signal" resumedPort) "comp-token" "grace" "Grace"
+                let! openedB = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" resumedPort)
+                let! b = connectClient (sprintf "http://127.0.0.1:%d/signal" resumedPort) openedB.PeerToken "grace" "Grace"
                 do! b.Runner.WaitFor (fun m ->
                         not m.EventConsumer.IsCatchingUp
                         && (m.Conversation.Items |> List.exists (fun i -> i.Body = "built binaries talking")))
@@ -553,7 +569,8 @@ let private compositionTests =
                 Expect.isTrue (page.Contains (Dom.attr Dom.Manager.session "composed")) "the registry survived the manager restart"
                 let! relaunched = postForm (manager2.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
                 let relaunchedPort = portOfRow (bodyOfReply relaunched)
-                let! c = connectClient (sprintf "http://127.0.0.1:%d/signal" relaunchedPort) "comp-token" "carol" "Carol"
+                let! openedC = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" relaunchedPort)
+                let! c = connectClient (sprintf "http://127.0.0.1:%d/signal" relaunchedPort) openedC.PeerToken "carol" "Carol"
                 do! c.Runner.WaitFor (fun m ->
                         not m.EventConsumer.IsCatchingUp
                         && (m.Conversation.Items |> List.exists (fun i -> i.Body = "built binaries talking")))
@@ -592,7 +609,7 @@ let private telemetryTests =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
                             Telemetry = Some collector }
-                let record = pm.CreateSession "tel-child" "Tel child" "tel-token" |> expect
+                let record = pm.CreateSession "tel-child" "Tel child" |> expect
 
                 // The child inherits our environment: run its built-in usage-probe agent.
                 setEnv "YESSION_AGENT" "usage-probe"
@@ -600,9 +617,11 @@ let private telemetryTests =
                 unsetEnv "YESSION_AGENT"
                 let port = launched |> expect
 
-                // A real client messages the child; the probe turn runs and emits usage back
-                // to the Manager's receiver over the injected OTLP endpoint.
-                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) "tel-token" "ada" "Ada"
+                // A real client messages the child; access rides the OIDC bounce; the probe
+                // turn runs and emits usage back to the Manager's receiver over the
+                // injected OTLP endpoint.
+                let! openedTel = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" port)
+                let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) openedTel.PeerToken "ada" "Ada"
                 do! compose a a.Hello.PeerId "probe a turn"
                 a.Connection.SendDraft a.Hello.PeerId
 
@@ -679,7 +698,9 @@ let private notificationStreamTests =
         testCaseAsync "a pushed notification reaches the subscribed session, is scoped to it, and stops on cancel" <|
             async {
                 let! server, url, hub, _ =
-                    startControlServer [ "secret-a", stubCapabilities; "secret-b", stubCapabilities ]
+                    startControlServer
+                        [ "secret-a", (SessionId.create "sse-a" |> expect), stubCapabilities
+                          "secret-b", (SessionId.create "sse-b" |> expect), stubCapabilities ]
 
                 let mutable receivedA : SessionNotification list = []
                 let mutable receivedB : SessionNotification list = []
@@ -773,7 +794,7 @@ let private mcpStreamTests =
         testCaseAsync "a subscriber gets the current list on connect, then every change, and stops on cancel" <|
             async {
                 let! server, url, _, mcp =
-                    startControlServer [ "secret-a", stubCapabilities ]
+                    startControlServer [ "secret-a", (SessionId.create "sse-mcp" |> expect), stubCapabilities ]
                 // Seed a list before anyone subscribes: a connecting session must still see it.
                 mcp.Publish { Tools = [ searchTool ] }
 

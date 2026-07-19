@@ -14,6 +14,7 @@ module Yession.Host.ProcessManager
 open System
 open Yession.Domain
 open Yession.Manager
+open Yession.Oidc
 
 /// A session's runtime status — never persisted.
 type SessionStatus =
@@ -27,8 +28,8 @@ type SessionView =
       Status : SessionStatus }
 
 type ProcessManager =
-    { /// Register a new session (durable): id, display name, token. Does not launch.
-      CreateSession : string -> string -> string -> Result<SessionRecord, string>
+    { /// Register a new session (durable): id, display name. Does not launch.
+      CreateSession : string -> string -> Result<SessionRecord, string>
       /// Launch (or resume — same thing) a registered session; resolves with its port.
       Launch : SessionId -> Async<Result<int, string>>
       /// Stop a running session (SIGTERM, SIGKILL after a grace period).
@@ -79,7 +80,11 @@ type Options =
       /// Telemetry (Plan 04): when set, the Manager runs an OTLP `/v1/logs` receiver on its
       /// endpoint feeding this collector, and injects `YESSION_OTLP_ENDPOINT`/`_SECRET` into
       /// every launch. None = telemetry off (children run with telemetry disabled).
-      Telemetry : TelemetryReceiver.Collector option }
+      Telemetry : TelemetryReceiver.Collector option
+      /// How the OIDC provider authenticates the human at /authorize. None = the
+      /// built-in trust-localhost strategy; an upstream OIDC integration is a
+      /// different strategy value, not a different Manager.
+      Strategy : AuthenticationStrategy option }
 
 module Options =
     let defaults (dataDir: string) (sessionCommand: string) (sessionArgs: string list) : Options =
@@ -91,7 +96,8 @@ module Options =
           StopGraceMs = 3000
           Grant = None
           ManagerPort = None
-          Telemetry = None }
+          Telemetry = None
+          Strategy = None }
 
 [<Fable.Core.Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
@@ -166,36 +172,52 @@ let createWithUi
     // function returns — route through a slot the record fills in below. Requests
     // cannot arrive before then in practice; a too-early one gets a 503.
     let mutable self : ProcessManager option = None
+
+    // The Manager's endpoint always runs: beyond environment authority it now carries
+    // the OIDC provider every session needs to authorize its users, so there is no
+    // endpoint-less mode. The port is only known once the server listens, and the
+    // provider reads the issuer lazily, so the mutable slot resolves cleanly.
+    let mutable endpointUrl : string option = None
+    let issuerOf () = defaultArg endpointUrl ""
+    let! provider = ManagerOidc.create issuerOf (defaultArg options.Strategy Strategy.localhost)
+
+    // What a control secret resolves to: the launch's session plus its (optional)
+    // environment grant. Registration works for every launch; environment routes 403
+    // without a grant.
+    let resolveCaller (secret: string) : Control.ControlCaller option =
+        Map.tryFind secret secretSessions
+        |> Option.map (fun sessionId ->
+            { Control.ControlCaller.SessionId = sessionId
+              Capabilities = Map.tryFind secret secrets })
+
     let! controlServer =
-        if Option.isNone options.Grant && Option.isNone ui && Option.isNone options.ManagerPort && Option.isNone options.Telemetry then
-            async { return None }
-        else
-            async {
-                let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-                    let handled =
-                        Control.tryHandle (fun secret -> Map.tryFind secret secrets) reportName notifications.Register mcp.Register req res
-                        || (match options.Telemetry with
-                            | Some collector ->
-                                TelemetryReceiver.tryHandle (fun secret -> Set.contains secret telemetrySecrets) collector req res
-                            | None -> false)
-                        || (match ui, self with
-                            | Some handle, Some pm -> handle pm req res
-                            | Some _, None ->
-                                res.writeHead (503, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
-                                res.``end`` "starting"
-                                true
-                            | None, _ -> false)
-                    if not handled then
-                        res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
-                        res.``end`` "not found"
-                let server = Interop.createServer handler
-                let! listening =
-                    Async.FromContinuations (fun (cont, _, _) ->
-                        server.listen (defaultArg options.ManagerPort 0, "127.0.0.1", fun () -> cont server) |> ignore)
-                return Some listening
-            }
-    let controlUrl () =
-        controlServer |> Option.map (fun s -> sprintf "http://127.0.0.1:%d" (Interop.serverPort s))
+        async {
+            let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+                let handled =
+                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient req res
+                    || (match options.Telemetry with
+                        | Some collector ->
+                            TelemetryReceiver.tryHandle (fun secret -> Set.contains secret telemetrySecrets) collector req res
+                        | None -> false)
+                    || provider.TryHandle req res
+                    || (match ui, self with
+                        | Some handle, Some pm -> handle pm req res
+                        | Some _, None ->
+                            res.writeHead (503, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                            res.``end`` "starting"
+                            true
+                        | None, _ -> false)
+                if not handled then
+                    res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                    res.``end`` "not found"
+            let server = Interop.createServer handler
+            let! listening =
+                Async.FromContinuations (fun (cont, _, _) ->
+                    server.listen (defaultArg options.ManagerPort 0, "127.0.0.1", fun () -> cont server) |> ignore)
+            endpointUrl <- Some (sprintf "http://127.0.0.1:%d" (Interop.serverPort listening))
+            return Some listening
+        }
+    let controlUrl () = endpointUrl
 
     let statusOf (record: SessionRecord) : SessionStatus =
         let key = SessionId.value record.SessionId
@@ -206,14 +228,13 @@ let createWithUi
             | Some code -> Exited code
             | None -> NotRunning
 
-    let createSession (sessionId: string) (displayName: string) (token: string) : Result<SessionRecord, string> =
+    let createSession (sessionId: string) (displayName: string) : Result<SessionRecord, string> =
         match SessionId.create sessionId with
         | Error e -> Error e
         | Ok id ->
             let record =
                 { SessionId = id
                   DisplayName = if displayName.Trim().Length > 0 then displayName.Trim () else sessionId
-                  Token = token
                   CreatedAt = clock ()
                   DataDir = sprintf "sessions/%s" (SessionId.value id) }
             match ManagerState.addSession record state with
@@ -231,16 +252,19 @@ let createWithUi
             | None -> return Error (sprintf "unknown session %s" key)
             | Some _ when Map.containsKey key children -> return Error (sprintf "session %s is already running" key)
             | Some record ->
-                // Step 24: mint the per-launch secret and grant the capabilities it
-                // resolves to — the session scope is established HERE, by the Manager.
+                // Step 24: mint the per-launch secret — every launch gets one (it now
+                // authenticates OAuth client registration as well as environment calls).
+                // The capability grant stays separate: only granted launches enter
+                // `secrets`; the session scope is established HERE, by the Manager.
                 let controlEnv =
-                    match options.Grant, controlUrl () with
-                    | Some grant, Some url ->
+                    match controlUrl () with
+                    | Some url ->
                         let secret = Interop.randomSecret ()
-                        secrets <- Map.add secret (grant record.SessionId) secrets
+                        options.Grant
+                        |> Option.iter (fun grant -> secrets <- Map.add secret (grant record.SessionId) secrets)
                         secretSessions <- Map.add secret record.SessionId secretSessions
                         [ "YESSION_CONTROL_URL", url; "YESSION_CONTROL_SECRET", secret ], Some secret
-                    | _ -> [], None
+                    | None -> [], None
                 // Telemetry (Plan 04): the child exports OTLP logs to the Manager's own
                 // endpoint, authenticated with a per-launch bearer, when telemetry is enabled.
                 let telemetryEnv =
@@ -252,7 +276,6 @@ let createWithUi
                     | _ -> [], None
                 let env =
                     [ "YESSION_SESSION", SessionId.value record.SessionId
-                      "YESSION_TOKEN", record.Token
                       "YESSION_SESSION_DATA", sprintf "%s/%s" options.DataDir record.DataDir
                       "YESSION_PORT", string (defaultArg options.SessionPort 0)
                       // The child watches its stdin and exits when this Manager dies.
@@ -264,8 +287,10 @@ let createWithUi
                      | Some secret ->
                          secrets <- Map.remove secret secrets
                          secretSessions <- Map.remove secret secretSessions
-                         // The launch's notification subscriptions die with its authority.
+                         // The launch's notification subscriptions and OAuth client
+                         // registration die with its authority.
                          notifications.Drop secret
+                         provider.RevokeByControlSecret secret
                      | None -> ())
                     // The launch's telemetry authority dies with it too.
                     match snd telemetryEnv with

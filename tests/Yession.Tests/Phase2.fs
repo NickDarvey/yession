@@ -31,9 +31,8 @@ let private launchTests =
             async {
                 let m = Manager.create None None basePort
                 manager <- Some m
-                let request =
-                    { SessionId = SessionId.create "managed-1" |> expect
-                      SessionToken = "managed-1-token" }
+                let request : SessionLaunchRequest =
+                    { SessionLaunchRequest.SessionId = SessionId.create "managed-1" |> expect }
                 let! result = m.StartSession request
                 Expect.equal result.SessionId request.SessionId "the launched session"
                 Expect.isTrue (result.ProcessId.Length > 0) "a process id is assigned"
@@ -55,9 +54,8 @@ let private launchTests =
         testCaseAsync "launching the same session twice is rejected" <|
             async {
                 let m = manager.Value
-                let request =
-                    { SessionId = SessionId.create "managed-1" |> expect
-                      SessionToken = "managed-1-token" }
+                let request : SessionLaunchRequest =
+                    { SessionLaunchRequest.SessionId = SessionId.create "managed-1" |> expect }
                 let mutable rejected = false
                 try
                     let! _ = m.StartSession request
@@ -71,8 +69,8 @@ let private launchTests =
                 let m = manager.Value
                 let managed = (m.Registered ()) |> List.head
                 let signalUrl = managed.BootstrapUri + "signal"
-                let! a = connectClient signalUrl "managed-1-token" "ada" "Ada"
-                let! b = connectClient signalUrl "managed-1-token" "grace" "Grace"
+                let! a = connectClient signalUrl (managed.Host.MintPeerToken ()) "ada" "Ada"
+                let! b = connectClient signalUrl (managed.Host.MintPeerToken ()) "grace" "Grace"
 
                 do! compose a a.Hello.PeerId "managed hello"
                 do! b.Runner.WaitFor (fun _ -> draftBody b a.Hello.PeerId = Some "managed hello")
@@ -270,11 +268,10 @@ let private lazyLifecycleTests =
                 let m = Manager.create (Some conversational) (Some backend) lazyEnvironmentPort
                 let! _ =
                     m.StartSession
-                        { SessionId = SessionId.create "lazy-1" |> expect
-                          SessionToken = "lazy-token" }
+                        { SessionLaunchRequest.SessionId = SessionId.create "lazy-1" |> expect }
                 let managed = (m.Registered ()) |> List.head
 
-                let! a = connectClient (managed.BootstrapUri + "signal") "lazy-token" "ada" "Ada"
+                let! a = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "ada" "Ada"
                 do! compose a a.Hello.PeerId "what is a monad?"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun model ->
@@ -308,11 +305,10 @@ let private lazyLifecycleTests =
                 let m = Manager.create (Some taskAgent) (Some backend) (lazyEnvironmentPort + 1)
                 let! _ =
                     m.StartSession
-                        { SessionId = SessionId.create "lazy-2" |> expect
-                          SessionToken = "lazy-token" }
+                        { SessionLaunchRequest.SessionId = SessionId.create "lazy-2" |> expect }
                 let managed = (m.Registered ()) |> List.head
 
-                let! a = connectClient (managed.BootstrapUri + "signal") "lazy-token" "ada" "Ada"
+                let! a = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "ada" "Ada"
                 do! compose a a.Hello.PeerId "please run the tests"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun model ->
@@ -484,14 +480,13 @@ let private commandTests =
                 let m = Manager.create (Some devAgent) (Some (Backends.LocalProcessBackend.create ())) commandPort
                 let! _ =
                     m.StartSession
-                        { SessionId = SessionId.create "cmd-e2e-session" |> expect
-                          SessionToken = "cmd-token" }
+                        { SessionLaunchRequest.SessionId = SessionId.create "cmd-e2e-session" |> expect }
                 let managed = (m.Registered ()) |> List.head
 
                 // Two clients: the sender, and a second browser that must see the same
                 // command log purely through event pages.
-                let! a = connectClient (managed.BootstrapUri + "signal") "cmd-token" "ada" "Ada"
-                let! b = connectClient (managed.BootstrapUri + "signal") "cmd-token" "grace" "Grace"
+                let! a = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "ada" "Ada"
+                let! b = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "grace" "Grace"
                 do! compose a a.Hello.PeerId "run the thing"
                 a.Connection.SendDraft a.Hello.PeerId
 
@@ -581,13 +576,12 @@ let private acceptanceE2eTests =
                 let m = Manager.create (Some devAgent) (Some (Backends.LocalProcessBackend.create ())) acceptancePort
                 let! _ =
                     m.StartSession
-                        { SessionId = SessionId.create "catchup-session" |> expect
-                          SessionToken = "catchup-token" }
+                        { SessionLaunchRequest.SessionId = SessionId.create "catchup-session" |> expect }
                 let managed = (m.Registered ()) |> List.head
                 let signalUrl = managed.BootstrapUri + "signal"
 
-                let! a = connectClient signalUrl "catchup-token" "ada" "Ada"
-                let! b = connectClient signalUrl "catchup-token" "grace" "Grace"
+                let! a = connectClient signalUrl (managed.Host.MintPeerToken ()) "ada" "Ada"
+                let! b = connectClient signalUrl (managed.Host.MintPeerToken ()) "grace" "Grace"
                 do! b.Runner.WaitFor (fun model -> not model.EventConsumer.IsCatchingUp)
 
                 // Grace leaves; the agent works while she is away.
@@ -662,9 +656,9 @@ let private persistenceTests =
 
                 // First life: a client drafts and sends a message.
                 let m1 = Manager.createWith None None (Some makeLog) persistencePort
-                let! _ = m1.StartSession { SessionId = sessionId; SessionToken = "persist-token" }
+                let! _ = m1.StartSession { SessionLaunchRequest.SessionId = sessionId }
                 let managed1 = (m1.Registered ()) |> List.head
-                let! a = connectClient (managed1.BootstrapUri + "signal") "persist-token" "ada" "Ada"
+                let! a = connectClient (managed1.BootstrapUri + "signal") (managed1.Host.MintPeerToken ()) "ada" "Ada"
                 do! compose a a.Hello.PeerId "remember me"
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun model ->
@@ -675,7 +669,7 @@ let private persistenceTests =
 
                 // Second life: a fresh Manager + Process over the same file.
                 let m2 = Manager.createWith None None (Some makeLog) (persistencePort + 1)
-                let! _ = m2.StartSession { SessionId = sessionId; SessionToken = "persist-token" }
+                let! _ = m2.StartSession { SessionLaunchRequest.SessionId = sessionId }
                 let managed2 = (m2.Registered ()) |> List.head
                 let! after = managed2.Host.Log.Read None Int32.MaxValue
                 Expect.equal
@@ -685,7 +679,7 @@ let private persistenceTests =
 
                 // A reconnecting client catches up on the persisted conversation, and
                 // new appends continue the offset sequence.
-                let! b = connectClient (managed2.BootstrapUri + "signal") "persist-token" "grace" "Grace"
+                let! b = connectClient (managed2.BootstrapUri + "signal") (managed2.Host.MintPeerToken ()) "grace" "Grace"
                 do! b.Runner.WaitFor (fun model ->
                         (model.Conversation.Items |> List.exists (fun i -> i.Body = "remember me"))
                         && not model.EventConsumer.IsCatchingUp)

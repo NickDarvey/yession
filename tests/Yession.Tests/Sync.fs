@@ -249,20 +249,26 @@ let private queueUnitTests =
 // -----------------------------------------------------------------------------
 
 let private port = 8101
-let private token = "sync-e2e-token"
 let private sessionId = SessionId.create "sync-e2e-session" |> expect
 let private signalUrl = sprintf "http://127.0.0.1:%d/signal" port
 
 let mutable private host : Host.SessionHost option = None
 
-let private connect = connectClient signalUrl token
+// Peer tokens are minted per connection from the running host (what `/me` serves an
+// authorized browser); the suite's ordered cases read it through the mutable slot.
+let private peerToken () =
+    match host with
+    | Some h -> h.MintPeerToken ()
+    | None -> failwith "host not started"
+
+let private connect (id: string) = connectClient signalUrl (peerToken ()) id
 let private reconnect = reconnectClient signalUrl
 
 let private e2eTests =
     testList "Draft sync E2E" [
         testCaseAsync "start the Session Process host" <|
             async {
-                let! h = Host.start sessionId token port
+                let! h = Host.start sessionId port
                 host <- Some h
             }
 
@@ -393,7 +399,7 @@ let private e2eTests =
             async {
                 let mallory = PeerId.create "mallory" |> expect
                 let! channel = WebRtc.connect signalUrl
-                do! channel.Send (Control (PeerHello { PeerId = mallory; DisplayName = "Mallory"; Token = token }))
+                do! channel.Send (Control (PeerHello { PeerId = mallory; DisplayName = "Mallory"; Token = peerToken () }))
                 let rec awaitAccepted () =
                     async {
                         match! channel.Receive () with

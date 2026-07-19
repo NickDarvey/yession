@@ -12,6 +12,7 @@
     <Compile Include="Agent.fs" />
     <Compile Include="Scheduler.fs" />
     <Compile Include="Transport.fs" />
+    <Compile Include="Auth.fs" />
     <Compile Include="Library.fs" />
   </ItemGroup>
 

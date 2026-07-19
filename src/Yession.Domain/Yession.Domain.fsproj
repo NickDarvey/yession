@@ -18,6 +18,7 @@
     <Compile Include="Markdown.fs" />
     <Compile Include="Transport.fs" />
     <Compile Include="Launch.fs" />
+    <Compile Include="Auth.fs" />
     <Compile Include="Serialization.fs" />
     <Compile Include="Sync.fs" />
   </ItemGroup>

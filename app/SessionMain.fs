@@ -17,26 +17,34 @@ let private expect =
     | Error e -> failwith e
 
 let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local-session") |> expect
-let private token = Interop.envOr "YESSION_TOKEN" "local-dev-token"
 let private port = Interop.envOr "YESSION_PORT" "0" |> int
 let private dataDir =
     Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId))
 
-// Environment capabilities over the control RPC (Step 24), when the Manager granted
-// them to this launch. Absent, the session runs environment-less.
-let private environmentCapabilities =
+// The control channel to the Manager (Step 24): environment capability calls, the
+// display-name report, AND this launch's OAuth client registration all authenticate
+// with the same per-launch secret. Absent (a bare `yession-session` run), the session
+// is environment-less and its HTTP surface is ungated.
+let private controlChannel =
     match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
     | "", _
     | _, "" -> None
-    | url, secret -> Some (ControlClient.capabilities url secret)
+    | url, secret -> Some (url, secret)
+
+// Environment capabilities over the control RPC, when the Manager granted them. A
+// launch without a grant still holds the channel (403 on environment routes).
+let private environmentCapabilities =
+    controlChannel |> Option.map (fun (url, secret) -> ControlClient.capabilities url secret)
 
 // The same control channel carries the collaborative title back to the Manager as the
-// session's display name, when a control channel exists for this launch.
+// session's display name.
 let private reportName =
-    match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
-    | "", _
-    | _, "" -> None
-    | url, secret -> Some (ControlClient.nameReporter url secret)
+    controlChannel |> Option.map (fun (url, secret) -> ControlClient.nameReporter url secret)
+
+// User authorization: with a Manager, this session is an OIDC client of it; the RP
+// configuration completes after listen (the redirect URI needs the bound port).
+let private auth =
+    controlChannel |> Option.map (fun _ -> SessionAuth.create sessionId)
 
 // Telemetry (Plan 04): one OTel log record per completed turn, exported to the Manager's
 // collector. Configured from `YESSION_OTLP_ENDPOINT`/`_SECRET`; a pure no-op when absent.
@@ -120,7 +128,25 @@ Async.StartImmediate (
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
-        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp sessionId token port
+        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp sessionId auth port
+        // Register this launch's OAuth client with the Manager — HERE, after listen
+        // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
+        // (readiness implies the login surface works). A session that cannot register
+        // cannot authorize users, so failure is fatal, never a half-open session.
+        match controlChannel, auth with
+        | Some (url, secret), Some auth ->
+            let redirectUri = sprintf "http://127.0.0.1:%d/callback" host.Port
+            match! ControlClient.registerClient url secret redirectUri with
+            | Error e ->
+                eprintfn "client registration with the manager failed: %s" e
+                Interop.exit 1
+            | Ok registration ->
+                match! auth.Configure registration.Issuer registration.ClientId registration.ClientSecret redirectUri with
+                | Error e ->
+                    eprintfn "%s" e
+                    Interop.exit 1
+                | Ok () -> ()
+        | _ -> ()
         // Sessions never outlive their Manager: spawned under the guard, the Manager's
         // death closes our stdin (the kernel does this even on SIGKILL) and we exit.
         if Interop.envOr "YESSION_PARENT_GUARD" "" = "1" then

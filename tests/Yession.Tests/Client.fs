@@ -21,7 +21,6 @@ let private expect =
     | Error e -> failwith e
 
 let private port = 8100
-let private token = "client-e2e-token"
 let private sessionId = SessionId.create "client-e2e-session" |> expect
 let private peerId = PeerId.create "grace" |> expect
 let private signalUrl = sprintf "http://127.0.0.1:%d/signal" port
@@ -48,7 +47,7 @@ let tests =
     testList "Client shell E2E" [
         testCaseAsync "start the Session Process host" <|
             async {
-                let! h = Host.start sessionId token port
+                let! h = Host.start sessionId port
                 host <- Some h
             }
 
@@ -63,7 +62,7 @@ let tests =
                     checkReconnecting model
 
                 let! channel = WebRtc.connect signalUrl
-                let hello = { PeerId = peerId; DisplayName = "Grace"; Token = token }
+                let hello = { PeerId = peerId; DisplayName = "Grace"; Token = host.Value.MintPeerToken () }
                 Async.StartImmediate(Connection.run hello dispatch ignore (fun _ _ -> ()) (fun _ _ -> ()) channel)
 
                 // Handshake completes -> Connected, with the joined offset as latest-known.

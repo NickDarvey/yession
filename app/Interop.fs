@@ -113,6 +113,27 @@ let headerOf (req: IncomingMessage) (name: string) : string option = jsNative
 [<Emit("crypto.randomUUID()")>]
 let randomSecret () : string = jsNative
 
+[<ImportAll("node:crypto")>]
+let private nodeCrypto : obj = jsNative
+
+/// SHA-256 of the UTF-8 input, base64url-encoded — the PKCE S256 operation the provider
+/// applies to a `code_verifier` (RFC 7636 §4.2).
+[<Emit("$0.createHash('sha256').update($1, 'utf8').digest('base64url')")>]
+let private sha256B64u (cryptoModule: obj) (input: string) : string = jsNative
+
+let sha256Base64Url (input: string) : string = sha256B64u nodeCrypto input
+
+/// Constant-time string equality (client secrets); length mismatch short-circuits,
+/// which leaks only the length.
+[<Emit("(() => { const left = Buffer.from($1, 'utf8'), right = Buffer.from($2, 'utf8'); return left.length === right.length && $0.timingSafeEqual(left, right) })()")>]
+let private timingSafeEq (cryptoModule: obj) (a: string) (b: string) : bool = jsNative
+
+let timingSafeEqualStr (a: string) (b: string) : bool = timingSafeEq nodeCrypto a b
+
+/// The TCP peer address of a request (`socket.remoteAddress`); None once disconnected.
+[<Emit("($0.socket?.remoteAddress ?? null)")>]
+let remoteAddressOf (req: IncomingMessage) : string option = jsNative
+
 /// POST a JSON body and resolve with the response text. Uses Node 24's global `fetch`.
 [<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 }).then(r => r.text())")>]
 let postText (url: string) (body: string) : JS.Promise<string> = jsNative

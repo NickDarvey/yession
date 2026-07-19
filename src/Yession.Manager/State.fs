@@ -15,9 +15,6 @@ open Thoth.Json.Net
 type SessionRecord =
     { SessionId : SessionId
       DisplayName : string
-      /// The session token, stored plaintext — the local-development threat model
-      /// (recorded in GAPS); revisit with real authn.
-      Token : string
       CreatedAt : DateTimeOffset
       /// Directory name under the Manager's data dir holding the session's stores
       /// (event log + doc sidecar).
@@ -65,14 +62,12 @@ module ManagerCodec =
                 Encode.object
                     [ "sessionId", Codec.sessionId.Encode s.SessionId
                       "displayName", Encode.string s.DisplayName
-                      "token", Encode.string s.Token
                       "createdAt", Codec.timestamp.Encode s.CreatedAt
                       "dataDir", Encode.string s.DataDir ]
           Decode =
             Decode.object (fun get ->
                 { SessionRecord.SessionId = get.Required.Field "sessionId" Codec.sessionId.Decode
                   SessionRecord.DisplayName = get.Required.Field "displayName" Decode.string
-                  SessionRecord.Token = get.Required.Field "token" Decode.string
                   SessionRecord.CreatedAt = get.Required.Field "createdAt" Codec.timestamp.Decode
                   SessionRecord.DataDir = get.Required.Field "dataDir" Decode.string }) }
 

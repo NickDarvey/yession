@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Fable bindings to the `openid-client` npm package — the OpenID-Foundation-certified
+    relying-party (client) implementation. Fable-only: `dotnet build` type-checks it; the
+    runnable JS comes from Fable. Standalone project per the Fable.Dockerode pattern.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="OpenIdClient.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>

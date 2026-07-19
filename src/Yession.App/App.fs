@@ -79,19 +79,21 @@ module App =
 
     /// The HTTP event fetcher for `ConnectOptions.FetchEvents`: translates "events
     /// after offset X" into the Session Process's immutable-chunk URL scheme
-    /// (`/events/{n}?token=…`) and decodes the JSONL envelopes. Because full chunks
-    /// are served immutable, an HTTP cache in front of `getText` (the browser's) makes
-    /// history replay local; only the growing tail chunk hits the network.
+    /// (`/events/{n}`) and decodes the JSONL envelopes. Because full chunks are served
+    /// immutable, an HTTP cache in front of `getText` (the browser's) makes history
+    /// replay local; only the growing tail chunk hits the network.
     module EventFetch =
 
         /// Build a fetcher over the platform's HTTP GET (`getText` must fail on
-        /// non-success statuses). A transport failure yields an empty final page so
-        /// the read loop re-arms on the next availability hint instead of wedging;
-        /// a malformed line is real corruption and fails loudly.
+        /// non-success statuses). `token` = a session-minted peer token appended as
+        /// `?token=` — the cookie-less path (Node clients); the browser passes None
+        /// and rides its same-origin auth cookie. A transport failure yields an empty
+        /// final page so the read loop re-arms on the next availability hint instead
+        /// of wedging; a malformed line is real corruption and fails loudly.
         let overHttp
             (getText: string -> Async<string>)
             (baseUrl: string)
-            (token: string)
+            (token: string option)
             : EventOffset option -> Async<EventPage<SessionEvent>> =
             fun after ->
                 async {
@@ -99,8 +101,12 @@ module App =
                         match after with
                         | Some o -> EventOffset.value o + 1L
                         | None -> 0L
+                    let tokenSuffix =
+                        token
+                        |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
+                        |> Option.defaultValue ""
                     let url =
-                        sprintf "%s/events/%d?token=%s" baseUrl (EventChunk.indexOf nextOffset) (System.Uri.EscapeDataString token)
+                        sprintf "%s/events/%d%s" baseUrl (EventChunk.indexOf nextOffset) tokenSuffix
                     let! fetched =
                         async {
                             try

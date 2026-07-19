@@ -68,10 +68,13 @@ let createFull
                     backend |> Option.map (fun b -> Authority.grant containers b request.SessionId)
                 let baseLog = makeLog |> Option.map (fun make -> make request.SessionId)
                 let docStore = makeDocStore |> Option.map (fun make -> make request.SessionId)
+                // In-process sessions run without an HTTP auth gate (there is no OIDC
+                // provider in this composition — it belongs to the ProcessManager);
+                // peer-token gating still applies, minted via `Host.MintPeerToken`.
                 let! host =
                     // The in-process Manager path has no control RPC, so no notification
                     // channel — the reverse leg exists only across the OS-process boundary.
-                    Host.startFull runAgent environmentCapabilities baseLog docStore None (fun _ _ -> ()) None None request.SessionId request.SessionToken port
+                    Host.startFull runAgent environmentCapabilities baseLog docStore None (fun _ _ -> ()) None None request.SessionId None port
                 let bootstrapUri = sprintf "http://127.0.0.1:%d/" host.Port
                 let managed =
                     { SessionId = request.SessionId

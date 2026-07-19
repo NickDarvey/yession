@@ -197,7 +197,6 @@ let private turnTests =
 // -----------------------------------------------------------------------------
 
 let private port = 8102
-let private token = "agent-e2e-token"
 let private e2eSessionId = SessionId.create "agent-e2e-session" |> expect
 let private signalUrl = sprintf "http://127.0.0.1:%d/signal" port
 
@@ -214,13 +213,13 @@ let private e2eTests =
                             onChunk { Text = context.CurrentMessage.Body }
                             return AgentCompleted (sprintf "You said: %s" context.CurrentMessage.Body, None)
                         }
-                let! h = Host.startWith (Some scripted) e2eSessionId token port
+                let! h = Host.startWith (Some scripted) e2eSessionId port
                 host <- Some h
             }
 
         testCaseAsync "a sent message yields a streamed agent response built from events (E2E-5)" <|
             async {
-                let! a = connectClient signalUrl token "ada" "Ada"
+                let! a = connectClient signalUrl (host.Value.MintPeerToken ()) "ada" "Ada"
                 do! compose a a.Hello.PeerId "hi agent"
                 a.Connection.SendDraft a.Hello.PeerId
 
@@ -298,10 +297,9 @@ let private liveTests =
                             8135
                     let! _ =
                         m.StartSession
-                            { SessionId = SessionId.create "live-tools" |> expect
-                              SessionToken = "live-tools-token" }
+                            { SessionLaunchRequest.SessionId = SessionId.create "live-tools" |> expect }
                     let managed = (m.Registered ()) |> List.head
-                    let! a = connectClient (managed.BootstrapUri + "signal") "live-tools-token" "ada" "Ada"
+                    let! a = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "ada" "Ada"
                     do! compose a a.Hello.PeerId "Use your execute_command tool to run the executable `node` with arguments `-e` and `console.log(6*7)`, then reply with just the number it printed."
                     a.Connection.SendDraft a.Hello.PeerId
 

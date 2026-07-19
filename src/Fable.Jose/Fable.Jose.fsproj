@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Fable bindings to the `jose` npm package — the standard JavaScript JWT/JWKS library,
+    built on WebCrypto. Fable-only, like app/Yession.Host.fsproj: `dotnet build` only
+    type-checks it; the runnable JS comes from Fable. Kept a standalone project so the
+    bindings are a distinct layer, mirroring Fable.Dockerode / Fable.Yjs.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Jose.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>

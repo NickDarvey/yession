@@ -37,7 +37,9 @@ let private chunkMathTests =
             Expect.equal (EventChunk.firstOffset 2) (int64 (2 * EventChunk.size)) "chunk 2 starts at 2*size"
 
         testCase "full chunks cache hard for 3 days; the tail never caches" <| fun () ->
-            Expect.equal (EventChunk.cacheControl true) "public, max-age=259200, immutable" "immutable + 3 days"
+            // `private`: chunks sit behind per-user auth — the browser cache still
+            // serves them (offline replay), shared caches never do.
+            Expect.equal (EventChunk.cacheControl true) "private, max-age=259200, immutable" "immutable + 3 days"
             Expect.equal (EventChunk.cacheControl false) "no-store" "a growing chunk is never cached"
     ]
 
@@ -45,7 +47,8 @@ let private endpointTests =
     testList "HTTP endpoint" [
         testCaseAsync "chunks serve JSONL with immutability-derived cache headers, token-gated" <|
             async {
-                let! h = Host.start (SessionId.create "events-http" |> expect) "events-token" 0
+                let! h = Host.start (SessionId.create "events-http" |> expect) 0
+                let mintedToken = h.MintPeerToken ()
                 // Fill two full chunks plus a 5-event tail (no client connects, so appends
                 // go straight to the log from offset 0).
                 for i in 1 .. 2 * EventChunk.size + 5 do
@@ -59,30 +62,33 @@ let private endpointTests =
                 let url (chunk: int) (token: string) =
                     sprintf "http://127.0.0.1:%d/events/%d?token=%s" h.Port chunk token
 
-                let! full = httpGet (url 0 "events-token") |> Async.AwaitPromise
+                let! full = httpGet (url 0 mintedToken) |> Async.AwaitPromise
                 Expect.equal full.status 200 "chunk 0 serves"
-                Expect.equal full.cacheControl "public, max-age=259200, immutable" "a full chunk is immutable"
+                Expect.equal full.cacheControl "private, max-age=259200, immutable" "a full chunk is immutable"
                 let fullLines = full.body.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
                 Expect.equal fullLines.Length EventChunk.size "exactly one chunk of lines"
                 // The served lines are the canonical wire encoding.
                 let decoded = Codec.fromString Codec.sessionEventEnvelope fullLines.[0] |> expect
                 Expect.equal (EventOffset.value decoded.Offset) 0L "chunk 0 starts at offset 0"
 
-                let! tail = httpGet (url 2 "events-token") |> Async.AwaitPromise
+                let! tail = httpGet (url 2 mintedToken) |> Async.AwaitPromise
                 Expect.equal tail.cacheControl "no-store" "the growing tail chunk never caches"
                 let tailLines = tail.body.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
                 Expect.equal tailLines.Length 5 "the tail has the remainder"
 
-                let! beyond = httpGet (url 9 "events-token") |> Async.AwaitPromise
+                let! beyond = httpGet (url 9 mintedToken) |> Async.AwaitPromise
                 Expect.equal beyond.status 200 "a chunk beyond the log serves"
                 Expect.equal beyond.cacheControl "no-store" "emptiness must never be cached"
                 Expect.equal (beyond.body.Trim ()) "" "and is empty"
 
                 let! wrongToken = httpGet (url 0 "stolen") |> Async.AwaitPromise
-                Expect.equal wrongToken.status 401 "the event log is token-gated"
+                Expect.equal wrongToken.status 401 "the event log is gated on minted tokens"
                 Expect.equal wrongToken.cacheControl "no-store" "rejections never cache"
 
-                let! notAChunk = httpGet (sprintf "http://127.0.0.1:%d/events/nope?token=events-token" h.Port) |> Async.AwaitPromise
+                let! bare = httpGet (sprintf "http://127.0.0.1:%d/events/0" h.Port) |> Async.AwaitPromise
+                Expect.equal bare.status 401 "no cookie and no token is unauthorized"
+
+                let! notAChunk = httpGet (sprintf "http://127.0.0.1:%d/events/nope?token=%s" h.Port mintedToken) |> Async.AwaitPromise
                 Expect.equal notAChunk.status 404 "non-numeric chunk paths are not found"
                 do! h.Stop ()
             }
@@ -90,13 +96,14 @@ let private endpointTests =
         Tag.needs "HTTP fetcher client" [ Tag.Ports; Tag.Native ] (fun () ->
             testCaseAsync "a client consuming over the HTTP fetcher builds the same timeline as the frame path" <|
             async {
-                let! h = Host.start (SessionId.create "events-http-client" |> expect) "fetch-token" 0
+                let! h = Host.start (SessionId.create "events-http-client" |> expect) 0
+                let mintedToken = h.MintPeerToken ()
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
                 let baseUrl = sprintf "http://127.0.0.1:%d" h.Port
                 let options =
                     { App.ConnectOptions.defaults with
-                        FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) baseUrl "fetch-token") }
-                let! a = connectClientWith options signalUrl "fetch-token" "ada" "Ada"
+                        FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) baseUrl (Some mintedToken)) }
+                let! a = connectClientWith options signalUrl mintedToken "ada" "Ada"
 
                 do! compose a a.Hello.PeerId "fetched over http"
                 a.Connection.SendDraft a.Hello.PeerId

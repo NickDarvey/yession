@@ -20,7 +20,6 @@ let private expect =
     | Error e -> failwith e
 
 let private port = 8099
-let private token = "e2e-token"
 let private sessionId = SessionId.create "e2e-session" |> expect
 let private peerId = PeerId.create "ada" |> expect
 let private joined = PeerJoined { PeerId = peerId; DisplayName = "Ada" }
@@ -40,7 +39,7 @@ let tests =
     testList "WebRTC E2E" [
         testCaseAsync "start the Session Process host" <|
             async {
-                let! h = Host.start sessionId token port
+                let! h = Host.start sessionId port
                 host <- Some h
             }
 
@@ -48,7 +47,7 @@ let tests =
             async {
                 let h = host.Value
                 let! channel = WebRtc.connect signalUrl
-                do! channel.Send (Control (PeerHello { PeerId = peerId; DisplayName = "Ada"; Token = token }))
+                do! channel.Send (Control (PeerHello { PeerId = peerId; DisplayName = "Ada"; Token = h.MintPeerToken () }))
                 let! accepted = channel.Receive ()
                 match accepted with
                 | Some (Control (PeerAccepted a)) ->
@@ -72,6 +71,7 @@ let tests =
                 let h = host.Value
                 let rejectedEnded = h.WaitForNextSessionEnd ()
                 let! badChannel = WebRtc.connect signalUrl
+                // An unminted string — never handed out by this host, so always rejected.
                 do! badChannel.Send (Control (PeerHello { PeerId = peerId; DisplayName = "Mallory"; Token = "wrong-token" }))
                 let! rejected = badChannel.Receive ()
                 match rejected with
