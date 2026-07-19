@@ -80,17 +80,57 @@ console.log('new CRDT ops   :', Y.encodeStateAsUpdate(doc, sv).length > 2)  // t
 **Actual:** the paragraph's second `Y.XmlText` is merged into the first and deleted from the
 CRDT; the doc emits new ops.
 
-## Why this is nasty
+## With a `ySyncPlugin` binding attached, the merge is re-entrant and duplicates content
 
-The mutation is invisible at the content level — `frag.toString()` and serialized output are
-unchanged, because the merge is content-preserving. But:
+Standalone, the merge is content-preserving (`frag.toString()` is unchanged). But the merge
+runs as **two transactions** (the `applyDelta`, then the delete), and if a `ySyncPlugin`
+binding is attached to the doc — the normal situation for a doc containing own-client content —
+the binding's observer (`_typeChanged`) fires after the **first** one. It evicts the changed
+parent from its mapping (`transaction.changedParentTypes.forEach(delType)`) and re-renders the
+fragment with a full `createNodeFromYElement` descent — which reaches the same still-adjacent
+pair and **runs the merge again**, appending the right sibling's content a second time.
 
-- If an editor binding (`ySyncPlugin`) is attached to the same doc, its `mapping` still
-  references the deleted item. The next local edit re-syncs against that inconsistent mapping
-  and can **silently drop a whole block** from the document. We hit this in production shape:
-  serialize-body-on-send → user keeps typing → a linked paragraph vanishes. No error, no log.
-- Any consumer using the converter for read-only purposes (serialization, export, indexing,
-  diffing) is unknowingly writing to — and broadcasting ops from — the doc it reads.
+Demonstrable headlessly by attaching an observer that replicates `_typeChanged`'s eviction +
+re-render (including its `mux` semantics), then running the read from the previous section:
+
+```js
+// binding replica: on any foreign transaction, evict changed types then re-render fully
+const meta = createEmptyMeta()
+const mux = createMutex()
+frag.observeDeep((events, transaction) => mux(() => {
+  Y.iterateDeletedStructs(transaction, transaction.deleteSet, s => {
+    if (s.constructor === Y.Item) s.content.type && meta.mapping.delete(s.content.type)
+  })
+  const delType = (_, type) => meta.mapping.delete(type)
+  transaction.changed.forEach(delType)
+  transaction.changedParentTypes.forEach(delType)
+  frag.toArray().map(t => meta.mapping.get(t) ?? createNodeFromYElement(t, schema, meta))
+}))
+
+yXmlFragmentToProseMirrorRootNode(frag, schema)   // the "read"
+
+// paragraph content before: "one "|"two"  (two Y.XmlText children)
+// paragraph content after :  "one twotwo" (one child — content DUPLICATED, sibling deleted)
+```
+
+(`createNodeFromYElement` / `createEmptyMeta` imported from `src/plugins/sync-plugin.js`;
+in the real plugin the same descent runs inside `_typeChanged`, which additionally dispatches
+a whole-document ProseMirror replace — in the middle of the caller's "read".)
+
+## Real-world impact
+
+We hit this in production shape, where the adjacent text node was empty (whole-block link
+layout), making the duplication invisible in content reads: serialize the live body on send →
+raw CRDT still *looks* correct → user keeps typing → the next edit, diffed through
+`updateYFragment` against the binding state the read had churned, **silently dropped a whole
+linked paragraph** from the CRDT. Reproduced under an editor E2E with controls: no read
+between paste and typing → block survives; a ~300 ms settle before the read → block survives.
+No error, no log — content just goes missing on a later edit, which made this extremely hard
+to trace.
+
+Beyond bindings: any consumer using the converter for read-only purposes (serialization,
+export, indexing, diffing) is unknowingly writing to — and broadcasting ops from — the doc it
+reads.
 
 ## Suggested fix
 

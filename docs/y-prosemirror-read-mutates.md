@@ -42,11 +42,13 @@ the wire skips the branch entirely.
 ## Why it surfaced with links (not plain text)
 
 The merge fires when a text node's immediate right-sibling (`_item.right`) is another
-`Y.Text`. Whole-block **link marks** produce exactly that adjacency in the Yjs item list
-across paragraph boundaries in a way plain paragraphs did not, so the corruption showed up the
-moment a body contained two linked blocks. It is not fundamentally link-specific — any layout
-that puts two same-client `Y.Text` items adjacent can trigger it — links are just the reliable
-trigger we hit.
+`Y.Text`. An item's `right` links siblings **within the same parent element** (each Yjs type
+holds its own item list), so the trigger layout is two same-client `Y.XmlText` items inside
+one paragraph — which the **link-paste flow** produces (the linked text plus a sibling text
+node at the mark boundary) and plain typing does not. It is not fundamentally link-specific —
+any flow that leaves two same-client `Y.Text` siblings adjacent can trigger it — links are
+just the reliable trigger we hit. (An earlier revision of this note said the adjacency arose
+"across paragraph boundaries"; that was wrong — `_item.right` cannot cross parents.)
 
 ## Precise repro
 
@@ -101,8 +103,19 @@ This is how it actually bit us. Reproduced with the host-free editor harness
 
 Key detail that makes it look like a heisenbug: the deletion is **not observable immediately
 after the read** — the raw fragment reads correct right after `ofFragment`. It only manifests on
-the **next edit**, which re-syncs against a binding whose mapping the read left inconsistent. So
-"read, check, looks fine, keep typing, content vanishes."
+the **next edit**. So "read, check, looks fine, keep typing, content vanishes."
+
+The binding interaction is worse than a stale mapping — it is **re-entrant** (verified
+headlessly against 1.3.7 by replicating `_typeChanged`'s evict-and-re-render, mux included):
+the merge runs as two transactions (`applyDelta`, then the delete), the binding's observer
+fires after the first, evicts the changed parent from its mapping, re-renders with a full
+descent, reaches the still-adjacent pair, and **runs the merge again** — appending the right
+sibling's content a *second* time (`"one "|"two"` → `"one twotwo"`) and dispatching a
+whole-document ProseMirror replace in the middle of the read. In our layout the adjacent text
+was empty, so the duplication was invisible in content reads — which is exactly why the read
+"looked harmless". The precise interleaving by which the *next* edit's `updateYFragment` diff
+then drops the block is timing-dependent (hence the 300 ms control below); the E2E pins the
+outcome.
 
 Controls that pin the cause (all run during investigation):
 - Same steps but **no `ofFragment` call** between paste and typing → both blocks survive.
