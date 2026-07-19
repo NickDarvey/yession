@@ -9,9 +9,14 @@
 
 ## Environment
 
-- `y-prosemirror` 1.3.7 (current latest)
+- `y-prosemirror` 1.3.7 (current npm `latest`) — the whole released 1.x line is affected
+  (the code landed in 627b6b22, 2024-08-05, closing #160/#161)
 - `yjs` 13.6.31
 - Node 24 (headless — no editor, no binding involved)
+
+Master appears **unaffected**: the v2 rewrite for yjs v14 (delta-based `fragmentToPm` in
+`sync-utils.js`) no longer contains this merge-on-read path. So this is a request for a **1.x
+maintenance patch**, since 1.3.7 is what npm installs today.
 
 ## Summary
 
@@ -96,7 +101,16 @@ mapping). Suggestion: gate it on binding context — e.g. a flag on the `meta` /
 Without the merge the converter's output is already correct: adjacent `Y.Text` siblings simply
 become adjacent ProseMirror text nodes.
 
-Happy to send a PR if that direction sounds right.
+Happy to send a PR against a 1.x maintenance branch if that direction sounds right.
+
+## Possibly related field reports
+
+["Random, rare data loss in production with y-prosemirror"](https://discuss.yjs.dev/t/random-rare-data-loss-in-production-with-y-prosemirror/3728)
+(discuss.yjs.dev, currently offline) describes the same fingerprint — rich-text-only, rare,
+silent, unreproducible data loss, while Y.Map/Y.Array data in the same app is never affected —
+with no root cause found. Not confirmed to be this bug, but any app that converts a live local
+doc (serialization on save/export is a common pattern) and keeps editing would produce exactly
+that symptom profile.
 
 ## Workaround (for anyone else hitting this)
 
