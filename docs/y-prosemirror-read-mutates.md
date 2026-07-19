@@ -1,7 +1,8 @@
 # Bug note — `yXmlFragmentToProseMirrorRootNode` mutates the live doc it reads
 
-> Status: **mitigated** (see [Mitigation](#mitigation-shipped)). This note is for you to
-> decide whether the mitigation is enough or whether to push a fix upstream.
+> Status: **mitigated + hardened** (see [Mitigation](#mitigation-shipped) and
+> [Resolution](#resolution-of-the-open-questions)). An upstream issue is drafted at
+> [y-prosemirror-upstream-issue.md](y-prosemirror-upstream-issue.md), not yet filed.
 > Discovered while adding rich-text hyperlinks (`Markdown.ofFragment` on a body a peer had
 > just linked).
 
@@ -137,18 +138,31 @@ runs; the live body is never touched. Cost: one whole-doc `encodeStateAsUpdate`/
 per serialize — fine because `ofFragment` is called on send/drain, not per keystroke; bodies are
 small.
 
-## Open questions for you
+## Resolution of the open questions
 
-1. **Is the snapshot copy acceptable long-term?** It copies the *entire* doc (all body roots) per
-   serialize. If bodies grow or serialization gets hot, prefer copying just the one root, or cache.
-2. **Upstream fix?** The `id.client === doc.clientID` merge deleting during a nominally-read API is
-   arguably a `y-prosemirror` bug. Worth a minimal repro (snippet A, hardened to force adjacency)
-   and an issue against `y-prosemirror`. We already carry a patch to that repo elsewhere, so an
-   upstream fix + version bump is a viable path and would let us drop the snapshot dance.
-3. **Any other live-fragment readers?** Audit for any *other* call that runs
-   `yXmlFragmentToProseMirrorRootNode` / `initProseMirrorDoc` on a live local doc. Today only
-   `Markdown.ofFragment` does, and it is now snapshot-guarded — but the trap is easy to reintroduce.
-4. **Test coverage gap.** The Node regression guard (`ofFragment does not mutate the source`) only
-   bites if the adjacency triggers in Node; the deterministic guard is the browser E2E. If you want
-   a hard headless guard, harden snippet A to force the adjacency and assert `frag.toString()` is
-   unchanged across a read.
+1. **Snapshot copy acceptable long-term?** Kept, with a caveat: the cost is **O(whole doc), not
+   O(body)** — `BodyKey.queued <id>` means the doc accumulates a body root per message, so each
+   serialize copies the full session history. Fine at current scale (send/drain only). If it ever
+   gets hot, the O(1) alternative is temporarily reassigning `doc.clientID` around the read (the
+   merge guard compares against the *current* `clientID`, and a pure read runs no transactions) —
+   but it leans on the same internals, so not worth it until measured.
+2. **Upstream fix?** No existing y-prosemirror issue covers this (searched 2026-07-19; bug
+   confirmed present in 1.3.7, our locked version and latest). A ready-to-file issue with a
+   deterministic headless repro and a suggested fix (gate the merge on binding context) is in
+   [y-prosemirror-upstream-issue.md](y-prosemirror-upstream-issue.md). N.B. this repo carries no
+   npm patch mechanism today, so "patch + version bump" would be new infrastructure — filing
+   upstream and keeping the snapshot until a release lands is the cheaper path.
+3. **Other live-fragment readers?** Audited: only `Markdown.ofFragment` converts a live local
+   fragment; `initProseMirrorDoc` runs only inside `mountEditor`, where the binding legitimately
+   owns the doc. `ofFragment` itself had one hole — a doc-attached but *nested* fragment (no root
+   name) silently took the live-read path — now closed: it refuses loudly instead
+   (`Markdown.fs`), pinned by a test.
+4. **Test coverage gap.** Closed. The trick that makes the adjacency deterministic in Node:
+   author the two `Y.XmlText` siblings in **separate transactions** (each transaction produces a
+   distinct item, so the second is the first's `_item.right`). The new guard
+   (`ofFragment is a pure read`, `tests/Yession.Tests/Editor.fs`) asserts at the **CRDT level**
+   (child count + no new ops since a state vector) — necessarily, because the merge is
+   content-preserving: markdown-level round-trip equality passes even when the CRDT was mutated,
+   which is also why the read "looked harmless" in the original investigation. Verified by
+   mutation testing: neutering the snapshot makes the new tests fail while the markdown-level
+   test still passes.
