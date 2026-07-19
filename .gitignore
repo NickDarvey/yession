@@ -28,6 +28,11 @@ tests/**/*.js
 # OS / editor
 .DS_Store
 
+# Nix
+result
+result-*
+.direnv/
+
 # Browser E2E scratch data
 tests/browser/.data*
 

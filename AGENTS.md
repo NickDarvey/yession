@@ -29,6 +29,10 @@ export PATH="/root/.local/bin:$PATH"       # every shell that runs mise
 mise trust && mise install                 # pinned node 24.16 + dotnet 10 (~235 MB, first run only)
 ```
 
+On a box with Nix, skip the curl bootstrap entirely: `nix develop` gives Node, the
+.NET SDK, and mise from nixpkgs, with mise pointed at those tools (no downloads). See
+`flake.nix`.
+
 Then use tasks (`mise tasks` lists them): `mise run test` / `build` / `verify`. `restore`
 (npm + dotnet tools) is a `depends` of the others — no need to run it by hand. Do NOT invoke
 `dotnet`/`fable`/`esbuild` directly to "run the suite"; go through `mise run` so tool versions

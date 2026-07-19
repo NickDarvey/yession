@@ -49,6 +49,21 @@ mise run restore # install all dependencies (npm + .NET tools)
 mise tasks       # list every available task
 ```
 
+### Nix
+
+Prefer a pure, reproducible toolchain with no `curl | sh` bootstrap? The
+[flake](flake.nix) provides Node, the .NET SDK, and mise itself from nixpkgs,
+and points mise at those tools (via `MISE_DISABLE_TOOLS`) so nothing is
+downloaded out of band:
+
+```sh
+nix develop        # enter a shell with the pinned toolchain on PATH
+mise run build     # the usual tasks, now against nix-provided Node/.NET
+```
+
+The `.NET` SDK is pinned to the same `10.0.301` as [mise.toml](mise.toml); Node
+tracks the same major (24). Bump the nixpkgs pin in `flake.nix` to move them.
+
 Yession ships as one npm package with two commands: `yession` (the Manager) and
 `yession-session` (a Session Process). `npm i -g <release-tarball>` pulls the
 platform-native pieces (the WebRTC transport and the agent's native Claude Code binary) on
