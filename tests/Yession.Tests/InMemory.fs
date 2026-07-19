@@ -17,16 +17,15 @@ open Yession.App
 open Yession.Host
 open Yession.Tests.Support
 
-let private token = "in-memory-token"
 let private sid () = SessionId.create "in-memory-session" |> expect
 
 let tests =
     testList "In-memory transport (cheap E2E through the real Host)" [
         testCaseAsync "two clients converge on the title through the Host's State relay" <|
             async {
-                let! host = Host.start (sid ()) token 0
-                let! a = connectInMemoryClient host token "ada" "Ada"
-                let! b = connectInMemoryClient host token "bob" "Bob"
+                let! host = Host.start (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                let! b = connectInMemoryClient host "bob" "Bob"
                 // Ada names the session; the edit rides a State frame through the Host to Bob.
                 a.Runner.Dispatch (user (EditTitleMsg (Text.insert 0 "launch plan" (a.Runner.Model ()).Synced.Title)))
                 do! b.Runner.WaitFor (fun m -> Text.toString m.Synced.Title = "launch plan")
@@ -36,9 +35,9 @@ let tests =
 
         testCaseAsync "a sent rich draft drains through the Host into both timelines as its markdown body" <|
             async {
-                let! host = Host.start (sid ()) token 0
-                let! a = connectInMemoryClient host token "ada" "Ada"
-                let! b = connectInMemoryClient host token "bob" "Bob"
+                let! host = Host.start (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                let! b = connectInMemoryClient host "bob" "Bob"
                 let ada = a.Hello.PeerId
                 // Ada composes a rich body and sends; the idle Host drains it to exactly one
                 // MessageSent, snapshotted as MARKDOWN — visible in BOTH timelines (the sender's
@@ -58,9 +57,9 @@ let tests =
 
         testCaseAsync "a peer's cursor presence relays to others in any field and clears on disconnect" <|
             async {
-                let! host = Host.start (sid ()) token 0
-                let! a = connectInMemoryClient host token "ada" "Ada"
-                let! b = connectInMemoryClient host token "bob" "Bob"
+                let! host = Host.start (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                let! b = connectInMemoryClient host "bob" "Bob"
                 // Ada's caret is in the title; the Host relays the presence frame to Bob.
                 let titleFocus : Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } }
                 a.Connection.ReportPresence (Some titleFocus)
@@ -93,8 +92,8 @@ let tests =
                 let awaitReport = Async.FromContinuations (fun (cont, _, _) -> reportCont <- Some cont)
                 let report (name: string) = async { match reportCont with Some c -> reportCont <- None; c name | None -> () }
 
-                let! host = Host.startFull None None None None (Some report) (fun _ _ -> ()) None None (sid ()) token 0
-                let! a = connectInMemoryClient host token "ada" "Ada"
+                let! host = Host.startFull None None None None (Some report) (fun _ _ -> ()) None None (sid ()) None 0
+                let! a = connectInMemoryClient host "ada" "Ada"
                 let! reportWaiter = Async.StartChild awaitReport
                 a.Runner.Dispatch (user (EditTitleMsg (Text.insert 0 "ship it" (a.Runner.Model ()).Synced.Title)))
                 let! reported = reportWaiter

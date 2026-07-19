@@ -148,8 +148,15 @@ let private clearTimeoutJs (handle: float) : unit = jsNative
 [<Emit("document.documentElement.classList.toggle('nav-alt')")>]
 let private toggleNav () : unit = jsNative
 
-[<Emit("new URLSearchParams(window.location.search).get($0) || $1")>]
-let private queryParam (name: string) (fallback: string) : string = jsNative
+// The auth probe: `/me` answers with a peer token when the browser's cookie (or an
+// auth-less session) allows it. Distinguishes DENIED (status) from OFFLINE (reject):
+// a 401 means renavigate to /login; a network failure means stay on the cached shell
+// and local stores — offline-first, the connection simply doesn't happen.
+[<Emit("""fetch('/me', { cache: 'no-store' }).then(r => r.ok ? r.json().then(me => ({ ok: true, token: me.peerToken })) : { ok: false, token: '' })""")>]
+let private fetchMe () : JS.Promise<{| ok: bool; token: string |}> = jsNative
+
+[<Emit("window.location.assign($0)")>]
+let private navigateTo (url: string) : unit = jsNative
 
 // --- Rich-text editor mount ------------------------------------------------------------
 // The view renders empty `[data-rich-body="<key>"]` hosts; the editor is mounted imperatively
@@ -379,23 +386,43 @@ let private start () =
         let persistence = newPersistence indexeddbPersistence (persistenceKey ()) doc
         do! whenSynced persistence |> Async.AwaitPromise
 
-        let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
-        let channel = frameChannel dc
-        let token = queryParam "token" "local-dev-token"
-        let hello =
-            { PeerId = peerId
-              DisplayName = displayName
-              Token = token }
-        // Events come over HTTP in immutable chunks, so the browser's own cache serves
-        // history; only the growing tail chunk hits the Session Process. Availability hints
-        // still arrive over the data channel.
-        let options =
-            { App.ConnectOptions.defaults with
-                FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" token) }
-        let connection = App.connect options doc registry hello (fun msg -> dispatchRef msg) channel
-        connectionRef <- Some connection
+        // Authorization by renavigation: probe `/me` for a peer token. 401 -> bounce
+        // through `/login` (code + PKCE via the Manager) and land back on this shell,
+        // where the probe succeeds. A NETWORK failure (offline, session down) rejects
+        // the promise instead: skip connecting entirely and keep the local-first shell
+        // — IndexedDB doc + cached event chunks — read-only until a reload reconnects.
+        let! me =
+            async {
+                try
+                    let! result = fetchMe () |> Async.AwaitPromise
+                    return Some result
+                with _ ->
+                    return None
+            }
+        match me with
+        | Some probe when not probe.ok ->
+            navigateTo "/login"
+        | Some probe ->
+            let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
+            let channel = frameChannel dc
+            let hello =
+                { PeerId = peerId
+                  DisplayName = displayName
+                  Token = probe.token }
+            // Events come over HTTP in immutable chunks, so the browser's own cache serves
+            // history; only the growing tail chunk hits the Session Process. Availability hints
+            // still arrive over the data channel. The same-origin auth cookie rides each
+            // fetch, so no token in the URL (history/cache stay clean).
+            let options =
+                { App.ConnectOptions.defaults with
+                    FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" None) }
+            let connection = App.connect options doc registry hello (fun msg -> dispatchRef msg) channel
+            connectionRef <- Some connection
 
-        do! connection.Run
+            do! connection.Run
+        | None ->
+            // Offline: local state already rendered; nothing to connect.
+            ()
     }
 
 Async.StartImmediate (start ())

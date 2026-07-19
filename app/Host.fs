@@ -11,7 +11,10 @@ open Yession.SessionProcess
 
 type SessionHost =
     { SessionId : SessionId
-      Token : string
+      /// Mint a peer token valid for this process — what `/me` serves an authenticated
+      /// browser, and what tests/headless clients use to join (`PeerHello.Token`) and
+      /// read `/events`.
+      MintPeerToken : unit -> string
       Port : int
       Log : EventLog<SessionEvent>
       /// The session's Yjs document. The Session Process owns it; peers hold replicas
@@ -53,11 +56,14 @@ let startFull
     (subscribeNotifications: ((SessionNotification -> unit) -> (unit -> unit)) option)
     (subscribeMcp: ((McpToolList -> unit) -> (unit -> unit)) option)
     (sessionId: SessionId)
-    (token: string)
+    (auth: SessionAuth.Auth option)
     (port: int)
     : Async<SessionHost> =
     async {
         let doc = Y.Doc.Create ()
+        // Peer access: every joining peer presents a token THIS process minted (served
+        // to authenticated browsers by `/me`, handed to tests via `MintPeerToken`).
+        let peerTokens = PeerTokens (Interop.randomSecret)
         // Restart ordering (Step 19): replay the persisted doc FIRST — before any
         // observer registers — then open the log, then the boot drain repairs the
         // crash-between-append-and-removal window via the log-anchored dedup.
@@ -234,7 +240,7 @@ let startFull
                         } }
             Async.StartImmediate(
                 async {
-                    do! PeerSession.run sessionId token log handlers channel
+                    do! PeerSession.run sessionId peerTokens.Validate log handlers channel
                     signalSessionEnded ()
                 })
 
@@ -242,7 +248,7 @@ let startFull
         // offsets [n*size, (n+1)*size). Full chunks are immutable (append-only log),
         // so browsers cache them hard and cold loads replay history from disk.
         let eventsEndpoint : Signalling.EventsEndpoint =
-            { Token = token
+            { ValidateToken = peerTokens.Validate
               ReadChunk =
                 fun index ->
                     async {
@@ -257,7 +263,7 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        let! server = Signalling.start sessionId onConnection (Some eventsEndpoint) port
+        let! server = Signalling.start sessionId onConnection (Some eventsEndpoint) auth peerTokens.Mint port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -282,7 +288,7 @@ let startFull
 
         return
             { SessionId = sessionId
-              Token = token
+              MintPeerToken = peerTokens.Mint
               Port = port
               Log = log
               Doc = doc
@@ -298,21 +304,22 @@ let startFull
                     } }
     }
 
-/// `startFull` without doc persistence — collaborative state is memory-only.
+/// `startFull` without doc persistence — collaborative state is memory-only. No auth
+/// gate on the HTTP surface (peer-token gating still applies at `PeerHello`); callers
+/// mint peer tokens from the host handle.
 let startWithCapabilities
     (runAgent: RunAgent option)
     (environmentCapabilities: SessionEnvironmentCapabilities option)
     (baseLog: EventLog<SessionEvent> option)
     (sessionId: SessionId)
-    (token: string)
     (port: int)
     : Async<SessionHost> =
-    startFull runAgent environmentCapabilities baseLog None None (fun _ _ -> ()) None None sessionId token port
+    startFull runAgent environmentCapabilities baseLog None None (fun _ _ -> ()) None None sessionId None port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
-let startWith (runAgent: RunAgent option) (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
-    startWithCapabilities runAgent None None sessionId token port
+let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =
+    startWithCapabilities runAgent None None sessionId port
 
 /// `startWith` without an agent — transport/draft/send scenarios that predate Step 08.
-let start (sessionId: SessionId) (token: string) (port: int) : Async<SessionHost> =
-    startWith None sessionId token port
+let start (sessionId: SessionId) (port: int) : Async<SessionHost> =
+    startWith None sessionId port

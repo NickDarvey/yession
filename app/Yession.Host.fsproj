@@ -13,6 +13,7 @@
     <Compile Include="Interop.fs" />
     <Compile Include="WebRtc.fs" />
     <Compile Include="Ssr.fs" />
+    <Compile Include="SessionAuth.fs" />
     <Compile Include="Signalling.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="Telemetry.fs" />
@@ -21,6 +22,7 @@
     <Compile Include="ManagerStore.fs" />
     <Compile Include="NotificationHub.fs" />
     <Compile Include="McpHub.fs" />
+    <Compile Include="ManagerOidc.fs" />
     <Compile Include="Control.fs" />
     <Compile Include="TelemetryReceiver.fs" />
     <Compile Include="ControlClient.fs" />
@@ -43,9 +45,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\src\Fable.Dockerode\Fable.Dockerode.fsproj" />
+    <ProjectReference Include="..\src\Fable.Jose\Fable.Jose.fsproj" />
+    <ProjectReference Include="..\src\Fable.OpenIdClient\Fable.OpenIdClient.fsproj" />
     <ProjectReference Include="..\src\Fable.OpenTelemetry\Fable.OpenTelemetry.fsproj" />
     <ProjectReference Include="..\src\Yession.Domain\Yession.Domain.fsproj" />
     <ProjectReference Include="..\src\Yession.Manager\Yession.Manager.fsproj" />
+    <ProjectReference Include="..\src\Yession.Oidc\Yession.Oidc.fsproj" />
     <ProjectReference Include="..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
     <ProjectReference Include="..\src\Yession.App\Yession.App.fsproj" />
   </ItemGroup>

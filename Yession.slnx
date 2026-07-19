@@ -10,10 +10,13 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Fable.Dockerode/Fable.Dockerode.fsproj" />
+    <Project Path="src/Fable.Jose/Fable.Jose.fsproj" />
+    <Project Path="src/Fable.OpenIdClient/Fable.OpenIdClient.fsproj" />
     <Project Path="src/Fable.OpenTelemetry/Fable.OpenTelemetry.fsproj" />
     <Project Path="src/Yession.App/Yession.App.fsproj" />
     <Project Path="src/Yession.Domain/Yession.Domain.fsproj" />
     <Project Path="src/Yession.Manager/Yession.Manager.fsproj" />
+    <Project Path="src/Yession.Oidc/Yession.Oidc.fsproj" />
     <Project Path="src/Yession.SessionProcess/Yession.SessionProcess.fsproj" />
   </Folder>
   <Folder Name="/tests/">

@@ -155,12 +155,14 @@ let private handshakeTests =
         Control (PeerHello { PeerId = peerId; DisplayName = "Ada"; Token = token })
 
     /// Run a peer session against an in-memory loopback, driving the client side with
-    /// `client`, and return the appended events once the session ends.
-    let runSession (sendToken: string) (client: FrameChannel<unit> -> Async<unit>) : Async<SessionEvent list> =
+    /// `client`, and return the appended events once the session ends. `validateToken`
+    /// is the injected peer-token check (the composition root's minted-token set in
+    /// the product).
+    let runSession (validateToken: string -> bool) (client: FrameChannel<unit> -> Async<unit>) : Async<SessionEvent list> =
         async {
             let log = newLog ()
             let clientEnd, serverEnd = InMemoryChannel.createPair<unit> ()
-            let! server = Async.StartChild (PeerSession.run sessionId sendToken log PeerSession.PeerHandlers.none serverEnd)
+            let! server = Async.StartChild (PeerSession.run sessionId validateToken log PeerSession.PeerHandlers.none serverEnd)
             do! client clientEnd
             do! server
             let! events = allEventsAfter log None
@@ -172,7 +174,7 @@ let private handshakeTests =
             async {
                 let mutable response : SessionFrame<unit> option = None
                 let! events =
-                    runSession token (fun ch ->
+                    runSession ((=) token) (fun ch ->
                         async {
                             do! ch.Send hello
                             let! resp = ch.Receive ()
@@ -192,7 +194,7 @@ let private handshakeTests =
             async {
                 let mutable response : SessionFrame<unit> option = None
                 let! events =
-                    runSession "the-wrong-token" (fun ch ->
+                    runSession (fun _ -> false) (fun ch ->
                         async {
                             do! ch.Send hello
                             let! resp = ch.Receive ()
@@ -207,7 +209,7 @@ let private handshakeTests =
         testCaseAsync "disconnecting after accept appends PeerLeft after PeerJoined" <|
             async {
                 let! events =
-                    runSession token (fun ch ->
+                    runSession ((=) token) (fun ch ->
                         async {
                             do! ch.Send hello
                             let! _ = ch.Receive () // drain PeerAccepted

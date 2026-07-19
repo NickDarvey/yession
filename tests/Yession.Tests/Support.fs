@@ -5,11 +5,18 @@ module Yession.Tests.Support
 // parameterized by host, so every E2E suite composes the same way. No sleeps, no polling.
 
 open Elmish
+open Fable.Core
 open Fable.Pyxpecto
 open Yjs
 open Yession.Domain
 open Yession.App
 open Yession.Host
+
+#if FABLE_COMPILER
+open Thoth.Json
+#else
+open Thoth.Json.Net
+#endif
 
 let expect =
     function
@@ -84,6 +91,87 @@ module Docker =
 let peer (id: string) (name: string) : PeerState =
     { PeerId = PeerId.create id |> expect; DisplayName = name }
 
+/// Drive the OIDC authorization flow over plain HTTP, the way a browser would: a cookie
+/// jar plus MANUAL redirect following. Manual matters twice — an auto-following fetch
+/// drops intermediate `Set-Cookie` headers, and the hops cross ports (session → manager
+/// → session), which must share this jar, not the runtime's.
+module OidcHttp =
+
+    type Jar = { mutable Cookies : Map<string, string> }
+
+    let newJar () : Jar = { Cookies = Map.empty }
+
+    let private cookieHeader (jar: Jar) : string =
+        jar.Cookies |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> String.concat "; "
+
+    type private ManualReply =
+        abstract status : int
+        abstract location : string
+        abstract setCookies : string []
+        abstract cacheControl : string
+        abstract body : string
+
+    [<Fable.Core.Emit("""fetch($0, { redirect: 'manual', headers: { cookie: $1 } }).then(async r => ({
+      status: r.status,
+      location: r.headers.get('location') || '',
+      setCookies: r.headers.getSetCookie(),
+      cacheControl: r.headers.get('cache-control') || '',
+      body: await r.text() }))""")>]
+    let private fetchManual (url: string) (cookie: string) : Fable.Core.JS.Promise<ManualReply> = Fable.Core.Util.jsNative
+
+    let private store (jar: Jar) (setCookies: string []) =
+        for header in setCookies do
+            match header.Split ';' |> Array.tryHead with
+            | Some pair ->
+                match pair.IndexOf '=' with
+                | i when i > 0 -> jar.Cookies <- Map.add (pair.Substring (0, i)) (pair.Substring (i + 1)) jar.Cookies
+                | _ -> ()
+            | None -> ()
+
+    /// GET with the jar, storing any cookies; no redirect following.
+    let getWithJar (jar: Jar) (url: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
+        async {
+            let! reply = fetchManual url (cookieHeader jar) |> Async.AwaitPromise
+            store jar reply.setCookies
+            return {| Status = reply.status; Location = reply.location; CacheControl = reply.cacheControl; Body = reply.body |}
+        }
+
+    /// Follow a redirect chain (capped) with the jar, returning the final non-3xx reply.
+    let followWithJar (jar: Jar) (startUrl: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
+        let resolve (baseUrl: string) (location: string) : string =
+            if location.StartsWith "http" then location
+            else
+                // Relative redirect (the callback's `/`): resolve against the base.
+                let origin = System.Uri baseUrl
+                sprintf "%s://%s:%d%s" origin.Scheme origin.Host origin.Port location
+        let rec go (url: string) (hops: int) =
+            async {
+                let! reply = getWithJar jar url
+                if reply.Status >= 300 && reply.Status < 400 && hops < 10 then
+                    return! go (resolve url reply.Location) (hops + 1)
+                else
+                    return reply
+            }
+        go startUrl 0
+
+    /// Log in to a session the way the browser client does — start at `/login`, ride the
+    /// hops to the manager and back — and return the jar plus a minted peer token from
+    /// `/me`. Fails loudly on any non-success step.
+    let openSession (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
+        async {
+            let jar = newJar ()
+            let! landed = followWithJar jar (sessionBaseUrl + "/login")
+            if landed.Status <> 200 then
+                failwithf "OIDC login chain ended with %d: %s" landed.Status landed.Body
+            let! me = getWithJar jar (sessionBaseUrl + "/me")
+            if me.Status <> 200 then failwithf "/me after login answered %d: %s" me.Status me.Body
+            let token =
+                match Decode.fromString (Decode.field "peerToken" Decode.string) me.Body with
+                | Ok token -> token
+                | Error e -> failwithf "malformed /me body: %s" e
+            return {| Jar = jar; PeerToken = token |}
+        }
+
 /// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.
 type Client =
@@ -118,9 +206,10 @@ let connectClient (signalUrl: string) (token: string) (id: string) (name: string
 /// Connect one full client to a host over an IN-MEMORY channel pair — the same drivers as
 /// the WebRTC path (`App.makeProgram` + `App.connect` on one end, the Host's real per-peer
 /// pump on the other via `host.Connect`), but with no WebRTC, HTTP, or native addon, so it
-/// runs in the cheap tier. Events come over frames (`FetchEvents = None`). Resolves once the
-/// model reaches `Connected`.
-let connectInMemoryClient (host: Host.SessionHost) (token: string) (id: string) (name: string) : Async<Client> =
+/// runs in the cheap tier. Events come over frames (`FetchEvents = None`). The peer token
+/// is minted from the host — what `/me` would serve an authorized browser. Resolves once
+/// the model reaches `Connected`.
+let connectInMemoryClient (host: Host.SessionHost) (id: string) (name: string) : Async<Client> =
     async {
         let clientEnd, serverEnd = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
         // The Host drives the server end exactly as it would a WebRTC connection.
@@ -129,7 +218,7 @@ let connectInMemoryClient (host: Host.SessionHost) (token: string) (id: string) 
         let local = peer id name
         let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
-        let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
+        let hello = { PeerId = local.PeerId; DisplayName = name; Token = host.MintPeerToken () }
         let connection = App.connect App.ConnectOptions.defaults doc registry hello (user >> runner.Dispatch) clientEnd
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)

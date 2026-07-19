@@ -35,17 +35,18 @@ module PeerSession =
 
     /// Run a peer session over a connected channel until the peer disconnects.
     ///
-    /// - On a valid `PeerHello` (matching `token`): append `PeerJoined`, reply with
-    ///   `PeerAccepted`, run `handlers.OnAccepted`, pump frames until the channel closes
-    ///   (`State` payloads go to `handlers.OnState`), run the cleanup, then append
-    ///   `PeerLeft`.
+    /// - On a `PeerHello` whose token passes `validateToken` (the composition root
+    ///   injects the check — the session-minted peer-token set in the product): append
+    ///   `PeerJoined`, reply with `PeerAccepted`, run `handlers.OnAccepted`, pump frames
+    ///   until the channel closes (`State` payloads go to `handlers.OnState`), run the
+    ///   cleanup, then append `PeerLeft`.
     /// - On an invalid token or an unexpected first frame: reply `PeerRejected` and close.
     ///
     /// Side effects (appends) go through the injected `EventLog`, honouring "the Session
     /// Process is the only event writer".
     let run
         (sessionId: SessionId)
-        (token: string)
+        (validateToken: string -> bool)
         (log: EventLog<SessionEvent>)
         (handlers: PeerHandlers<'State>)
         (channel: FrameChannel<'State>)
@@ -53,7 +54,7 @@ module PeerSession =
         async {
             let! first = channel.Receive ()
             match first with
-            | Some (Control (PeerHello hello)) when hello.Token = token ->
+            | Some (Control (PeerHello hello)) when validateToken hello.Token ->
                 let actor = HumanPeer hello.PeerId
                 let! joined =
                     log.Append actor (PeerJoined { PeerId = hello.PeerId; DisplayName = hello.DisplayName })
@@ -95,7 +96,7 @@ module PeerSession =
                 let! _ = log.Append actor (PeerLeft { PeerId = hello.PeerId })
                 return ()
             | Some (Control (PeerHello _)) ->
-                do! channel.Send (Control (PeerRejected "invalid session token"))
+                do! channel.Send (Control (PeerRejected "invalid peer token"))
                 do! channel.Close ()
             | _ ->
                 do! channel.Send (Control (PeerRejected "expected PeerHello as first frame"))

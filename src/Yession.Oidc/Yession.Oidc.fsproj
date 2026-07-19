@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Manager's OIDC provider (OP), isolated as its own module: dynamic client
+    registration bound to per-launch control secrets, the authorization-code + PKCE
+    state machine, the authentication-strategy seam, and the wire codecs. Pure and
+    Fable-portable — crypto (hashing, signing) is injected; the Node adapter lives in
+    app/ManagerOidc.fs. Conformance checks over this module run in the cheap test tier.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Provider.fs" />
+    <Compile Include="Strategy.fs" />
+    <Compile Include="Wire.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Thoth.Json" />
+    <PackageReference Include="Thoth.Json.Net" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Yession.Domain\Yession.Domain.fsproj" />
+  </ItemGroup>
+
+</Project>

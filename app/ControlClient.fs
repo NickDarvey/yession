@@ -9,6 +9,7 @@ module Yession.Host.ControlClient
 open Fable.Core
 open Yession.Domain
 open Yession.Manager
+open Yession.Oidc
 
 [<Emit("""fetch($0, { method: 'POST', headers: { 'x-yession-control': $1, 'content-type': 'application/json' }, body: $2 })
   .then(r => { if (!r.ok) throw new Error('control rpc failed: ' + r.status); return r.text() })""")>]
@@ -111,6 +112,24 @@ let nameReporter (baseUrl: string) (secret: string) : string -> Async<unit> =
                 return ()
             with _ -> return ()
         }
+
+/// Dynamic client registration: bind this launch's OAuth client to its control secret.
+/// Called after the session's server listens — the redirect URI needs the OS-assigned
+/// port. NOT best-effort: a session that cannot register cannot authorize users, so the
+/// failure is returned for the caller to treat as fatal.
+let registerClient (baseUrl: string) (secret: string) (redirectUri: string) : Async<Result<RegisterClientResponse, string>> =
+    async {
+        try
+            let! text =
+                postJson
+                    (sprintf "%s/control/register-client" baseUrl)
+                    secret
+                    (Wire.toString Wire.registerClientRequest { RedirectUri = redirectUri })
+                |> Async.AwaitPromise
+            return Wire.fromString Wire.registerClientResponse text
+        with e ->
+            return Error (sprintf "control unreachable: %s" e.Message)
+    }
 
 /// Build the capability record over the Manager's control endpoint.
 let capabilities (baseUrl: string) (secret: string) : SessionEnvironmentCapabilities =

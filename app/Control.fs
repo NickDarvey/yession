@@ -10,20 +10,27 @@ module Yession.Host.Control
 // (a label, never conversation or event content) — so the Manager's list reflects the title.
 //
 // Routes (secret in the `x-yession-control` header):
-//   POST /control/start          EnvironmentSpec  -> StartContainerResult
-//   POST /control/stop           ContainerHandle  -> StopContainerResult
-//   POST /control/execute        ExecuteRequest   -> NDJSON: chunk* then exactly one result
-//   POST /control/name           { name }         -> "ok" (updates the registry display name)
-//   GET  /control/notifications                   -> text/event-stream (the reverse leg:
+//   POST /control/start            EnvironmentSpec  -> StartContainerResult
+//   POST /control/stop             ContainerHandle  -> StopContainerResult
+//   POST /control/execute          ExecuteRequest   -> NDJSON: chunk* then exactly one result
+//   POST /control/name             { name }         -> "ok" (updates the registry display name)
+//   POST /control/register-client  { redirectUri }  -> { clientId, clientSecret, issuer }
+//   GET  /control/notifications                     -> text/event-stream (the reverse leg:
 //        the Manager pushing notifications DOWN to this session, multiplexed as SSE frames
 //        of `ControlWire.sessionNotification` JSON — see NotificationHub / SessionNotification)
-//   GET  /control/mcp                             -> text/event-stream (a second reverse leg:
+//   GET  /control/mcp                               -> text/event-stream (a second reverse leg:
 //        the current MCP tool list on subscribe, then a fresh list on every change, as SSE
 //        frames of `ControlWire.mcpToolList` — the standard `ListToolsResult` — see McpHub)
+//
+// Every launch can call the channel (its secret always resolves to a caller); whether
+// the caller also holds ENVIRONMENT capabilities is a separate grant — a session
+// without one still registers its OAuth client here, it just gets 403 on the
+// environment routes.
 
 open Fable.Core.JsInterop
 open Yession.Domain
 open Yession.Manager
+open Yession.Oidc
 open Yession.Host.Interop
 
 // SSE keep-alive: a comment frame on an interval so an idle stream is not reaped by an
@@ -33,6 +40,12 @@ let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Ut
 
 [<Fable.Core.Emit("clearInterval($0)")>]
 let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
+
+/// What a control secret resolves to: WHICH launch is calling, and the environment
+/// capabilities that launch was granted (None = environment-less session).
+type ControlCaller =
+    { SessionId : SessionId
+      Capabilities : SessionEnvironmentCapabilities option }
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
@@ -53,10 +66,11 @@ let private respond (res: ServerResponse) (status: int) (text: string) =
 /// Handle a control request. Returns false when the path is not a control route, so a
 /// composing HTTP server (the management UI shares the port) falls through.
 let tryHandle
-    (resolve: string -> SessionEnvironmentCapabilities option)
+    (resolve: string -> ControlCaller option)
     (reportName: string -> string -> Async<Result<unit, string>>)
     (registerNotificationSink: string -> (SessionNotification -> unit) -> (unit -> unit))
     (registerMcpSink: (McpToolList -> unit) -> (unit -> unit))
+    (registerClient: string -> SessionId -> string -> RegisterClientResponse)
     (req: IncomingMessage)
     (res: ServerResponse)
     : bool =
@@ -64,43 +78,51 @@ let tryHandle
     if not (path.StartsWith "/control/") then false
     else
         let secret = headerOf req "x-yession-control"
-        let capabilities = secret |> Option.bind resolve
-        match capabilities with
+        match secret |> Option.bind resolve with
         | None -> respond res 401 "invalid control secret"
-        | Some capabilities ->
+        | Some caller ->
             let decodeAnd (decode: string -> Result<'a, string>) (handle: 'a -> unit) =
                 readBody req (fun body ->
                     match decode body with
                     | Ok value -> handle value
                     | Error e -> respond res 400 (sprintf "malformed control request: %s" e))
+            // The environment routes need the launch's capability grant; a session
+            // launched without one gets a clean 403, not a crash.
+            let withCapabilities (handle: SessionEnvironmentCapabilities -> unit) =
+                match caller.Capabilities with
+                | Some capabilities -> handle capabilities
+                | None -> respond res 403 "no environment capabilities granted"
             match req.``method``, path with
             | "POST", "/control/start" ->
-                decodeAnd (ControlWire.fromString ControlWire.environmentSpec) (fun spec ->
-                    Async.StartImmediate (
-                        async {
-                            let! result = capabilities.StartContainer spec
-                            respondJson res (ControlWire.toString ControlWire.startContainerResult result)
-                        }))
+                withCapabilities (fun capabilities ->
+                    decodeAnd (ControlWire.fromString ControlWire.environmentSpec) (fun spec ->
+                        Async.StartImmediate (
+                            async {
+                                let! result = capabilities.StartContainer spec
+                                respondJson res (ControlWire.toString ControlWire.startContainerResult result)
+                            })))
             | "POST", "/control/stop" ->
-                decodeAnd (ControlWire.fromString ControlWire.containerHandle) (fun handle ->
-                    Async.StartImmediate (
-                        async {
-                            let! result = capabilities.StopContainer handle
-                            respondJson res (ControlWire.toString ControlWire.stopContainerResult result)
-                        }))
+                withCapabilities (fun capabilities ->
+                    decodeAnd (ControlWire.fromString ControlWire.containerHandle) (fun handle ->
+                        Async.StartImmediate (
+                            async {
+                                let! result = capabilities.StopContainer handle
+                                respondJson res (ControlWire.toString ControlWire.stopContainerResult result)
+                            })))
             | "POST", "/control/execute" ->
-                decodeAnd (ControlWire.fromString ControlWire.executeRequest) (fun request ->
-                    // Chunks stream as NDJSON lines the moment they arrive; the final
-                    // line is the command result. Ordering rides the response stream.
-                    res.writeHead (200, createObj [ "content-type", box "application/x-ndjson"; "cache-control", box "no-store" ]) |> ignore
-                    Async.StartImmediate (
-                        async {
-                            let! result =
-                                capabilities.Execute request.Handle request.Command (fun chunk ->
-                                    res.write (ControlWire.toString ControlWire.executeLine (ControlWire.OutputLine chunk) + "\n")
-                                    |> ignore)
-                            res.``end`` (ControlWire.toString ControlWire.executeLine (ControlWire.ResultLine result) + "\n")
-                        }))
+                withCapabilities (fun capabilities ->
+                    decodeAnd (ControlWire.fromString ControlWire.executeRequest) (fun request ->
+                        // Chunks stream as NDJSON lines the moment they arrive; the final
+                        // line is the command result. Ordering rides the response stream.
+                        res.writeHead (200, createObj [ "content-type", box "application/x-ndjson"; "cache-control", box "no-store" ]) |> ignore
+                        Async.StartImmediate (
+                            async {
+                                let! result =
+                                    capabilities.Execute request.Handle request.Command (fun chunk ->
+                                        res.write (ControlWire.toString ControlWire.executeLine (ControlWire.OutputLine chunk) + "\n")
+                                        |> ignore)
+                                res.``end`` (ControlWire.toString ControlWire.executeLine (ControlWire.ResultLine result) + "\n")
+                            })))
             | "POST", "/control/name" ->
                 // Session metadata, not environment authority: the secret only names WHICH
                 // session is reporting; the Manager updates that session's display name.
@@ -111,6 +133,14 @@ let tryHandle
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))
+            | "POST", "/control/register-client" ->
+                // Dynamic client registration (the OIDC RP side of this launch). The
+                // secret names the registering session; the redirect URI arrives here —
+                // not at spawn — because the session's port is OS-assigned and only
+                // known once it listens.
+                decodeAnd (Wire.fromString Wire.registerClientRequest) (fun request ->
+                    let response = registerClient (Option.defaultValue "" secret) caller.SessionId request.RedirectUri
+                    respondJson res (Wire.toString Wire.registerClientResponse response))
             | "GET", "/control/notifications" ->
                 // The reverse leg: a long-lived SSE stream the Manager pushes notifications
                 // down. The secret already resolved to capabilities above, so it is valid —

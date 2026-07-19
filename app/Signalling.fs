@@ -51,30 +51,42 @@ let private pathnameOf (url: string) : string = Fable.Core.Util.jsNative
 [<Fable.Core.Emit("new URL($0, 'http://local').searchParams.get($1)")>]
 let private queryOf (url: string) (name: string) : string option = Fable.Core.Util.jsNative
 
-/// The token-gated, HTTP-cacheable event-log read surface.
+/// The auth-gated, HTTP-cacheable event-log read surface.
 type EventsEndpoint =
-    { /// The session token; chunk requests must carry it as `?token=`.
-      Token : string
+    { /// Validates a `?token=` peer token (minted by this process via `/me`) — the
+      /// cookie-less access path (Node tests, headless clients).
+      ValidateToken : string -> bool
       /// Read chunk `n`: the JSONL-encoded envelope lines, plus whether the chunk is
       /// full (and therefore immutable).
       ReadChunk : int -> Async<string list * bool> }
 
 /// Start the HTTP bootstrap + signalling server. For each offer posted to `/signal`, an
 /// answering peer connection is created; when its data channel opens, the resulting frame
-/// channel is handed to `onConnection`. When `events` is given, `GET /events/{n}?token=…`
-/// serves the log in fixed-size chunks with cache headers derived from immutability.
-/// Resolves once the server is listening.
+/// channel is handed to `onConnection`. When `events` is given, `GET /events/{n}` serves
+/// the log in fixed-size chunks with cache headers derived from immutability, gated by
+/// the auth cookie or a minted `?token=`. When `auth` is given, the login surface
+/// (`/login`, `/callback`, `/me`) rides the same server; the SHELL stays ungated and
+/// cacheable — offline-first — because it is a pure function of the session id with no
+/// content and no secrets; authorization gates the data surfaces, and the browser client
+/// renavigates to `/login` when `/me` says it must.
 let start
     (sessionId: SessionId)
     (onConnection: FrameChannel<string> -> unit)
     (events: EventsEndpoint option)
+    (auth: SessionAuth.Auth option)
+    (mintPeerToken: unit -> string)
     (port: int)
     : Async<HttpServer> =
     let bootstrapHtml = bootstrapHtml sessionId
-    let serveChunk (endpoint: EventsEndpoint) (url: string) (index: int) (res: ServerResponse) =
-        if queryOf url "token" <> Some endpoint.Token then
+    let authorized (req: IncomingMessage) (url: string) (validateToken: string -> bool) =
+        (match auth with
+         | Some a -> a.IsAuthenticated req
+         | None -> false)
+        || (queryOf url "token" |> Option.map validateToken |> Option.defaultValue false)
+    let serveChunk (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (index: int) (res: ServerResponse) =
+        if not (authorized req url endpoint.ValidateToken) then
             res.writeHead (401, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
-            res.``end`` "invalid session token"
+            res.``end`` "unauthorized"
         else
             Async.StartImmediate (
                 async {
@@ -126,10 +138,64 @@ let start
                 res.``end`` "stylesheet not built (run: mise run build)"
         | "GET", path when path.StartsWith "/events/" ->
             match events, System.Int32.TryParse (path.Substring "/events/".Length) with
-            | Some endpoint, (true, index) when index >= 0 -> serveChunk endpoint req.url index res
+            | Some endpoint, (true, index) when index >= 0 -> serveChunk endpoint req req.url index res
             | _ ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                 res.``end`` "not found"
+        | "GET", "/login" ->
+            // Begin the authorization-code + PKCE dance: 302 to the Manager's authorize
+            // endpoint. The BROWSER navigates here (renavigation on a 401 from `/me`) —
+            // the cached shell itself never redirects, preserving offline reopen.
+            match auth with
+            | None ->
+                res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
+                res.``end`` "this session has no authorization provider"
+            | Some a ->
+                Async.StartImmediate (
+                    async {
+                        match! a.BeginLogin () with
+                        | Some url ->
+                            res.writeHead (302, createObj [ "location", box url; "cache-control", box "no-store" ]) |> ignore
+                            res.``end`` ""
+                        | None ->
+                            res.writeHead (503, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
+                            res.``end`` "session is still registering with its manager"
+                    })
+        | "GET", "/callback" ->
+            match auth with
+            | None ->
+                res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
+                res.``end`` "this session has no authorization provider"
+            | Some a ->
+                Async.StartImmediate (
+                    async {
+                        match! a.HandleCallback req.url with
+                        | Ok setCookie ->
+                            res.writeHead (
+                                302,
+                                createObj [ "location", box "/"; "set-cookie", box setCookie; "cache-control", box "no-store" ])
+                            |> ignore
+                            res.``end`` ""
+                        | Error (status, message) ->
+                            res.writeHead (status, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
+                            res.``end`` message
+                    })
+        | "GET", "/me" ->
+            // The browser's probe: a valid cookie (or no auth requirement at all) mints
+            // a peer token for the WebRTC `PeerHello` — cookies cannot ride the data
+            // channel. 401 tells the client to renavigate to `/login`; a network error
+            // (offline) tells it to stay on the cached shell and local stores.
+            let respondMe (subject: string) =
+                res.writeHead (200, createObj [ "content-type", box "application/json"; "cache-control", box "no-store" ]) |> ignore
+                res.``end`` (sprintf """{"peerToken":"%s","sub":"%s"}""" (mintPeerToken ()) subject)
+            match auth with
+            | None -> respondMe "local"
+            | Some a ->
+                match a.SubjectOf req with
+                | Some subject -> respondMe subject
+                | None ->
+                    res.writeHead (401, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
+                    res.``end`` "unauthorized"
         | _ ->
             res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
             res.``end`` "not found"

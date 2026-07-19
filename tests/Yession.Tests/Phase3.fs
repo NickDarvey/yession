@@ -115,7 +115,7 @@ let private raceTests =
         testCaseAsync "delete before the snapshot wins: a deleted entry is never consumed (delete-vs-accept, delete first)" <|
             async {
                 let runner, release = heldAgent ()
-                let! h = Host.startWith (Some runner) (SessionId.create "race-delete-first" |> expect) "t" 0
+                let! h = Host.startWith (Some runner) (SessionId.create "race-delete-first" |> expect) 0
                 let o = offlinePeer 11.0 "olive" "Olive"
 
                 // m1 drains immediately and its turn HOLDS; m2 accumulates behind it.
@@ -146,7 +146,7 @@ let private raceTests =
 
         testCaseAsync "a late delete of an accepted entry is a CRDT no-op (delete-vs-accept, accept first)" <|
             async {
-                let! h = Host.start (SessionId.create "race-accept-first" |> expect) "t" 0
+                let! h = Host.start (SessionId.create "race-accept-first" |> expect) 0
                 let o = offlinePeer 12.0 "olive" "Olive"
 
                 let q1 = enqueue o "d-1" "q-1" "already accepted"
@@ -168,7 +168,7 @@ let private raceTests =
         testCaseAsync "an edit that reaches the Process before the snapshot is consumed; a late edit is discarded (edit-vs-accept, both orderings)" <|
             async {
                 let runner, release = heldAgent ()
-                let! h = Host.startWith (Some runner) (SessionId.create "race-edit" |> expect) "t" 0
+                let! h = Host.startWith (Some runner) (SessionId.create "race-edit" |> expect) 0
                 let o = offlinePeer 13.0 "olive" "Olive"
 
                 // Hold a turn on m1 so m2 sits in the queue.
@@ -207,7 +207,7 @@ let private raceTests =
         testCaseAsync "a reorder before the snapshot decides consumption order; the batch is one coalesced turn (reorder-vs-accept, reorder first + liveness + single-flight)" <|
             async {
                 let runner, release = heldAgent ()
-                let! h = Host.startWith (Some runner) (SessionId.create "race-reorder-first" |> expect) "t" 0
+                let! h = Host.startWith (Some runner) (SessionId.create "race-reorder-first" |> expect) 0
                 let o = offlinePeer 14.0 "olive" "Olive"
 
                 let _q1 = enqueue o "d-1" "q-1" "opening message"
@@ -239,7 +239,7 @@ let private raceTests =
 
         testCaseAsync "a late reorder of an accepted entry is a no-op (reorder-vs-accept, accept first)" <|
             async {
-                let! h = Host.start (SessionId.create "race-reorder-late" |> expect) "t" 0
+                let! h = Host.start (SessionId.create "race-reorder-late" |> expect) 0
                 let o = offlinePeer 15.0 "olive" "Olive"
 
                 let _q1 = enqueue o "d-1" "q-1" "first"
@@ -272,7 +272,7 @@ let private crashRepairTests =
 
                 // First life: the entry is consumed (appended durably, removed from the
                 // process doc). The peer never receives the removal.
-                let! h1 = Host.startWithCapabilities None None (Some (openLog ())) sessionId "t" 0
+                let! h1 = Host.startWithCapabilities None None (Some (openLog ())) sessionId 0
                 let o = offlinePeer 16.0 "olive" "Olive"
                 let q1 = enqueue o "d-1" "q-1" "exactly once"
                 deliver o.Doc h1.Doc
@@ -283,7 +283,7 @@ let private crashRepairTests =
                 // Second life: a fresh process doc (doc persistence arrives in Step 19),
                 // the SAME durable log. The stale peer re-syncs the consumed entry —
                 // exactly the crash-between-append-and-removal shape.
-                let! h2 = Host.startWithCapabilities None None (Some (openLog ())) sessionId "t" 0
+                let! h2 = Host.startWithCapabilities None None (Some (openLog ())) sessionId 0
                 deliver o.Doc h2.Doc
 
                 let! secondLife = sentMessages h2.Log
@@ -324,9 +324,9 @@ let private interruptTests =
                         resume (AgentCompleted ("second turn done", None))
                     | None -> failwith "no held turn to release"
 
-                let! h = Host.startWith (Some runner) (SessionId.create "interrupt-e2e" |> expect) "interrupt-token" 0
+                let! h = Host.startWith (Some runner) (SessionId.create "interrupt-e2e" |> expect) 0
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
-                let! a = connectClient signalUrl "interrupt-token" "ada" "Ada"
+                let! a = connectClient signalUrl (h.MintPeerToken ()) "ada" "Ada"
 
                 // First send: the turn starts and streams its partial response.
                 do! compose a a.Hello.PeerId "go research this"
@@ -372,9 +372,9 @@ let private interruptTests =
         testCaseAsync "interrupting a turn that already finished is rejected (interrupt-vs-completion race)" <|
             async {
                 let scripted : RunAgent = fun _ _ _ _ -> async { return AgentCompleted ("instant", None) }
-                let! h = Host.startWith (Some scripted) (SessionId.create "interrupt-late" |> expect) "late-token" 0
+                let! h = Host.startWith (Some scripted) (SessionId.create "interrupt-late" |> expect) 0
                 let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
-                let! a = connectClient signalUrl "late-token" "ada" "Ada"
+                let! a = connectClient signalUrl (h.MintPeerToken ()) "ada" "Ada"
 
                 do! compose a a.Hello.PeerId "quick one"
                 a.Connection.SendDraft a.Hello.PeerId
@@ -389,7 +389,7 @@ let private interruptTests =
                 // A raw channel so the command RESPONSE is observable.
                 let! channel = WebRtc.connect signalUrl
                 do! channel.Send (
-                        Control (PeerHello { PeerId = PeerId.create "raw" |> expect; DisplayName = "Raw"; Token = "late-token" }))
+                        Control (PeerHello { PeerId = PeerId.create "raw" |> expect; DisplayName = "Raw"; Token = h.MintPeerToken () }))
                 let rec awaitAccepted () =
                     async {
                         match! channel.Receive () with
@@ -446,7 +446,7 @@ let private docPersistenceTests =
                 // First life: a held turn consumes e1; e2 stays pending; a plain draft
                 // is typed but never sent.
                 let runner1, _release1 = heldAgent ()
-                let! h1 = Host.startFull (Some runner1) None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId "t" 0
+                let! h1 = Host.startFull (Some runner1) None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId None 0
                 let o = offlinePeer 21.0 "olive" "Olive"
                 let q1 = enqueue o "d-1" "q-1" "consumed before crash"
                 deliver o.Doc h1.Doc
@@ -462,7 +462,7 @@ let private docPersistenceTests =
                 // Second life: replay doc + log. The boot drain consumes e2 exactly
                 // once; the draft is intact.
                 let runner2, release2 = heldAgent ()
-                let! h2 = Host.startFull (Some runner2) None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId "t" 0
+                let! h2 = Host.startFull (Some runner2) None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId None 0
                 let! secondLife = sentMessages h2.Log
                 Expect.equal
                     (secondLife |> List.map (fun m -> m.QueueId, m.Body))
@@ -493,7 +493,7 @@ let private docPersistenceTests =
                 let sessionId = SessionId.create "phase3-torn" |> expect
                 let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
 
-                let! h1 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId "t" 0
+                let! h1 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId None 0
                 let o = offlinePeer 22.0 "olive" "Olive"
                 let oPeer = (o.Runner.Model ()).Peer.PeerId
                 Body.author o.Registry o.Runner oPeer "acknowledged"
@@ -503,7 +503,7 @@ let private docPersistenceTests =
                 // A crash tore the final append: an unparseable half-line, no newline.
                 appendFileSync nodeFs docPath "////////"
 
-                let! h2 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId "t" 0
+                let! h2 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId None 0
                 let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
                 Expect.equal
                     (synced.Drafts |> Map.tryFind oPeer |> Option.map (fun _ -> SyncedStateSync.draftBodyMarkdown h2.Doc oPeer))
@@ -518,7 +518,7 @@ let private docPersistenceTests =
                 let sessionId = SessionId.create "phase3-corrupt" |> expect
                 let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
 
-                let! h1 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId "t" 0
+                let! h1 = Host.startFull None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None sessionId None 0
                 do! h1.Stop ()
                 // A garbage line WITH a trailing newline claims to be acknowledged:
                 // that is corruption, and it must never be silently dropped.

@@ -21,7 +21,6 @@ let private expect =
 // Default 0 = a random OS-assigned port for the default session, so multiple
 // instances coexist.
 let private port = Interop.envOr "YESSION_PORT" "0" |> int
-let private token = Interop.envOr "YESSION_TOKEN" "local-dev-token"
 let private sessionKey = Interop.envOr "YESSION_SESSION" "local-session"
 let private dataDir = Interop.envOr "YESSION_DATA_DIR" ".yession"
 // The management UI wants a bookmarkable address, so its default is fixed; a second
@@ -58,7 +57,7 @@ Async.StartImmediate(
         let sessionId = SessionId.create sessionKey |> expect
         match manager.TryFind sessionId with
         | Some _ -> ()
-        | None -> manager.CreateSession sessionKey sessionKey token |> expect |> ignore
+        | None -> manager.CreateSession sessionKey sessionKey |> expect |> ignore
 
         match! manager.Launch sessionId with
         | Error reason -> failwithf "default session failed to launch: %s" reason

@@ -5,8 +5,7 @@ namespace Yession.Domain
 /// boundary later steps delegate scoped capabilities across (docs/design.md §3).
 
 type SessionLaunchRequest =
-    { SessionId : SessionId
-      SessionToken : string }
+    { SessionId : SessionId }
 
 /// The bootstrap URI is a string for Fable portability; it is a plain
 /// `http://127.0.0.1:<port>/` local URI in Phase 2.

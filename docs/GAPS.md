@@ -9,18 +9,27 @@ discovers it in production. Items are roughly ordered by how much they matter.
 
 ## Security & trust
 
-- **No transport encryption guarantees beyond WebRTC/DTLS, and no authn beyond the
-  session token.** A single shared random token gates a session (acceptable for local
-  development per design.md §3's threat model). There are no identities, no per-peer
-  authorization, no token rotation, and the token rides a query parameter into the
-  browser client.
+- **User authorization gates ACCESS, not identity.** Sessions authorize users through
+  the Manager's OIDC provider ([plan](plans/04-session-authorization.md)): the
+  shared session token is gone, the browser rides an authorization-code + PKCE bounce
+  into an HttpOnly cookie, and peer/event access is minted per user. But ID-token
+  claims are NOT yet threaded into `PeerId`/`ActorRef` — display names stay
+  self-asserted and events are not attributed to authenticated users (the recorded
+  follow-up).
+- **The only authentication strategy is trust-localhost.** The provider's
+  `AuthenticationStrategy` seam exists precisely so an upstream OIDC (or any other)
+  strategy can slot in, but until one does, every loopback request IS the single
+  local user — the OIDC machinery adds structure, not secrets, over the same
+  local-dev threat model. No `nonce` in ID tokens yet (PKCE + confidential client +
+  loopback); add it with the upstream strategy.
+- **No transport encryption guarantees beyond WebRTC/DTLS.** Everything binds
+  127.0.0.1; loopback HTTP is the RFC 8252 pattern, but nothing here is LAN-safe.
 - **The Manager and Process read plaintext** (per the stated Phase 1–2 threat model);
   command-to-container encryption is designed for but not implemented.
-- **The management UI and control endpoint are unauthenticated beyond locality +
-  secrets.** Both bind 127.0.0.1 only; the control RPC is gated by per-launch secrets,
-  but the management UI itself has no login — anyone with local access can manage
-  sessions (and session tokens appear in its open links). Same local-dev threat model
-  as everything else; revisit with real authn.
+- **The management UI itself has no login.** It binds 127.0.0.1 and its open links are
+  now plain URLs (no embedded tokens — the session's own OIDC gate does the work), but
+  anyone with local access can manage sessions. The authentication-strategy seam is
+  where a UI login would reuse the same policy.
 - **`LocalProcessBackend` provides no OS isolation.** Commands run as child processes of
   the Manager with the Manager's own user and environment. The *authority* contract
   (session scoping, handle validation) is enforced and tested, but the *engine* is not a
@@ -86,9 +95,11 @@ discovers it in production. Items are roughly ordered by how much they matter.
 - **The JSONL event log loads fully into memory** and has no compaction, rotation, or
   checksumming; a corrupt line fails the whole open (loud by design). The doc store
   compacts only at open — a very long-lived Process grows its sidecar until restart.
-- **The session token rides the chunk URLs** (`?token=`), consistent with the page
-  URL, and therefore ends up in the browser's cache keys and history — acceptable for
-  the local-development threat model, revisit with real authn.
+- **Event chunks are cookie-gated for browsers; headless clients still put a minted
+  peer token in the chunk URL** (`?token=`). The browser path is clean (the same-origin
+  auth cookie rides each fetch, so URLs — and cache keys — carry no secrets); the
+  token-in-URL path remains for Node clients and tests, scoped to per-process minted
+  tokens that die with the session.
 - **A session served offline has no app shell**: IndexedDB restores state instantly
   once the page loads, but the page itself still needs the Session Process (no
   service worker).
@@ -116,7 +127,9 @@ discovers it in production. Items are roughly ordered by how much they matter.
   shell does not yet redial and resume (the protocol supports it — E2E-4 proves resume
   works, and the client now pushes its full local state on every accept — the browser
   redial wiring is what's missing).
-- **The session token defaults to `local-dev-token`** or a `?token=` query parameter.
+- **A 401 from `/me` renavigates to `/login` unconditionally** — there is no in-app
+  "signed out" state; the client simply rides the OIDC bounce again. Offline, the
+  probe's network failure keeps the cached shell read-only with no reconnect UI.
 - **No browser support matrix**: verified on Chromium (headless, in CI); the ICE
   gathering settle-fallback should cover Safari/Firefox mDNS behaviour, but they are
   untested.

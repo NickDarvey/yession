@@ -34,7 +34,9 @@ module EventChunk =
 
     /// The `Cache-Control` value for a chunk response. Full chunks are immutable by
     /// construction (append-only log, fixed chunk bounds); a partial chunk is still
-    /// growing and must be revalidated every time.
+    /// growing and must be revalidated every time. `private` because chunks now sit
+    /// behind per-user authorization: the BROWSER cache still serves them (offline
+    /// replay keeps working); only shared caches are excluded.
     let cacheControl (isFull: bool) : string =
-        if isFull then sprintf "public, max-age=%d, immutable" maxAgeSeconds
+        if isFull then sprintf "private, max-age=%d, immutable" maxAgeSeconds
         else "no-store"
