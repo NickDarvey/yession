@@ -134,6 +134,14 @@ let private placeTitleCursor (peer: string) (anchor: int) (head: int) : unit = j
 [<Emit("requestAnimationFrame(() => $0())")>]
 let private raf (f: unit -> unit) : unit = jsNative
 
+// A trailing debounce: presence decorations are pushed only after the doc stops changing, so a
+// decoration transaction never lands while y-prosemirror is applying remote content (which would
+// starve the read-only mirrors' rendering of that content — see `pushPresences`).
+[<Emit("setTimeout($0, $1)")>]
+let private setTimeoutJs (f: unit -> unit) (ms: int) : float = jsNative
+[<Emit("clearTimeout($0)")>]
+let private clearTimeoutJs (handle: float) : unit = jsNative
+
 // The sidebar/drawer state is one bit on the root element, outside `#app`, so it survives
 // every re-render: default = sidebar visible on desktop, off-canvas on mobile; `nav-alt`
 // = the inverse (see Style.sidebar).
@@ -217,6 +225,11 @@ let private start () =
         let registry = BodyRegistry doc
         let mutable latestModel = initial
         let mountedBodies = System.Collections.Generic.Dictionary<string, Y.XmlFragment * Editor.EditorHandle> ()
+        // The last cursor set pushed into each editor, so a render only dispatches a decoration
+        // transaction when it actually changed. Dispatching one every render competes with
+        // y-prosemirror's ySync applying REMOTE edits and starves the read-only mirrors' rendering
+        // of incoming content — so an unchanged (typically empty) set must never re-dispatch.
+        let lastPushed = System.Collections.Generic.Dictionary<string, Editor.RemoteBodyCursor list> ()
 
         /// The collaborative field a body host names — parsed back from its `BodyKey` so a body
         /// editor's presence report (and the remote cursors pushed into it) carry the right field.
@@ -271,26 +284,41 @@ let private start () =
             for stale in mountedBodies.Keys |> Seq.filter (seen.Contains >> not) |> Seq.toList do
                 (snd mountedBodies.[stale]).Dispose ()
                 mountedBodies.Remove stale |> ignore
+                lastPushed.Remove stale |> ignore
 
-        /// Push each mounted body's remote cursors into its editor: the peers whose focus is in
-        /// that body, coloured per peer (`PeerColour`), positioned by their relative anchor/head.
+        // The remote cursors currently in a given body, coloured per peer.
+        let cursorsFor (key: string) : Editor.RemoteBodyCursor list =
+            match fieldOfKey key with
+            | Some field ->
+                latestModel.Presence
+                |> Map.toList
+                |> List.filter (fun (_, p) -> p.Focus.Field = field)
+                |> List.map (fun (peerId, p) ->
+                    ({ Colour = PeerColour.ofPeer peerId
+                       Selection = PeerColour.translucent peerId
+                       Name = p.DisplayName
+                       Anchor = p.Focus.Pos.Anchor
+                       Head = p.Focus.Pos.Head } : Editor.RemoteBodyCursor))
+            | None -> []
+
+        // Overlay each body's remote cursors, DEBOUNCED: every render (re)arms a short timer, so
+        // the decoration dispatch fires only once the model — and thus the doc — has gone quiet.
+        // This keeps decoration transactions strictly out of the active-convergence window, where
+        // they starve y-prosemirror's rendering of remote content; the caret lands just after the
+        // content settles. Only editors whose cursor set changed are dispatched (idle empty→empty
+        // is skipped), so a settled editor with no cursors is never disturbed.
+        let mutable pushTimer = 0.0
         let pushPresences () =
-            for kv in mountedBodies do
-                let handle = snd kv.Value
-                let cursors =
-                    match fieldOfKey kv.Key with
-                    | Some field ->
-                        latestModel.Presence
-                        |> Map.toList
-                        |> List.filter (fun (_, p) -> p.Focus.Field = field)
-                        |> List.map (fun (peerId, p) ->
-                            ({ Colour = PeerColour.ofPeer peerId
-                               Selection = PeerColour.translucent peerId
-                               Name = p.DisplayName
-                               Anchor = p.Focus.Pos.Anchor
-                               Head = p.Focus.Pos.Head } : Editor.RemoteBodyCursor))
-                    | None -> []
-                handle.PushPresences cursors
+            clearTimeoutJs pushTimer
+            pushTimer <-
+                setTimeoutJs (fun () ->
+                    for kv in mountedBodies do
+                        let key, handle = kv.Key, snd kv.Value
+                        let cursors = cursorsFor key
+                        let prev = match lastPushed.TryGetValue key with | true, v -> v | _ -> []
+                        if not (List.isEmpty cursors) || prev <> cursors then
+                            lastPushed.[key] <- cursors
+                            handle.PushPresences cursors) 150
 
         /// Place collaborators' title carets by measurement (native inputs have no per-character
         /// geometry): decode each title-focused peer's relative anchor/head against the title

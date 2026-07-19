@@ -128,8 +128,17 @@ let tests =
                 let! _ = await (pageA.WaitForFunctionAsync renderedHeading)
 
                 // B converges: it renders A's draft (read-only) as the same formatted heading.
+                // (Regression guard: pushing presence decorations on every render used to starve
+                // y-prosemirror's rendering of REMOTE content here, so B's mirror stayed blank.)
                 do! await (pageB.WaitForFunctionAsync
                             """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one')""") |> Async.Ignore
+
+                // B also overlays A's live caret in that read-only mirror: A's presence (a base64
+                // relative position over the draft body) decodes to a caret widget + name label.
+                // This lands just after the content settles (the decoration push is debounced off
+                // the active-convergence window). Guards remote BODY cursors end-to-end.
+                do! await (pageB.WaitForFunctionAsync
+                            """!!document.querySelector('[data-rich-readonly="true"] .pm-caret')""") |> Async.Ignore
 
                 // A sends; both timelines show the immutable message — serialized back to
                 // MARKDOWN (`# Heading one`), from events (not Yjs).
