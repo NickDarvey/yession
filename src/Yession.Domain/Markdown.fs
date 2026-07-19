@@ -58,13 +58,23 @@ module Markdown =
     /// Serialize a fragment's ProseMirror doc to Markdown (durable body / agent input). Reads a
     /// detached snapshot so the live body is never mutated (see the note above).
     let ofFragment (fragment: Y.XmlFragment) : string =
-        let name = rootName fragment
+        let doc = fragDoc fragment
         let node =
-            if isNull (box name) then fragmentToRootNode fragment schema
+            if isNull doc then
+                // Truly detached (no doc): there is no live CRDT the read could corrupt.
+                fragmentToRootNode fragment schema
             else
-                let snapshot = newDoc docClass
-                applyUpdate snapshot (encodeStateAsUpdate (fragDoc fragment))
-                fragmentToRootNode (docXmlFragment snapshot name) schema
+                let name = rootName fragment
+                if isNull (box name) then
+                    // Doc-attached but NOT a top-level root (nested, e.g. inside a Y.Map): we
+                    // cannot locate its counterpart in a snapshot by name, and a live read can
+                    // mutate the doc (see the note above). Bodies are top-level roots by
+                    // invariant (RichText.fs) — refuse loudly rather than corrupt silently.
+                    failwith "Markdown.ofFragment: refusing a live read of a nested (non-root) fragment — y-prosemirror can mutate the doc it reads"
+                else
+                    let snapshot = newDoc docClass
+                    applyUpdate snapshot (encodeStateAsUpdate doc)
+                    fragmentToRootNode (docXmlFragment snapshot name) schema
         serializer.serialize node
 
     /// Parse Markdown into an (empty) fragment — seeds a queue body on send.

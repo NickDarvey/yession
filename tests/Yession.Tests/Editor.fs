@@ -10,6 +10,8 @@ module Yession.Tests.Editor
 // `prosemirror-markdown` and `y-prosemirror` are pure JS (no DOM), so `Markdown.ofFragment`
 // / `Markdown.intoFragment` / `Markdown.copy` work headless — only `mountEditor` needs a browser.
 
+open Fable.Core
+open Fable.Core.JsInterop
 open Fable.Pyxpecto
 open Yjs
 open Ylmish.Codec
@@ -97,6 +99,46 @@ let private serializationTests =
             let first = md f
             let second = md f
             Expect.equal second first "re-reading the same fragment is stable (the read is side-effect-free)"
+
+        // The markdown-level guard above cannot fail on its own: y-prosemirror's merge is
+        // content-preserving, so the serialized output is identical even when the CRDT was
+        // mutated (only the editor binding's next edit exposes the damage). This test asserts
+        // at the CRDT level instead, on the exact layout that trips the merge: two same-client
+        // `Y.XmlText` siblings authored in SEPARATE transactions become adjacent items, the
+        // second being the first's `_item.right` — deterministically, no editor involved.
+        testCase "ofFragment is a pure read: no CRDT ops under same-client Y.Text adjacency" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let frag = doc.getXmlFragment "body"
+            let p = Y.XmlElement.Create "paragraph"
+            frag.insert (0., [| !^p |])
+            let insertLinked (index: float) (text: string) (href: string) =
+                doc.transact (fun _ ->
+                    let t = Y.XmlText.Create ()
+                    t.insert (0, text, !!(createObj [ "link" ==> createObj [ "href" ==> href; "title" ==> null ] ]))
+                    p.insert (index, [| !^t |]))
+            insertLinked 0. "one " "https://a.test"
+            insertLinked 1. "two" "https://b.test"
+            Expect.equal (p.toArray().Count) 2 "precondition: the paragraph holds two sibling Y.XmlText items"
+            let before = Y.encodeStateVector !^doc
+            let out = Markdown.ofFragment frag
+            Expect.stringContains out "one" "first text serialized"
+            Expect.stringContains out "two" "second text serialized"
+            Expect.equal (p.toArray().Count) 2 "no Y.XmlText was merged/deleted by the read"
+            // An empty v1 update encodes to exactly 2 bytes (0 structs + 0 deletions); anything
+            // larger means the read emitted CRDT ops.
+            let opsSince = Y.encodeStateAsUpdate (doc, before)
+            Expect.isTrue (opsSince.length <= 2) "the read produced no new CRDT ops"
+
+        // `ofFragment` can only snapshot fragments it can find by root name; a doc-attached but
+        // NESTED fragment would silently take the live-read path and re-expose the mutation bug,
+        // so it must refuse instead. (Bodies are top-level roots by invariant — RichText.fs.)
+        testCase "ofFragment refuses a nested (non-root) live fragment" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let map : Y.Map<obj> = doc.getMap "root"
+            let frag = Y.XmlFragment.Create ()
+            map.set ("body", !!frag) |> ignore
+            Expect.throws (fun () -> Markdown.ofFragment frag |> ignore)
+                "a nested live fragment must fail loudly, not read (and possibly mutate) the live doc"
     ]
 
 // The strongest non-brittle guard: parsing then serializing is a FIXED POINT — running it
