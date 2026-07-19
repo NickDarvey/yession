@@ -1,10 +1,18 @@
 name: pr
 
-# Every pull request runs the capabilities a PR runner can satisfy WITHOUT the native
-# node-datachannel addon: the cheap tier plus the host-free rich-editor browser E2E
-# (`-- Browser` needs only Chromium). The full gate — the WebRTC/host suites (`Native`),
-# Docker, and the live-agent smoke — needs the addon/daemon/credentials and runs on master
-# push in release.yml (`mise run verify`), which is what publishes a release.
+# Every pull request runs everything a PR runner can satisfy without a Docker daemon or live
+# model credentials: the cheap tier, the host-free rich-editor browser E2E, AND the native
+# WebRTC/host suites — the two-peer browser convergence E2E and the Node WebRTC/host E2Es
+# (`Native` + `Ports`). node-datachannel (the WebRTC addon) is a plain npm dependency that
+# installs on the PR runner, so there is no reason to defer this coverage to master — it is
+# exactly what catches two-peer regressions before merge (a presence-cursor bug that only the
+# two-peer suite could see reached master precisely because this ran release-only). Only
+# `Docker` (needs a daemon) and `LiveAgent` (needs real credentials) stay release-only;
+# release.yml's `mise run verify` runs the complete gate and is what publishes a release.
+#
+# The native WebRTC suites gather ICE in a sandbox and occasionally flake (an ICE stall, or a
+# toolchain segfault mid-compile), so the gate is retried once before it is called a failure:
+# a genuine break fails both attempts; a transient one clears on the retry.
 
 on:
   pull_request:
@@ -16,8 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
-      # Chromium for the host-free editor E2E (the .NET Playwright driver drives it).
-      - name: Install Chromium for the editor E2E
+      # Chromium drives both the host-free editor E2E and the two-peer browser convergence E2E
+      # (via the .NET Playwright driver); node-datachannel comes from `npm install` (mise restore).
+      - name: Install Chromium for the browser E2Es
         run: npx --yes playwright@1.61.1 install --with-deps chromium
-      - name: Cheap tier + host-free editor browser E2E
-        run: mise run test -- Browser
+      - name: Cheap tier + browser + native WebRTC/host E2E (retry once on flake)
+        run: |
+          for attempt in 1 2; do
+            echo "::group::native gate — attempt $attempt"
+            if mise run test -- Browser Ports Native; then
+              echo "::endgroup::"
+              echo "native gate passed on attempt $attempt"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "native gate failed on attempt $attempt"
+          done
+          echo "native gate failed after 2 attempts — treating as a real failure"
+          exit 1
