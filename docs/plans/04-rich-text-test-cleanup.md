@@ -1,5 +1,7 @@
 # Plan — rich-text test cleanup (AAA-targeted, high-signal)
 
+> **Status: delivered.** (`8fd7fea` — body-agnostic test seam)
+
 The XmlFragment flip broke ~83 test call sites that referenced the old `Ylmish.Text` body.
 That number is the real finding: **the body was scaffolding, not the subject** in almost all
 of them. A test earns its place only if it covers one behaviour nothing else does. So we

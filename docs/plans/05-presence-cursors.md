@@ -1,5 +1,7 @@
 # Plan — general presence cursors (title + bodies + beyond)
 
+> **Status: delivered.** (`b13d2bf` #14 Design B, `c0e2e25` #15 debounce; builds on the title-only cursors from #8)
+
 Replace the title-only cursor with ONE presence system that shows every collaborator's
 caret AND selection wherever they are — the session title, any draft composer, any queued
 message body — extensible to more places later. One peer has one focus at a time.

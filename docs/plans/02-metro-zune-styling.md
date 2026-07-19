@@ -1,5 +1,7 @@
 # Step — Metro / Zune styling for the client shell
 
+> **Status: delivered.** (`bd15c5d`, #2; carried through the Fable.Lit rewrite `4814815`, #4)
+>
 > Phase 4 · Client presentation
 > Design context: [docs/design.md](../design.md) §1 (Reactive, Types first), §2.1
 

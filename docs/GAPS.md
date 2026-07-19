@@ -1,9 +1,11 @@
 # Known gaps
 
 An honest inventory of what Yession does **not** do yet, as of `1.0.0-beta.*`. Phases
-1–4 are accepted ([tracker](plans/TODO.md)); everything below is deliberate scope,
-recorded so nobody discovers it in production. Items are roughly ordered by how much
-they matter.
+1–4 are accepted, plus later work delivered outside the numbered phases — client
+presentation (Metro/Zune styling, rich-text editing, collaborative presence cursors),
+telemetry (Plan 04), and the Manager→Session control-RPC reverse legs
+([tracker](plans/TODO.md)). Everything below is deliberate scope, recorded so nobody
+discovers it in production. Items are roughly ordered by how much they matter.
 
 ## Security & trust
 
@@ -93,17 +95,23 @@ they matter.
 
 ## Browser client
 
-- **Rendering is innerHTML-replacement with a focus/caret restore hack** for the draft
-  being typed. Fine at this scale; a proper reconciling renderer (Elmish.React or
-  morphdom) is the upgrade path. Caret position is restored to end-of-text, so editing
-  mid-string while remote edits land can jump the caret.
+- **Rendering is Fable.Lit (lit-html), a reconciling renderer.** The view is a total
+  function of the model, rendered into `#app` on every change, and Lit diffs the DOM so
+  focus and caret survive re-renders with no manual restore hack (this replaced the old
+  innerHTML-replacement approach). The only remaining manual DOM work is pinning the chat
+  scroll and pixel-positioning collaborators' cursor markers (a native `<input>` exposes no
+  per-character geometry).
 - **One WIP draft per client, co-editable by any peer** ([plan](plans/03-one-draft-per-client.md)):
   drafts are keyed by author (`Map<PeerId, DraftState>`), so each client owns at most one —
   structurally, not by a runtime cap. Any peer may co-edit any slot (collaboration); the
   owner sends their own. The queue is untouched (send clears the slot, so a client still
-  queues many by sending repeatedly). Still **one textarea each: no presence cursors, no
-  per-peer selections, no rich text**. Invariant 4 (clean send) has a dedicated Hedgehog
-  property; broader draft-op schedules (participation, offline rejoin) are the follow-up.
+  queues many by sending repeatedly). Drafts and queued messages are now **rich ProseMirror
+  editors** on a Yjs `XmlFragment` (markdown typing, bold/italic/code, lists, paste-as-markdown,
+  undo/redo) — not textareas, not plain text — and **collaborative presence cursors** overlay
+  every collaborative field (the title input and the body editors), showing each peer's caret
+  and selection with a colour + name label, relayed over ephemeral `Presence` frames (never
+  durable). Invariant 4 (clean send) has a dedicated Hedgehog property; broader draft-op
+  schedules (participation, offline rejoin) are the follow-up.
 - **Reconnect is manual** (reload). The model reaches `Reconnecting`, but the browser
   shell does not yet redial and resume (the protocol supports it — E2E-4 proves resume
   works, and the client now pushes its full local state on every accept — the browser
@@ -119,8 +127,9 @@ they matter.
   results; there is no structured tool-result schema and no tool for reading the
   command log or session history beyond the prompt transcript.
 - **The context pack is a flat transcript** rebuilt per turn from the full projection —
-  no windowing, summarisation, or token budgeting; long sessions will eventually
-  overflow the model context.
+  no windowing, summarisation, or token budgeting. Bodies are now Markdown (rich text
+  landed), but the transcript is still a naive `author: body` join with no multi-line
+  handling, so long sessions or large rich bodies will eventually overflow the model context.
 - **Turn discipline is done** (Phase 3): single-flight is enforced by the queue drain,
   interrupt is explicit, and the invariants are property-tested — but the queue has
   **no size cap**, a drain coalesces any backlog into ONE turn (no per-message turns
@@ -147,10 +156,14 @@ they matter.
   disk; the SDK's own resolution finds it thereafter (no `YESSION_CLAUDE_PATH` needed).
 - **The composition E2E and install smoke run on Linux/CI**; other platforms' native
   resolution rides npm's own optional-dependency machinery, unverified per-commit.
-- **darwin-x64 is not built** (runners produce linux-x64 and darwin-arm64); Intel Mac
-  users need Rosetta or a matrix addition.
-- **No Windows build**; no signing/notarisation for macOS binaries (Gatekeeper will
-  warn).
+- **No per-platform build matrix, no code signing.** Release CI is a single `ubuntu-latest`
+  job that ships one platform-neutral npm tarball; the platform-native pieces are resolved
+  by npm's `optionalDependencies` on whichever machine runs `npm install`, not built by
+  Yession (this replaced the earlier SEA per-platform binaries — see Step 26→28). Yession
+  therefore has no compiled binary of its own to sign or notarise; the native `claude` and
+  `node-datachannel` addon npm pulls in are unsigned third-party downloads that may still
+  trip macOS Gatekeeper. Darwin and Windows resolution rides npm's own machinery, exercised
+  only by the Linux install-smoke — unverified per-commit on those platforms.
 - **Telemetry is agent-turn usage only** (Plan 04): each completed turn emits one OpenTelemetry
   **log record** — the token/cache counts plus session/turn/model ids, never message content —
   over OTLP/HTTP to the Manager, which acts as the collector (`/v1/logs`) and logs + aggregates
