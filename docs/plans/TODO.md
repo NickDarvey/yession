@@ -97,7 +97,7 @@ E2E on the built binaries).
 | 22 | Manager state & codec | `ManagerState` + hand-written codec; atomic file store; registry survives restart | Done | `ManagerState`/`SessionRecord` in `Yession.Manager/State.fs` (runtime facts deliberately excluded — reconciled at boot, never persisted); `ManagerCodec` is the only path to bytes (unknown-field-tolerant decode; `Version` = SQLite migration hook); `ManagerStore` (app) loads/saves one JSON file atomically (temp+fsync+rename); tests: round-trip, tolerance, duplicate rejection, restart-keeps-registry, corrupt-fails-loudly; cheap tier 95/95 |
 | 23 | Session Process as an OS process | `yession-session` env contract + readiness line; spawn/observe/stop/resume; crash isolation | Done | `SessionMain.fs` (env contract, one JSON readiness line, stdin parent-guard so children die with the Manager even on SIGKILL); `Spawn` (readiness await + timeout + exit observation) + `ProcessManager` (create/launch/stop/resume/status over the Step 22 store; stop = SIGTERM→SIGKILL grace; resume = launch over the same data dir); `Main.fs` now the Manager entry spawning the default session as a child; interim: children run environment-less until Step 24. Gotcha pinned: TWO Fable output trees duplicate class identity (union equality checks the constructor), so the session entry compiles inside the ONE Host tree (`app/SessionMain.js`), not a second `-o` build. Verify-tier spawn-contract test (launch/serve/message/stop/resume-with-history/crash-observation/manager-restart); browser E2E now runs the real two-process topology; 116/116 verify + 96/96 cheap |
 | 24 | Authority over the control RPC | Per-launch secret; capability RPC; Step 11 rejections hold across the boundary | Done | `ControlWire` codecs (spec/handle/results/execute stream — handles serialize as plain data because validation is registry-anchored); Manager control endpoint (`/control/start\|stop\|execute`, 127.0.0.1, `x-yession-control` secret; execute streams NDJSON chunks then one result line); `ControlClient` implements `SessionEnvironmentCapabilities` over it (transport failures degrade to failed-result values); ProcessManager mints a per-launch secret resolving to the granted capabilities and revokes it on exit; SessionMain wires the RPC capabilities + a built-in `YESSION_AGENT=diagnostic` runner (credential-free end-to-end exercise); Main grants LocalProcessBackend authority — the interim environment-less mode ends; Step 11 rejections re-verified across the wire (forged secret 401, cross-session, fabricated handle, stopped container — backend untouched) + streamed-order test + cross-process diagnostic E2E; 118/118 verify, 97/97 cheap, browser E2E green |
-| 25 | Management UI (htmx) | SSR pages/fragments; create/launch/stop/resume/list; vendored htmx | Done | `ManagerUi`: pure page/table/row renders (the ROW is the swap unit — every action and the 2s status poll replace it via `hx-swap="outerHTML"`); routes `GET /`, `GET /htmx.js` (vendored htmx 2.0.10, no CDN), `POST /sessions`, `POST /sessions/{id}/launch\|stop`, `GET /sessions/{id}/row`; shares the Manager endpoint with the control RPC (`ProcessManager.createWithUi`; stable `YESSION_MANAGER_PORT` default 8321, loud conflict); open link targets the child's port with the token; cheap-tier render tests + verify-tier full flow over real HTTP (create→launch→open→stop→resume, duplicate rejected); 121/121 verify, 100/100 cheap, browser E2E green |
+| 25 | Management UI (htmx) | SSR pages/fragments; create/launch/stop/resume/list; vendored htmx | Done | `ManagerUi`: pure page/table/row renders (the ROW is the swap unit — every action and the 2s status poll replace it via `hx-swap="outerHTML"`); routes `GET /`, `GET /htmx.js` (vendored htmx 2.0.10, no CDN), `POST /sessions`, `POST /sessions/{id}/launch\|stop`, `GET /sessions/{id}/row`; shares the Manager endpoint with the control RPC (`ProcessManager.createWithUi`; stable `YESSION_MANAGER_PORT` default 8321, loud conflict); open link targets the child's port with the token; cheap-tier render tests + verify-tier full flow over real HTTP (create→launch→open→stop→resume, duplicate rejected); 121/121 verify, 100/100 cheap, browser E2E green. **Later reworked** (`4814815`, #4): htmx and the `GET /htmx.js` route were dropped — the UI is now Fable.Lit SSR (templates rendered to strings by `Ssr`) with a tiny inline vanilla script for fragment swaps + the status poll |
 | 26 | SEA binaries & F# build script | Two single-file executables; native addon extraction; `build.fsx` replaces `package.mjs` | Superseded by 28 | Delivered as two Node SEA single-file executables (esbuild→CJS, blob, postject, native-addon extraction shim), `package.mjs` deleted. **Replaced by Step 28 (npm packaging)** because SEA couldn't ship the 239 MB native `claude` the agent SDK spawns; npm's optional-dependency resolution does. |
 | 28 | npm packaging (one package, two bins) | Ship as one npm package; npm pulls the platform natives on install; GitHub-release tarballs | Done | `scripts/build.fsx` now assembles ONE npm package: esbuild bundles `manager.js` + `session.js` (ESM) keeping `node-datachannel`/`@anthropic-ai/claude-agent-sdk`/`zod` EXTERNAL (they only work from real node_modules — the SDK self-resolves its native `claude` via import.meta.url); assets (client.js, htmx) read package-relative by `Interop.readAsset`; `bin/yession.js` points the Manager at the packaged `session.js`; `package.json` deps = the externals → `npm i` pulls the platform-native `claude` (≈240 MB) AND node-datachannel automatically. SEA machinery removed (blob/postject/extraction shim/`isSea`/`siblingOfExecutable`; postject devDep dropped). Package = 306 KB; a clean `--ignore-scripts` install proved npm resolves the native `claude` + node-datachannel + both bins. Composition E2E redirected to the npm bundles; release workflow does `npm pack` + a per-platform install smoke (asserts native deps land + boot) and ships the .tgz. 122/122 verify + browser E2E |
 | 27 | Composition E2E & acceptance | The full scenario on built artifacts (verify tier); Phase 4 acceptance recorded | Done | `mise run verify` now packages the real binaries (`build.fsx 0.0.0-verify`) and the verify-tier composition E2E drives THEM: create+launch from the management UI over HTTP, a real WebRTC client messages the packaged child, the diagnostic agent runs a real command through the packaged manager's control RPC, stop/resume from the UI with history intact, manager kill+restart with the registry intact and resume still working; 122/122 verify + browser E2E |
@@ -118,17 +118,43 @@ ports/browser/credentials). Live agent tests self-gate on credentials (none in t
 dev environment; CI's `CLAUDE_CODE_OAUTH_TOKEN` secret exercises them in the verify
 job).
 
-## Client presentation (planned)
+## Client presentation (delivered)
 
-Presentation work not yet scheduled into a numbered phase:
+Presentation work delivered outside the numbered phases:
 
-- [02-metro-zune-styling.md](02-metro-zune-styling.md) — Metro/Zune workspace skin for the
-  client shell (Tailwind utilities composed as typed F# values; zero authored CSS).
-- [03-rich-text-editing.md](03-rich-text-editing.md) — Linear-style rich text editing: type or
-  paste Markdown, rendered live as formatted WYSIWYG. Bodies become a ProseMirror doc synced as
-  a Yjs `XmlFragment`, exposed as a first-class Ylmish-encoded field (extend Ylmish's
-  live-handle `CustomElement` codec — the sync boundary stays intact); markdown survives at the
-  drain so the agent path is unchanged. Starts with a de-risking spike (Step 0).
+- **Metro/Zune styling** — [02-metro-zune-styling.md](02-metro-zune-styling.md). Metro/Zune
+  workspace skin for the client shell (Tailwind utilities composed as typed F# values; zero
+  authored CSS). Delivered in `bd15c5d` (#2); carried through the Fable.Lit rewrite
+  (`4814815`, #4), which composes the same `Style` utilities and dropped the CDN + htmx.
+- **Rich text editing** — [03-rich-text-editing.md](03-rich-text-editing.md) (follow-up test
+  cleanup: [04-rich-text-test-cleanup.md](04-rich-text-test-cleanup.md)). Type or paste Markdown,
+  rendered live as WYSIWYG; bodies are a pure-F# ProseMirror doc synced as a Yjs `XmlFragment`
+  (a first-class body root — the sync boundary stays intact), and Markdown is snapshotted at the
+  drain so the agent path is unchanged. Delivered across the `dcd4b7a`→`141c488`→`eda261f`→
+  `275cc01`/`7bc0043` (permanent XmlFragment body flip)→`8fd7fea`→`6d1739e` series.
+- **Collaborative presence cursors** — [05-presence-cursors.md](05-presence-cursors.md). One
+  presence system showing every collaborator's caret AND selection wherever they are — the
+  session title, any draft composer, any queued body (`FocusField = Title | DraftBody | QueueBody`,
+  base64 Yjs relative positions) — relayed over ephemeral `Presence` frames, never durable.
+  Delivered in `b13d2bf` (#14, Design B) + `c0e2e25` (#15, debounce), building on the title-only
+  cursors from `03e6033` (#8).
+
+## Later delivery (post-Phase 4)
+
+Infrastructure delivered after Phase 4 acceptance, outside the numbered phase tables:
+
+- **Telemetry (Plan 04)** — [04-telemetry.md](04-telemetry.md) (Status: delivered). Each completed
+  agent turn emits one OpenTelemetry **log record** (token/cache counts + session/turn/model ids,
+  never message content) over OTLP/HTTP to the Manager, which is the collector (`/v1/logs`) and
+  logs + aggregates per-session totals to stdout; off unless the Manager enables it. Delivered in
+  `3fc06ce` (#10) + fix `f4d2689` (#12). (The plan doc's local Steps 28–33 are scoped to that doc,
+  not the tracker's Step 28.)
+- **Manager→Session control-RPC reverse legs** — the Manager can push down to a running session
+  over SSE on the shared control endpoint. `GET /control/notifications` (`ProcessManager.Notify`,
+  `NotificationHub`) delivered in `2360e36` (#11); `GET /control/mcp` (`ProcessManager.PublishMcpTools`,
+  `McpHub`, standard MCP `ListToolsResult`, retained snapshot) delivered in #13. Transport + wire
+  codecs + hubs are done and verify-tier tested over real sockets; no production producer wires
+  real payloads through them yet (a documented follow-up — see [GAPS.md](../GAPS.md)).
 
 ## Blockers log
 

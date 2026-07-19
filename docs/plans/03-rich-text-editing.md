@@ -1,5 +1,7 @@
 # Step — Linear-style rich text editing
 
+> **Status: delivered.** (`dcd4b7a`…`6d1739e`; test cleanup in [04-rich-text-test-cleanup.md](04-rich-text-test-cleanup.md))
+>
 > Client presentation · follows [02-metro-zune-styling.md](02-metro-zune-styling.md)
 > Design context: [docs/design.md](../design.md) §1 (Ylmish is the sync boundary; Yjs is
 > not the domain model), §2.2 (state split), §5 (invariants)
