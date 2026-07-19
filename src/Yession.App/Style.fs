@@ -179,6 +179,25 @@ module Style =
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 
+    /// Read-only rendered Markdown in the timeline (the mirror of the composer's live
+    /// formatting). Preflight strips heading/list defaults, so each rendered element carries
+    /// its own utilities — the same "F# composes utilities, no hand CSS" rule as everything
+    /// else. Blocks share a tight vertical rhythm; only the first/last drop their outer margin.
+    let proseP = "[&:not(:first-child)]:mt-2"
+    let proseH1 = "text-[19px] leading-7 font-normal text-ink [&:not(:first-child)]:mt-3 mb-1"
+    let proseH2 = "text-[17px] leading-6 font-normal text-ink [&:not(:first-child)]:mt-3 mb-1"
+    let proseH3 = "text-[15px] leading-6 font-semibold text-ink [&:not(:first-child)]:mt-2 mb-1"
+    let proseH4 = "text-[13px] leading-5 font-semibold uppercase tracking-[0.08em] text-ink-dim [&:not(:first-child)]:mt-2 mb-1"
+    let proseUl = "list-disc pl-5 [&:not(:first-child)]:mt-2 marker:text-ink-faint"
+    let proseOl = "list-decimal pl-5 [&:not(:first-child)]:mt-2 marker:text-ink-faint"
+    let proseLi = "[&:not(:first-child)]:mt-1"
+    let proseStrong = "font-semibold text-ink"
+    let proseCode = "font-mono text-[13px] bg-surface-2 text-ink px-1 py-0.5"
+    let prosePre = "font-mono text-[12px] leading-5 bg-surface-2 text-ink p-3 [&:not(:first-child)]:mt-2 overflow-x-auto whitespace-pre-wrap"
+    let proseQuote = "border-l-2 border-hair pl-3 text-ink-dim [&:not(:first-child)]:mt-2"
+    let proseLink = "text-blue underline decoration-1 underline-offset-2 hover:text-[#7fd0f5]"
+    let proseHr = "border-0 border-t border-hair my-3"
+
     // --- Agent activity strip ----------------------------------------------------------------
 
     let activity =

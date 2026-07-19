@@ -71,7 +71,9 @@ let private uiChecklistTests =
                   "draft editor mount host", Dom.attr Dom.Hooks.draftInput "ada"
                   "send button", Dom.attr Dom.Hooks.sendDraft "ada"
                   "conversation timeline", Dom.Hooks.conversation
-                  "sent message in timeline", Dom.hookText Dom.Hooks.messageBody "ship it"
+                  // The sent body is rendered as formatted rich text (a paragraph here), not
+                  // raw markdown text sitting directly under the hook.
+                  "sent message in timeline", ">ship it</p>"
                   "agent streaming response", Dom.attr Dom.Hooks.messageStatus Dom.Text.streaming
                   "agent stream indicator", Dom.Hooks.agentStream
                   "active agent turn", Dom.Hooks.agentTurn
@@ -95,6 +97,35 @@ let private uiChecklistTests =
                 let parts = name.Split '-'
                 Expect.equal parts.Length 2 "adjective-animal shape"
                 Expect.isTrue (parts.[0].Length > 0 && parts.[1].Length > 0) "both halves non-empty"
+
+        // The timeline renders a sent body's Markdown as formatted rich text — the read-only
+        // mirror of the composer — through the very SSR path the browser also runs. This pins
+        // it in the cheap tier; the real-browser two-peer flow (Browser.fs) covers it live.
+        testCase "a sent markdown body renders as formatted rich text in the timeline" <| fun () ->
+            let richItem : ConversationItem =
+                { MessageId = MessageId.create "msg-rich" |> expect
+                  Author = HumanPeer ada
+                  Body = "# Heading one\n\nText with **bold** and `code`.\n\n- item one\n- item two"
+                  Status = Complete }
+            let model =
+                { representativeModel with
+                    Conversation = { representativeModel.Conversation with Items = [ richItem ] } }
+            let html = Support.render model
+            let timeline =
+                let start = html.IndexOf Dom.Hooks.conversation
+                html.Substring (start, html.IndexOf ("</section>", start) - start)
+            // Block/inline structure comes through as semantic elements…
+            for label, marker in
+                [ "heading text", ">Heading one</h1>"
+                  "bold mark", ">bold</strong>"
+                  "inline code", ">code</code>"
+                  "bullet list", "<ul"
+                  "list item", "<li"
+                  "list item text", ">item one</p>" ] do
+                Expect.isTrue (timeline.Contains marker) (sprintf "%s (`%s`) must render formatted" label marker)
+            // …and the Markdown syntax itself is transformed away, never left as literal source.
+            Expect.isFalse (timeline.Contains "# Heading one") "the heading '#' is not literal text"
+            Expect.isFalse (timeline.Contains "**bold**") "the bold '**' is not literal text"
     ]
 
 let tests =
