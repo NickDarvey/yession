@@ -121,7 +121,11 @@ stdenv.mkDerivation {
     ${dotnetEnv}
     # npm-installed CLIs (tailwindcss) on PATH; npmConfigHook has populated node_modules.
     export PATH="$PWD/node_modules/.bin:$PATH"
-    export NUGET_PACKAGES="${nugetDeps}"
+    # NUGET_PACKAGES must be writable — `dotnet tool restore`/restore write lock and temp
+    # files into it — so copy the read-only cache FOD into a writable dir (the Nix store is
+    # read-only, which fails hard in a sandboxed build).
+    export NUGET_PACKAGES="$TMPDIR/nuget-packages"
+    cp -r --no-preserve=mode,ownership ${nugetDeps} "$NUGET_PACKAGES"
     # Offline NuGet: no online source, resolve everything from the pre-populated cache.
     cat > nuget.config <<'EOF'
     <?xml version="1.0" encoding="utf-8"?>
