@@ -39,27 +39,53 @@ The full reasoning, and the invariants that have to survive code review, are in
 
 ## Getting started
 
-[mise](https://mise.jdx.dev) manages the toolchain and is the way into the repo: every
-workflow is a mise task. Versions (Node, .NET, Fable) are pinned in [mise.toml](mise.toml)
-and installed for you.
+The toolchain comes from a [Nix flake](flake.nix); [`just`](https://just.systems) is the
+task runner. `nix develop` gives an environment — Node 24, the .NET SDK 10, `just` — that is
+identical on a laptop and in a Claude Code cloud session, with nothing curl-bootstrapped.
 
 ```sh
-mise install     # install the pinned toolchain (Node, .NET)
-mise run restore # install all dependencies (npm + .NET tools)
-mise tasks       # list every available task
+nix develop        # enter the dev shell (Node, .NET, just on PATH)
+just               # list every task
+just restore       # install all dependencies (npm + .NET tools)
+just build         # build everything
 ```
 
-Yession ships as one npm package with two commands: `yession` (the Manager) and
-`yession-session` (a Session Process). `npm i -g <release-tarball>` pulls the
-platform-native pieces (the WebRTC transport and the agent's native Claude Code binary) on
-install; Node ≥24 is the only prerequisite. `yession` serves a management UI (default
-http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its own
-process.
+No Nix? Any Node 24 + .NET SDK 10 will do — install [`just`](https://just.systems), then run
+the same `just` tasks. Nix just pins those versions for you (`dotnet-sdk_10` = 10.0.301,
+`nodejs_24`); bump the nixpkgs pin in `flake.nix` to move them.
+
+Yession ships two ways, side by side, each giving the two commands `yession` (the Manager)
+and `yession-session` (a Session Process). Either way `yession` serves a management UI
+(default http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its
+own process.
+
+- **npm package.** `npm i -g <release-tarball>` pulls the platform-native pieces (the WebRTC
+  transport and the agent's native Claude Code binary) on install; Node ≥24 is the only
+  prerequisite.
+- **Nix package.** Reproducible and self-contained — the native WebRTC addon is built from
+  source, the agent points at nixpkgs `claude-code`, and nothing runs an npm postinstall:
+
+  ```sh
+  nix run    github:NickDarvey/yession          # run the Manager without installing
+  nix profile install github:NickDarvey/yession # add yession + yession-session to your profile
+  ```
+
+  Or add the flake as an input and put `yession.packages.<system>.default` in a NixOS
+  `environment.systemPackages` / home-manager `home.packages` list.
 
 The core tasks are `restore`, `build`, `start`, `dev`, `test`, `verify`, `package`, and
-`clean`. Run them through `mise run <task>` (or `mise exec -- <cmd>`) so the pinned
-versions are always used. `build` type-checks the F# solution and Fable-compiles the
-Session Process host; `start` runs it.
+`clean` — run them as `just <task>` inside `nix develop`. Capabilities pass as arguments:
+`just test Browser`. `build` type-checks the F# solution and Fable-compiles the Session
+Process host; `start` runs it.
+
+### Cloud sessions (Claude Code on the web)
+
+To get the same environment in a cloud session, set the environment's **setup script** to
+install Nix (`sh <(curl -L https://nixos.org/nix/install) --no-daemon`, with flakes enabled)
+and warm the shell (`nix develop --command true`). `*.nixos.org` and `cache.nixos.org` are in
+the default Trusted network allowlist, so the flake resolves and substitutes without any
+extra allowed domains — nixpkgs is pinned to a `nixos.org` channel tarball rather than a
+`github:` input for exactly that reason.
 
 Tests declare what they need in code, not by folder — `Ports`, `Docker`, `LiveAgent`,
 `Browser`, or nothing for a pure suite — and the harness runs each one only where those
