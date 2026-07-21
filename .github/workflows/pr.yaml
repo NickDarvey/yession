@@ -8,9 +8,9 @@ name: pr
 # what publishes a release.
 #
 # The toolchain comes from the Nix flake (Node 24, .NET SDK 10, just) so CI and local dev use
-# the exact same versions. `just restore` installs deps with `--ignore-scripts`; the native
-# node-datachannel WebRTC addon is then built explicitly (`npm rebuild`) — GitHub runners can
-# fetch its prebuilt / build it from source, which the sandboxed dev container cannot.
+# the exact same versions. `just restore` installs deps with `--ignore-scripts` and links the
+# Nix-built node-datachannel WebRTC addon (packages.node-datachannel) into node_modules — the
+# same addon local dev uses, so the Native tier is byte-identical here and on a laptop.
 #
 # The native WebRTC suites gather ICE in a sandbox and occasionally flake (an ICE stall, or a
 # toolchain segfault mid-compile), so the gate is retried once before it is called a failure:
@@ -29,12 +29,11 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-      # Deps + the native WebRTC addon (node-datachannel), which `just restore` deliberately
-      # does not build. Chromium drives both the host-free editor E2E and the two-peer browser
-      # convergence E2E via the .NET Playwright driver.
-      - name: Restore deps + build the node-datachannel addon
-        run: |
-          nix develop --command bash -c 'just restore && npm rebuild node-datachannel'
+      # Deps + the Nix-built node-datachannel addon (linked by `just restore`). Chromium drives
+      # both the host-free editor E2E and the two-peer browser convergence E2E via the .NET
+      # Playwright driver.
+      - name: Restore deps (links the Nix node-datachannel addon)
+        run: nix develop --command just restore
       - name: Install Chromium for the browser E2Es
         run: nix develop --command npx --yes playwright@1.61.1 install --with-deps chromium
       - name: Cheap tier + browser + native WebRTC/host E2E (retry once on flake)

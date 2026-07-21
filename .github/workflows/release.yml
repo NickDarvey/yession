@@ -23,8 +23,8 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-      - name: Restore deps + build the node-datachannel addon
-        run: nix develop --command bash -c 'just restore && npm rebuild node-datachannel'
+      - name: Restore deps (links the Nix node-datachannel addon)
+        run: nix develop --command just restore
       - name: Install Chromium for the browser E2E
         run: nix develop --command npx --yes playwright@1.61.1 install --with-deps chromium
       # The Docker integration suite talks to the daemon via dockerode over the local
@@ -65,10 +65,8 @@ jobs:
       - name: Compute version (1.0.0-beta.<commit count>)
         id: version
         run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
-      # The install-smoke below assembles the tarball with the real node-datachannel addon,
-      # so build it here (just restore uses --ignore-scripts).
       - name: Build
-        run: nix develop --command bash -c 'just build && npm rebuild node-datachannel'
+        run: nix develop --command just build
       - name: Assemble the npm package (one package, two bins)
         run: nix develop --command dotnet fsi scripts/build.fsx ${{ steps.version.outputs.version }}
       # Prove a clean install of the published tarball pulls the platform-native deps

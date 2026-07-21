@@ -66,9 +66,10 @@ Capabilities:
 - `Browser` — Chromium via the .NET Playwright driver. Pins the .NET CLR runtime.
 - `Ports` — binds TCP ports / spawns processes.
 - `Native` — the native `node-datachannel` WebRTC addon, loaded by the real Session Process.
-  `restore` does not build it (github-blocked prebuild); it is provided by Nix (`packages.node-datachannel`
-  in flake.nix). Without that addon linked into `node_modules`, `Native`-tagged suites (all
-  host-spawning ones) skip cleanly — pass `Browser` (not `Native`).
+  Built from source by Nix (`packages.node-datachannel` in flake.nix, against nixpkgs
+  libdatachannel + plog); in the Nix dev shell `just restore` links it into `node_modules`, so
+  `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC data-channel E2E) RUN
+  here — unlike the old mise container. Outside Nix the addon is absent and they skip cleanly.
 - `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
 
 To eyeball a rich-editor change in a real browser without any of the WebRTC machinery:

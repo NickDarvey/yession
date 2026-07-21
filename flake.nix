@@ -28,29 +28,40 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell {
-          packages = [
-            pkgs.nodejs_24        # 24.x — Browser Client + Session Process both run on Node
-            pkgs.dotnet-sdk_10    # 10.0.301 — F# toolchain; Fable compiles F# -> JS
-            pkgs.just             # task runner (the repo interface; replaces mise)
-            pkgs.git
-          ];
-
-          DOTNET_CLI_TELEMETRY_OPTOUT = "1";
-          DOTNET_NOLOGO = "1";
-          DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1";
-
-          shellHook = ''
-            # Tool-installed binaries (Fable via dotnet tools, esbuild/tailwind via npm)
-            # go on PATH, matching the versions the build and package steps use.
-            export PATH="$PWD/node_modules/.bin:$PATH"
-            export DOTNET_ROOT="${pkgs.dotnet-sdk_10}/share/dotnet"
-            echo "yession dev shell — node $(node --version), dotnet $(dotnet --version)"
-            echo "Run tasks with just: just build | just test Browser | just start"
-          '';
-        };
+      packages = forAllSystems (pkgs: {
+        # The native WebRTC addon, built from source (nixpkgs libdatachannel + plog), since
+        # its npm postinstall can't run in a sandbox (no network / GitHub-scoped egress).
+        node-datachannel = pkgs.callPackage ./nix/node-datachannel.nix { };
       });
+
+      devShells = forAllSystems (pkgs:
+        let ndc = self.packages.${pkgs.system}.node-datachannel;
+        in {
+          default = pkgs.mkShell {
+            packages = [
+              pkgs.nodejs_24        # 24.x — Browser Client + Session Process both run on Node
+              pkgs.dotnet-sdk_10    # 10.0.301 — F# toolchain; Fable compiles F# -> JS
+              pkgs.just             # task runner (the repo interface; replaces mise)
+              pkgs.git
+            ];
+
+            DOTNET_CLI_TELEMETRY_OPTOUT = "1";
+            DOTNET_NOLOGO = "1";
+            DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1";
+            # `just restore` links this Nix-built addon into node_modules so the Native test
+            # tier and `just start` work without npm compiling node-datachannel.
+            YESSION_NDC_ADDON = "${ndc}/build/Release/node_datachannel.node";
+
+            shellHook = ''
+              # Tool-installed binaries (Fable via dotnet tools, esbuild/tailwind via npm)
+              # go on PATH, matching the versions the build and package steps use.
+              export PATH="$PWD/node_modules/.bin:$PATH"
+              export DOTNET_ROOT="${pkgs.dotnet-sdk_10}/share/dotnet"
+              echo "yession dev shell — node $(node --version), dotnet $(dotnet --version)"
+              echo "Run tasks with just: just build | just test Browser | just start"
+            '';
+          };
+        });
 
       formatter = forAllSystems (pkgs: pkgs.nixpkgs-fmt);
     };

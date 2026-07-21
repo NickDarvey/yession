@@ -17,8 +17,17 @@ default:
 # node-datachannel's WebRTC addon, is supplied by Nix for the Native test tier and the
 # packaged build (see flake.nix), so it never needs npm to compile it.
 restore:
+    #!/usr/bin/env bash
+    set -euo pipefail
     npm install --ignore-scripts
     dotnet tool restore
+    # In the Nix dev shell, link the Nix-built node-datachannel addon into node_modules so the
+    # Native tier and `just start` work. Outside Nix (var unset), this is a no-op — run
+    # `npm rebuild node-datachannel` if you need the addon there.
+    if [ -n "${YESSION_NDC_ADDON:-}" ] && [ -f "$YESSION_NDC_ADDON" ]; then
+      mkdir -p node_modules/node-datachannel/build/Release
+      install -m 0755 "$YESSION_NDC_ADDON" node_modules/node-datachannel/build/Release/node_datachannel.node
+    fi
 
 # Build everything: type-check (.NET), Fable-compile both entries, bundle the browser client.
 build: restore
