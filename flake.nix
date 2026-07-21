@@ -25,17 +25,35 @@
   outputs = { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # claude-code (used by the packaged agent) is unfree; allow just that package.
+      pkgsFor = system: import nixpkgs {
+        inherit system;
+        config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "claude-code";
+      };
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (pkgsFor system));
     in
     {
       packages = forAllSystems (pkgs: {
         # The native WebRTC addon, built from source (nixpkgs libdatachannel + plog), since
         # its npm postinstall can't run in a sandbox (no network / GitHub-scoped egress).
         node-datachannel = pkgs.callPackage ./nix/node-datachannel.nix { };
+
+        # The installable package: `yession` + `yession-session` as wrapped Node executables.
+        yession = pkgs.callPackage ./nix/yession.nix {
+          node-datachannel = self.packages.${pkgs.stdenv.hostPlatform.system}.node-datachannel;
+        };
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.yession;
+      });
+
+      apps = forAllSystems (pkgs: {
+        default = {
+          type = "app";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.yession}/bin/yession";
+        };
       });
 
       devShells = forAllSystems (pkgs:
-        let ndc = self.packages.${pkgs.system}.node-datachannel;
+        let ndc = self.packages.${pkgs.stdenv.hostPlatform.system}.node-datachannel;
         in {
           default = pkgs.mkShell {
             packages = [

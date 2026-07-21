@@ -96,6 +96,29 @@ jobs:
           name: dist-npm
           path: dist/*.tgz
 
+  # The other distribution channel: the reproducible Nix package. Build it and boot-smoke the
+  # two wrapped bins, so `nix profile install github:NickDarvey/yession` stays green. (Add a
+  # `cachix/cachix-action` push here to serve binaries and spare consumers the source build.)
+  nix-package:
+    needs: verify
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build the Nix package
+        run: nix build .#yession --print-build-logs
+      - name: Boot smoke (both surfaces serve)
+        run: |
+          out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=0 \
+            timeout 30 ./result/bin/yession 2>&1 || true)"
+          echo "$out" | grep -q "management UI at" \
+            || { echo "the Nix package did not boot:"; echo "$out"; exit 1; }
+          echo "nix package boot smoke passed"
+
   release:
     needs: package
     if: github.ref == 'refs/heads/master'

@@ -54,13 +54,24 @@ No Nix? Any Node 24 + .NET SDK 10 will do — install [`just`](https://just.syst
 the same `just` tasks. Nix just pins those versions for you (`dotnet-sdk_10` = 10.0.301,
 `nodejs_24`); bump the nixpkgs pin in `flake.nix` to move them.
 
-Yession ships two ways. As one **npm package** with two commands — `yession` (the Manager)
-and `yession-session` (a Session Process): `npm i -g <release-tarball>` pulls the
-platform-native pieces (the WebRTC transport and the agent's native Claude Code binary) on
-install; Node ≥24 is the only prerequisite. And as a **Nix package**: `nix profile install`
-it, or add the flake to your system/home-manager config — the native pieces are built or
-wired from nixpkgs, no npm postinstall. Either way `yession` serves a management UI (default
-http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its own process.
+Yession ships two ways, side by side, each giving the two commands `yession` (the Manager)
+and `yession-session` (a Session Process). Either way `yession` serves a management UI
+(default http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its
+own process.
+
+- **npm package.** `npm i -g <release-tarball>` pulls the platform-native pieces (the WebRTC
+  transport and the agent's native Claude Code binary) on install; Node ≥24 is the only
+  prerequisite.
+- **Nix package.** Reproducible and self-contained — the native WebRTC addon is built from
+  source, the agent points at nixpkgs `claude-code`, and nothing runs an npm postinstall:
+
+  ```sh
+  nix run    github:NickDarvey/yession          # run the Manager without installing
+  nix profile install github:NickDarvey/yession # add yession + yession-session to your profile
+  ```
+
+  Or add the flake as an input and put `yession.packages.<system>.default` in a NixOS
+  `environment.systemPackages` / home-manager `home.packages` list.
 
 The core tasks are `restore`, `build`, `start`, `dev`, `test`, `verify`, `package`, and
 `clean` — run them as `just <task>` inside `nix develop`. Capabilities pass as arguments:
