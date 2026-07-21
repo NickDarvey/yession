@@ -20,27 +20,34 @@ Boundaries: code/commits/PRs written normal.
 
 ## Bootstrap
 
-Dev container has Node + .NET on disk but NOT `mise` — and `mise` is the repo interface
-(everything is `mise run <task>`). Install it first, ONCE per fresh container:
+The repo interface is `just <task>`; the toolchain (Node 24, .NET SDK 10) comes from a Nix
+flake (`flake.nix`). On a box with Nix: `nix develop` drops you in a shell with `node`,
+`dotnet`, and `just` on PATH — no other install.
+
+A fresh container without Nix: install it ONCE (single-user, no daemon), then enter the shell.
 
 ```
-curl -fsSL https://mise.run | sh          # -> /root/.local/bin/mise
-export PATH="/root/.local/bin:$PATH"       # every shell that runs mise
-mise trust && mise install                 # pinned node 24.16 + dotnet 10 (~235 MB, first run only)
+sh <(curl -L https://nixos.org/nix/install) --no-daemon      # installs /nix + ~/.nix-profile
+. ~/.nix-profile/etc/profile.d/nix.sh                          # every shell (or re-login)
+mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
+nix develop --command just build                              # enter shell, build everything
 ```
 
-On a box with Nix, skip the curl bootstrap entirely: `nix develop` gives Node, the
-.NET SDK, and mise from nixpkgs, with mise pointed at those tools (no downloads). See
-`flake.nix`.
+Behind Claude Code's egress proxy also export `NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt`
+and `https_proxy="$HTTPS_PROXY"` so Nix trusts the proxy CA and reaches `cache.nixos.org`.
+nixpkgs is pinned to a `nixos.org` channel tarball (not a `github:` input) precisely so it
+resolves under the default-Trusted network policy, where `*.nixos.org` is allowed but arbitrary
+GitHub repos are not.
 
-Then use tasks (`mise tasks` lists them): `mise run test` / `build` / `verify`. `restore`
-(npm + dotnet tools) is a `depends` of the others — no need to run it by hand. Do NOT invoke
-`dotnet`/`fable`/`esbuild` directly to "run the suite"; go through `mise run` so tool versions
-and PATH match CI.
+Then use tasks (`just` with no args lists them): `just test` / `build` / `verify`. `restore`
+(npm + dotnet tools) is a dependency of the others — no need to run it by hand. Do NOT invoke
+`dotnet`/`fable`/`esbuild` directly to "run the suite"; go through `just` so tool versions and
+PATH match CI. `restore` uses `npm install --ignore-scripts` — deterministic, github-free.
 
 Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-browsers`) — the
-`Browser` cap works here. NOT built: the `node-datachannel` WebRTC addon — so `Native`-capped
-suites can't run in this container (see Testing).
+`Browser` cap works here. The `node-datachannel` WebRTC addon is NOT built by npm (its prebuilt
+lives on GitHub releases, which the proxy blocks); it is supplied by Nix for the `Native` tier
+and the packaged build (see flake.nix / Testing).
 
 ## Testing
 
@@ -49,21 +56,21 @@ suite runs only when this environment has every capability it needs; otherwise i
 skip — never an error. Pass the caps THIS box has as args:
 
 ```
-mise run test                    # cheap tier: pure/model/protocol on Node. Every PR. Fast.
-mise run test -- Browser         # + host-free rich-editor E2E. Needs only Chromium.
-mise run test -- Ports Native    # + WebRTC/host suites. Need the node-datachannel addon.
-mise run verify                  # == -- Browser Ports Native Docker LiveAgent. Release gate.
+just test                    # cheap tier: pure/model/protocol on Node. Every PR. Fast.
+just test Browser            # + host-free rich-editor E2E. Needs only Chromium.
+just test Ports Native       # + WebRTC/host suites. Need the node-datachannel addon.
+just verify                  # == just test Browser Ports Native Docker LiveAgent. Release gate.
 ```
 
 Capabilities:
 - `Browser` — Chromium via the .NET Playwright driver. Pins the .NET CLR runtime.
 - `Ports` — binds TCP ports / spawns processes.
 - `Native` — the native `node-datachannel` WebRTC addon, loaded by the real Session Process.
-  ABSENT in the dev container (not prebuilt), so `Native`-tagged suites (all host-spawning ones)
-  can't run here — pass `-- Browser` (not `Native`) and they skip cleanly.
+  `restore` does not build it (github-blocked prebuild); it is provided by Nix (`packages.node-datachannel`
+  in flake.nix). Without that addon linked into `node_modules`, `Native`-tagged suites (all
+  host-spawning ones) skip cleanly — pass `Browser` (not `Native`).
 - `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
 
 To eyeball a rich-editor change in a real browser without any of the WebRTC machinery:
-`mise run test -- Browser` (drives Chromium against `tests/browser/editor-harness.html`).
-The dev container has Chromium but not the addon, so this is the browser signal you CAN get
-locally; the full two-peer WebRTC E2E only runs where `Native` is available (CI, `mise run verify`).
+`just test Browser` (drives Chromium against `tests/browser/editor-harness.html`). The full
+two-peer WebRTC E2E runs where the Nix-built `Native` addon is present (CI, `just verify`).

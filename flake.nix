@@ -1,25 +1,25 @@
 {
-  # Nix flake: a pure, reproducible dev toolchain for Yession.
+  # Nix flake for Yession — the reproducible dev toolchain and an installable package.
   #
-  # The repo interface is `mise run <task>` (see mise.toml). Normally mise is
-  # bootstrapped with `curl | sh` and downloads its own pinned Node/.NET — both
-  # impure. This flake provides Node, the .NET SDK, and mise itself from nixpkgs,
-  # and sets MISE_DISABLE_TOOLS so mise defers to the nix-provided toolchain
-  # instead of fetching anything. The documented `mise run build|test|verify`
-  # commands work unchanged, with nothing curled or downloaded out of band.
+  # `just` is the task runner (see the justfile); the devShell puts Node, the .NET SDK,
+  # and just on PATH. `nix develop` (or `direnv`) gives an environment identical on a
+  # laptop and in Claude Code cloud sessions.
   #
-  #     nix develop        # enter the shell, then: mise run build
+  #     nix develop          # enter the shell
+  #     just                 # list tasks
+  #     just build           # build everything
+  #     just test Browser    # run tests with capabilities
   #
-  # Toolchain matches mise.toml's pins by major version (.NET 10.0.301 exactly,
-  # Node 24.x). Bump the nixpkgs pin below to move them.
+  # nixpkgs is pinned to a nixos.org channel tarball rather than `github:NixOS/nixpkgs`
+  # on purpose: `*.nixos.org` is reachable from Claude Code's default-Trusted network
+  # policy, while arbitrary github flake inputs are scoped to session-attached repos.
+  # The tarball resolves to an exact releases.nixos.org revision + narHash in flake.lock,
+  # so it is just as reproducible as a git pin — and needs no github egress.
 
   description = "Yession — local-first runtime where humans and AI agents collaborate in a shared session.";
 
   inputs = {
-    # Pinned to a nixpkgs commit that carries dotnet-sdk_10 = 10.0.301 (the
-    # mise.toml pin) and nodejs_24. Reproducible without a flake.lock; still
-    # `nix flake update`-able.
-    nixpkgs.url = "github:NixOS/nixpkgs/6368bc923cec55a5f78960ade0cb4dd99580e087";
+    nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
   };
 
   outputs = { self, nixpkgs }:
@@ -31,30 +31,23 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = [
-            pkgs.nodejs_24
-            pkgs.dotnet-sdk_10
-            pkgs.mise
+            pkgs.nodejs_24        # 24.x — Browser Client + Session Process both run on Node
+            pkgs.dotnet-sdk_10    # 10.0.301 — F# toolchain; Fable compiles F# -> JS
+            pkgs.just             # task runner (the repo interface; replaces mise)
             pkgs.git
           ];
-
-          # mise reads mise.toml's [tools] (node, dotnet). Disabling those two
-          # tools makes mise use whatever's on PATH — i.e. the nix-provided
-          # Node and .NET — rather than installing its own pinned copies.
-          MISE_DISABLE_TOOLS = "node,dotnet";
 
           DOTNET_CLI_TELEMETRY_OPTOUT = "1";
           DOTNET_NOLOGO = "1";
           DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1";
 
           shellHook = ''
-            # Trust this repo's mise config non-interactively (no prompt).
-            mise trust --quiet "$PWD/mise.toml" 2>/dev/null || true
-
-            echo "yession dev shell — toolchain from nix (no mise bootstrap needed)"
-            echo "  node    $(node --version)"
-            echo "  dotnet  $(dotnet --version)"
-            echo "  mise    $(mise --version | head -n1)"
-            echo "Run the repo tasks: mise run restore | build | test | verify"
+            # Tool-installed binaries (Fable via dotnet tools, esbuild/tailwind via npm)
+            # go on PATH, matching the versions the build and package steps use.
+            export PATH="$PWD/node_modules/.bin:$PATH"
+            export DOTNET_ROOT="${pkgs.dotnet-sdk_10}/share/dotnet"
+            echo "yession dev shell — node $(node --version), dotnet $(dotnet --version)"
+            echo "Run tasks with just: just build | just test Browser | just start"
           '';
         };
       });
