@@ -110,8 +110,11 @@ let
       mkdir -p node_modules/node-datachannel/build/Release
       cp ${node-datachannel}/build/Release/node_datachannel.node \
          node_modules/node-datachannel/build/Release/node_datachannel.node
+      # Ship it AS `$out/node_modules` so that, once symlinked in, a package's realpath parent is
+      # literally `node_modules` — Node resolves siblings (e.g. esbuild → @esbuild/linux-x64) only
+      # by that name, so `$out/<pkgs>` directly would break self-resolution.
       mkdir -p "$out"
-      cp -a node_modules/. "$out/"
+      cp -a node_modules "$out/node_modules"
       runHook postInstall
     '';
     # The addon and the npm-shipped platform binaries (esbuild, tailwind oxide) are already
@@ -217,9 +220,9 @@ in
   # Point node_modules at the Nix-built tree (addon baked in). Idempotent; replaces a stale
   # symlink or a leftover npm-installed dir. `restore` then skips `npm install` (dir present).
   enterShell = ''
-    if [ "$(readlink node_modules 2>/dev/null)" != "${nodeModules}" ]; then
+    if [ "$(readlink node_modules 2>/dev/null)" != "${nodeModules}/node_modules" ]; then
       rm -rf node_modules
-      ln -s ${nodeModules} node_modules
+      ln -s ${nodeModules}/node_modules node_modules
     fi
     export PATH="$PWD/node_modules/.bin:$PATH"
     echo "yession — tasks: restore build start dev check verify package clean  (check <caps>: Browser Ports Native Docker LiveAgent)"
