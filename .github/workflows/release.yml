@@ -90,7 +90,7 @@ jobs:
       # The boot-smoke logic (ephemeral ports, wait for "management UI at") lives in build.fsx;
       # this job has no devenv, so borrow dotnet from the flake devShell to call the same verb.
       - name: Boot smoke (both surfaces serve)
-        run: nix develop -c dotnet fsi scripts/build.fsx boot-smoke ./result/bin/yession
+        run: nix develop -c dotnet fsi tasks.fsx boot-smoke ./result/bin/yession
 
   release:
     needs: package

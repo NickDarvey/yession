@@ -1,7 +1,7 @@
 // The complete, standalone build interface for Yession. Every Yession-specific build/test/
 // package function lives here so that devenv (devenv.nix scripts) and CI (.github/workflows)
 // are thin wrappers — you can throw both away and still drive everything directly with
-// `dotnet fsi scripts/build.fsx <verb>`. Only tool-specific glue (nix/devenv bootstrap,
+// `dotnet fsi tasks.fsx <verb>`. Only tool-specific glue (nix/devenv bootstrap,
 // actions/* steps, artifact upload) stays in the callers; no Yession logic does.
 //
 // Verbs:
@@ -20,7 +20,7 @@
 //     clean                        # remove build artifacts + deps
 //     clean-docker                 # remove leaked label=yession-session containers/volumes
 //
-// `dotnet fsi scripts/build.fsx <version>` (a bare version) is treated as `package <version>`
+// `dotnet fsi tasks.fsx <version>` (a bare version) is treated as `package <version>`
 // for backwards compatibility. Output: dist/npm/ (staging) and dist/yession-<version>.tgz.
 //
 // Yession ships as ONE npm package with two bins, `yession` (the Manager) and
@@ -34,7 +34,7 @@ open System
 open System.Diagnostics
 open System.IO
 
-let repoRoot = Path.GetFullPath (Path.Combine (__SOURCE_DIRECTORY__, ".."))
+let repoRoot = Path.GetFullPath __SOURCE_DIRECTORY__
 let dist = Path.Combine (repoRoot, "dist")
 let pkg = Path.Combine (dist, "npm")
 let binDir = Path.Combine (repoRoot, "node_modules", ".bin")
@@ -302,6 +302,23 @@ let private ensureBrowser () =
 
 let private hasAny (caps: Set<string>) names = names |> List.exists caps.Contains
 
+// Run the Fable-compiled test bundle on Node with a hard timeout, so a hung WebRTC connection
+// (or any hang) can never block the suite. Inherits stdio (output streams; env passes through,
+// incl. YESSION_TEST_CAPS) and forwards the suite's exit code; a timeout is a failure. (Folded
+// in from the former scripts/run-tests.fsx.)
+let private runNodeSuite (target: string) (timeoutMs: int) =
+    let psi = ProcessStartInfo "node"
+    psi.ArgumentList.Add target
+    psi.WorkingDirectory <- repoRoot
+    psi.UseShellExecute <- false
+    use p = Process.Start psi
+    if p.WaitForExit timeoutMs then
+        if p.ExitCode <> 0 then failwithf "tests failed (exit %d)" p.ExitCode
+    else
+        eprintfn "tests: timed out after %dms — killing" timeoutMs
+        p.Kill true
+        failwith "tests timed out"
+
 let private runCheckOnce (caps: string list) =
     let capSet = Set.ofList caps
     Environment.SetEnvironmentVariable ("YESSION_TEST_CAPS", String.concat " " caps)
@@ -317,7 +334,7 @@ let private runCheckOnce (caps: string list) =
 
     // The Node (Fable/JS) path — always runs; self-skips suites whose caps/runtime don't match.
     exec "dotnet" [ "fable"; "tests/Yession.Tests/Yession.Tests.fsproj"; "-o"; "tests/Yession.Tests/out" ]
-    exec "dotnet" [ "fsi"; "scripts/run-tests.fsx"; "tests/Yession.Tests/out/Main.js"; "240000" ]
+    runNodeSuite "tests/Yession.Tests/out/Main.js" 240000
 
     // The .NET CLR (Playwright) path — only when a Browser-tagged suite is enabled.
     if capSet.Contains "Browser" then
@@ -400,5 +417,5 @@ match arg 1 with
     | [] -> failwith "boot-smoke <command…>"
 | Some "clean" -> clean ()
 | Some "clean-docker" -> cleanDocker ()
-| Some version -> package version // backwards compat: `build.fsx <version>` == `package <version>`
+| Some version -> package version // backwards compat: `tasks.fsx <version>` == `package <version>`
 | None -> package "0.0.0-dev"

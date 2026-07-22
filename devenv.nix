@@ -3,7 +3,7 @@
 # The single declaration for Yession's dev environment, tasks, AND build outputs. Toolchain
 # (Node 24, .NET SDK 10) from the pinned nixpkgs; tasks are devenv `scripts`; the installable
 # Nix package and the npm tarball are devenv `outputs`, both produced off one staged build.
-# All compile/bundle/assemble logic lives in scripts/build.fsx (the one authority the scripts
+# All compile/bundle/assemble logic lives in tasks.fsx (the one authority the scripts
 # and the outputs both call). flake.nix only re-exposes these outputs; it declares nothing.
 let
   # The native WebRTC addon, built from source (its npm prebuild is github-bound).
@@ -20,7 +20,7 @@ let
   version = let v = builtins.getEnv "YESSION_VERSION"; in if v == "" then "0.0.0-nix" else v;
 
   # Only the files the build consumes, so editing devenv config / CI / docs doesn't invalidate
-  # the (slow) F#/Fable build. README.md is kept — scripts/build.fsx copies it into the package.
+  # the (slow) F#/Fable build. README.md is kept — tasks.fsx copies it into the package.
   src =
     let root = ./.;
     in lib.cleanSourceWith {
@@ -93,7 +93,7 @@ let
     hash = "sha256-KAlO9QDFE5XNUmM1202Oet2dicrkQotZJQIm9uzHHgQ=";
   };
 
-  # staged — the offline build shared by both outputs. Delegates to scripts/build.fsx `stage`
+  # staged — the offline build shared by both outputs. Delegates to tasks.fsx `stage`
   # (compile + bundle + assemble dist/npm); no bundling logic is duplicated here. $out carries
   # the assembled package dir and a prod-pruned node_modules for the installable to reuse.
   staged = pkgs.stdenv.mkDerivation {
@@ -115,7 +115,7 @@ let
       </configuration>
       EOF
       dotnet tool restore
-      dotnet fsi scripts/build.fsx stage "${version}"
+      dotnet fsi tasks.fsx stage "${version}"
       runHook postBuild
     '';
     installPhase = ''
@@ -130,7 +130,7 @@ let
     dontStrip = true;
   };
 
-  # installed — the installable: two wrapped Node bins over build.fsx's shims, the runtime
+  # installed — the installable: two wrapped Node bins over tasks.fsx's shims, the runtime
   # node_modules, and the Nix node-datachannel addon, with the agent pointed at claude-code.
   installed = pkgs.stdenv.mkDerivation {
     pname = "yession";
@@ -147,7 +147,7 @@ let
       cp ${node-datachannel}/build/Release/node_datachannel.node \
          "$out/libexec/yession/node_modules/node-datachannel/build/Release/node_datachannel.node"
 
-      # build.fsx's yession shim sets YESSION_SESSION_MAIN and spawns `node session.js`, which
+      # tasks.fsx's yession shim sets YESSION_SESSION_MAIN and spawns `node session.js`, which
       # inherits YESSION_CLAUDE_PATH from this wrapper.
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-session" \
         --add-flags "$out/libexec/yession/bin/yession-session.js" \
@@ -203,23 +203,23 @@ in
   outputs.packaged = packaged;
 
   # --- tasks (devenv scripts) ----------------------------------------------------------------
-  # Thin wrappers: every task is a verb of scripts/build.fsx (the complete, standalone build
+  # Thin wrappers: every task is a verb of tasks.fsx (the complete, standalone build
   # interface). No Yession build logic lives here — delete devenv and call the fsx directly and
   # nothing is lost. `"$@"` forwards args (e.g. `check Browser Ports Native --retry 1`).
 
-  scripts.restore.exec = ''exec dotnet fsi scripts/build.fsx restore'';
-  scripts.build.exec = ''exec dotnet fsi scripts/build.fsx build'';
-  scripts.start.exec = ''exec dotnet fsi scripts/build.fsx start'';
-  scripts.dev.exec = ''exec dotnet fsi scripts/build.fsx dev'';
+  scripts.restore.exec = ''exec dotnet fsi tasks.fsx restore'';
+  scripts.build.exec = ''exec dotnet fsi tasks.fsx build'';
+  scripts.start.exec = ''exec dotnet fsi tasks.fsx start'';
+  scripts.dev.exec = ''exec dotnet fsi tasks.fsx dev'';
   # Named `check`, not `test`, because `test` is a shell builtin and would shadow the script.
-  scripts.check.exec = ''exec dotnet fsi scripts/build.fsx check "$@"'';
-  scripts.verify.exec = ''exec dotnet fsi scripts/build.fsx verify'';
-  scripts.version.exec = ''exec dotnet fsi scripts/build.fsx version'';
+  scripts.check.exec = ''exec dotnet fsi tasks.fsx check "$@"'';
+  scripts.verify.exec = ''exec dotnet fsi tasks.fsx verify'';
+  scripts.version.exec = ''exec dotnet fsi tasks.fsx version'';
   # Local package (compile + bundle + smoke + pack). For the release tarball as a Nix output,
   # use `devenv build outputs.packaged`. Usage: package 1.2.3
-  scripts.package.exec = ''exec dotnet fsi scripts/build.fsx package "''${1:-0.0.0-dev}"'';
-  scripts.clean.exec = ''exec dotnet fsi scripts/build.fsx clean'';
-  # CI helpers (also plain build.fsx verbs): install-smoke <tgz>, clean-docker.
-  scripts."install-smoke".exec = ''exec dotnet fsi scripts/build.fsx install-smoke "$@"'';
-  scripts."clean-docker".exec = ''exec dotnet fsi scripts/build.fsx clean-docker'';
+  scripts.package.exec = ''exec dotnet fsi tasks.fsx package "''${1:-0.0.0-dev}"'';
+  scripts.clean.exec = ''exec dotnet fsi tasks.fsx clean'';
+  # CI helpers (also plain tasks.fsx verbs): install-smoke <tgz>, clean-docker.
+  scripts."install-smoke".exec = ''exec dotnet fsi tasks.fsx install-smoke "$@"'';
+  scripts."clean-docker".exec = ''exec dotnet fsi tasks.fsx clean-docker'';
 }

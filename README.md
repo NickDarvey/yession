@@ -53,9 +53,9 @@ start              # run the Session Process locally
 
 Tasks are devenv scripts: `restore`, `build`, `start`, `dev`, `check` (tests; capabilities pass
 as args — `check Browser`), `verify`, `package`, `clean`. Each is a thin wrapper over one place,
-[`scripts/build.fsx`](scripts/build.fsx) — the complete, standalone build interface. The devenv
+[`tasks.fsx`](tasks.fsx) — the complete, standalone build interface. The devenv
 scripts, the GitHub Actions workflows, and the Nix outputs all call it; `dotnet fsi
-scripts/build.fsx <verb>` drives everything on its own if you throw devenv and CI away.
+tasks.fsx <verb>` drives everything on its own if you throw devenv and CI away.
 
 Yession ships two ways, side by side, each giving the commands `yession` (the Manager) and
 `yession-session` (a Session Process). Either way `yession` serves a management UI (default
