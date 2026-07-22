@@ -33,6 +33,17 @@ result
 result-*
 .direnv/
 
+# devenv
+.devenv/
+.devenv.flake.nix
+devenv.local.nix
+# Generated in github-restricted sandboxes (points the devenv input at the
+# cache-substituted source); never committed.
+devenv.local.yaml
+# The lock is environment-generated (the sandbox override pins a store path, a laptop pins
+# the github rev), so it is not committed; nixpkgs is pinned via the tarball URL in devenv.yaml.
+devenv.lock
+
 # Browser E2E scratch data
 tests/browser/.data*
 

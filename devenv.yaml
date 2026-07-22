@@ -1,0 +1,10 @@
+# devenv inputs. nixpkgs is a nixos.org channel tarball (not a github: input) so it resolves
+# under Claude Code's default-Trusted network policy (*.nixos.org is allowlisted; arbitrary
+# github repos are not). On a laptop/CI the github `devenv` input below works natively; in a
+# github-restricted sandbox, a generated devenv.local.yaml repoints it at the devenv source
+# substituted from cache.nixos.org (see .claude/hooks / AGENTS.md).
+inputs:
+  nixpkgs:
+    url: tarball+https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz
+  devenv:
+    url: github:cachix/devenv?dir=src/modules
