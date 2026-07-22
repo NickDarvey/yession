@@ -12,13 +12,13 @@ open Fable.Core.JsInterop
 /// The repo's one test suite, shared by both runtimes Pyxpecto runs on. Each suite declares
 /// what it NEEDS (`Tag.needs`), and the harness runs it only where those needs are met — so
 /// the SAME list serves both targets with no `#if` here:
-///   * Fable → JS on Node (`mise run test` / `verify`): the model/protocol/WebRTC suites — the
+///   * Fable → JS on Node (`check` / `verify`): the model/protocol/WebRTC suites — the
 ///     JavaScript the product actually runs.
 ///   * .NET CLR (`dotnet run --project tests/Yession.Tests`): the real-browser E2E, driven
 ///     through the Microsoft.Playwright driver.
 /// A suite with no needs runs on Node (the product runtime). `[Browser]` pins the .NET CLR;
 /// every other need is a capability the run declares via `YESSION_TEST_CAPS` (e.g.
-/// `mise run test -- Browser Native`). `Native` marks suites that spawn the real Session
+/// `check Browser Native`). `Native` marks suites that spawn the real Session
 /// Process (which loads the node-datachannel addon), so they skip — rather than error — where
 /// that addon is absent. Whatever this run cannot host or satisfy shows as one visible skip.
 let all =

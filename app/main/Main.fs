@@ -1,6 +1,6 @@
 module Yession.Host.Main
 
-// The Manager entry point (`mise run start`; the `yession` binary). The Manager is a
+// The Manager entry point (`start`; the `yession` binary). The Manager is a
 // process supervisor + management surface: sessions run as CHILD OS PROCESSES
 // (`yession-session`; in development, node over the Fable output), so a crashing
 // session never takes the Manager down. Configuration comes from the environment so

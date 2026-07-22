@@ -85,7 +85,7 @@ Capabilities:
   Built from source by Nix (`node-datachannel` in devenv.nix, against nixpkgs
   libdatachannel + plog) and baked into the `nodeModules` derivation the dev shell symlinks in,
   so `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC data-channel E2E) RUN
-  here — unlike the old mise container. Outside Nix the addon is absent and they skip cleanly.
+  here. Outside Nix the addon is absent and they skip cleanly.
 - `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
 
 To eyeball a rich-editor change in a real browser without any of the WebRTC machinery:
