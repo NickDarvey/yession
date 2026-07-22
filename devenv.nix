@@ -1,7 +1,7 @@
 { pkgs, lib, ... }:
 
-# The single declaration for Yession's dev environment, tasks, AND build outputs. Toolchain
-# (Node 24, .NET SDK 10) from the pinned nixpkgs; tasks are devenv `scripts`; the installable
+# The single declaration for Yession's dev environment, tasks, AND build outputs. The toolchain
+# is the pinned nixpkgs (see `languages.*` below); tasks are devenv `scripts`; the installable
 # Nix package and the npm tarball are devenv `outputs`, both produced off one staged build.
 # All compile/bundle/assemble logic lives in tasks.fsx (the one authority the scripts
 # and the outputs both call). flake.nix only re-exposes these outputs; it declares nothing.

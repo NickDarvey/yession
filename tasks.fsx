@@ -1,34 +1,17 @@
 // The complete, standalone build interface for Yession. Every Yession-specific build/test/
 // package function lives here so that devenv (devenv.nix scripts) and CI (.github/workflows)
 // are thin wrappers — you can throw both away and still drive everything directly with
-// `dotnet fsi tasks.fsx <verb>`. Only tool-specific glue (nix/devenv bootstrap,
-// actions/* steps, artifact upload) stays in the callers; no Yession logic does.
+// `dotnet fsi tasks.fsx <verb>`. Only tool-specific glue (nix/devenv bootstrap, actions/*
+// steps, artifact upload) stays in the callers; no Yession logic does.
 //
-// Verbs:
-//     compile                      # Fable-compile both entries, bundle the browser client, CSS
-//     restore                      # npm install (--ignore-scripts) + dotnet tools + link NDC addon
-//     build                        # restore + compile
-//     start                        # build + run the Session Process (node app/out/Main.js)
-//     dev                          # restore + fable watch --runWatch node app/out/Main.js
-//     check [caps…] [--retry N]    # capability-gated tests (YESSION_TEST_CAPS); N retries on flake
-//     verify                       # check Browser Ports Native Docker LiveAgent (release gate)
-//     version                      # print 1.0.0-beta.<commit count> (the versioning policy)
-//     stage   [version]            # compile + bundle the two bins + assemble dist/npm (for Nix)
-//     package [version]            # restore + stage + boot-smoke + npm pack (the .tgz)
-//     install-smoke <tgz>          # npm-install the tarball, assert native deps, boot-smoke it
-//     boot-smoke <command…>        # run a yession bin with ephemeral ports; assert readiness
-//     clean                        # remove build artifacts + deps
-//     clean-docker                 # remove leaked label=yession-session containers/volumes
-//
-// `dotnet fsi tasks.fsx <version>` (a bare version) is treated as `package <version>`
-// for backwards compatibility. Output: dist/npm/ (staging) and dist/yession-<version>.tgz.
+// The verbs are the dispatch at the bottom of this file; each has its own section below. A
+// bare version (`dotnet fsi tasks.fsx 1.2.3`) is shorthand for `package`.
 //
 // Yession ships as ONE npm package with two bins, `yession` (the Manager) and
-// `yession-session` (a Session Process). The two entries are esbuild-bundled to single ESM
-// files with the native / self-resolving deps kept EXTERNAL — node-datachannel loads its
-// addon and the Agent SDK resolves its native `claude` sibling via import.meta.url, both of
-// which only work from a real node_modules, never bundled. Assets (the client bundle, the
-// stylesheet) are copied in and read package-relative at runtime.
+// `yession-session` (a Session Process). Both entries are esbuild-bundled to single ESM files
+// with the native / self-resolving deps kept EXTERNAL — node-datachannel loads its addon and
+// the Agent SDK resolves its native `claude` sibling via import.meta.url, neither of which
+// works bundled. Assets are copied in and read package-relative at runtime.
 
 open System
 open System.Diagnostics
@@ -296,8 +279,7 @@ let private hasAny (caps: Set<string>) names = names |> List.exists caps.Contain
 
 // Run the Fable-compiled test bundle on Node with a hard timeout, so a hung WebRTC connection
 // (or any hang) can never block the suite. Inherits stdio (output streams; env passes through,
-// incl. YESSION_TEST_CAPS) and forwards the suite's exit code; a timeout is a failure. (Folded
-// in from the former scripts/run-tests.fsx.)
+// incl. YESSION_TEST_CAPS) and forwards the suite's exit code; a timeout is a failure.
 let private runNodeSuite (target: string) (timeoutMs: int) =
     let psi = ProcessStartInfo "node"
     psi.ArgumentList.Add target

@@ -40,9 +40,9 @@ The full reasoning, and the invariants that have to survive code review, are in
 ## Getting started
 
 The dev environment, tasks, and build outputs are all declared by [devenv](https://devenv.sh)
-([devenv.nix](devenv.nix)): the toolchain (Node 24, .NET SDK 10), the tasks (devenv scripts),
-and the installable Nix package + npm tarball (devenv outputs). Versions are pinned via nixpkgs
-(`dotnet-sdk_10` = 10.0.301, `nodejs_24`).
+([devenv.nix](devenv.nix)): the toolchain (Node + .NET SDK), the tasks (devenv scripts), and
+the installable Nix package + npm tarball (devenv outputs). Exact versions are pinned via
+nixpkgs in [devenv.nix](devenv.nix) (`nodejs_24`, `dotnet-sdk_10`).
 
 ```sh
 devenv shell       # enter the environment (Node, .NET on PATH)
