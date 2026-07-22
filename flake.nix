@@ -55,28 +55,28 @@
       devShells = forAllSystems (pkgs:
         let ndc = self.packages.${pkgs.stdenv.hostPlatform.system}.node-datachannel;
         in {
+          # A devenv-free fallback shell (the primary dev environment is devenv — see
+          # devenv.nix). Provides the toolchain; run tasks via the build authority directly,
+          # e.g. `dotnet fsi scripts/build.fsx compile` / `stage` / `package`.
           default = pkgs.mkShell {
             packages = [
               pkgs.nodejs_24        # 24.x — Browser Client + Session Process both run on Node
               pkgs.dotnet-sdk_10    # 10.0.301 — F# toolchain; Fable compiles F# -> JS
-              pkgs.just             # task runner (the repo interface; replaces mise)
               pkgs.git
             ];
 
             DOTNET_CLI_TELEMETRY_OPTOUT = "1";
             DOTNET_NOLOGO = "1";
             DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1";
-            # `just restore` links this Nix-built addon into node_modules so the Native test
-            # tier and `just start` work without npm compiling node-datachannel.
+            # Link this Nix-built addon into node_modules so the Native tier works without npm
+            # compiling node-datachannel.
             YESSION_NDC_ADDON = "${ndc}/build/Release/node_datachannel.node";
 
             shellHook = ''
-              # Tool-installed binaries (Fable via dotnet tools, esbuild/tailwind via npm)
-              # go on PATH, matching the versions the build and package steps use.
               export PATH="$PWD/node_modules/.bin:$PATH"
               export DOTNET_ROOT="${pkgs.dotnet-sdk_10}/share/dotnet"
-              echo "yession dev shell — node $(node --version), dotnet $(dotnet --version)"
-              echo "Run tasks with just: just build | just test Browser | just start"
+              echo "yession fallback shell — node $(node --version), dotnet $(dotnet --version)"
+              echo "Primary dev env is devenv (devenv shell). Build: dotnet fsi scripts/build.fsx compile"
             '';
           };
         });

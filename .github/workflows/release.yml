@@ -23,10 +23,10 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-      - name: Restore deps (links the Nix node-datachannel addon)
-        run: nix develop --command just restore
+      - name: Install devenv
+        run: nix profile install nixpkgs#devenv
       - name: Install Chromium for the browser E2E
-        run: nix develop --command npx --yes playwright@1.61.1 install --with-deps chromium
+        run: devenv shell -- npx --yes playwright@1.61.1 install --with-deps chromium
       # The Docker integration suite talks to the daemon via dockerode over the local
       # socket. This job runs on the VM host (no `container:` key), so the preinstalled
       # daemon is reachable directly — no docker-in-docker. Fail fast if that ever changes.
@@ -41,7 +41,7 @@ jobs:
           # Make a missing daemon a hard failure here, not a silent skip: the release gate
           # must actually exercise Docker.
           YESSION_REQUIRE_DOCKER: "1"
-        run: nix develop --command just verify
+        run: devenv shell -- verify
       # Reused runners must not leak session containers/volumes between jobs.
       - name: Clean up Yession Docker artefacts
         if: always()
@@ -62,13 +62,13 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      - name: Install devenv
+        run: nix profile install nixpkgs#devenv
       - name: Compute version (1.0.0-beta.<commit count>)
         id: version
         run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Build
-        run: nix develop --command just build
-      - name: Assemble the npm package (one package, two bins)
-        run: nix develop --command dotnet fsi scripts/build.fsx ${{ steps.version.outputs.version }}
+      - name: Assemble the npm package (compile + bundle + smoke + pack)
+        run: devenv shell -- package ${{ steps.version.outputs.version }}
       # Prove a clean install of the published tarball pulls the platform-native deps
       # (node-datachannel's addon AND the SDK's native `claude`) and boots. This is the
       # real end-to-end check of "installing the package is all it takes".
@@ -79,7 +79,7 @@ jobs:
           # unambiguously a local tarball.
           tgz="$PWD/$(ls dist/yession-*.tgz)"
           prefix="$(mktemp -d)"
-          nix develop --command npm install --prefix "$prefix" "$tgz"
+          devenv shell -- npm install --prefix "$prefix" "$tgz"
           test -f "$prefix/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude" \
             || { echo "native claude binary was not pulled by npm"; exit 1; }
           ls "$prefix"/node_modules/node-datachannel/build/Release/*.node >/dev/null 2>&1 \
@@ -87,7 +87,7 @@ jobs:
           # Capture the manager's output (it runs until the timeout), then assert it
           # announced its endpoints — avoids a pipe racing the process to death.
           out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=8321 \
-            timeout 25 nix develop --command node "$prefix/node_modules/.bin/yession" 2>&1 || true)"
+            timeout 25 devenv shell -- node "$prefix/node_modules/.bin/yession" 2>&1 || true)"
           echo "$out" | grep -q "management UI at" \
             || { echo "the installed package did not boot:"; echo "$out"; exit 1; }
           echo "install smoke passed: native deps resolved and the package booted"

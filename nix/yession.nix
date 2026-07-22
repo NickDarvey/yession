@@ -20,13 +20,13 @@
 , makeWrapper
 , node-datachannel
 , claude-code
-, esbuild
 , version ? "0.0.0-nix"
 }:
 
 let
-  # Only the files the build actually consumes, so editing flake.nix, docs, CI, or the
-  # justfile doesn't invalidate the (slow) F#/Fable build.
+  # Only the files the build actually consumes, so editing flake.nix, CI, or devenv config
+  # doesn't invalidate the (slow) F#/Fable build. README.md is kept — scripts/build.fsx copies
+  # it into the package.
   src =
     let root = ../.;
     in lib.cleanSourceWith {
@@ -37,11 +37,14 @@ let
           lib.hasPrefix "nix/" rel
           || lib.hasPrefix ".github/" rel
           || lib.hasPrefix "docs/" rel
+          || lib.hasPrefix ".claude/" rel
           || rel == "flake.nix"
           || rel == "flake.lock"
-          || rel == "justfile"
+          || rel == "devenv.nix"
+          || rel == "devenv.yaml"
           || rel == ".gitignore"
-          || lib.hasSuffix ".md" rel
+          || rel == "AGENTS.md"
+          || rel == "CLAUDE.md"
         );
     };
 
@@ -106,7 +109,6 @@ stdenv.mkDerivation {
   nativeBuildInputs = [
     dotnet-sdk_10
     nodejs_24
-    esbuild
     npmHooks.npmConfigHook
     makeWrapper
   ];
@@ -119,9 +121,13 @@ stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
     ${dotnetEnv}
-    # npm-installed CLIs (tailwindcss) on PATH; npmConfigHook has populated node_modules.
+    # npm-installed CLIs (esbuild, tailwind) on PATH; npmConfigHook has populated node_modules.
     export PATH="$PWD/node_modules/.bin:$PATH"
-    export NUGET_PACKAGES="${nugetDeps}"
+    # NUGET_PACKAGES must be writable — `dotnet tool restore`/restore write lock and temp files
+    # into it — so copy the read-only cache FOD into a writable dir (the store is read-only,
+    # which fails hard in a sandboxed build).
+    export NUGET_PACKAGES="$TMPDIR/nuget-packages"
+    cp -r --no-preserve=mode,ownership ${nugetDeps} "$NUGET_PACKAGES"
     # Offline NuGet: no online source, resolve everything from the pre-populated cache.
     cat > nuget.config <<'EOF'
     <?xml version="1.0" encoding="utf-8"?>
@@ -131,32 +137,21 @@ stdenv.mkDerivation {
     EOF
 
     dotnet tool restore
-    dotnet build Yession.slnx --no-restore || dotnet build Yession.slnx
-    dotnet fable app/main/Yession.Host.Main.fsproj -o app/out
-    dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser
-
-    # Bundle the two entries to single ESM files, keeping the native / self-resolving deps
-    # external (they must load from node_modules, never bundled), matching scripts/build.fsx.
-    banner='import { createRequire as __createRequire } from "module"; const require = __createRequire(import.meta.url);'
-    externals="--external:node-datachannel --external:@anthropic-ai/claude-agent-sdk --external:zod --external:dockerode"
-    esbuild app/out/Main.js        --bundle --platform=node --format=esm --banner:js="$banner" $externals --outfile=stage/manager.js
-    esbuild app/SessionMain.js     --bundle --platform=node --format=esm --banner:js="$banner" $externals --outfile=stage/session.js
-    esbuild app/out/browser/Browser.js --bundle --format=esm --minify --outfile=stage/assets/client.js
-    tailwindcss -i app/tailwind.css -o stage/assets/app.css --minify
+    # Delegate to the repo's build authority: compile + bundle + assemble dist/npm. No
+    # bundling logic is duplicated here — build.fsx owns it (same output the npm channel ships).
+    dotnet fsi scripts/build.fsx stage "${version}"
     runHook postBuild
   '';
 
   installPhase = ''
     runHook preInstall
-    mkdir -p "$out/libexec/yession" "$out/bin"
-    cp stage/manager.js stage/session.js "$out/libexec/yession/"
-    cp -r stage/assets "$out/libexec/yession/assets"
-    # The bundles are ESM; mark the directory so Node treats manager.js/session.js as modules.
-    echo '{ "type": "module", "private": true }' > "$out/libexec/yession/package.json"
+    mkdir -p "$out/bin" "$out/libexec"
+    # dist/npm is the assembled package (manager.js, session.js, assets/, bin/ shims,
+    # package.json). Ship it wholesale.
+    cp -r dist/npm "$out/libexec/yession"
 
-    # Runtime node_modules: the four externals kept out of the bundles resolve from here (the
-    # rest of package.json's deps are inlined into the bundles, but carrying them is harmless).
-    # Reuse the node_modules npmConfigHook already populated offline; drop dev-only tooling.
+    # Runtime node_modules: the four externals kept out of the bundles resolve from here. Reuse
+    # the node_modules npmConfigHook populated offline; drop dev-only tooling.
     npm prune --omit=dev --offline --no-audit --no-fund || true
     cp -r node_modules "$out/libexec/yession/node_modules"
 
@@ -165,16 +160,15 @@ stdenv.mkDerivation {
     cp ${node-datachannel}/build/Release/node_datachannel.node \
        "$out/libexec/yession/node_modules/node-datachannel/build/Release/node_datachannel.node"
 
-    # Wrap the two bins on the pinned Node. The Manager spawns the Session Process as a child;
-    # point it at the wrapped session bin, and point the agent at nixpkgs claude-code so the
-    # SDK never needs its own native binary.
+    # Wrap build.fsx's own bin shims on the pinned Node, pointing the agent at nixpkgs
+    # claude-code (so the SDK never needs its native binary). The yession shim sets
+    # YESSION_SESSION_MAIN and spawns `node session.js`, which inherits YESSION_CLAUDE_PATH.
     makeWrapper ${nodejs_24}/bin/node "$out/bin/yession-session" \
-      --add-flags "$out/libexec/yession/session.js" \
+      --add-flags "$out/libexec/yession/bin/yession-session.js" \
       --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude
 
     makeWrapper ${nodejs_24}/bin/node "$out/bin/yession" \
-      --add-flags "$out/libexec/yession/manager.js" \
-      --set-default YESSION_SESSION_BIN "$out/bin/yession-session" \
+      --add-flags "$out/libexec/yession/bin/yession.js" \
       --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude
     runHook postInstall
   '';
