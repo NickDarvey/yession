@@ -73,26 +73,18 @@ let exec (command: string) (arguments: string list) : unit =
 
 let gitVersion () = sprintf "1.0.0-beta.%s" (run "git" [ "rev-list"; "--count"; "HEAD" ])
 
-// --- restore: deps (npm + .NET tools) + the native node-datachannel addon --------------------
+// --- restore: deps (npm + .NET tools) -------------------------------------------------------
 
-// The npm prebuild for node-datachannel lives on GitHub releases (blocked in the sandbox), so
-// npm runs with --ignore-scripts and the Nix-built addon is linked in from $YESSION_NDC_ADDON.
+// node_modules is provided by the environment when one exists: under devenv it's a Nix artifact
+// (the offline npm tree + the source-built node-datachannel addon) symlinked in by enterShell —
+// so the native addon is present with no Yession-specific env var or per-file linking, and we
+// don't `npm install` over it. Off-Nix (no such tree) a plain `npm install` materializes the
+// deps; the node-datachannel addon there still comes from Nix or a manual build (the `Native`
+// tier self-skips without it), same as before.
 let restore () =
-    exec "npm" [ "install"; "--ignore-scripts" ]
+    if not (Directory.Exists (Path.Combine (repoRoot, "node_modules"))) then
+        exec "npm" [ "install"; "--ignore-scripts" ]
     exec "dotnet" [ "tool"; "restore" ]
-    match Environment.GetEnvironmentVariable "YESSION_NDC_ADDON" with
-    | addon when not (String.IsNullOrEmpty addon) && File.Exists addon ->
-        let release = Path.Combine (repoRoot, "node_modules/node-datachannel/build/Release")
-        Directory.CreateDirectory release |> ignore
-        let target = Path.Combine (release, "node_datachannel.node")
-        File.Copy (addon, target, true)
-        File.SetUnixFileMode (
-            target,
-            UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute
-            ||| UnixFileMode.GroupRead ||| UnixFileMode.GroupExecute
-            ||| UnixFileMode.OtherRead ||| UnixFileMode.OtherExecute
-        )
-    | _ -> ()
 
 // --- compile: F# -> JS (both entries), the browser client bundle, and the stylesheet --------
 
@@ -370,7 +362,11 @@ let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent" ]
 let clean () =
     for d in [ "node_modules"; "app/out"; "tests/Yession.Tests/out"; "dist" ] do
         let p = Path.Combine (repoRoot, d)
-        if Directory.Exists p then Directory.Delete (p, true)
+        if Directory.Exists p then
+            // A symlinked node_modules is the Nix-managed tree — immutable and always fresh, so
+            // leave it (removing the link would strand the shell without its addon-baked deps).
+            // A real dir (off-Nix npm install) is cleaned normally.
+            if (DirectoryInfo p).LinkTarget = null then Directory.Delete (p, true)
     // Sweep the F#/.NET build dirs, without descending into deps or git.
     let rec sweep dir =
         for sub in Directory.GetDirectories dir do

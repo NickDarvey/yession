@@ -47,9 +47,12 @@ input at devenv's **own source substituted from `cache.nixos.org`** — zero Git
 laptop/CI the committed `devenv.yaml` (normal github input) is used and the hook no-ops.
 
 Then use the task scripts (inside `devenv shell`): `check` / `build` / `verify`. `restore`
-(npm + dotnet tools) is called by the others — no need to run it by hand. Do NOT invoke
-`dotnet`/`fable`/`esbuild` directly to "run the suite"; go through the scripts so tool versions
-and PATH match CI. `restore` uses `npm install --ignore-scripts` — deterministic, github-free.
+(dotnet tools; npm only when `node_modules` is absent) is called by the others — no need to run
+it by hand. Do NOT invoke `dotnet`/`fable`/`esbuild` directly to "run the suite"; go through the
+scripts so tool versions and PATH match CI. Under devenv, `node_modules` is a Nix artifact — the
+offline npm tree with the native node-datachannel addon baked in — symlinked in by `enterShell`,
+so nothing runs an npm postinstall and there's no per-file addon linking. Off-Nix, `restore`
+falls back to `npm install --ignore-scripts`.
 Every Yession build function lives in `tasks.fsx` — it's the complete, standalone build
 interface (`restore`/`build`/`start`/`dev`/`check`/`verify`/`version`/`stage`/`package`/
 `install-smoke`/`boot-smoke`/`clean`/`clean-docker`). The devenv scripts and the GitHub Actions
@@ -58,8 +61,9 @@ away and `dotnet fsi tasks.fsx <verb>` still drives everything.
 
 Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-browsers`) — the
 `Browser` cap works here. The `node-datachannel` WebRTC addon is NOT built by npm (its prebuilt
-lives on GitHub releases, which the proxy blocks); it is supplied by Nix for the `Native` tier
-and the `outputs` (see devenv.nix / Testing).
+lives on GitHub releases, which the proxy blocks); Nix builds it from source and bakes it into
+the `nodeModules` derivation the dev shell symlinks in (and into the `outputs`) — so the
+`Native` tier just works (see devenv.nix / Testing).
 
 ## Testing
 
@@ -79,8 +83,8 @@ Capabilities:
 - `Ports` — binds TCP ports / spawns processes.
 - `Native` — the native `node-datachannel` WebRTC addon, loaded by the real Session Process.
   Built from source by Nix (`node-datachannel` in devenv.nix, against nixpkgs
-  libdatachannel + plog); `restore` links it into `node_modules`, so
-  `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC data-channel E2E) RUN
+  libdatachannel + plog) and baked into the `nodeModules` derivation the dev shell symlinks in,
+  so `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC data-channel E2E) RUN
   here — unlike the old mise container. Outside Nix the addon is absent and they skip cleanly.
 - `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
 

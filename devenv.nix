@@ -93,6 +93,32 @@ let
     hash = "sha256-KAlO9QDFE5XNUmM1202Oet2dicrkQotZJQIm9uzHHgQ=";
   };
 
+  # node_modules as a Nix artifact: the offline npm tree (npmConfigHook installs it from npmDeps
+  # with scripts ignored) with the source-built node-datachannel addon overlaid. This is how the
+  # dev shell gets a COMPLETE node_modules — the native WebRTC addon included — with no npm
+  # postinstall, no GitHub, and no per-file addon linking. enterShell symlinks it into place.
+  nodeModules = pkgs.stdenv.mkDerivation {
+    pname = "yession-node-modules";
+    inherit version src npmDeps;
+    nativeBuildInputs = [ pkgs.nodejs_24 pkgs.npmHooks.npmConfigHook ];
+    npmFlags = [ "--ignore-scripts" ];
+    dontBuild = true;
+    installPhase = ''
+      runHook preInstall
+      # npmConfigHook populated ./node_modules from the FOD (scripts ignored, so node-datachannel
+      # has its JS but no compiled addon); drop the Nix-built .node into place.
+      mkdir -p node_modules/node-datachannel/build/Release
+      cp ${node-datachannel}/build/Release/node_datachannel.node \
+         node_modules/node-datachannel/build/Release/node_datachannel.node
+      mkdir -p "$out"
+      cp -a node_modules/. "$out/"
+      runHook postInstall
+    '';
+    # The addon and the npm-shipped platform binaries (esbuild, tailwind oxide) are already
+    # built; don't let fixup patchelf/strip them.
+    dontFixup = true;
+  };
+
   # staged — the offline build shared by both outputs. Delegates to tasks.fsx `stage`
   # (compile + bundle + assemble dist/npm); no bundling logic is duplicated here. $out carries
   # the assembled package dir and a prod-pruned node_modules for the installable to reuse.
@@ -185,11 +211,16 @@ in
 
   packages = [ pkgs.git ];
 
-  env.YESSION_NDC_ADDON = "${node-datachannel}/build/Release/node_datachannel.node";
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
 
+  # Point node_modules at the Nix-built tree (addon baked in). Idempotent; replaces a stale
+  # symlink or a leftover npm-installed dir. `restore` then skips `npm install` (dir present).
   enterShell = ''
+    if [ "$(readlink node_modules 2>/dev/null)" != "${nodeModules}" ]; then
+      rm -rf node_modules
+      ln -s ${nodeModules} node_modules
+    fi
     export PATH="$PWD/node_modules/.bin:$PATH"
     echo "yession — tasks: restore build start dev check verify package clean  (check <caps>: Browser Ports Native Docker LiveAgent)"
   '';
