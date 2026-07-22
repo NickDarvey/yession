@@ -203,90 +203,23 @@ in
   outputs.packaged = packaged;
 
   # --- tasks (devenv scripts) ----------------------------------------------------------------
+  # Thin wrappers: every task is a verb of scripts/build.fsx (the complete, standalone build
+  # interface). No Yession build logic lives here — delete devenv and call the fsx directly and
+  # nothing is lost. `"$@"` forwards args (e.g. `check Browser Ports Native --retry 1`).
 
-  # Install deps (npm + .NET tools) and link the Nix-built node-datachannel addon.
-  scripts.restore.exec = ''
-    set -euo pipefail
-    npm install --ignore-scripts
-    dotnet tool restore
-    if [ -n "''${YESSION_NDC_ADDON:-}" ] && [ -f "$YESSION_NDC_ADDON" ]; then
-      mkdir -p node_modules/node-datachannel/build/Release
-      install -m 0755 "$YESSION_NDC_ADDON" node_modules/node-datachannel/build/Release/node_datachannel.node
-    fi
-  '';
-
-  # Compile everything (type-check + Fable both entries + client bundle + stylesheet).
-  scripts.build.exec = ''
-    set -euo pipefail
-    restore
-    dotnet fsi scripts/build.fsx compile
-  '';
-
-  # Start the Session Process locally (http://127.0.0.1:8080).
-  scripts.start.exec = ''
-    set -euo pipefail
-    build
-    node app/out/Main.js
-  '';
-
-  # Watch mode: recompile and restart on change.
-  scripts.dev.exec = ''
-    set -euo pipefail
-    restore
-    dotnet fable watch app/main/Yession.Host.Main.fsproj -o app/out --runWatch node app/out/Main.js
-  '';
-
-  # Run tests. Default = cheap tier. Pass capabilities as args: `check Browser`, `check Ports
-  # Native`, etc. Suites self-skip when their capabilities aren't present. (Named `check`, not
-  # `test`, because `test` is a shell builtin and would shadow the script.)
-  scripts.check.exec = ''
-    set -euo pipefail
-    restore
-    caps="$*"
-    export YESSION_TEST_CAPS="$caps"
-    dotnet build Yession.slnx
-
-    # Browser output is needed by the host-spawning Node suites and the editor Browser E2E.
-    case " $caps " in
-      *" Ports "*|*" Native "*|*" Docker "*|*" LiveAgent "*|*" Browser "*)
-        dotnet fable app/browser/Yession.Browser.fsproj -o app/out/browser ;;
-    esac
-
-    # Host-spawning Node suites drive the assembled npm package — stage it (compile + bundle).
-    case " $caps " in
-      *" Ports "*|*" Native "*|*" Docker "*|*" LiveAgent "*)
-        dotnet fsi scripts/build.fsx stage 0.0.0-test ;;
-    esac
-
-    # The Node (Fable/JS) test path — always runs; self-skips suites whose caps/runtime don't match.
-    dotnet fable tests/Yession.Tests/Yession.Tests.fsproj -o tests/Yession.Tests/out
-    dotnet fsi scripts/run-tests.fsx tests/Yession.Tests/out/Main.js 240000
-
-    # The .NET CLR (Playwright) test path — only when a Browser-tagged suite is enabled.
-    case " $caps " in
-      *" Browser "*)
-        ./node_modules/.bin/esbuild app/out/browser/EditorHarness.js --bundle --format=esm --outfile=tests/browser/out/harness.js
-        dotnet run --project tests/Yession.Tests/Yession.Tests.fsproj ;;
-    esac
-  '';
-
-  # The FULL verification gate (every capability + real-browser E2E). Gates releases.
-  scripts.verify.exec = ''check Browser Ports Native Docker LiveAgent'';
-
-  # Assemble the npm package locally with a boot smoke (build.fsx package). For the release
-  # tarball as a Nix output, use `devenv build outputs.packaged`. Usage: package 1.2.3
-  scripts.package.exec = ''
-    set -euo pipefail
-    restore
-    dotnet fsi scripts/build.fsx package "''${1:-0.0.0-dev}"
-  '';
-
-  # Remove build artifacts and installed dependencies.
-  scripts.clean.exec = ''
-    set -euo pipefail
-    rm -rf node_modules app/out tests/Yession.Tests/out dist
-    find . -type d -name bin -prune -exec rm -rf {} +
-    find . -type d -name obj -prune -exec rm -rf {} +
-    find . -type d -name fable_modules -prune -exec rm -rf {} +
-  '';
+  scripts.restore.exec = ''exec dotnet fsi scripts/build.fsx restore'';
+  scripts.build.exec = ''exec dotnet fsi scripts/build.fsx build'';
+  scripts.start.exec = ''exec dotnet fsi scripts/build.fsx start'';
+  scripts.dev.exec = ''exec dotnet fsi scripts/build.fsx dev'';
+  # Named `check`, not `test`, because `test` is a shell builtin and would shadow the script.
+  scripts.check.exec = ''exec dotnet fsi scripts/build.fsx check "$@"'';
+  scripts.verify.exec = ''exec dotnet fsi scripts/build.fsx verify'';
+  scripts.version.exec = ''exec dotnet fsi scripts/build.fsx version'';
+  # Local package (compile + bundle + smoke + pack). For the release tarball as a Nix output,
+  # use `devenv build outputs.packaged`. Usage: package 1.2.3
+  scripts.package.exec = ''exec dotnet fsi scripts/build.fsx package "''${1:-0.0.0-dev}"'';
+  scripts.clean.exec = ''exec dotnet fsi scripts/build.fsx clean'';
+  # CI helpers (also plain build.fsx verbs): install-smoke <tgz>, clean-docker.
+  scripts."install-smoke".exec = ''exec dotnet fsi scripts/build.fsx install-smoke "$@"'';
+  scripts."clean-docker".exec = ''exec dotnet fsi scripts/build.fsx clean-docker'';
 }

@@ -25,35 +25,28 @@ jobs:
             experimental-features = nix-command flakes
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
-      - name: Install Chromium for the browser E2E
-        run: devenv shell -- npx --yes playwright@1.61.1 install --with-deps chromium
-      # The Docker integration suite talks to the daemon via dockerode over the local
-      # socket. This job runs on the VM host (no `container:` key), so the preinstalled
-      # daemon is reachable directly — no docker-in-docker. Fail fast if that ever changes.
-      # (If this job is later containerized, mount the host socket — `options: -v
-      # /var/run/docker.sock:/var/run/docker.sock` — rather than a privileged dind service.)
-      - name: Docker daemon present (fail fast)
-        run: docker version
+      # The Docker integration suite talks to the daemon (dockerode over the local socket). This
+      # job runs on the VM host (no `container:` key), so the preinstalled daemon is reachable
+      # directly. YESSION_REQUIRE_DOCKER makes a missing daemon a hard failure inside `verify`
+      # (not a silent skip), so no separate fail-fast step is needed. `verify` (check … Browser)
+      # provisions Chromium itself, so no separate Chromium step is needed either.
       - name: Full verification gate
         env:
           # Testing-scoped credential; enables the live agent smoke tests.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Make a missing daemon a hard failure here, not a silent skip: the release gate
-          # must actually exercise Docker.
           YESSION_REQUIRE_DOCKER: "1"
         run: devenv shell -- verify
       # Reused runners must not leak session containers/volumes between jobs.
       - name: Clean up Yession Docker artefacts
         if: always()
-        run: |
-          ids="$(docker ps -aq --filter label=yession-session)"
-          [ -n "$ids" ] && docker rm -f $ids || true
-          docker volume ls -q --filter label=yession-session | xargs -r docker volume rm || true
+        run: devenv shell -- clean-docker
 
   package:
     needs: verify
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,31 +59,14 @@ jobs:
         run: nix profile install nixpkgs#devenv
       - name: Compute version (1.0.0-beta.<commit count>)
         id: version
-        run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(devenv shell -- version)" >> "$GITHUB_OUTPUT"
       - name: Assemble the npm package (compile + bundle + smoke + pack)
         run: devenv shell -- package ${{ steps.version.outputs.version }}
       # Prove a clean install of the published tarball pulls the platform-native deps
       # (node-datachannel's addon AND the SDK's native `claude`) and boots. This is the
       # real end-to-end check of "installing the package is all it takes".
       - name: Install smoke (native deps resolve; both surfaces serve)
-        run: |
-          # Absolute path: a bare `dist/x.tgz` looks like a GitHub `owner/repo`
-          # shorthand to npm, which then tries to git-clone it. An absolute path is
-          # unambiguously a local tarball.
-          tgz="$PWD/$(ls dist/yession-*.tgz)"
-          prefix="$(mktemp -d)"
-          devenv shell -- npm install --prefix "$prefix" "$tgz"
-          test -f "$prefix/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude" \
-            || { echo "native claude binary was not pulled by npm"; exit 1; }
-          ls "$prefix"/node_modules/node-datachannel/build/Release/*.node >/dev/null 2>&1 \
-            || { echo "node-datachannel addon was not built"; exit 1; }
-          # Capture the manager's output (it runs until the timeout), then assert it
-          # announced its endpoints — avoids a pipe racing the process to death.
-          out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=8321 \
-            timeout 25 devenv shell -- node "$prefix/node_modules/.bin/yession" 2>&1 || true)"
-          echo "$out" | grep -q "management UI at" \
-            || { echo "the installed package did not boot:"; echo "$out"; exit 1; }
-          echo "install smoke passed: native deps resolved and the package booted"
+        run: devenv shell -- install-smoke "$(ls dist/yession-*.tgz)"
       - uses: actions/upload-artifact@v4
         with:
           name: dist-npm
@@ -111,25 +87,23 @@ jobs:
             experimental-features = nix-command flakes
       - name: Build the Nix package
         run: nix build .#yession --print-build-logs
+      # The boot-smoke logic (ephemeral ports, wait for "management UI at") lives in build.fsx;
+      # this job has no devenv, so borrow dotnet from the flake devShell to call the same verb.
       - name: Boot smoke (both surfaces serve)
-        run: |
-          out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=0 \
-            timeout 30 ./result/bin/yession 2>&1 || true)"
-          echo "$out" | grep -q "management UI at" \
-            || { echo "the Nix package did not boot:"; echo "$out"; exit 1; }
-          echo "nix package boot smoke passed"
+        run: nix develop -c dotnet fsi scripts/build.fsx boot-smoke ./result/bin/yession
 
   release:
     needs: package
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    env:
+      # The versioning policy lives in build.fsx; the package job computed it — reuse it here
+      # rather than recompute, so this job needs no devenv/dotnet just for the tag name.
+      VERSION: ${{ needs.package.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Compute version
-        id: version
-        run: echo "version=1.0.0-beta.$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
       - name: Diff since previous release
         id: diff
         run: |
@@ -169,8 +143,8 @@ jobs:
       #     merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: Yession ${{ steps.version.outputs.version }}
+          tag_name: v${{ env.VERSION }}
+          name: Yession ${{ env.VERSION }}
           prerelease: true
           # Claude-drafted notes when present, GitHub's generated notes otherwise.
           body_path: ${{ steps.notes.outputs.body }}

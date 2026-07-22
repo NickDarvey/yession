@@ -50,8 +50,11 @@ Then use the task scripts (inside `devenv shell`): `check` / `build` / `verify`.
 (npm + dotnet tools) is called by the others — no need to run it by hand. Do NOT invoke
 `dotnet`/`fable`/`esbuild` directly to "run the suite"; go through the scripts so tool versions
 and PATH match CI. `restore` uses `npm install --ignore-scripts` — deterministic, github-free.
-All build/package logic lives in `scripts/build.fsx` (`compile`/`stage`/`package`); the scripts
-and the Nix `outputs` both call it.
+Every Yession build function lives in `scripts/build.fsx` — it's the complete, standalone build
+interface (`restore`/`build`/`start`/`dev`/`check`/`verify`/`version`/`stage`/`package`/
+`install-smoke`/`boot-smoke`/`clean`/`clean-docker`). The devenv scripts and the GitHub Actions
+workflows are thin wrappers over it, and the Nix `outputs` call it too — throw devenv and CI
+away and `dotnet fsi scripts/build.fsx <verb>` still drives everything.
 
 Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-browsers`) — the
 `Browser` cap works here. The `node-datachannel` WebRTC addon is NOT built by npm (its prebuilt

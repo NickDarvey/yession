@@ -31,21 +31,7 @@ jobs:
             experimental-features = nix-command flakes
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
-      # Chromium drives both the host-free editor E2E and the two-peer browser convergence E2E
-      # via the .NET Playwright driver. `check` itself restores deps + links the addon.
-      - name: Install Chromium for the browser E2Es
-        run: devenv shell -- npx --yes playwright@1.61.1 install --with-deps chromium
+      # `check` does everything Yession-specific: restore + link the addon, provision Chromium
+      # for the browser E2Es, run the gate, and re-run once on a native flake (--retry 1).
       - name: Cheap tier + browser + native WebRTC/host E2E (retry once on flake)
-        run: |
-          for attempt in 1 2; do
-            echo "::group::native gate — attempt $attempt"
-            if devenv shell -- check Browser Ports Native; then
-              echo "::endgroup::"
-              echo "native gate passed on attempt $attempt"
-              exit 0
-            fi
-            echo "::endgroup::"
-            echo "native gate failed on attempt $attempt"
-          done
-          echo "native gate failed after 2 attempts — treating as a real failure"
-          exit 1
+        run: devenv shell -- check Browser Ports Native --retry 1
