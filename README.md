@@ -39,20 +39,20 @@ The full reasoning, and the invariants that have to survive code review, are in
 
 ## Getting started
 
-The toolchain comes from a [Nix flake](flake.nix); [`just`](https://just.systems) is the
-task runner. `nix develop` gives an environment — Node 24, the .NET SDK 10, `just` — that is
-identical on a laptop and in a Claude Code cloud session, with nothing curl-bootstrapped.
+The dev environment is [devenv](https://devenv.sh) ([devenv.nix](devenv.nix)); it provides the
+toolchain — Node 24, the .NET SDK 10 — and [`just`](https://just.systems) is the task runner.
 
 ```sh
-nix develop        # enter the dev shell (Node, .NET, just on PATH)
+devenv shell       # enter the environment (Node, .NET, just on PATH)
 just               # list every task
 just restore       # install all dependencies (npm + .NET tools)
 just build         # build everything
 ```
 
-No Nix? Any Node 24 + .NET SDK 10 will do — install [`just`](https://just.systems), then run
-the same `just` tasks. Nix just pins those versions for you (`dotnet-sdk_10` = 10.0.301,
-`nodejs_24`); bump the nixpkgs pin in `flake.nix` to move them.
+Versions are pinned via nixpkgs (`dotnet-sdk_10` = 10.0.301, `nodejs_24`); a plain
+[`flake.nix`](flake.nix) devShell (`nix develop`) is kept as a devenv-free fallback and is what
+builds the Nix package below. No Nix at all? Any Node 24 + .NET SDK 10 works — install `just`
+and run the same tasks.
 
 Yession ships two ways, side by side, each giving the two commands `yession` (the Manager)
 and `yession-session` (a Session Process). Either way `yession` serves a management UI
@@ -80,12 +80,17 @@ Process host; `start` runs it.
 
 ### Cloud sessions (Claude Code on the web)
 
-To get the same environment in a cloud session, set the environment's **setup script** to
-install Nix (`sh <(curl -L https://nixos.org/nix/install) --no-daemon`, with flakes enabled)
-and warm the shell (`nix develop --command true`). `*.nixos.org` and `cache.nixos.org` are in
-the default Trusted network allowlist, so the flake resolves and substitutes without any
-extra allowed domains — nixpkgs is pinned to a `nixos.org` channel tarball rather than a
-`github:` input for exactly that reason.
+Set the environment's **setup script** to install Nix (`sh <(curl -L
+https://nixos.org/nix/install) --no-daemon`, flakes enabled). `*.nixos.org` and
+`cache.nixos.org` are in the default Trusted network allowlist, so nixpkgs (a `nixos.org`
+channel tarball, not a `github:` input) resolves and substitutes with no extra allowed domains.
+
+devenv itself would normally fetch `github:cachix/devenv`, which the sandbox blocks. The
+committed [`.claude/settings.json`](.claude/settings.json) runs
+[`scripts/devenv-local.sh`](scripts/devenv-local.sh) on session start, which writes a
+gitignored `devenv.local.yaml` repointing the `devenv` input at devenv's own source
+**substituted from `cache.nixos.org`** — so `devenv shell` works with zero GitHub access.
+On a laptop / in CI the hook no-ops and the normal `github:` input is used.
 
 Tests declare what they need in code, not by folder — `Ports`, `Docker`, `LiveAgent`,
 `Browser`, or nothing for a pure suite — and the harness runs each one only where those

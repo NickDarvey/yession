@@ -20,24 +20,30 @@ Boundaries: code/commits/PRs written normal.
 
 ## Bootstrap
 
-The repo interface is `just <task>`; the toolchain (Node 24, .NET SDK 10) comes from a Nix
-flake (`flake.nix`). On a box with Nix: `nix develop` drops you in a shell with `node`,
-`dotnet`, and `just` on PATH — no other install.
+The dev environment is **devenv** (`devenv.nix`): Node 24 + .NET SDK 10 + `just`. `just` is
+the task runner. On a laptop / in CI: `devenv shell` drops you in with `node`, `dotnet`, and
+`just` on PATH.
 
-A fresh container without Nix: install it ONCE (single-user, no daemon), then enter the shell.
+A fresh Claude Code container: install Nix ONCE (single-user, no daemon), then enter devenv.
 
 ```
 sh <(curl -L https://nixos.org/nix/install) --no-daemon      # installs /nix + ~/.nix-profile
 . ~/.nix-profile/etc/profile.d/nix.sh                          # every shell (or re-login)
 mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
-nix develop --command just build                              # enter shell, build everything
+export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt https_proxy="$HTTPS_PROXY"   # trust proxy CA
+scripts/devenv-local.sh                                       # write devenv.local.yaml (see below)
+nix shell 'https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz#devenv' \
+  -c devenv shell -- just build                               # enter devenv, build everything
 ```
 
-Behind Claude Code's egress proxy also export `NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt`
-and `https_proxy="$HTTPS_PROXY"` so Nix trusts the proxy CA and reaches `cache.nixos.org`.
-nixpkgs is pinned to a `nixos.org` channel tarball (not a `github:` input) precisely so it
-resolves under the default-Trusted network policy, where `*.nixos.org` is allowed but arbitrary
-GitHub repos are not.
+**Why devenv works here without GitHub.** devenv's generated flake normally fetches
+`github:cachix/devenv`, which this sandbox blocks (the GitHub proxy scopes fetches to attached
+repos, and `add_repo` refuses cross-owner repos). So `devenv.yaml` pins nixpkgs to a
+`nixos.org` channel tarball (allowed under the default-Trusted policy — `*.nixos.org` is, GitHub
+isn't), and `scripts/devenv-local.sh` (run automatically by the SessionStart hook in
+`.claude/settings.json`) writes a gitignored `devenv.local.yaml` that repoints the `devenv`
+input at devenv's **own source substituted from `cache.nixos.org`** — zero GitHub. On a
+laptop/CI the committed `devenv.yaml` (normal github input) is used and the hook no-ops.
 
 Then use tasks (`just` with no args lists them): `just test` / `build` / `verify`. `restore`
 (npm + dotnet tools) is a dependency of the others — no need to run it by hand. Do NOT invoke
