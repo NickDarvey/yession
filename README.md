@@ -64,21 +64,22 @@ http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its
 - **npm package** — `outputs.packaged`. `npm i -g <release-tarball>` pulls the platform-native
   pieces (the WebRTC transport and the agent's native Claude Code binary) on install; Node ≥24
   is the only prerequisite. Build it locally with `devenv build outputs.packaged`.
-- **Nix package** — `outputs.installed`. Reproducible and self-contained: the native WebRTC
-  addon is built from source, the agent points at nixpkgs `claude-code`, nothing runs an npm
-  postinstall. Build/install:
+- **Nix package** — the `installed` derivation. Reproducible and self-contained: the native
+  WebRTC addon is built from source, the agent points at nixpkgs `claude-code`, nothing runs an
+  npm postinstall. Build/install:
 
   ```sh
-  devenv build outputs.installed                 # build the two wrapped bins
-  nix run    github:NickDarvey/yession           # run the Manager (via the flake bridge)
-  nix profile install github:NickDarvey/yession  # add yession + yession-session to your profile
+  nix build          github:NickDarvey/yession#yession  # build the two wrapped bins
+  nix run            github:NickDarvey/yession           # run the Manager
+  nix profile install github:NickDarvey/yession          # add yession + yession-session
   ```
 
-  [`flake.nix`](flake.nix) is a thin bridge — it only re-exposes devenv's outputs as flake
-  packages (`packages.<system>.{default,yession,packaged}`) so `nix build`/`nix profile install`
-  work; it declares no environment. Add it as an input and put
-  `yession.packages.<system>.default` in a NixOS `environment.systemPackages` / home-manager
-  `home.packages` list.
+  The installable derivations live in [`nix/packages.nix`](nix/packages.nix), and
+  [`flake.nix`](flake.nix) builds `packages.<system>.{default,yession,packaged}` from it
+  directly — no devenv involved, so `nix build` / `nix profile install` are pure (only the
+  nixpkgs input). devenv.nix imports the same file for `devenv build outputs.<name>`, so the two
+  never diverge. Add the flake as an input and put `yession.packages.<system>.default` in a NixOS
+  `environment.systemPackages` / home-manager `home.packages` list.
 
 ### Cloud sessions (Claude Code on the web)
 
