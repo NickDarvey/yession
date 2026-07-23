@@ -3,10 +3,10 @@
 # The npm package ships a prebuilt `.node` (from GitHub releases) or, failing that, builds
 # from source with cmake-js — its CMakeLists FetchContent's libdatachannel from GitHub at
 # configure time. Neither works in a sandbox: no network, and GitHub is scoped to attached
-# repos. So we patch the FetchContent out and link nixpkgs' libdatachannel (0.24.1; the
-# package pins v0.24.2 — one patch apart) and plog (header-only), then compile the addon
-# against the nixpkgs Node headers. The result is the whole node-datachannel package with
-# `build/Release/node_datachannel.node` populated, ready to drop into node_modules.
+# repos. So we patch the FetchContent out and link nixpkgs' libdatachannel and plog
+# (header-only), then compile the addon against the nixpkgs Node headers. The result is the
+# whole node-datachannel package with `build/Release/node_datachannel.node` populated, ready
+# to drop into node_modules.
 { lib, stdenv, fetchurl, cmake, pkg-config, openssl, libdatachannel, plog, nodejs_24 }:
 
 let

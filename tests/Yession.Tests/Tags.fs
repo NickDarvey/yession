@@ -15,7 +15,7 @@ module Yession.Tests.Tag
 //     (where the Microsoft.Playwright driver lives); everything else runs on Node (the runtime
 //     the product actually runs on). Each suite therefore runs on exactly ONE runtime.
 //   * CAPABILITIES are orthogonal availability flags the RUN declares it has, via
-//     `YESSION_TEST_CAPS` (e.g. `mise run test -- Browser Native`). A suite runs only when
+//     `YESSION_TEST_CAPS` (e.g. `check Browser Native`). A suite runs only when
 //     every need it lists is in that set. `Native` is the discriminator that lets the host-free
 //     editor E2E (`[Browser]`) run wherever Chromium exists, while the WebRTC/host suites
 //     (`… Native`) skip when the native `node-datachannel` addon is absent — instead of erroring.
@@ -65,7 +65,7 @@ let private hasCreds =
     getEnv "ANTHROPIC_API_KEY" <> "" || getEnv "CLAUDE_CODE_OAUTH_TOKEN" <> ""
 
 /// The capabilities THIS run declares it has. `YESSION_TEST_CAPS` is the primary API (a
-/// space/comma list, e.g. from `mise run test -- Browser Native`); `YESSION_TEST_TIER=verify|all`
+/// space/comma list, e.g. from `check Browser Native`); `YESSION_TEST_TIER=verify|all`
 /// is a back-compat alias meaning "every capability".
 let private requestedCaps : Set<Need> =
     let tier = getEnv "YESSION_TEST_TIER"

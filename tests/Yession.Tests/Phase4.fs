@@ -97,7 +97,7 @@ let private stateTests =
 // -----------------------------------------------------------------------------
 // Step 23 — the Session Process as an OS process. Verify tier: these spawn REAL
 // child processes over the Fable output (`app/SessionMain.js` — built
-// by `mise run verify` before the suite runs) and connect real WebRTC clients.
+// by `verify` before the suite runs) and connect real WebRTC clients.
 // -----------------------------------------------------------------------------
 
 [<Emit("process.execPath")>]
@@ -432,8 +432,8 @@ let private uiFlowTests =
 
 // -----------------------------------------------------------------------------
 // Step 27/28 — the composition E2E: the SHIPPED npm bundles (`dist/npm/manager.js`
-// + `session.js`, produced by `dotnet fsi scripts/build.fsx` inside `mise run
-// verify`), composed for real — the packaged manager spawns the packaged session,
+// + `session.js`, produced by `dotnet fsi tasks.fsx` inside `verify`), composed for
+// real — the packaged manager spawns the packaged session,
 // the management UI drives them, a real WebRTC client talks to the child, the
 // control RPC exercises authority, and crash-resume + a manager restart preserve
 // everything. This is what gates a release.

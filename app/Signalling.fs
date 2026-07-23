@@ -119,14 +119,14 @@ let start
             res.writeHead (200, createObj [ "content-type", box "text/html; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
             res.``end`` bootstrapHtml
         | "GET", "/client.js" ->
-            // The browser client bundle, built by `mise run build` (esbuild output).
+            // The browser client bundle, built by `build` (esbuild output).
             match readBundle () with
             | Some js ->
                 res.writeHead (200, createObj [ "content-type", box "text/javascript; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
                 res.``end`` js
             | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-                res.``end`` "client bundle not built (run: mise run build)"
+                res.``end`` "client bundle not built (run: build)"
         | "GET", "/app.css" ->
             // The locally built Tailwind stylesheet (no CDN); same one-day offline window.
             match readCss () with
@@ -135,7 +135,7 @@ let start
                 res.``end`` css
             | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-                res.``end`` "stylesheet not built (run: mise run build)"
+                res.``end`` "stylesheet not built (run: build)"
         | "GET", path when path.StartsWith "/events/" ->
             match events, System.Int32.TryParse (path.Substring "/events/".Length) with
             | Some endpoint, (true, index) when index >= 0 -> serveChunk endpoint req req.url index res

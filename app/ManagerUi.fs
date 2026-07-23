@@ -175,7 +175,7 @@ let tryHandle (pm: ProcessManager.ProcessManager) (req: IncomingMessage) (res: S
         // The same locally built stylesheet the session shell uses — shared style, no CDN.
         match readAsset "app.css" cssPath fs with
         | Some css -> respond res 200 "text/css; charset=utf-8" css
-        | None -> respond res 404 "text/plain" "stylesheet not built (run: mise run build)"
+        | None -> respond res 404 "text/plain" "stylesheet not built (run: build)"
         true
     | "POST", "/sessions" ->
         readBody req (fun body ->

@@ -39,60 +39,67 @@ The full reasoning, and the invariants that have to survive code review, are in
 
 ## Getting started
 
-The toolchain comes from a [Nix flake](flake.nix); [`just`](https://just.systems) is the
-task runner. `nix develop` gives an environment — Node 24, the .NET SDK 10, `just` — that is
-identical on a laptop and in a Claude Code cloud session, with nothing curl-bootstrapped.
+The dev environment, tasks, and build outputs are all declared by [devenv](https://devenv.sh)
+([devenv.nix](devenv.nix)): the toolchain (Node + .NET SDK), the tasks (devenv scripts), and
+the installable Nix package + npm tarball (devenv outputs). Exact versions are pinned via
+nixpkgs in [devenv.nix](devenv.nix) (`nodejs_24`, `dotnet-sdk_10`).
 
 ```sh
-nix develop        # enter the dev shell (Node, .NET, just on PATH)
-just               # list every task
-just restore       # install all dependencies (npm + .NET tools)
-just build         # build everything
+devenv shell       # enter the environment (Node, .NET on PATH)
+build              # compile everything
+check              # run the cheap test tier (check Browser / Ports Native / … for more)
+start              # run the Session Process locally
 ```
 
-No Nix? Any Node 24 + .NET SDK 10 will do — install [`just`](https://just.systems), then run
-the same `just` tasks. Nix just pins those versions for you (`dotnet-sdk_10` = 10.0.301,
-`nodejs_24`); bump the nixpkgs pin in `flake.nix` to move them.
+Tasks are devenv scripts: `restore`, `build`, `start`, `dev`, `check` (tests; capabilities pass
+as args — `check Browser`), `verify`, `package`, `clean`. Each is a thin wrapper over one place,
+[`tasks.fsx`](tasks.fsx) — the complete, standalone build interface. The devenv
+scripts, the GitHub Actions workflows, and the Nix outputs all call it; `dotnet fsi
+tasks.fsx <verb>` drives everything on its own if you throw devenv and CI away.
 
-Yession ships two ways, side by side, each giving the two commands `yession` (the Manager)
-and `yession-session` (a Session Process). Either way `yession` serves a management UI
-(default http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its
-own process.
+Yession ships two ways, side by side, each giving the commands `yession` (the Manager) and
+`yession-session` (a Session Process). Either way `yession` serves a management UI (default
+http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its own process.
 
-- **npm package.** `npm i -g <release-tarball>` pulls the platform-native pieces (the WebRTC
-  transport and the agent's native Claude Code binary) on install; Node ≥24 is the only
-  prerequisite.
-- **Nix package.** Reproducible and self-contained — the native WebRTC addon is built from
-  source, the agent points at nixpkgs `claude-code`, and nothing runs an npm postinstall:
+- **npm package** — `outputs.packaged`. `npm i -g <release-tarball>` pulls the platform-native
+  pieces (the WebRTC transport and the agent's native Claude Code binary) on install; Node ≥24
+  is the only prerequisite. Build it locally with `devenv build outputs.packaged`.
+- **Nix package** — `outputs.installed`. Reproducible and self-contained: the native WebRTC
+  addon is built from source, the agent points at nixpkgs `claude-code`, nothing runs an npm
+  postinstall. Build/install:
 
   ```sh
-  nix run    github:NickDarvey/yession          # run the Manager without installing
-  nix profile install github:NickDarvey/yession # add yession + yession-session to your profile
+  devenv build outputs.installed                 # build the two wrapped bins
+  nix run    github:NickDarvey/yession           # run the Manager (via the flake bridge)
+  nix profile install github:NickDarvey/yession  # add yession + yession-session to your profile
   ```
 
-  Or add the flake as an input and put `yession.packages.<system>.default` in a NixOS
-  `environment.systemPackages` / home-manager `home.packages` list.
-
-The core tasks are `restore`, `build`, `start`, `dev`, `test`, `verify`, `package`, and
-`clean` — run them as `just <task>` inside `nix develop`. Capabilities pass as arguments:
-`just test Browser`. `build` type-checks the F# solution and Fable-compiles the Session
-Process host; `start` runs it.
+  [`flake.nix`](flake.nix) is a thin bridge — it only re-exposes devenv's outputs as flake
+  packages (`packages.<system>.{default,yession,packaged}`) so `nix build`/`nix profile install`
+  work; it declares no environment. Add it as an input and put
+  `yession.packages.<system>.default` in a NixOS `environment.systemPackages` / home-manager
+  `home.packages` list.
 
 ### Cloud sessions (Claude Code on the web)
 
-To get the same environment in a cloud session, set the environment's **setup script** to
-install Nix (`sh <(curl -L https://nixos.org/nix/install) --no-daemon`, with flakes enabled)
-and warm the shell (`nix develop --command true`). `*.nixos.org` and `cache.nixos.org` are in
-the default Trusted network allowlist, so the flake resolves and substitutes without any
-extra allowed domains — nixpkgs is pinned to a `nixos.org` channel tarball rather than a
-`github:` input for exactly that reason.
+Set the environment's **setup script** to install Nix (`sh <(curl -L
+https://nixos.org/nix/install) --no-daemon`, flakes enabled). `*.nixos.org` and
+`cache.nixos.org` are in the default Trusted network allowlist, so nixpkgs (a `nixos.org`
+channel tarball, not a `github:` input) resolves and substitutes with no extra allowed domains.
+
+devenv itself would normally fetch `github:cachix/devenv`, which the sandbox blocks. The
+committed [`.claude/settings.json`](.claude/settings.json) runs
+[`scripts/devenv-local.sh`](scripts/devenv-local.sh) on session start, which writes a
+gitignored `devenv.local.yaml` repointing the `devenv` input at devenv's own source
+**substituted from `cache.nixos.org`** — so `devenv shell` works with zero GitHub access.
+On a laptop / in CI the hook no-ops and the normal `github:` input is used.
 
 Tests declare what they need in code, not by folder — `Ports`, `Docker`, `LiveAgent`,
 `Browser`, or nothing for a pure suite — and the harness runs each one only where those
 needs are met, skipping cleanly otherwise. There are two tiers:
 
-- `test` is the cheap tier: pure, model, and protocol suites on Node. Fast, no ports or
-  credentials. This is what PRs run.
+- `check` is the cheap tier: pure, model, and protocol suites on Node. Fast, no ports or
+  credentials. This is what PRs run. (`check Browser`, `check Ports Native`, … add tiers.)
 - `verify` is the release gate: everything above plus the port-bound suites, the live
   agent, Docker, and the real-browser E2E.
 
