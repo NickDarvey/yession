@@ -59,7 +59,10 @@ jobs:
         run: nix profile install nixpkgs#devenv
       - name: Compute version (1.0.0-beta.<commit count>)
         id: version
-        run: echo "version=$(devenv shell -- version)" >> "$GITHUB_OUTPUT"
+        # tasks.fsx owns the version policy. `devenv shell` prints its own banner/build progress
+        # to stdout, so take only the last line (the version) — capturing all of it corrupts the
+        # step output.
+        run: echo "version=$(devenv shell -- version | tail -n1)" >> "$GITHUB_OUTPUT"
       - name: Assemble the npm package (compile + bundle + smoke + pack)
         run: devenv shell -- package ${{ steps.version.outputs.version }}
       # Prove a clean install of the published tarball pulls the platform-native deps
@@ -87,10 +90,17 @@ jobs:
             experimental-features = nix-command flakes
       - name: Build the Nix package
         run: nix build .#yession --print-build-logs
-      # The boot-smoke logic (ephemeral ports, wait for "management UI at") lives in build.fsx;
-      # this job has no devenv, so borrow dotnet from the flake devShell to call the same verb.
+      # nix-only job (no devenv, no dotnet), so the readiness check is inline tool-glue rather
+      # than tasks.fsx's boot-smoke verb: run the built bin with ephemeral ports and assert it
+      # announces the management UI. (`nix build .#yession` above is pure — it never touches the
+      # devenv input — so this job proves the real `nix profile install` path.)
       - name: Boot smoke (both surfaces serve)
-        run: nix develop -c dotnet fsi tasks.fsx boot-smoke ./result/bin/yession
+        run: |
+          out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=0 \
+            timeout 30 ./result/bin/yession 2>&1 || true)"
+          echo "$out" | grep -q "management UI at" \
+            || { echo "the Nix package did not boot:"; echo "$out"; exit 1; }
+          echo "nix package boot smoke passed"
 
   release:
     needs: package
