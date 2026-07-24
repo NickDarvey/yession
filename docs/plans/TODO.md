@@ -164,6 +164,8 @@ Infrastructure delivered after Phase 4 acceptance, outside the numbered phase ta
   `SecretRef` injection into Docker environments, agent tools
   (`set_secret`/`list_secrets`/`delete_secret`), and a `Keyring` test capability
   driving the real OS credential manager (headless via `scripts/with-keyring.sh`).
+  Follow-up delivered: in-process **OTel audit records** for every secrets/ABAC
+  authority decision (see the plan doc's Telemetry section).
 
 ## Blockers log
 

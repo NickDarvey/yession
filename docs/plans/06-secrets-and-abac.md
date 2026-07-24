@@ -153,6 +153,34 @@ HTTP, get-route 404, restart durability vs. ephemeral loss). Keyring tier: the r
 container; the genuine OS store elsewhere). Docker tier: `SecretRef` injection of
 stored session- and user-scoped values, binding-gated, env fallback shadowed.
 
+## Telemetry (audit log)
+
+Every authority decision this plan introduced emits one OTel-shaped log record —
+concise, for audit and issue diagnosis. The Manager builds the records **in-process**
+(`TelemetryReceiver.Audit`: `event.name`, `service.name=yession-manager`, severity,
+`yession.*` attributes) and feeds them to one sink built once at boot: the telemetry
+collector's `Record` when the Manager runs one (so audit records reach the `onRecord`
+re-export seam and print through the audit formatter), the stdout formatter otherwise —
+either/or, printed exactly once, no OTLP loopback and no second SDK pipeline.
+
+```text
+yession.secret.set|delete       INFO/WARN  session, scope, name, outcome — never the value
+yession.secret.list             INFO       session, scope, count
+yession.authz.deny              WARN       session, action, resource, reason
+yession.secret.inject           INFO/WARN  session, name, source session|user|env; miss = WARN
+yession.secrets.store_open      INFO/WARN  mode, keystore, kek created|loaded, entries
+yession.secrets.store_open_failed ERROR    kind corrupt|sealed|keystore (boot still dies loudly)
+yession.auth.binding_recorded   INFO       session, sub        (at ID-token issuance)
+yession.auth.binding_revoked    INFO       session              (with the launch)
+yession.control.unauthorized    WARN       request path         (bad control secret)
+```
+
+The Plan 04 "no content" rule applies verbatim: identifiers and names only — no audit
+constructor even accepts a value parameter, and the route suite pins that no formatted
+record contains a stored value. Known non-events: a store failure *during* injection
+propagates as the start error without its own record, and the telemetry receiver's own
+bearer 401 is un-audited (both recorded in GAPS).
+
 ## Deliberate scope (recorded in GAPS)
 
 No shared/Manager-global secret scope (ambient authority with no owner). No user-facing
