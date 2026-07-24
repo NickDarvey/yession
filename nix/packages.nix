@@ -179,18 +179,18 @@ let
       cp ${node-datachannel}/build/Release/node_datachannel.node \
          "$out/libexec/yession/node_modules/node-datachannel/build/Release/node_datachannel.node"
 
-      # tasks.fsx's yession shim sets YESSION_SESSION_MAIN and spawns `node session.js`, which
-      # inherits YESSION_CLAUDE_PATH from this wrapper.
+      # tasks.fsx's yession-manager shim sets YESSION_SESSION_MAIN and spawns `node session.js`,
+      # which inherits YESSION_CLAUDE_PATH from this wrapper.
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-session" \
         --add-flags "$out/libexec/yession/bin/yession-session.js" \
         --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude
-      makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession" \
-        --add-flags "$out/libexec/yession/bin/yession.js" \
+      makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-manager" \
+        --add-flags "$out/libexec/yession/bin/yession-manager.js" \
         --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude
       runHook postInstall
     '';
     dontStrip = true;
-    meta.mainProgram = "yession";
+    meta.mainProgram = "yession-manager";
   };
 
   # packaged — the npm tarball, `npm pack`ed off the same staged package dir.

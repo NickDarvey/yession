@@ -160,7 +160,7 @@ discovers it in production. Items are roughly ordered by how much they matter.
 ## Delivery & operations
 
 - **Node is a required runtime.** Yession ships as one npm package with two bins
-  (`yession`, `yession-session`); `npm i -g yession-*.tgz` pulls the platform-native
+  (`yession-manager`, `yession-session`); `npm i -g yession-*.tgz` pulls the platform-native
   deps — `node-datachannel`'s addon AND the SDK's native `claude` — via npm's optional
   dependencies, so install is all it takes and the agent works offline afterward. But
   there is no self-contained binary anymore: a machine without Node ≥24 can't run it.

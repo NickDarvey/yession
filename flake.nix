@@ -29,7 +29,7 @@
       packages = forAllSystems (system:
         let p = packagesFor system;
         in {
-          default = p.installed;   # `yession` + `yession-session`
+          default = p.installed;   # `yession-manager` + `yession-session`
           yession = p.installed;
           packaged = p.packaged;   # the npm tarball
         });
@@ -37,7 +37,7 @@
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${(packagesFor system).installed}/bin/yession";
+          program = "${(packagesFor system).installed}/bin/yession-manager";
         };
       });
 

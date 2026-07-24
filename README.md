@@ -57,9 +57,10 @@ as args — `check Browser`), `verify`, `package`, `clean`. Each is a thin wrapp
 scripts, the GitHub Actions workflows, and the Nix outputs all call it; `dotnet fsi
 tasks.fsx <verb>` drives everything on its own if you throw devenv and CI away.
 
-Yession ships two ways, side by side, each giving the commands `yession` (the Manager) and
-`yession-session` (a Session Process). Either way `yession` serves a management UI (default
-http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its own process.
+Yession ships two ways, side by side, each giving the commands `yession-manager` (the Manager)
+and `yession-session` (a Session Process). Either way `yession-manager` serves a management UI
+(default http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its own
+process.
 
 - **npm package** — `outputs.packaged`. `npm i -g <release-tarball>` pulls the platform-native
   pieces (the WebRTC transport and the agent's native Claude Code binary) on install; Node ≥24
@@ -70,8 +71,8 @@ http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its
 
   ```sh
   nix build          github:NickDarvey/yession#yession  # build the two wrapped bins
-  nix run            github:NickDarvey/yession           # run the Manager
-  nix profile install github:NickDarvey/yession          # add yession + yession-session
+  nix run            github:NickDarvey/yession           # run the Manager (yession-manager)
+  nix profile install github:NickDarvey/yession          # add yession-manager + yession-session
   ```
 
   The installable derivations live in [`nix/packages.nix`](nix/packages.nix), and
