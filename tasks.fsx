@@ -317,25 +317,13 @@ let private runCheckOnce (caps: string list) =
         exec esbuild [ "app/out/browser/EditorHarness.js"; "--bundle"; "--format=esm"; "--outfile=tests/browser/out/harness.js" ]
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 
-// check [caps…] [--retry N]. Default = cheap tier. The native WebRTC suites occasionally flake
-// (ICE stall / toolchain segfault), so --retry re-runs the whole gate before calling it a fail.
-let check (args: string list) =
-    let rec parse caps retry =
-        function
-        | "--retry" :: n :: rest -> parse caps (int n) rest
-        | c :: rest -> parse (c :: caps) retry rest
-        | [] -> List.rev caps, retry
-    let caps, retries = parse [] 0 args
+// check [caps…]. Default = cheap tier; each cap adds its suites (Browser, Ports, Native, …).
+// The gate runs once and is deterministic — the native WebRTC suites used to abort intermittently,
+// but that was a real defect (the addon carried its own C++ runtime; see nix/node-datachannel.nix),
+// now fixed, not inherent flakiness. A failure here is a genuine break, so don't paper it over.
+let check (caps: string list) =
     restore ()
-    let attempts = retries + 1
-    let rec go attempt =
-        try runCheckOnce caps
-        with ex ->
-            if attempt < attempts then
-                eprintfn "check: attempt %d/%d failed (%s); retrying" attempt attempts ex.Message
-                go (attempt + 1)
-            else reraise ()
-    go 1
+    runCheckOnce caps
 
 let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent" ]
 

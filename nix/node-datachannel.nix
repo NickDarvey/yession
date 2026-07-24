@@ -59,6 +59,19 @@ stdenv.mkDerivation {
     substituteInPlace CMakeLists.txt \
       --replace-fail '${"$"}{CMAKE_BINARY_DIR}/_deps/libdatachannel-src/include' '${lib.getDev libdatachannel}/include' \
       --replace-fail '${"$"}{CMAKE_BINARY_DIR}/_deps/libdatachannel-src/deps/plog' '${plog}/include'
+
+    # Link libstdc++/libgcc DYNAMICALLY, not statically. Upstream statically links them
+    # (portable prebuilt), giving the addon its own copy of the C++ runtime — its own
+    # __gxx_personality_v0 and unwinder. But we link the *shared* nixpkgs libdatachannel,
+    # which uses the shared libstdc++/libgcc_s. Two C++ runtimes in one process: a peer
+    # closing a data channel mid-send makes rtc::DataChannel::send() throw through the
+    # NAPI boundary, and the exception raised by the shared unwinder aborts when it reaches
+    # the addon's static personality routine — a main-thread SIGABRT no catch can stop.
+    # Dropping the flags makes the whole process share one C++ runtime (the same nixpkgs
+    # gcc that built libdatachannel), so the throw unwinds cleanly into sendMessage's
+    # catch(std::exception&) and surfaces as an ordinary JS error. See app/WebRtc.fs.
+    substituteInPlace CMakeLists.txt \
+      --replace-fail '-static-libgcc -static-libstdc++' ""
   '';
 
   # Drive cmake directly (not cmake-js) so nothing tries to download Node headers: point

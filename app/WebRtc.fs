@@ -53,10 +53,15 @@ let frameChannel (dc: DataChannel) : FrameChannel<string> =
         fun frame ->
             async {
                 // A peer can vanish between frames (e.g. presence broadcasts racing a
-                // disconnect); sending into a closed channel must be a no-op, not a
-                // native throw inside a Node-API callback.
+                // disconnect); sending into a closed channel must be a no-op. The `isOpen`
+                // guard narrows the window but can't close it: libdatachannel runs its own
+                // threads, so the channel can transition to closed between this check and the
+                // native send, making `send()` throw. With the addon sharing the process C++
+                // runtime (see nix/node-datachannel.nix) that throw is an ordinary catchable
+                // JS error, so we swallow it here — a lost frame on a dying channel is a no-op.
                 if not closed && dc.isOpen () then
-                    dc.sendMessage (Codec.toString frameCodec frame) |> ignore
+                    try dc.sendMessage (Codec.toString frameCodec frame) |> ignore
+                    with _ -> ()
             }
       Receive =
         fun () ->
