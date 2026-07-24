@@ -155,6 +155,13 @@ Infrastructure delivered after Phase 4 acceptance, outside the numbered phase ta
   `McpHub`, standard MCP `ListToolsResult`, retained snapshot) delivered in #13. Transport + wire
   codecs + hubs are done and verify-tier tested over real sockets; no production producer wires
   real payloads through them yet (a documented follow-up — see [GAPS.md](../GAPS.md)).
+- **Secrets + ABAC (Plan 06)** — [06-secrets-and-abac.md](06-secrets-and-abac.md)
+  (Status: in progress). A real Manager-owned secret store (AES-256-GCM file, KEK in the
+  OS credential manager via `@napi-rs/keyring`, non-extractable import; no credential
+  manager → in-memory only), a write/list/delete-only `/control/secrets/*` surface (no
+  value-returning route), a pure default-deny `Policy.authorize` over the composite
+  identity (session + users the Manager verified at ID-token issuance), and store-backed
+  `SecretRef` injection into Docker environments.
 
 ## Blockers log
 
