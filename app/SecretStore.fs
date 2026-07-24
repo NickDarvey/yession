@@ -22,7 +22,32 @@ type SecretStore =
       /// Decrypt-on-demand for env injection. Never exposed over the control channel.
       Resolve : SecretId -> Async<Result<string option, string>>
       /// True when backed by the encrypted file; false when in-memory only.
-      Durable : bool }
+      Durable : bool
+      /// True when the KEK was minted at this open (first run); false when loaded.
+      KekMinted : bool
+      /// Entries in the envelope at open (0 for a fresh or ephemeral store).
+      EntriesAtOpen : int }
+
+/// Why an open failed — structural, so the boot path can audit the KIND without
+/// string-sniffing. `describe` renders exactly the wording the failures always had.
+type OpenError =
+    | KeyStoreFailure of detail: string
+    | CorruptStore of path: string * detail: string
+    | SealedByDifferentKey of path: string * fileKekId: string * hostKekId: string
+
+module OpenError =
+    let describe (error: OpenError) : string =
+        match error with
+        | KeyStoreFailure detail -> detail
+        | CorruptStore (path, detail) -> sprintf "corrupt secrets store %s: %s" path detail
+        | SealedByDifferentKey (path, fileKekId, hostKekId) ->
+            sprintf "secrets store %s was sealed by a different key (%s, this host's is %s) — restore that key or delete the file" path fileKekId hostKekId
+
+    let kind (error: OpenError) : string =
+        match error with
+        | KeyStoreFailure _ -> "keystore"
+        | CorruptStore _ -> "corrupt"
+        | SealedByDifferentKey _ -> "sealed"
 
 let private now () : DateTimeOffset = DateTimeOffset.UtcNow
 
@@ -34,7 +59,7 @@ type ResolveSecret = SessionId -> SecretName -> Async<Result<string, string>>
 /// (created on first run, durable in the credential manager BEFORE first use), file
 /// loaded through the codec (missing = empty; corrupt = loud Error; KekId mismatch =
 /// distinct loud Error). Ephemeral when `None`: same semantics, zero file I/O.
-let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async<Result<SecretStore, string>> =
+let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async<Result<SecretStore, OpenError>> =
     async {
         // Resolve (or mint) the KEK — the only moment the raw key bytes are in scope.
         let! stored = keyStore.Get ()
@@ -43,7 +68,7 @@ let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async
                         | None ->
                             let fresh = Interop.randomSecret (), SecretsCipher.generateKek ()
                             Ok (fresh, true)) with
-        | Error e -> return Error (sprintf "secrets key store (%s): %s" keyStore.Name e)
+        | Error e -> return Error (KeyStoreFailure (sprintf "secrets key store (%s): %s" keyStore.Name e))
         | Ok ((kekId, kekB64u), minted) ->
             let persist (result: Result<unit, string>) =
                 async {
@@ -57,21 +82,21 @@ let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async
                 }
             let! persisted = persist (Ok ())
             match persisted with
-            | Error e -> return Error (sprintf "secrets key store (%s): could not persist the key: %s" keyStore.Name e)
+            | Error e -> return Error (KeyStoreFailure (sprintf "secrets key store (%s): could not persist the key: %s" keyStore.Name e))
             | Ok () ->
 
             let! cipher = SecretsCipher.importKey kekB64u
 
             // Load (or initialise) the envelope.
-            let initial : Result<SecretsFile, string> =
+            let initial : Result<SecretsFile, OpenError> =
                 match persistPath with
                 | None -> Ok (SecretsFile.empty kekId)
                 | Some path when not (Fs.exists path) -> Ok (SecretsFile.empty kekId)
                 | Some path ->
                     match SecretsCodec.fromString (Fs.readText path) with
-                    | Error e -> Error (sprintf "corrupt secrets store %s: %s" path e)
+                    | Error e -> Error (CorruptStore (path, e))
                     | Ok file when file.KekId <> kekId ->
-                        Error (sprintf "secrets store %s was sealed by a different key (%s, this host's is %s) — restore that key or delete the file" path file.KekId kekId)
+                        Error (SealedByDifferentKey (path, file.KekId, kekId))
                     | Ok file -> Ok file
 
             match initial with
@@ -122,7 +147,9 @@ let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async
                                     let! decrypted = cipher.Decrypt (SecretsCipher.aadFor entry.Scope entry.Name) entry.Iv entry.Ciphertext
                                     return decrypted |> Result.map Some
                             }
-                      Durable = Option.isSome persistPath }
+                      Durable = Option.isSome persistPath
+                      KekMinted = minted
+                      EntriesAtOpen = loaded.Entries.Length }
                 return Ok store
     }
 
@@ -133,6 +160,15 @@ let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async
 /// (InjectSecret); a Deny simply means "not this caller's secret — next scope", and
 /// only a store FAILURE stops the walk.
 module SecretResolution =
+
+    /// What one SecretRef resolution came to — the audit observation the Manager maps
+    /// to a log record (domain-shaped here; TelemetryReceiver compiles later).
+    type InjectOutcome =
+        | InjectedFromScope of SecretScope
+        | InjectedFromFallback
+        | InjectMissed of reason: string
+
+    type Observe = SessionId -> SecretName -> InjectOutcome -> unit
 
     /// The explicit lowest-precedence fallback: the Manager's OWN process environment —
     /// the pre-Plan-06 "smallest local-dev store" (docs/GAPS.md), kept so existing
@@ -154,7 +190,7 @@ module SecretResolution =
     let scopesFor (sessionId: SessionId) (users: Set<UserSubject>) : SecretScope list =
         SessionScope sessionId :: (users |> Set.toList |> List.map UserScope)
 
-    let compose (store: SecretStore) (usersOf: SessionId -> Set<UserSubject>) (fallback: ResolveSecret) : ResolveSecret =
+    let compose (observe: Observe) (store: SecretStore) (usersOf: SessionId -> Set<UserSubject>) (fallback: ResolveSecret) : ResolveSecret =
         fun sessionId name ->
             async {
                 let users = usersOf sessionId
@@ -162,7 +198,17 @@ module SecretResolution =
                 let rec walk scopes =
                     async {
                         match scopes with
-                        | [] -> return! fallback sessionId name
+                        | [] ->
+                            // The walk fell through to the fallback: its outcome is the
+                            // resolution's outcome. Intermediate deny/miss steps stay
+                            // silent — that is the precedence working, not an event.
+                            match! fallback sessionId name with
+                            | Ok value ->
+                                observe sessionId name InjectedFromFallback
+                                return Ok value
+                            | Error e ->
+                                observe sessionId name (InjectMissed e)
+                                return Error e
                         | scope :: rest ->
                             let id : SecretId = { Scope = scope; Name = name }
                             let request =
@@ -173,7 +219,9 @@ module SecretResolution =
                             | Deny _ -> return! walk rest
                             | Permit ->
                                 match! store.Resolve id with
-                                | Ok (Some value) -> return Ok value
+                                | Ok (Some value) ->
+                                    observe sessionId name (InjectedFromScope scope)
+                                    return Ok value
                                 | Ok None -> return! walk rest
                                 | Error e -> return Error e
                     }

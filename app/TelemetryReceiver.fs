@@ -243,6 +243,15 @@ module Audit =
     /// The prod sink when no telemetry collector is configured.
     let stdout : Sink = fun r -> printfn "%s" (format r)
 
+    /// Map the injection walk's outcome (SecretStore.SecretResolution) to records.
+    let injectObserver (sink: Sink) : SecretStore.SecretResolution.Observe =
+        fun sessionId name outcome ->
+            match outcome with
+            | SecretStore.SecretResolution.InjectedFromScope (SessionScope _) -> sink (inject sessionId name "session")
+            | SecretStore.SecretResolution.InjectedFromScope (UserScope _) -> sink (inject sessionId name "user")
+            | SecretStore.SecretResolution.InjectedFromFallback -> sink (inject sessionId name "env")
+            | SecretStore.SecretResolution.InjectMissed reason -> sink (injectMiss sessionId name reason)
+
 // --- Interpreting a record as agent-turn usage -------------------------------------------
 
 /// The agent-turn usage a log record carries, when it is one (the yession ids are present).

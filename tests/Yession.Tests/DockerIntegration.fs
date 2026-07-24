@@ -234,14 +234,14 @@ let tests =
                     // A store seeded with a session-scoped secret, a user-scoped secret,
                     // and a shadowed name that also exists in the process env.
                     let! opened = SecretStore.openStore None (KeyStore.random ())
-                    let store = expect opened
+                    let store = expect (opened |> Result.mapError SecretStore.OpenError.describe)
                     let sessionId = SessionId.mint ()
                     let alice = UserSubject.create "alice" |> expect
                     let secretName n = SecretName.create n |> expect
                     let! _ = store.Set { Scope = SessionScope sessionId; Name = secretName "SESSION_TOKEN" } "session-held"
                     let! _ = store.Set { Scope = UserScope alice; Name = secretName "USER_TOKEN" } "user-held"
                     setEnv "SESSION_TOKEN" "env-shadowed"
-                    let resolve = SecretStore.SecretResolution.compose store (fun _ -> Set.singleton alice) SecretStore.SecretResolution.processEnv
+                    let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) SecretStore.SecretResolution.processEnv
                     let registry = Authority.ContainerRegistry ()
                     let caps = Authority.grant registry (Backends.DockerBackend.create resolve) sessionId
                     let spec =
@@ -260,7 +260,7 @@ let tests =
                     unsetEnv "SESSION_TOKEN"
 
                     // Without the user binding, the user-scoped secret is unreachable.
-                    let unbound = SecretStore.SecretResolution.compose store (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
+                    let unbound = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
                     let registry2 = Authority.ContainerRegistry ()
                     let session2 = SessionId.mint ()
                     let caps2 = Authority.grant registry2 (Backends.DockerBackend.create unbound) session2

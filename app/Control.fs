@@ -96,6 +96,9 @@ let tryHandle
     (registerMcpSink: (McpToolList -> unit) -> (unit -> unit))
     (registerClient: string -> SessionId -> string -> RegisterClientResponse)
     (secretsApi: SecretsApi option)
+    // Audit hook (Plan 06 telemetry): called with the request path whenever a control
+    // secret fails to resolve — the one place the path and the failure meet.
+    (onUnauthorized: string -> unit)
     (req: IncomingMessage)
     (res: ServerResponse)
     : bool =
@@ -104,7 +107,9 @@ let tryHandle
     else
         let secret = headerOf req "x-yession-control"
         match secret |> Option.bind resolve with
-        | None -> respond res 401 "invalid control secret"
+        | None ->
+            onUnauthorized path
+            respond res 401 "invalid control secret"
         | Some caller ->
             let decodeAnd (decode: string -> Result<'a, string>) (handle: 'a -> unit) =
                 readBody req (fun body ->

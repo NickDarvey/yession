@@ -259,7 +259,14 @@ let private cipherTests =
 let private openDurable path (keyStore: KeyStore.KeyStore) =
     async {
         let! opened = SecretStore.openStore (Some path) keyStore
-        return expect opened
+        return expect (opened |> Result.mapError SecretStore.OpenError.describe)
+    }
+
+/// Open the in-memory ephemeral store (test double), stringifying the error kind.
+let private openEphemeral () =
+    async {
+        let! opened = SecretStore.openStore None (KeyStore.random ())
+        return expect (opened |> Result.mapError SecretStore.OpenError.describe)
     }
 
 let private storeTests =
@@ -322,14 +329,15 @@ let private storeTests =
                 // A different key store = a different KEK (the first one is lost).
                 let! reopened = SecretStore.openStore (Some path) (KeyStore.inMemory ())
                 match reopened with
-                | Error e -> Expect.isTrue (e.Contains "sealed by a different key") "distinct wording"
+                | Error (SecretStore.SealedByDifferentKey _ as e) ->
+                    Expect.isTrue ((SecretStore.OpenError.describe e).Contains "sealed by a different key") "distinct wording"
+                | Error other -> failwithf "expected SealedByDifferentKey, got %A" other
                 | Ok _ -> failwith "expected the open to fail"
             }
 
         testCaseAsync "the ephemeral store works without any file and reports non-durable" <|
             async {
-                let! opened = SecretStore.openStore None (KeyStore.random ())
-                let store = expect opened
+                let! store = openEphemeral ()
                 Expect.isFalse store.Durable "ephemeral"
                 let id = sid (SessionScope sessionA) "deploy-token"
                 let! _ = store.Set id "transient"
@@ -391,13 +399,12 @@ let private resolutionTests =
     testList "injection resolution" [
         testCaseAsync "session scope shadows user scope shadows the fallback" <|
             async {
-                let! opened = SecretStore.openStore None (KeyStore.random ())
-                let store = expect opened
+                let! store = openEphemeral ()
                 let id scope = sid scope "deploy-token"
                 let! _ = store.Set (id (SessionScope sessionA)) "from-session"
                 let! _ = store.Set (id (UserScope alice)) "from-user"
                 let fallback : SecretStore.ResolveSecret = fun _ _ -> async { return Ok "from-env" }
-                let resolve = SecretStore.SecretResolution.compose store (fun _ -> Set.singleton alice) fallback
+                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) fallback
 
                 let! full = resolve sessionA name
                 Expect.equal (expect full) "from-session" "the session's own secret wins"
@@ -413,22 +420,43 @@ let private resolutionTests =
 
         testCaseAsync "an unbound user's secret is invisible: the policy skips the scope" <|
             async {
-                let! opened = SecretStore.openStore None (KeyStore.random ())
-                let store = expect opened
+                let! store = openEphemeral ()
                 let! _ = store.Set (sid (UserScope alice) "deploy-token") "alice's"
                 // Session B has no bound users: alice's scope is never a candidate, and
                 // even a hand-crafted walk would be denied by the policy.
                 let fallback : SecretStore.ResolveSecret = fun _ n -> async { return Error (sprintf "secret '%s' is not available" (SecretName.value n)) }
-                let resolve = SecretStore.SecretResolution.compose store (fun _ -> Set.empty) fallback
+                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) fallback
                 let! outcome = resolve sessionB name
                 Expect.isError outcome "nothing resolves"
             }
 
+        testCaseAsync "the injection walk reports its outcome to the observer" <|
+            async {
+                let! store = openEphemeral ()
+                let! _ = store.Set (sid (SessionScope sessionA) "deploy-token") "v"
+                let mutable observed : (string * SecretStore.SecretResolution.InjectOutcome) list = []
+                let observe sid n outcome = observed <- (SecretName.value n, outcome) :: observed
+                let ok : SecretStore.ResolveSecret = fun _ _ -> async { return Ok "env-v" }
+                let miss : SecretStore.ResolveSecret = fun _ _ -> async { return Error "nope" }
+                let resolveHit = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) miss
+                let! _ = resolveHit sessionA name
+                let resolveEnv = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) ok
+                let other = SecretName.create "OTHER" |> expect
+                let! _ = resolveEnv sessionA other
+                let resolveMiss = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) miss
+                let! _ = resolveMiss sessionA other
+                Expect.equal
+                    (List.rev observed)
+                    [ "deploy-token", SecretStore.SecretResolution.InjectedFromScope (SessionScope sessionA)
+                      "OTHER", SecretStore.SecretResolution.InjectedFromFallback
+                      "OTHER", SecretStore.SecretResolution.InjectMissed "nope" ]
+                    "one observation per resolution, naming the source"
+            }
+
         testCaseAsync "a total miss reports the fallback's legible error" <|
             async {
-                let! opened = SecretStore.openStore None (KeyStore.random ())
-                let store = expect opened
-                let resolve = SecretStore.SecretResolution.compose store (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
+                let! store = openEphemeral ()
+                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
                 let missing = SecretName.create "YESSION_DEFINITELY_MISSING" |> expect
                 let! outcome = resolve sessionA missing
                 match outcome with
@@ -449,7 +477,7 @@ type private ControlReply =
 [<Fable.Core.Emit("fetch($0, { method: 'POST', headers: { 'x-yession-control': $1, 'content-type': 'application/json' }, body: $2 }).then(async r => ({ status: r.status, body: await r.text() }))")>]
 let private postControl (url: string) (secret: string) (body: string) : Fable.Core.JS.Promise<ControlReply> = Fable.Core.Util.jsNative
 
-let private startControlServer (callers: (string * Control.ControlCaller) list) (api: Control.SecretsApi option) =
+let private startControlServer (callers: (string * Control.ControlCaller) list) (api: Control.SecretsApi option) (onUnauthorized: string -> unit) =
     async {
         let table = Map.ofList callers
         let dummyRegister (_: string) (_: SessionId) (_: string) : Yession.Oidc.RegisterClientResponse =
@@ -462,6 +490,7 @@ let private startControlServer (callers: (string * Control.ControlCaller) list) 
                         (fun _ -> fun () -> ())
                         dummyRegister
                         api
+                        onUnauthorized
                         req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
@@ -479,14 +508,24 @@ let private routeTests =
     testList "control routes" [
         testCaseAsync "a session writes, lists (metadata only), and deletes its own scope; strangers and siblings are refused" <|
             async {
-                let! opened = SecretStore.openStore None (KeyStore.random ())
-                let store = expect opened
+                let! store = openEphemeral ()
+                // Recording sinks: every audit record and every 401 path this run emits.
+                let mutable audited : TelemetryReceiver.ReceivedLog list = []
+                let mutable unauthorized : string list = []
                 let! _, url =
                     startControlServer
                         [ "secret-a", caller sessionA (Set.singleton alice)
                           "secret-b", caller sessionB Set.empty ]
-                        (Some (ProcessManager.secretsApiFor store))
+                        (Some (ProcessManager.secretsApiFor (fun r -> audited <- r :: audited) store))
+                        (fun path -> unauthorized <- path :: unauthorized)
                 let post route secret body = postControl (sprintf "%s/control/secrets/%s" url route) secret body |> Async.AwaitPromise
+                let eventNames () =
+                    audited
+                    |> List.rev
+                    |> List.choose (fun r ->
+                        match Map.tryFind "event.name" r.Attributes with
+                        | Some (TelemetryReceiver.StringValue n) -> Some n
+                        | _ -> None)
 
                 // Own scope: the full lifecycle.
                 let setBody = ControlWire.toString ControlWire.setSecretRequest { Scope = SessionScope sessionA; Name = name; Value = "hunter2" }
@@ -524,16 +563,32 @@ let private routeTests =
                 let! deleted = post "delete" "secret-a" (ControlWire.toString ControlWire.deleteSecretRequest { Scope = SessionScope sessionA; Name = name })
                 Expect.equal deleted.status 200 "own-scope delete permits"
                 Expect.isTrue (deleted.body.Contains "true") "reports the entry existed"
+
+                // The audit trail (Plan 06 telemetry): permitted ops and every deny
+                // became records; the 401 hook saw the path; no formatted record leaks
+                // the value.
+                Expect.equal
+                    (eventNames ())
+                    [ "yession.secret.set"; "yession.secret.list"        // own-scope set + list
+                      "yession.authz.deny"; "yession.authz.deny"        // session B's two cross-scope attempts
+                      "yession.authz.deny"                              // user-scope write
+                      "yession.secret.list"                             // bound user's list
+                      "yession.authz.deny"                              // unbound user list
+                      "yession.secret.delete" ]
+                    "one audit record per authorization decision, in order"
+                Expect.equal unauthorized [ "/control/secrets/set" ] "the 401 hook carries the request path"
+                for r in audited do
+                    Expect.isFalse ((TelemetryReceiver.Audit.format r).Contains "hunter2") "no audit record ever renders a value"
             }
 
         testCaseAsync "the session-side typed capability drives the full lifecycle over the wire" <|
             async {
-                let! opened = SecretStore.openStore None (KeyStore.random ())
-                let store = expect opened
+                let! store = openEphemeral ()
                 let! _, url =
                     startControlServer
                         [ "secret-a", caller sessionA Set.empty ]
-                        (Some (ProcessManager.secretsApiFor store))
+                        (Some (ProcessManager.secretsApiFor (fun _ -> ()) store))
+                        ignore
                 // The capability a Session Process builds in SessionMain: pre-bound to
                 // its own scope; failures are values.
                 let capability = ControlClient.secretsCapabilities url "secret-a" sessionA
@@ -561,7 +616,7 @@ let private routeTests =
 
         testCaseAsync "a Manager without a secrets store answers 403" <|
             async {
-                let! _, url = startControlServer [ "secret-a", caller sessionA Set.empty ] None
+                let! _, url = startControlServer [ "secret-a", caller sessionA Set.empty ] None ignore
                 let! reply =
                     postControl
                         (url + "/control/secrets/list")
