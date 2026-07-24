@@ -9,11 +9,12 @@ discovers it in production. Items are roughly ordered by how much they matter.
 
 ## Security & trust
 
-- **User authorization gates ACCESS, not identity.** Sessions authorize users through
-  the Manager's OIDC provider ([plan](plans/04-session-authorization.md)): the
-  shared session token is gone, the browser rides an authorization-code + PKCE bounce
-  into an HttpOnly cookie, and peer/event access is minted per user. But ID-token
-  claims are NOT yet threaded into `PeerId`/`ActorRef` — display names stay
+- **User authorization gates ACCESS and Manager-side authority, not event identity.**
+  Sessions authorize users through the Manager's OIDC provider
+  ([plan](plans/04-session-authorization.md)); the Manager now also RECORDS which user
+  it verified into which launch at ID-token issuance and authorizes secrets through
+  that composite identity ([Plan 06](plans/06-secrets-and-abac.md)). But ID-token
+  claims are still NOT threaded into `PeerId`/`ActorRef` — display names stay
   self-asserted and events are not attributed to authenticated users (the recorded
   follow-up).
 - **The only authentication strategy is trust-localhost.** The provider's
@@ -42,8 +43,31 @@ discovers it in production. Items are roughly ordered by how much they matter.
   (`tests/Yession.Tests/DockerIntegration.fs`) runs where a daemon exists; on the CI
   `verify` runner `YESSION_REQUIRE_DOCKER=1` makes a missing daemon a hard failure rather
   than a silent skip. The dev container has no daemon, so local runs still report a skip.
-- **Secrets**: `SecretRef` resolves from a process-env store (local-dev only — see
-  `DockerBackend`); there is no real secret store yet.
+- **Secrets are a real Manager-owned store now** ([Plan 06](plans/06-secrets-and-abac.md)):
+  AES-256-GCM per-entry ciphertext in `<DataDir>/secrets.json`, the KEK in the OS
+  credential manager (`@napi-rs/keyring`, imported non-extractably each start), a
+  write/list/delete-only `/control/secrets/*` surface (no value-returning route,
+  anywhere), a pure default-deny `Policy.authorize` over the composite session+user
+  identity, and store-backed `SecretRef` injection (session scope ▸ bound users'
+  scope ▸ Manager process env). Remaining, deliberate:
+  - **Hosts without a credential manager run in-memory only** (dev containers, CI,
+    headless servers): secrets die with the Manager; loud at boot, never a plaintext
+    key file. (Tests cover the real keyring via the `Keyring` capability —
+    `scripts/with-keyring.sh`.)
+  - **No shared/Manager-global scope**, and **no user surface yet**: sessions cannot
+    write user-scoped secrets; the Claude/GitHub sign-in strategies are the intended
+    writers. User↔launch bindings are launch-lifetime (re-login re-forms them).
+  - **`LocalProcessBackend` still performs no env-var injection**; the process-env
+    fallback remains (lowest precedence, shadowed by any store entry).
+  - **No KEK rotation/recovery** (a lost credential entry orphans the store loudly;
+    the operator deletes the file), and multi-user same-name injection precedence is
+    unresolved until a real multi-user strategy lands.
+  - **The environment routes still gate on their capability grant**, not
+    `Policy.authorize` — folding them in is the follow-up that proves the ABAC
+    layer's reuse.
+  - `@napi-rs/keyring`'s per-platform prebuilds join `node-datachannel` in the
+    "unsigned third-party native binaries" trust bucket below; macOS/Windows paths
+    are field-verified only (CI exercises Linux/Secret Service).
 
 ## Runtime & topology
 

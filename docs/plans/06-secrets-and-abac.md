@@ -1,6 +1,6 @@
 # Plan 06 — Secrets in the Manager, and an ABAC authorization layer
 
-> **Status: in progress.** Addresses [GAPS.md](../GAPS.md) § Security & trust
+> **Status: delivered.** Addresses [GAPS.md](../GAPS.md) § Security & trust
 > ("**Secrets**: `SecretRef` resolves from a process-env store (local-dev only …); there
 > is no real secret store yet") and builds directly on
 > [04-session-authorization.md](04-session-authorization.md): the Manager is already the
