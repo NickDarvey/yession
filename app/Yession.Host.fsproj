@@ -50,6 +50,7 @@
   <ItemGroup>
     <ProjectReference Include="..\src\Fable.Dockerode\Fable.Dockerode.fsproj" />
     <ProjectReference Include="..\src\Fable.Jose\Fable.Jose.fsproj" />
+    <ProjectReference Include="..\src\Fable.Keyring\Fable.Keyring.fsproj" />
     <ProjectReference Include="..\src\Fable.OpenIdClient\Fable.OpenIdClient.fsproj" />
     <ProjectReference Include="..\src\Fable.OpenTelemetry\Fable.OpenTelemetry.fsproj" />
     <ProjectReference Include="..\src\Yession.Domain\Yession.Domain.fsproj" />

@@ -38,3 +38,49 @@ let random () : KeyStore =
     let store = inMemory ()
     let seeded = payload (Yession.Host.Interop.randomSecret ()) (SecretsCipher.generateKek ())
     { store with Get = fun () -> async { return Ok (Some seeded) } }
+
+/// The product store: one OS credential-manager entry (service "yession", name after
+/// the caller — the Manager uses "manager"), through the `@napi-rs/keyring` binding.
+/// `Available` treats "no entry yet" as available and any backend error — no Secret
+/// Service daemon, a locked keychain over SSH — as UNAVAILABLE, so the Manager refuses
+/// persistence instead of failing or degrading.
+let keyring (service: string) (account: string) : KeyStore =
+    // Every call constructs + calls inside try: the Entry ctor itself may throw on
+    // hosts with no credential store, and getPassword throws BOTH for "no entry" and
+    // for backend failure — the message is the only discriminator keyring-rs exposes.
+    let tryGet () : Result<string option, string> =
+        try
+            let entry = Fable.Keyring.Entry.entry service account
+            try Ok (Some (entry.getPassword ()))
+            with getError ->
+                let message = getError.Message
+                if message.Contains "No matching entry" || message.Contains "no matching entry" then Ok None
+                else Error message
+        with ctorError -> Error ctorError.Message
+    { Name = sprintf "os-keyring (%s/%s)" service account
+      Available =
+        fun () ->
+            async {
+                match tryGet () with
+                | Ok _ -> return true
+                | Error _ -> return false
+            }
+      Get = fun () -> async { return tryGet () }
+      Set =
+        fun value ->
+            async {
+                try
+                    (Fable.Keyring.Entry.entry service account).setPassword value
+                    return Ok ()
+                with setError -> return Error setError.Message
+            } }
+
+/// The product probe: the platform credential manager, or None — in which case the
+/// Manager runs the ephemeral in-memory store (never a plaintext key file, never an
+/// env-var key).
+let detect () : Async<KeyStore option> =
+    async {
+        let store = keyring "yession" "manager"
+        let! available = store.Available ()
+        return if available then Some store else None
+    }

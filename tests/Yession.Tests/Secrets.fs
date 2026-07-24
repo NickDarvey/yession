@@ -348,6 +348,43 @@ let private storeTests =
             }
     ]
 
+// --- Step 4: the real OS credential manager ([Keyring]) ---------------------------------
+// Runs only where the run declares a usable credential store: `check Keyring` on a
+// desktop (genuine Keychain / Credential Manager / Secret Service), or through
+// `scripts/with-keyring.sh` (dbus + gnome-keyring) in headless containers and CI.
+
+let private keyringTests =
+    testList "OS keyring round-trip" [
+        testCaseAsync "the keyring-backed KeyStore probes available and round-trips the KEK payload" <|
+            async {
+                // A namespaced test entry so a real machine's product entry is never touched.
+                let store = KeyStore.keyring "yession-test" ("roundtrip-" + Yession.Host.Interop.randomSecret ())
+                let! available = store.Available ()
+                Expect.isTrue available "this run declared Keyring, so the store must probe available"
+                let! empty = store.Get ()
+                Expect.equal (expect empty) None "starts absent"
+                let payload = KeyStore.payload "kek-test" (SecretsCipher.generateKek ())
+                let! set = store.Set payload
+                expect set
+                let! back = store.Get ()
+                Expect.equal (expect back) (Some payload) "round-trips through the OS store"
+            }
+
+        testCaseAsync "a whole SecretStore runs durable over the real keyring" <|
+            async {
+                let keyStore = KeyStore.keyring "yession-test" ("store-" + Yession.Host.Interop.randomSecret ())
+                let path = freshPath "keyring"
+                let! store = openDurable path keyStore
+                Expect.isTrue store.Durable "durable over the OS store"
+                let id = sid (SessionScope sessionA) "deploy-token"
+                let! _ = store.Set id "keyring-held"
+                // Reopen: the KEK comes back from the credential manager and decrypts.
+                let! reopened = openDurable path keyStore
+                let! resolved = reopened.Resolve id
+                Expect.equal (expect resolved) (Some "keyring-held") "KEK survives via the OS store"
+            }
+    ]
+
 let tests =
     testList "Secrets" [
         constructorTests
@@ -356,4 +393,5 @@ let tests =
         wireTests
         cipherTests
         storeTests
+        Tag.needs "OS keyring" [ Tag.Keyring ] (fun () -> keyringTests)
     ]
