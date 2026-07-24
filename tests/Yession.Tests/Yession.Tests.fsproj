@@ -17,6 +17,7 @@
   <ItemGroup>
     <Compile Include="Tags.fs" />
     <Compile Include="Domain.fs" />
+    <Compile Include="Secrets.fs" />
     <Compile Include="SessionProcess.fs" />
     <Compile Include="Support.fs" />
     <Compile Include="Sync.fs" />
