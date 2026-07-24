@@ -11,6 +11,7 @@ module Yession.Host.TelemetryReceiver
 
 open Fable.Core
 open Fable.Core.JsInterop
+open Yession.Domain
 open Yession.Host.Interop
 
 // --- OTLP/HTTP JSON logs decode (only the subset the emitter emits) ----------------------
@@ -21,6 +22,9 @@ type LogValue =
 
 type ReceivedLog =
     { Body : string
+      /// OTel log-data-model severity number (9 INFO, 13 WARN, 17 ERROR). The session
+      /// emitter has always sent `severityNumber`; decode defaults to INFO when absent.
+      Severity : int
       Attributes : Map<string, LogValue> }
 
 [<Emit("$0[$1]")>]
@@ -67,7 +71,10 @@ let private logRecordOf (lr: obj) : ReceivedLog =
         else
             let s = prop b "stringValue"
             if isNullish s then "" else unbox<string> s
-    { Body = body; Attributes = attributesOf lr }
+    let severity =
+        let n = prop lr "severityNumber"
+        if isNullish n then 9 else asInt n
+    { Body = body; Severity = severity; Attributes = attributesOf lr }
 
 module LogsWire =
     /// Decode an OTLP/HTTP JSON logs payload into the flat list of records it carries.
@@ -82,6 +89,159 @@ module LogsWire =
             |> Array.map logRecordOf
             |> List.ofArray
             |> Ok
+
+// --- Manager audit records (Plan 06 telemetry) -------------------------------------------
+
+/// An audit record consumer. Built ONCE per Manager (createWithUi): the telemetry
+/// collector's `Record` when a collector is configured, `Audit.stdout` otherwise —
+/// either/or, never both, so a record is printed exactly once.
+type Sink = ReceivedLog -> unit
+
+/// OTel-log-shaped audit events the Manager emits IN-PROCESS about its own authority
+/// decisions: secrets operations, policy denies, SecretRef injection, KEK/store
+/// lifecycle, user↔launch bindings, and control-channel 401s. Identifiers and names
+/// only — no constructor accepts a secret value, KEK material, or control secret, so
+/// content cannot leak by type. Records carry `event.name` (`yession.*`) and
+/// `service.name = yession-manager`, ready for the collector's `onRecord` re-export.
+module Audit =
+
+    module Severity =
+        let info = 9
+        let warn = 13
+        let error = 17
+
+    let private record (name: string) (severity: int) (attributes: (string * LogValue) list) (body: string) : ReceivedLog =
+        { Body = body
+          Severity = severity
+          Attributes =
+            Map.ofList
+                ([ "event.name", StringValue name
+                   "service.name", StringValue "yession-manager" ]
+                 @ attributes) }
+
+    let private scopeAttrs (scope: SecretScope) : (string * LogValue) list =
+        match scope with
+        | SessionScope sessionId ->
+            [ "yession.secret.scope", StringValue "session"
+              "yession.secret.scope_key", StringValue (SessionId.value sessionId) ]
+        | UserScope user ->
+            [ "yession.secret.scope", StringValue "user"
+              "yession.secret.scope_key", StringValue (UserSubject.value user) ]
+
+    let private session (sessionId: SessionId) = "yession.session.id", StringValue (SessionId.value sessionId)
+    let private outcome ok = "yession.outcome", StringValue (if ok then "ok" else "failed")
+
+    let private secretOp (op: string) (sessionId: SessionId) (id: SecretId) (ok: bool) : ReceivedLog =
+        record
+            (sprintf "yession.secret.%s" op)
+            (if ok then Severity.info else Severity.warn)
+            ([ session sessionId
+               "yession.secret.name", StringValue (SecretName.value id.Name)
+               outcome ok ]
+             @ scopeAttrs id.Scope)
+            (sprintf "secret %s %s" op (if ok then "ok" else "failed"))
+
+    let secretSet (sessionId: SessionId) (id: SecretId) (ok: bool) : ReceivedLog = secretOp "set" sessionId id ok
+    let secretDelete (sessionId: SessionId) (id: SecretId) (ok: bool) : ReceivedLog = secretOp "delete" sessionId id ok
+
+    let secretList (sessionId: SessionId) (scope: SecretScope) (count: int) : ReceivedLog =
+        record "yession.secret.list" Severity.info
+            ([ session sessionId; "yession.secret.count", IntValue count ] @ scopeAttrs scope)
+            "secret list"
+
+    let authzDeny (sessionId: SessionId) (action: SecretAction) (resource: AuthzResource) (reason: string) : ReceivedLog =
+        let resourceAttrs =
+            match resource with
+            | SecretResource id ->
+                ("yession.secret.name", StringValue (SecretName.value id.Name)) :: scopeAttrs id.Scope
+            | SecretCollection scope -> scopeAttrs scope
+        record "yession.authz.deny" Severity.warn
+            ([ session sessionId
+               "yession.authz.action", StringValue (sprintf "%A" action)
+               "yession.authz.reason", StringValue reason ]
+             @ resourceAttrs)
+            (sprintf "secrets: DENY %A for session %s: %s" action (SessionId.value sessionId) reason)
+
+    let inject (sessionId: SessionId) (name: SecretName) (source: string) : ReceivedLog =
+        record "yession.secret.inject" Severity.info
+            [ session sessionId
+              "yession.secret.name", StringValue (SecretName.value name)
+              "yession.inject.source", StringValue source ]
+            "secret injected into environment"
+
+    let injectMiss (sessionId: SessionId) (name: SecretName) (reason: string) : ReceivedLog =
+        record "yession.secret.inject" Severity.warn
+            [ session sessionId
+              "yession.secret.name", StringValue (SecretName.value name)
+              "yession.inject.source", StringValue "none"
+              "yession.authz.reason", StringValue reason ]
+            "secret injection missed"
+
+    let storeOpen (mode: string) (keystore: string) (kekMinted: bool) (entries: int) : ReceivedLog =
+        record "yession.secrets.store_open" Severity.info
+            [ "yession.secrets.mode", StringValue mode
+              "yession.secrets.keystore", StringValue keystore
+              "yession.secrets.kek", StringValue (if kekMinted then "created" else "loaded")
+              "yession.secrets.entries", IntValue entries ]
+            (sprintf "secrets store open (%s)" mode)
+
+    let storeEphemeral : ReceivedLog =
+        record "yession.secrets.store_open" Severity.warn
+            [ "yession.secrets.mode", StringValue "ephemeral" ]
+            "secrets: no OS credential manager available — secrets are IN-MEMORY ONLY and die with this Manager"
+
+    let storeInaccessible (path: string) : ReceivedLog =
+        record "yession.secrets.store_open" Severity.warn
+            [ "yession.secrets.mode", StringValue "ephemeral"
+              "yession.secrets.path", StringValue path ]
+            (sprintf "secrets: %s exists but its key lives in a credential manager this host cannot reach — stored secrets stay inaccessible (and untouched) until one is available" path)
+
+    let storeOpenFailed (kind: string) (detail: string) : ReceivedLog =
+        record "yession.secrets.store_open_failed" Severity.error
+            [ "yession.secrets.reason", StringValue kind ]
+            detail
+
+    let bindingRecorded (sessionId: SessionId) (subject: UserSubject) : ReceivedLog =
+        record "yession.auth.binding_recorded" Severity.info
+            [ session sessionId; "yession.auth.sub", StringValue (UserSubject.value subject) ]
+            "user verified into launch"
+
+    let bindingRevoked (sessionId: SessionId) : ReceivedLog =
+        record "yession.auth.binding_revoked" Severity.info
+            [ session sessionId ]
+            "user bindings revoked with launch"
+
+    let controlUnauthorized (path: string) : ReceivedLog =
+        record "yession.control.unauthorized" Severity.warn
+            [ "yession.http.path", StringValue path ]
+            "invalid control secret"
+
+    let private severityLabel (severity: int) : string =
+        if severity = Severity.info then "INFO"
+        elif severity = Severity.warn then "WARN"
+        elif severity = Severity.error then "ERROR"
+        else string severity
+
+    /// One greppable line, deterministic (Map iterates key-sorted): severity, event
+    /// name, attributes (minus the two that lead the line), then the human body.
+    let format (r: ReceivedLog) : string =
+        let name =
+            match Map.tryFind "event.name" r.Attributes with
+            | Some (StringValue n) -> n
+            | _ -> "-"
+        let attrs =
+            r.Attributes
+            |> Map.toList
+            |> List.filter (fun (k, _) -> k <> "event.name" && k <> "service.name")
+            |> List.map (fun (k, v) ->
+                match v with
+                | StringValue s -> sprintf "%s=%s" k s
+                | IntValue i -> sprintf "%s=%d" k i)
+            |> String.concat " "
+        sprintf "audit %s %s %s :: %s" (severityLabel r.Severity) name attrs r.Body
+
+    /// The prod sink when no telemetry collector is configured.
+    let stdout : Sink = fun r -> printfn "%s" (format r)
 
 // --- Interpreting a record as agent-turn usage -------------------------------------------
 
@@ -146,7 +306,12 @@ module Collector =
                         "telemetry session=%s turn=%s in=%d out=%d cache_read=%d cache_create=%d model=%s (session totals in=%d out=%d)"
                         u.SessionId u.TurnId u.InputTokens u.OutputTokens u.CacheReadTokens u.CacheCreationTokens
                         (Option.defaultValue "-" u.Model) (fst totalsNow) (snd totalsNow)
-                | None -> printfn "telemetry non-usage record: %s" r.Body
+                | None ->
+                    // Manager audit records (Plan 06) print through their formatter;
+                    // anything else keeps the legacy non-usage line.
+                    match Map.tryFind "event.name" r.Attributes with
+                    | Some (StringValue name) when name.StartsWith "yession." -> printfn "%s" (Audit.format r)
+                    | _ -> printfn "telemetry non-usage record: %s" r.Body
                 onRecord r }
 
     /// A collector with a downstream seam that retains every record — the in-test double.
