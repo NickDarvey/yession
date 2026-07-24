@@ -88,7 +88,20 @@ type Options =
       /// How the OIDC provider authenticates the human at /authorize. None = the
       /// built-in trust-localhost strategy; an upstream OIDC integration is a
       /// different strategy value, not a different Manager.
-      Strategy : AuthenticationStrategy option }
+      Strategy : AuthenticationStrategy option
+      /// Secrets (Plan 06): how the Manager's secret store is keyed. None = the
+      /// feature is off — the secrets routes answer 403 and injection sees only the
+      /// process-env fallback (the pre-Plan-06 behaviour).
+      Secrets : SecretsBacking option }
+
+/// How the secret store is keyed on this host.
+and SecretsBacking =
+    /// A usable OS credential manager holds the KEK; the encrypted store lives at
+    /// <DataDir>/secrets.json.
+    | DurableSecrets of KeyStore.KeyStore
+    /// No credential manager: the store runs in memory under a per-boot random key
+    /// and dies with the Manager. Loudly logged at boot; never a plaintext key file.
+    | EphemeralSecrets
 
 module Options =
     let defaults (dataDir: string) (sessionCommand: string) (sessionArgs: string list) : Options =
@@ -101,12 +114,58 @@ module Options =
           Grant = None
           ManagerPort = None
           Telemetry = None
-          Strategy = None }
+          Strategy = None
+          Secrets = None }
 
 [<Fable.Core.Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
 
 let private clock () = DateTimeOffset.UtcNow
+
+/// The secrets handlers (Plan 06): the ONLY place a verified AuthzSubject is built, so
+/// the route arms stay policy-free. Every deny is logged (subject/action/scope — never
+/// values); every permitted call goes straight to the store. Module-level so the
+/// authorization matrix is testable over a bare control server.
+let secretsApiFor (store: SecretStore.SecretStore) : Control.SecretsApi =
+    let authorize (caller: Control.ControlCaller) (action: SecretAction) (resource: AuthzResource) =
+        let request =
+            { Subject = { Session = Some caller.SessionId; Users = caller.Users }
+              Action = SecretAction action
+              Resource = resource }
+        match Policy.authorize request with
+        | Permit -> Ok ()
+        | Deny reason ->
+            printfn "secrets: DENY %A for session %s: %s" action (SessionId.value caller.SessionId) reason
+            Error (Control.SecretsDenied reason)
+    { Control.SecretsApi.Set =
+        fun caller request ->
+            async {
+                let id : SecretId = { Scope = request.Scope; Name = request.Name }
+                match authorize caller SetSecret (SecretResource id) with
+                | Error e -> return Error e
+                | Ok () ->
+                    match! store.Set id request.Value with
+                    | Ok metadata -> return Ok metadata
+                    | Error e -> return Error (Control.SecretsFailed e)
+            }
+      List =
+        fun caller request ->
+            async {
+                match authorize caller ListSecrets (SecretCollection request.Scope) with
+                | Error e -> return Error e
+                | Ok () -> return Ok (store.List request.Scope)
+            }
+      Delete =
+        fun caller request ->
+            async {
+                let id : SecretId = { Scope = request.Scope; Name = request.Name }
+                match authorize caller DeleteSecret (SecretResource id) with
+                | Error e -> return Error e
+                | Ok () ->
+                    match! store.Delete id with
+                    | Ok existed -> return Ok existed
+                    | Error e -> return Error (Control.SecretsFailed e)
+            } }
 
 /// Create the Manager. `ui` is the management surface (Step 25): a route handler that
 /// closes over the Manager itself, sharing the control endpoint's server.
@@ -187,6 +246,27 @@ let createWithUi
     // provider reads the issuer lazily, so the mutable slot resolves cleanly.
     let mutable endpointUrl : string option = None
     let issuerOf () = defaultArg endpointUrl ""
+    // The secret store (Plan 06). A corrupt durable store fails the boot loudly — it
+    // must never look empty. The ephemeral mode warns loudly and leaves any durable
+    // file from a previous run untouched (inaccessible, never deleted).
+    let secretsPath = sprintf "%s/secrets.json" options.DataDir
+    let! secretStore =
+        async {
+            match options.Secrets with
+            | None -> return None
+            | Some (DurableSecrets keyStore) ->
+                match! SecretStore.openStore (Some secretsPath) keyStore with
+                | Ok store -> return Some store
+                | Error e -> return failwithf "secrets store: %s" e
+            | Some EphemeralSecrets ->
+                printfn "secrets: no OS credential manager available — secrets are IN-MEMORY ONLY and die with this Manager"
+                if Fs.exists secretsPath then
+                    printfn "secrets: %s exists but its key lives in a credential manager this host cannot reach — stored secrets stay inaccessible (and untouched) until one is available" secretsPath
+                match! SecretStore.openStore None (KeyStore.random ()) with
+                | Ok store -> return Some store
+                | Error e -> return failwithf "secrets store (ephemeral): %s" e
+        }
+
     let recordTokenIssued (controlSecret: string) (_sessionId: SessionId) (subject: UserSubject) : unit =
         // Guarded by the live secret: a token redeemed in the same instant a launch
         // dies must not resurrect its authority.
@@ -205,11 +285,13 @@ let createWithUi
               Capabilities = Map.tryFind secret secrets
               Users = Map.tryFind secret launchUsers |> Option.defaultValue Set.empty })
 
+    let secretsApi : Control.SecretsApi option = secretStore |> Option.map secretsApiFor
+
     let! controlServer =
         async {
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                 let handled =
-                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient req res
+                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi req res
                     || (match options.Telemetry with
                         | Some collector ->
                             TelemetryReceiver.tryHandle (fun secret -> Set.contains secret telemetrySecrets) collector req res

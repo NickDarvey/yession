@@ -385,6 +385,108 @@ let private keyringTests =
             }
     ]
 
+// --- Step 6: the secrets control routes over real HTTP ([Ports]) ------------------------
+// A bare control server (the Phase4 pattern) with a known caller table and the SAME
+// pre-authorized handlers the Manager composes (ProcessManager.secretsApiFor), driven
+// as raw HTTP so denied shapes below the typed client are expressible.
+
+type private ControlReply =
+    abstract status : int
+    abstract body : string
+
+[<Fable.Core.Emit("fetch($0, { method: 'POST', headers: { 'x-yession-control': $1, 'content-type': 'application/json' }, body: $2 }).then(async r => ({ status: r.status, body: await r.text() }))")>]
+let private postControl (url: string) (secret: string) (body: string) : Fable.Core.JS.Promise<ControlReply> = Fable.Core.Util.jsNative
+
+let private startControlServer (callers: (string * Control.ControlCaller) list) (api: Control.SecretsApi option) =
+    async {
+        let table = Map.ofList callers
+        let dummyRegister (_: string) (_: SessionId) (_: string) : Yession.Oidc.RegisterClientResponse =
+            { ClientId = "unused"; ClientSecret = "unused"; Issuer = "unused" }
+        let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            if not (Control.tryHandle
+                        (fun secret -> Map.tryFind secret table)
+                        (fun _ _ -> async { return Ok () })
+                        (fun _ _ -> fun () -> ())
+                        (fun _ -> fun () -> ())
+                        dummyRegister
+                        api
+                        req res) then
+                res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "not found"
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) ->
+                server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        return listening, sprintf "http://127.0.0.1:%d" (Interop.serverPort listening)
+    }
+
+let private caller sessionId users : Control.ControlCaller =
+    { SessionId = sessionId; Capabilities = None; Users = users }
+
+let private routeTests =
+    testList "control routes" [
+        testCaseAsync "a session writes, lists (metadata only), and deletes its own scope; strangers and siblings are refused" <|
+            async {
+                let! opened = SecretStore.openStore None (KeyStore.random ())
+                let store = expect opened
+                let! _, url =
+                    startControlServer
+                        [ "secret-a", caller sessionA (Set.singleton alice)
+                          "secret-b", caller sessionB Set.empty ]
+                        (Some (ProcessManager.secretsApiFor store))
+                let post route secret body = postControl (sprintf "%s/control/secrets/%s" url route) secret body |> Async.AwaitPromise
+
+                // Own scope: the full lifecycle.
+                let setBody = ControlWire.toString ControlWire.setSecretRequest { Scope = SessionScope sessionA; Name = name; Value = "hunter2" }
+                let! set = post "set" "secret-a" setBody
+                Expect.equal set.status 200 "own-scope set permits"
+                Expect.isFalse (set.body.Contains "hunter2") "the set response carries no value"
+                let! listed = post "list" "secret-a" (ControlWire.toString ControlWire.listSecretsRequest { Scope = SessionScope sessionA })
+                Expect.equal listed.status 200 "own-scope list permits"
+                Expect.isTrue (listed.body.Contains "deploy-token") "metadata names the secret"
+                Expect.isFalse (listed.body.Contains "hunter2") "the raw list body carries no value"
+
+                // An unknown secret is turned away at the door.
+                let! unknown = post "set" "not-a-secret" setBody
+                Expect.equal unknown.status 401 "invalid control secret"
+
+                // Session B cannot touch A's scope (and the deny does not echo values).
+                let! cross = post "set" "secret-b" setBody
+                Expect.equal cross.status 403 "cross-session write denies"
+                let! crossList = post "list" "secret-b" (ControlWire.toString ControlWire.listSecretsRequest { Scope = SessionScope sessionA })
+                Expect.equal crossList.status 403 "cross-session list denies"
+
+                // User scope: sessions never write; a bound user's collection lists.
+                let! userWrite = post "set" "secret-a" (ControlWire.toString ControlWire.setSecretRequest { Scope = UserScope alice; Name = name; Value = "v" })
+                Expect.equal userWrite.status 403 "sessions cannot write user scope"
+                let! userList = post "list" "secret-a" (ControlWire.toString ControlWire.listSecretsRequest { Scope = UserScope alice })
+                Expect.equal userList.status 200 "a bound user's collection lists"
+                let! unboundList = post "list" "secret-b" (ControlWire.toString ControlWire.listSecretsRequest { Scope = UserScope alice })
+                Expect.equal unboundList.status 403 "an unbound session cannot list a user's collection"
+
+                // There is no read-back route, for anyone.
+                let! get = post "get" "secret-a" setBody
+                Expect.equal get.status 404 "/control/secrets/get does not exist"
+
+                // Delete closes the lifecycle.
+                let! deleted = post "delete" "secret-a" (ControlWire.toString ControlWire.deleteSecretRequest { Scope = SessionScope sessionA; Name = name })
+                Expect.equal deleted.status 200 "own-scope delete permits"
+                Expect.isTrue (deleted.body.Contains "true") "reports the entry existed"
+            }
+
+        testCaseAsync "a Manager without a secrets store answers 403" <|
+            async {
+                let! _, url = startControlServer [ "secret-a", caller sessionA Set.empty ] None
+                let! reply =
+                    postControl
+                        (url + "/control/secrets/list")
+                        "secret-a"
+                        (ControlWire.toString ControlWire.listSecretsRequest { Scope = SessionScope sessionA })
+                    |> Async.AwaitPromise
+                Expect.equal reply.status 403 "no store configured"
+            }
+    ]
+
 let tests =
     testList "Secrets" [
         constructorTests
@@ -394,4 +496,5 @@ let tests =
         cipherTests
         storeTests
         Tag.needs "OS keyring" [ Tag.Keyring ] (fun () -> keyringTests)
+        Tag.needs "Secrets control routes" [ Tag.Ports ] (fun () -> routeTests)
     ]
