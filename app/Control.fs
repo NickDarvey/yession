@@ -41,11 +41,15 @@ let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Ut
 [<Fable.Core.Emit("clearInterval($0)")>]
 let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
 
-/// What a control secret resolves to: WHICH launch is calling, and the environment
-/// capabilities that launch was granted (None = environment-less session).
+/// What a control secret resolves to: WHICH launch is calling, the environment
+/// capabilities that launch was granted (None = environment-less session), and the
+/// users the Manager verified into the launch at ID-token issuance (empty until a
+/// login completes). Manager-verified, never self-asserted — this is the ABAC
+/// composite identity (Plan 06).
 type ControlCaller =
     { SessionId : SessionId
-      Capabilities : SessionEnvironmentCapabilities option }
+      Capabilities : SessionEnvironmentCapabilities option
+      Users : Set<UserSubject> }
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""

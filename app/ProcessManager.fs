@@ -50,6 +50,10 @@ type ProcessManager =
       /// leg): replaces the retained list and pushes it to all live subscribers, and every
       /// session that subscribes later receives it as its initial snapshot.
       PublishMcpTools : McpToolList -> unit
+      /// Users the Manager verified into the session's live launch at ID-token
+      /// issuance (Plan 06). Empty for a stopped session or before any login —
+      /// bindings die with the launch.
+      UsersOf : SessionId -> Set<UserSubject>
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
       /// Stop every running child and the Manager endpoint (Manager shutdown).
@@ -131,6 +135,10 @@ let createWithUi
     // Per-launch telemetry bearer secrets (Plan 04): a session posts OTLP logs authenticated
     // with its bearer; the secret lives and dies with the launch, like the control secret.
     let mutable telemetrySecrets : Set<string> = Set.empty
+    // Users the Manager verified into a LAUNCH (Plan 06): recorded at ID-token issuance,
+    // keyed by the per-launch control secret so the binding dies with the launch, exactly
+    // like the client registration it derives from. Durable secrets, per-login access.
+    let mutable launchUsers : Map<string, Set<UserSubject>> = Map.empty
 
     // Manager→Session notifications (the reverse leg): live subscriber sinks keyed by the
     // same per-launch secret, so a session's stream dies exactly when its launch does.
@@ -179,7 +187,13 @@ let createWithUi
     // provider reads the issuer lazily, so the mutable slot resolves cleanly.
     let mutable endpointUrl : string option = None
     let issuerOf () = defaultArg endpointUrl ""
-    let! provider = ManagerOidc.create issuerOf (defaultArg options.Strategy Strategy.localhost)
+    let recordTokenIssued (controlSecret: string) (_sessionId: SessionId) (subject: UserSubject) : unit =
+        // Guarded by the live secret: a token redeemed in the same instant a launch
+        // dies must not resurrect its authority.
+        if Map.containsKey controlSecret secretSessions then
+            let existing = Map.tryFind controlSecret launchUsers |> Option.defaultValue Set.empty
+            launchUsers <- Map.add controlSecret (Set.add subject existing) launchUsers
+    let! provider = ManagerOidc.create issuerOf (defaultArg options.Strategy Strategy.localhost) recordTokenIssued
 
     // What a control secret resolves to: the launch's session plus its (optional)
     // environment grant. Registration works for every launch; environment routes 403
@@ -188,7 +202,8 @@ let createWithUi
         Map.tryFind secret secretSessions
         |> Option.map (fun sessionId ->
             { Control.ControlCaller.SessionId = sessionId
-              Capabilities = Map.tryFind secret secrets })
+              Capabilities = Map.tryFind secret secrets
+              Users = Map.tryFind secret launchUsers |> Option.defaultValue Set.empty })
 
     let! controlServer =
         async {
@@ -287,10 +302,11 @@ let createWithUi
                      | Some secret ->
                          secrets <- Map.remove secret secrets
                          secretSessions <- Map.remove secret secretSessions
-                         // The launch's notification subscriptions and OAuth client
-                         // registration die with its authority.
+                         // The launch's notification subscriptions, OAuth client
+                         // registration, and user bindings die with its authority.
                          notifications.Drop secret
                          provider.RevokeByControlSecret secret
+                         launchUsers <- Map.remove secret launchUsers
                      | None -> ())
                     // The launch's telemetry authority dies with it too.
                     match snd telemetryEnv with
@@ -347,6 +363,15 @@ let createWithUi
                 |> Option.map (fun r -> { Record = r; Status = statusOf r })
           Notify = notify
           PublishMcpTools = mcp.Publish
+          UsersOf =
+            fun sessionId ->
+                secretSessions
+                |> Map.fold
+                    (fun acc secret sid ->
+                        if sid = sessionId then
+                            Set.union acc (Map.tryFind secret launchUsers |> Option.defaultValue Set.empty)
+                        else acc)
+                    Set.empty
           EndpointPort = controlServer |> Option.map Interop.serverPort
           StopAll =
             fun () ->

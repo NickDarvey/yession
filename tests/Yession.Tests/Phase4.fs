@@ -214,7 +214,7 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
         let table =
             secrets
             |> List.map (fun (secret, sessionId, capabilities) ->
-                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities }
+                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities; Users = Set.empty }
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
