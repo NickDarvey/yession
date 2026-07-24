@@ -18,6 +18,14 @@ Auto-Clarity: drop caveman for security warnings, irreversible actions, user con
 
 Boundaries: code/commits/PRs written normal.
 
+## Contributing changes
+
+Read `.claude/skills/contributing-changes/SKILL.md` when completing a plan to integrate
+changes. Short version: compare implementation to plan; if consistent (no interesting
+deviations, blockers, or uncompletable work), open PR with auto-merge, subscribe to PR
+events, then watch the master pipeline after merge — auto-fix failures and repeat the
+process until master is green. Deviations stop the loop and get reported instead.
+
 ## Bootstrap
 
 The dev environment, tasks, and build outputs are all declared in **devenv.nix**: Node 24 +
