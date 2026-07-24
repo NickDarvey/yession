@@ -150,16 +150,16 @@ jobs:
       #   run: |
       #     if [ -s RELEASE_NOTES.md ]; then echo "body=RELEASE_NOTES.md" >> "$GITHUB_OUTPUT"
       #     else echo "body=" >> "$GITHUB_OUTPUT"; fi
-      # - uses: actions/download-artifact@v4
-      #   with:
-      #     path: dist
-      #     merge-multiple: true
+      # Pull the tarball the package:npm job built (uploaded as the `dist-npm` artifact) into
+      # dist/, so the release actually carries it — this job's own checkout has no dist/.
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-npm
+          path: dist
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
           name: Yession ${{ env.VERSION }}
           prerelease: true
-          # Claude-drafted notes when present, GitHub's generated notes otherwise.
-          body_path: ${{ steps.notes.outputs.body }}
-          generate_release_notes: ${{ steps.notes.outputs.body == '' }}
+          generate_release_notes: true
           files: dist/*.tgz

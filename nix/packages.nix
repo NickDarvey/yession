@@ -162,9 +162,9 @@ let
     dontStrip = true;
   };
 
-  # installed — the installable: two wrapped Node bins over tasks.fsx's shims, the runtime
+  # nix — the installable: two wrapped Node bins over tasks.fsx's shims, the runtime
   # node_modules, and the Nix node-datachannel addon, with the agent pointed at claude-code.
-  installed = pkgs.stdenv.mkDerivation {
+  nix = pkgs.stdenv.mkDerivation {
     pname = "yession";
     inherit version;
     dontUnpack = true;
@@ -193,8 +193,8 @@ let
     meta.mainProgram = "yession-manager";
   };
 
-  # packaged — the npm tarball, `npm pack`ed off the same staged package dir.
-  packaged = pkgs.stdenv.mkDerivation {
+  # npm — the npm tarball, `npm pack`ed off the same staged package dir.
+  npm = pkgs.stdenv.mkDerivation {
     pname = "yession-tarball";
     inherit version;
     dontUnpack = true;
@@ -210,5 +210,5 @@ let
   };
 in
 {
-  inherit node-datachannel claude-code nodeModules staged installed packaged;
+  inherit node-datachannel claude-code nodeModules staged nix npm;
 }
