@@ -6,6 +6,7 @@ module Yession.Tests.Secrets
 // new Permit can only appear by editing the policy AND this table.
 
 open System
+open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
 
@@ -190,10 +191,169 @@ let private wireTests =
             Expect.isError (ControlWire.fromString ControlWire.setSecretRequest json) "blank name rejected"
     ]
 
+// --- Step 3: cipher + store (real WebCrypto AES-GCM on Node; cheap tier) ----------------
+
+open Yession.Host
+
+[<Fable.Core.Emit("crypto.subtle.exportKey('raw', $0)")>]
+let private exportRawKey (key: obj) : Fable.Core.JS.Promise<obj> = Fable.Core.Util.jsNative
+
+let private freshPath (label: string) =
+    sprintf "tests/Yession.Tests/out/.data/%s-%d.secrets.json" label (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+
+let private sid (scope: SecretScope) (n: string) : SecretId =
+    { Scope = scope; Name = SecretName.create n |> expect }
+
+let private cipherTests =
+    testList "cipher" [
+        testCaseAsync "encrypt/decrypt round-trips under the right AAD" <|
+            async {
+                let! cipher = SecretsCipher.importKey (SecretsCipher.generateKek ())
+                let aad = SecretsCipher.aadFor (SessionScope sessionA) name
+                let! iv, ct = cipher.Encrypt aad "hunter2"
+                let! back = cipher.Decrypt aad iv ct
+                Expect.equal (expect back) "hunter2" "round-trips"
+                Expect.isFalse (ct.Contains "hunter2") "ciphertext is not the plaintext"
+            }
+
+        testCaseAsync "a tampered ciphertext fails authentication" <|
+            async {
+                let! cipher = SecretsCipher.importKey (SecretsCipher.generateKek ())
+                let aad = SecretsCipher.aadFor (SessionScope sessionA) name
+                let! iv, ct = cipher.Encrypt aad "value"
+                let tampered = (if ct.StartsWith "A" then "B" else "A") + ct.Substring 1
+                let! r = cipher.Decrypt aad iv tampered
+                Expect.isError r "tamper detected"
+            }
+
+        testCaseAsync "a ciphertext transplanted onto another entry's identity fails (AAD binding)" <|
+            async {
+                let! cipher = SecretsCipher.importKey (SecretsCipher.generateKek ())
+                let! iv, ct = cipher.Encrypt (SecretsCipher.aadFor (UserScope alice) name) "alice's token"
+                let! r = cipher.Decrypt (SecretsCipher.aadFor (SessionScope sessionA) name) iv ct
+                Expect.isError r "transplant detected"
+            }
+
+        testCaseAsync "a different KEK cannot decrypt" <|
+            async {
+                let! sealer = SecretsCipher.importKey (SecretsCipher.generateKek ())
+                let! other = SecretsCipher.importKey (SecretsCipher.generateKek ())
+                let aad = SecretsCipher.aadFor (SessionScope sessionA) name
+                let! iv, ct = sealer.Encrypt aad "value"
+                let! r = other.Decrypt aad iv ct
+                Expect.isError r "wrong key detected"
+            }
+
+        testCaseAsync "the imported KEK is non-extractable: exportKey rejects" <|
+            async {
+                let! cipher = SecretsCipher.importKey (SecretsCipher.generateKek ())
+                let mutable threw = false
+                try
+                    let! _ = exportRawKey cipher.Key |> Async.AwaitPromise
+                    ()
+                with _ -> threw <- true
+                Expect.isTrue threw "exporting the KEK must throw"
+            }
+    ]
+
+let private openDurable path (keyStore: KeyStore.KeyStore) =
+    async {
+        let! opened = SecretStore.openStore (Some path) keyStore
+        return expect opened
+    }
+
+let private storeTests =
+    testList "secret store" [
+        testCaseAsync "set → list yields metadata; resolve returns the value; delete removes" <|
+            async {
+                let path = freshPath "roundtrip"
+                let! store = openDurable path (KeyStore.inMemory ())
+                let id = sid (SessionScope sessionA) "deploy-token"
+                let! set = store.Set id "hunter2"
+                Expect.equal (expect set).Id id "metadata identifies the secret"
+                Expect.equal (store.List (SessionScope sessionA) |> List.length) 1 "listed"
+                let! resolved = store.Resolve id
+                Expect.equal (expect resolved) (Some "hunter2") "resolves internally"
+                let! deleted = store.Delete id
+                Expect.isTrue (expect deleted) "existed"
+                let! resolvedAfter = store.Resolve id
+                Expect.equal (expect resolvedAfter) None "gone"
+            }
+
+        testCaseAsync "the KEK is durable in the key store before first use, and reopening decrypts" <|
+            async {
+                let path = freshPath "reopen"
+                let keyStore = KeyStore.inMemory ()
+                let! store = openDurable path keyStore
+                let! kek = keyStore.Get ()
+                Expect.isTrue (expect kek |> Option.isSome) "KEK persisted at open, before any entry"
+                let id = sid (SessionScope sessionA) "deploy-token"
+                let! _ = store.Set id "hunter2"
+                // A fresh store over the same file + key store (a Manager restart).
+                let! reopened = openDurable path keyStore
+                let! resolved = reopened.Resolve id
+                Expect.equal (expect resolved) (Some "hunter2") "survives the restart"
+                Expect.isTrue reopened.Durable "durable mode"
+            }
+
+        testCaseAsync "the value on disk is ciphertext only" <|
+            async {
+                let path = freshPath "atrest"
+                let! store = openDurable path (KeyStore.inMemory ())
+                let! _ = store.Set (sid (SessionScope sessionA) "deploy-token") "hunter2-at-rest"
+                let onDisk = Fs.readText path
+                Expect.isFalse (onDisk.Contains "hunter2-at-rest") "no plaintext at rest"
+                Expect.isTrue (onDisk.Contains "deploy-token") "metadata is cleartext by design"
+            }
+
+        testCaseAsync "a corrupt file fails the open loudly" <|
+            async {
+                let path = freshPath "corrupt"
+                Fs.writeTextAtomic path "{ not json"
+                let! opened = SecretStore.openStore (Some path) (KeyStore.inMemory ())
+                Expect.isError opened "corrupt store must not look empty"
+            }
+
+        testCaseAsync "a file sealed by a different key fails distinctly" <|
+            async {
+                let path = freshPath "wrongkek"
+                let! first = openDurable path (KeyStore.inMemory ())
+                let! _ = first.Set (sid (SessionScope sessionA) "deploy-token") "v"
+                // A different key store = a different KEK (the first one is lost).
+                let! reopened = SecretStore.openStore (Some path) (KeyStore.inMemory ())
+                match reopened with
+                | Error e -> Expect.isTrue (e.Contains "sealed by a different key") "distinct wording"
+                | Ok _ -> failwith "expected the open to fail"
+            }
+
+        testCaseAsync "the ephemeral store works without any file and reports non-durable" <|
+            async {
+                let! opened = SecretStore.openStore None (KeyStore.random ())
+                let store = expect opened
+                Expect.isFalse store.Durable "ephemeral"
+                let id = sid (SessionScope sessionA) "deploy-token"
+                let! _ = store.Set id "transient"
+                let! resolved = store.Resolve id
+                Expect.equal (expect resolved) (Some "transient") "usable in memory"
+            }
+
+        testCaseAsync "interleaved sets both land (encryption completes before the read-modify-write)" <|
+            async {
+                let path = freshPath "interleave"
+                let! store = openDurable path (KeyStore.inMemory ())
+                let a = store.Set (sid (SessionScope sessionA) "one") "1"
+                let b = store.Set (sid (SessionScope sessionA) "two") "2"
+                let! _ = [ a; b ] |> Async.Parallel
+                Expect.equal (store.List (SessionScope sessionA) |> List.length) 2 "both entries present"
+            }
+    ]
+
 let tests =
     testList "Secrets" [
         constructorTests
         policyTests
         envelopeTests
         wireTests
+        cipherTests
+        storeTests
     ]

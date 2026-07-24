@@ -19,7 +19,11 @@
     <Compile Include="Telemetry.fs" />
     <Compile Include="EventStore.fs" />
     <Compile Include="DocStore.fs" />
+    <Compile Include="Fs.fs" />
     <Compile Include="ManagerStore.fs" />
+    <Compile Include="SecretsCipher.fs" />
+    <Compile Include="KeyStore.fs" />
+    <Compile Include="SecretStore.fs" />
     <Compile Include="NotificationHub.fs" />
     <Compile Include="McpHub.fs" />
     <Compile Include="ManagerOidc.fs" />
