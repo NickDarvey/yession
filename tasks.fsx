@@ -127,7 +127,7 @@ let private depVersion (name: string) =
 
 // Bin shims and package.json live at module level (offside column 0) so their column-0
 // string content doesn't trip F#'s indentation rule inside the `stage` function.
-let private yessionBinJs = """#!/usr/bin/env node
+let private managerBinJs = """#!/usr/bin/env node
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 process.env.YESSION_SESSION_MAIN ||= join(dirname(fileURLToPath(import.meta.url)), '..', 'session.js')
@@ -147,7 +147,7 @@ let private packageJson (version: string) =
   "description": "Local-first runtime where humans and AI agents collaborate inside a shared session.",
   "type": "module",
   "bin": {
-    "yession": "bin/yession.js",
+    "yession-manager": "bin/yession-manager.js",
     "yession-session": "bin/yession-session.js"
   },
   "files": ["bin/", "manager.js", "session.js", "assets/", "README.md"],
@@ -186,9 +186,9 @@ let stage (version: string) =
     File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
     File.Copy (Path.Combine (repoRoot, "app/out/public/app.css"), Path.Combine (pkg, "assets/app.css"), true)
 
-    // Bin shims. `yession` points the Manager at the packaged session bundle (both live in one
-    // install), so it spawns `node session.js` with no PATH assumptions.
-    File.WriteAllText (Path.Combine (pkg, "bin/yession.js"), yessionBinJs)
+    // Bin shims. `yession-manager` points the Manager at the packaged session bundle (both live
+    // in one install), so it spawns `node session.js` with no PATH assumptions.
+    File.WriteAllText (Path.Combine (pkg, "bin/yession-manager.js"), managerBinJs)
     File.WriteAllText (Path.Combine (pkg, "bin/yession-session.js"), yessionSessionBinJs)
     File.WriteAllText (Path.Combine (pkg, "package.json"), packageJson version)
     File.Copy (Path.Combine (repoRoot, "README.md"), Path.Combine (pkg, "README.md"), true)
@@ -234,7 +234,7 @@ let package (version: string) =
     stage version
     // Boot the packaged bin shim (it self-sets YESSION_SESSION_MAIN); externals resolve from the
     // repo node_modules two levels up from dist/npm.
-    bootSmoke "node" [ Path.Combine (pkg, "bin/yession.js") ]
+    bootSmoke "node" [ Path.Combine (pkg, "bin/yession-manager.js") ]
     let packed = runIn pkg "npm" [ "pack"; "--pack-destination"; dist ] |> fun out -> out.Split('\n') |> Array.last
     printfn "packaged dist/%s" (Path.GetFileName (packed.Trim ()))
 
@@ -259,7 +259,7 @@ let installSmoke (tgz: string) =
     if not (Directory.Exists ndcRelease && (Directory.GetFiles (ndcRelease, "*.node")).Length > 0) then
         failwith "install-smoke: node-datachannel addon was not built"
 
-    bootSmoke "node" [ Path.Combine (prefix, "node_modules/.bin/yession") ]
+    bootSmoke "node" [ Path.Combine (prefix, "node_modules/.bin/yession-manager") ]
     printfn "install-smoke: native deps resolved and the installed package booted"
 
 // --- check: capability-gated test orchestration ----------------------------------------------
@@ -317,25 +317,13 @@ let private runCheckOnce (caps: string list) =
         exec esbuild [ "app/out/browser/EditorHarness.js"; "--bundle"; "--format=esm"; "--outfile=tests/browser/out/harness.js" ]
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 
-// check [caps…] [--retry N]. Default = cheap tier. The native WebRTC suites occasionally flake
-// (ICE stall / toolchain segfault), so --retry re-runs the whole gate before calling it a fail.
-let check (args: string list) =
-    let rec parse caps retry =
-        function
-        | "--retry" :: n :: rest -> parse caps (int n) rest
-        | c :: rest -> parse (c :: caps) retry rest
-        | [] -> List.rev caps, retry
-    let caps, retries = parse [] 0 args
+// check [caps…]. Default = cheap tier; each cap adds its suites (Browser, Ports, Native, …).
+// The gate runs once and is deterministic — the native WebRTC suites used to abort intermittently,
+// but that was a real defect (the addon carried its own C++ runtime; see nix/node-datachannel.nix),
+// now fixed, not inherent flakiness. A failure here is a genuine break, so don't paper it over.
+let check (caps: string list) =
     restore ()
-    let attempts = retries + 1
-    let rec go attempt =
-        try runCheckOnce caps
-        with ex ->
-            if attempt < attempts then
-                eprintfn "check: attempt %d/%d failed (%s); retrying" attempt attempts ex.Message
-                go (attempt + 1)
-            else reraise ()
-    go 1
+    runCheckOnce caps
 
 let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent" ]
 

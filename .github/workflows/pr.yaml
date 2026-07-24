@@ -12,9 +12,10 @@ name: pr
 # byte-identical here and on a laptop. GitHub runners have full GitHub access, so devenv's
 # `github:cachix/devenv` input resolves natively (no cache-substitution override needed).
 #
-# The native WebRTC suites gather ICE in a sandbox and occasionally flake (an ICE stall, or a
-# toolchain segfault mid-compile), so the gate is retried once before it is called a failure:
-# a genuine break fails both attempts; a transient one clears on the retry.
+# The gate runs once — no retry crutch. The native WebRTC suites used to abort intermittently, but
+# that was a real defect (the node-datachannel addon linked its own static C++ runtime and aborted
+# when a shared-libdatachannel exception crossed the NAPI boundary; fixed in nix/node-datachannel.nix
+# by linking the addon against the shared runtime). A failure here is now a genuine break.
 
 on:
   pull_request:
@@ -32,6 +33,6 @@ jobs:
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
       # `check` does everything Yession-specific: restore + link the addon, provision Chromium
-      # for the browser E2Es, run the gate, and re-run once on a native flake (--retry 1).
-      - name: Cheap tier + browser + native WebRTC/host E2E (retry once on flake)
-        run: devenv shell -- check Browser Ports Native --retry 1
+      # for the browser E2Es, and run the gate.
+      - name: Cheap tier + browser + native WebRTC/host E2E
+        run: devenv shell -- check Browser Ports Native
