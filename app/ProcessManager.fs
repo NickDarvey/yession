@@ -54,6 +54,12 @@ type ProcessManager =
       /// issuance (Plan 06). Empty for a stopped session or before any login —
       /// bindings die with the launch.
       UsersOf : SessionId -> Set<UserSubject>
+      /// Session-scoped secret resolution for environment injection (Plan 06):
+      /// store-backed precedence (session scope, then bound users' scopes, then the
+      /// Manager's process env) when a store is configured; bare process env otherwise.
+      /// Hand this to a container backend — values resolve at container start, never
+      /// over the control channel.
+      ResolveSecret : SecretStore.ResolveSecret
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
       /// Stop every running child and the Manager endpoint (Manager shutdown).
@@ -287,6 +293,16 @@ let createWithUi
 
     let secretsApi : Control.SecretsApi option = secretStore |> Option.map secretsApiFor
 
+    // The union of user bindings across a session's live launches (in practice one).
+    let usersOf (sessionId: SessionId) : Set<UserSubject> =
+        secretSessions
+        |> Map.fold
+            (fun acc secret sid ->
+                if sid = sessionId then
+                    Set.union acc (Map.tryFind secret launchUsers |> Option.defaultValue Set.empty)
+                else acc)
+            Set.empty
+
     let! controlServer =
         async {
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
@@ -445,15 +461,11 @@ let createWithUi
                 |> Option.map (fun r -> { Record = r; Status = statusOf r })
           Notify = notify
           PublishMcpTools = mcp.Publish
-          UsersOf =
-            fun sessionId ->
-                secretSessions
-                |> Map.fold
-                    (fun acc secret sid ->
-                        if sid = sessionId then
-                            Set.union acc (Map.tryFind secret launchUsers |> Option.defaultValue Set.empty)
-                        else acc)
-                    Set.empty
+          UsersOf = usersOf
+          ResolveSecret =
+            match secretStore with
+            | Some store -> SecretStore.SecretResolution.compose store usersOf SecretStore.SecretResolution.processEnv
+            | None -> SecretStore.SecretResolution.processEnv
           EndpointPort = controlServer |> Option.map Interop.serverPort
           StopAll =
             fun () ->

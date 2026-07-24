@@ -73,27 +73,23 @@ module DockerBackend =
         | Some i -> i.Name + (i.Tag |> Option.map ((+) ":") |> Option.defaultValue "")
         | None -> "alpine:3"
 
-    /// Read a secret from the process env (the smallest local-dev store; see docs/GAPS.md —
-    /// there is no real secret store yet).
-    [<Emit("process.env[$0]")>]
-    let private secretFromEnv (name: string) : string = jsNative
-
-    /// Resolve `spec.EnvironmentVariables` to Docker `Env` entries (`KEY=VALUE`), failing on
-    /// an unresolved secret reference.
-    let private resolveEnv (spec: EnvironmentSpec) : Result<string array, string> =
-        (Ok [], spec.EnvironmentVariables |> Map.toList)
-        ||> List.fold (fun acc (name, ref) ->
-            match acc with
-            | Error _ -> acc
-            | Ok entries ->
-                match ref with
-                | PlainValue v -> Ok (sprintf "%s=%s" name v :: entries)
-                | SecretRef secret ->
-                    let value = secretFromEnv (SecretName.value secret)
-                    if isNil (box value) then
-                        Error (sprintf "secret '%s' is not available" (SecretName.value secret))
-                    else Ok (sprintf "%s=%s" name value :: entries))
-        |> Result.map (List.rev >> List.toArray)
+    /// Resolve `spec.EnvironmentVariables` to Docker `Env` entries (`KEY=VALUE`) through
+    /// the injected, session-scoped resolver (Plan 06: the Manager's store-backed
+    /// precedence walk, or the bare process-env fallback), failing on an unresolved
+    /// secret reference. This is the ONLY moment a secret value exists on the start
+    /// path — it goes straight into the container's env.
+    let private resolveEnv (resolveSecret: SecretStore.ResolveSecret) (sessionId: SessionId) (spec: EnvironmentSpec) : Async<Result<string array, string>> =
+        let rec walk acc entries =
+            async {
+                match entries with
+                | [] -> return Ok (acc |> List.rev |> List.toArray)
+                | (name, PlainValue v) :: rest -> return! walk (sprintf "%s=%s" name v :: acc) rest
+                | (name, SecretRef secret) :: rest ->
+                    match! resolveSecret sessionId secret with
+                    | Error e -> return Error e
+                    | Ok value -> return! walk (sprintf "%s=%s" name value :: acc) rest
+            }
+        walk [] (spec.EnvironmentVariables |> Map.toList)
 
     /// One `HostConfig.Mounts` entry from a typed mount.
     let private mountObj (sessionId: SessionId) (m: ContainerMount) : obj =
@@ -135,7 +131,7 @@ module DockerBackend =
             with _ -> return false
         }
 
-    let create () : ContainerBackend =
+    let create (resolveSecret: SecretStore.ResolveSecret) : ContainerBackend =
         let client = DK.create ()
 
         { Start =
@@ -177,7 +173,8 @@ module DockerBackend =
                                         let! drained = drainProgress client stream
                                         return drained |> Result.map (fun () -> image)
                             }
-                        match imageResult, resolveEnv spec with
+                        let! envResult = resolveEnv resolveSecret sessionId spec
+                        match imageResult, envResult with
                         | Error reason, _ -> return Error reason
                         | _, Error reason -> return Error reason
                         | Ok image, Ok env ->

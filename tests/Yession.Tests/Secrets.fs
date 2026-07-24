@@ -385,6 +385,58 @@ let private keyringTests =
             }
     ]
 
+// --- Step 7: injection precedence (pure walk over an in-memory store; cheap tier) -------
+
+let private resolutionTests =
+    testList "injection resolution" [
+        testCaseAsync "session scope shadows user scope shadows the fallback" <|
+            async {
+                let! opened = SecretStore.openStore None (KeyStore.random ())
+                let store = expect opened
+                let id scope = sid scope "deploy-token"
+                let! _ = store.Set (id (SessionScope sessionA)) "from-session"
+                let! _ = store.Set (id (UserScope alice)) "from-user"
+                let fallback : SecretStore.ResolveSecret = fun _ _ -> async { return Ok "from-env" }
+                let resolve = SecretStore.SecretResolution.compose store (fun _ -> Set.singleton alice) fallback
+
+                let! full = resolve sessionA name
+                Expect.equal (expect full) "from-session" "the session's own secret wins"
+
+                let! _ = store.Delete (id (SessionScope sessionA))
+                let! userLevel = resolve sessionA name
+                Expect.equal (expect userLevel) "from-user" "a bound user's secret is next"
+
+                let! _ = store.Delete (id (UserScope alice))
+                let! envLevel = resolve sessionA name
+                Expect.equal (expect envLevel) "from-env" "the process-env fallback is last"
+            }
+
+        testCaseAsync "an unbound user's secret is invisible: the policy skips the scope" <|
+            async {
+                let! opened = SecretStore.openStore None (KeyStore.random ())
+                let store = expect opened
+                let! _ = store.Set (sid (UserScope alice) "deploy-token") "alice's"
+                // Session B has no bound users: alice's scope is never a candidate, and
+                // even a hand-crafted walk would be denied by the policy.
+                let fallback : SecretStore.ResolveSecret = fun _ n -> async { return Error (sprintf "secret '%s' is not available" (SecretName.value n)) }
+                let resolve = SecretStore.SecretResolution.compose store (fun _ -> Set.empty) fallback
+                let! outcome = resolve sessionB name
+                Expect.isError outcome "nothing resolves"
+            }
+
+        testCaseAsync "a total miss reports the fallback's legible error" <|
+            async {
+                let! opened = SecretStore.openStore None (KeyStore.random ())
+                let store = expect opened
+                let resolve = SecretStore.SecretResolution.compose store (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
+                let missing = SecretName.create "YESSION_DEFINITELY_MISSING" |> expect
+                let! outcome = resolve sessionA missing
+                match outcome with
+                | Error e -> Expect.isTrue (e.Contains "YESSION_DEFINITELY_MISSING") "names the missing secret"
+                | Ok _ -> failwith "expected a miss"
+            }
+    ]
+
 // --- Step 6: the secrets control routes over real HTTP ([Ports]) ------------------------
 // A bare control server (the Phase4 pattern) with a known caller table and the SAME
 // pre-authorized handlers the Manager composes (ProcessManager.secretsApiFor), driven
@@ -495,6 +547,7 @@ let tests =
         wireTests
         cipherTests
         storeTests
+        resolutionTests
         Tag.needs "OS keyring" [ Tag.Keyring ] (fun () -> keyringTests)
         Tag.needs "Secrets control routes" [ Tag.Ports ] (fun () -> routeTests)
     ]

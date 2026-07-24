@@ -26,6 +26,10 @@ type SecretStore =
 
 let private now () : DateTimeOffset = DateTimeOffset.UtcNow
 
+/// How a launched environment's `SecretRef` env vars resolve to values, pre-scoped to
+/// the session being started. The ONLY consumer of `SecretStore.Resolve`.
+type ResolveSecret = SessionId -> SecretName -> Async<Result<string, string>>
+
 /// Open the store. Durable when `persistPath` is set: KEK through the KeyStore
 /// (created on first run, durable in the credential manager BEFORE first use), file
 /// loaded through the codec (missing = empty; corrupt = loud Error; KekId mismatch =
@@ -121,3 +125,57 @@ let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async
                       Durable = Option.isSome persistPath }
                 return Ok store
     }
+
+/// Secret resolution for environment injection (Plan 06): which value a `SecretRef`
+/// means for THIS session, in precedence order — the session's own scoped secret, then
+/// a user-scoped secret of a user the Manager verified into the session's launch, then
+/// the fallback. Every store step passes the same pure policy the control routes use
+/// (InjectSecret); a Deny simply means "not this caller's secret — next scope", and
+/// only a store FAILURE stops the walk.
+module SecretResolution =
+
+    /// The explicit lowest-precedence fallback: the Manager's OWN process environment —
+    /// the pre-Plan-06 "smallest local-dev store" (docs/GAPS.md), kept so existing
+    /// flows work unseeded. Inside the Manager's trust boundary; any store entry
+    /// shadows it.
+    [<Fable.Core.Emit("process.env[$0]")>]
+    let private processEnvRaw (name: string) : string = Fable.Core.Util.jsNative
+
+    let processEnv : ResolveSecret =
+        fun _sessionId name ->
+            async {
+                let value = processEnvRaw (SecretName.value name)
+                if isNull (box value) then
+                    return Error (sprintf "secret '%s' is not available" (SecretName.value name))
+                else return Ok value
+            }
+
+    /// The scopes a session may draw injected values from, most specific first.
+    let scopesFor (sessionId: SessionId) (users: Set<UserSubject>) : SecretScope list =
+        SessionScope sessionId :: (users |> Set.toList |> List.map UserScope)
+
+    let compose (store: SecretStore) (usersOf: SessionId -> Set<UserSubject>) (fallback: ResolveSecret) : ResolveSecret =
+        fun sessionId name ->
+            async {
+                let users = usersOf sessionId
+                let subject : AuthzSubject = { Session = Some sessionId; Users = users }
+                let rec walk scopes =
+                    async {
+                        match scopes with
+                        | [] -> return! fallback sessionId name
+                        | scope :: rest ->
+                            let id : SecretId = { Scope = scope; Name = name }
+                            let request =
+                                { Subject = subject
+                                  Action = SecretAction InjectSecret
+                                  Resource = SecretResource id }
+                            match Policy.authorize request with
+                            | Deny _ -> return! walk rest
+                            | Permit ->
+                                match! store.Resolve id with
+                                | Ok (Some value) -> return Ok value
+                                | Ok None -> return! walk rest
+                                | Error e -> return Error e
+                    }
+                return! walk (scopesFor sessionId users)
+            }
