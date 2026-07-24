@@ -526,6 +526,39 @@ let private routeTests =
                 Expect.isTrue (deleted.body.Contains "true") "reports the entry existed"
             }
 
+        testCaseAsync "the session-side typed capability drives the full lifecycle over the wire" <|
+            async {
+                let! opened = SecretStore.openStore None (KeyStore.random ())
+                let store = expect opened
+                let! _, url =
+                    startControlServer
+                        [ "secret-a", caller sessionA Set.empty ]
+                        (Some (ProcessManager.secretsApiFor store))
+                // The capability a Session Process builds in SessionMain: pre-bound to
+                // its own scope; failures are values.
+                let capability = ControlClient.secretsCapabilities url "secret-a" sessionA
+                let! set = capability.SetSecret name "hunter2"
+                Expect.equal (expect set).Id { Scope = SessionScope sessionA; Name = name } "metadata round-trips"
+                let! listed = capability.ListSecrets ()
+                Expect.equal (expect listed |> List.length) 1 "lists the one secret"
+                let! deleted = capability.DeleteSecret name
+                Expect.isTrue (expect deleted) "reports existence on delete"
+                let! deletedAgain = capability.DeleteSecret name
+                Expect.isFalse (expect deletedAgain) "second delete reports absence"
+            }
+
+        testCaseAsync "the agent capability surface denies cleanly without a grant" <|
+            async {
+                // What a turn sees when no secrets capability is threaded (Host passes
+                // None): every operation is a legible Error value, never an exception.
+                let! set = AgentCapabilities.none.SetSecret name "v"
+                Expect.isError set "set denies"
+                let! listed = AgentCapabilities.none.ListSecrets ()
+                Expect.isError listed "list denies"
+                let! deleted = AgentCapabilities.none.DeleteSecret name
+                Expect.isError deleted "delete denies"
+            }
+
         testCaseAsync "a Manager without a secrets store answers 403" <|
             async {
                 let! _, url = startControlServer [ "secret-a", caller sessionA Set.empty ] None

@@ -47,6 +47,9 @@ type SessionHost =
 let startFull
     (runAgent: RunAgent option)
     (environmentCapabilities: SessionEnvironmentCapabilities option)
+    // Secrets (Plan 06): the Manager-granted, session-scoped secrets surface
+    // (write/list/delete — never read). None = turns see the `none` denials.
+    (secretsCapabilities: ControlClient.SessionSecretsCapabilities option)
     (baseLog: EventLog<SessionEvent> option)
     (docStore: DocStore.DocStore option)
     (reportName: (string -> Async<unit>) option)
@@ -140,7 +143,19 @@ let startFull
             | Error e -> failwithf "message id invariant violated: %s" e
         let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
             { EnsureEnvironment = environment.Ensure (Some turnId)
-              ExecuteCommand = environment.Execute }
+              ExecuteCommand = environment.Execute
+              SetSecret =
+                match secretsCapabilities with
+                | Some secrets -> secrets.SetSecret
+                | None -> AgentCapabilities.none.SetSecret
+              ListSecrets =
+                match secretsCapabilities with
+                | Some secrets -> secrets.ListSecrets
+                | None -> AgentCapabilities.none.ListSecrets
+              DeleteSecret =
+                match secretsCapabilities with
+                | Some secrets -> secrets.DeleteSecret
+                | None -> AgentCapabilities.none.DeleteSecret }
 
         // The queue drain and turn scheduler (Phase 3) — the real machinery lives in
         // `Scheduler` (shared with the property harness); the Host wires it to this
@@ -314,7 +329,7 @@ let startWithCapabilities
     (sessionId: SessionId)
     (port: int)
     : Async<SessionHost> =
-    startFull runAgent environmentCapabilities baseLog None None (fun _ _ -> ()) None None sessionId None port
+    startFull runAgent environmentCapabilities None baseLog None None (fun _ _ -> ()) None None sessionId None port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

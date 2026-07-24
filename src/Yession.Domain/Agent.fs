@@ -45,19 +45,38 @@ type EnsureEnvironment = string -> Async<EnsureEnvironmentResult>
 /// callback (it is also recorded as events by the Session Process).
 type ExecuteCommand = CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult>
 
+/// Persist a secret under the session's own scope (Plan 06). WRITE-ONLY from the
+/// agent's side: there is no capability that returns a value — a stored secret is used
+/// by referencing its name in an environment spec (`SecretRef`), resolved Manager-side
+/// straight into the container env, never through the agent loop or the transcript.
+type SetSessionSecret = SecretName -> string -> Async<Result<SecretMetadata, string>>
+
+/// List the session's secret METADATA — names and timestamps, never values (the type
+/// cannot carry one).
+type ListSessionSecrets = unit -> Async<Result<SecretMetadata list, string>>
+
+/// Delete one of the session's secrets; false = it did not exist.
+type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
+
 /// The typed capabilities an agent turn may use. No raw Docker, no handles, no session
 /// ids — everything is already scoped by the Session Process and, beneath it, the
 /// Session Manager.
 type AgentCapabilities =
     { EnsureEnvironment : EnsureEnvironment
-      ExecuteCommand : ExecuteCommand }
+      ExecuteCommand : ExecuteCommand
+      SetSecret : SetSessionSecret
+      ListSecrets : ListSessionSecrets
+      DeleteSecret : DeleteSessionSecret }
 
 module AgentCapabilities =
 
     /// A turn with no environment authority at all (Phase 1 behaviour).
     let none : AgentCapabilities =
         { EnsureEnvironment = fun _ -> async { return EnvironmentUnavailable "no environment capability" }
-          ExecuteCommand = fun _ _ -> async { return CommandExecutionFailed "no environment capability" } }
+          ExecuteCommand = fun _ _ -> async { return CommandExecutionFailed "no environment capability" }
+          SetSecret = fun _ _ -> async { return Error "no secrets capability" }
+          ListSecrets = fun () -> async { return Error "no secrets capability" }
+          DeleteSecret = fun _ -> async { return Error "no secrets capability" } }
 
 /// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
 /// Session Process owns the signal; the runner observes it — poll `IsAborted` at
