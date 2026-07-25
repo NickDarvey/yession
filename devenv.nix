@@ -19,12 +19,7 @@ in
   # dbus + gnome-keyring back the `Keyring` test capability on headless hosts:
   # `scripts/with-keyring.sh check Keyring` runs the OS-credential-manager suite against
   # a private, empty-password-unlocked Secret Service (see the script).
-  #
-  # fsautocomplete is the F# language server (the engine behind Ionide). It is not part of
-  # any build or test path — it backs `scripts/fsharp-lsp-mcp.js`, which gives agents
-  # compiler-accurate go-to-definition / find-references instead of text search. It reads
-  # Yession.slnx directly and loads every project with no configuration.
-  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint pkgs.fsautocomplete ];
+  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint ];
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";

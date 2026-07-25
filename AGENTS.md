@@ -109,44 +109,35 @@ lives on GitHub releases, which the proxy blocks); Nix builds it from source and
 the `nodeModules` derivation the dev shell symlinks in (and into the `outputs`) — so the
 `Native` tier just works (see devenv.nix / Testing).
 
-## Navigating the F# (don't grep for symbols)
+## Finding F# symbols
 
-`fsautocomplete` — the F# language server behind Ionide — is a devenv package, and
-`scripts/fsharp-lsp-mcp.js` exposes it to agents over MCP (registered in `.mcp.json`). Four
-tools: `fsharp_definition`, `fsharp_references`, `fsharp_hover`, `fsharp_symbol_search`.
-Positions are 1-based, and you pass the identifier you care about rather than a column:
+Never search for a bare name. F# reuses one identifier across several unrelated symbols:
+`SessionId` is a type, its companion module, a DU case constructor, and twelve record
+fields. `rg '\bSessionId\b'` returns 321 hits; only 97 are the type.
+
+Search for the **declaration form** instead — it is anchored and unambiguous:
 
 ```
-fsharp_definition { file: "app/Backends.fs", line: 100, symbol: "value" }
-  -> src/Yession.Domain/Identity.fs:78:9   let value (SessionId s) = s
+rg '^type SessionId\b'                      # the type
+rg '^module SessionId\b'                    # its companion module (usually just below)
+rg '^\s*(type|module|let|and)\s+Foo\b'      # any declaration of Foo, when unsure which
 ```
 
-Reach for these over `rg` whenever the question is "where is this defined / what uses this /
-what type is this". F# infers most types (so the answer often isn't in the text at all) and
-freely reuses one name across a type, its module, its DU case, and record fields — text search
-cannot tell them apart. `rg '\bSessionId\b'` returns **321 hits** here; the compiler finds
-**97** references to the type.
+Then scope to the owning file, because short member names repeat across sibling modules —
+`rg '^\s+let value\b' src/Yession.Domain/Identity.fs` returns nine hits, one per identity
+type, disambiguated only by their pattern (`let value (SessionId s) = s`).
 
-The cost is startup: ~20s to load the workspace and ~1.3GB resident, plus ~12s on the first
-`references` call (it forces a workspace-wide check). The MCP server therefore starts
-fsautocomplete eagerly when the session starts, so that cost usually lands before you ask
-anything; `FSAC_LAZY=1` defers it to the first query instead.
+Two properties make this reliable:
 
-**You do not need to be inside `devenv shell` for this.** Agents are normally launched from
-the plain container shell, so the server is found at `.devenv/profile/bin/fsautocomplete` —
-devenv's mirror of the built environment, refreshed on every `devenv shell` — rather than on
-PATH. That directory also goes on the spawned server's PATH: fsautocomplete loads projects by
-shelling out to MSBuild, and without `dotnet` there it starts happily, loads zero projects,
-and answers every query with "Couldn't find <file> in LoadedProjects", which looks like a
-broken workspace rather than a missing toolchain.
+- **Compile order is explicit.** Each `.fsproj` lists `<Compile Include>` in order, and a
+  symbol is always declared in that file or an earlier one — read the `.fsproj` to bound
+  the search.
+- **Scoping is strictly top-down.** Within a file, a definition precedes every use, so
+  going down, the first match is the declaration.
 
-The one requirement is that the environment has been built at least once, since
-`.devenv/profile` is created by `devenv shell`. In a fresh container run the Bootstrap above
-first. If the MCP server started before that, it watches for the profile and warms up when it
-appears — no session restart needed.
-
-Still use `rg` for what it's good at: string literals, comments, config, non-F# files, and
-"does this phrase appear anywhere".
+The one thing text search cannot recover is a type F# inferred rather than wrote: `let x =
+foo bar` has no annotation to find. Follow the right-hand side to its declaration, or write
+the type you expect and let `check` tell you if you are wrong.
 
 ## Testing
 
