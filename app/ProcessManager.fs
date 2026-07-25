@@ -50,6 +50,16 @@ type ProcessManager =
       /// leg): replaces the retained list and pushes it to all live subscribers, and every
       /// session that subscribes later receives it as its initial snapshot.
       PublishMcpTools : McpToolList -> unit
+      /// Users the Manager verified into the session's live launch at ID-token
+      /// issuance (Plan 06). Empty for a stopped session or before any login —
+      /// bindings die with the launch.
+      UsersOf : SessionId -> Set<UserSubject>
+      /// Session-scoped secret resolution for environment injection (Plan 06):
+      /// store-backed precedence (session scope, then bound users' scopes, then the
+      /// Manager's process env) when a store is configured; bare process env otherwise.
+      /// Hand this to a container backend — values resolve at container start, never
+      /// over the control channel.
+      ResolveSecret : SecretStore.ResolveSecret
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
       /// Stop every running child and the Manager endpoint (Manager shutdown).
@@ -84,7 +94,20 @@ type Options =
       /// How the OIDC provider authenticates the human at /authorize. None = the
       /// built-in trust-localhost strategy; an upstream OIDC integration is a
       /// different strategy value, not a different Manager.
-      Strategy : AuthenticationStrategy option }
+      Strategy : AuthenticationStrategy option
+      /// Secrets (Plan 06): how the Manager's secret store is keyed. None = the
+      /// feature is off — the secrets routes answer 403 and injection sees only the
+      /// process-env fallback (the pre-Plan-06 behaviour).
+      Secrets : SecretsBacking option }
+
+/// How the secret store is keyed on this host.
+and SecretsBacking =
+    /// A usable OS credential manager holds the KEK; the encrypted store lives at
+    /// <DataDir>/secrets.json.
+    | DurableSecrets of KeyStore.KeyStore
+    /// No credential manager: the store runs in memory under a per-boot random key
+    /// and dies with the Manager. Loudly logged at boot; never a plaintext key file.
+    | EphemeralSecrets
 
 module Options =
     let defaults (dataDir: string) (sessionCommand: string) (sessionArgs: string list) : Options =
@@ -97,12 +120,69 @@ module Options =
           Grant = None
           ManagerPort = None
           Telemetry = None
-          Strategy = None }
+          Strategy = None
+          Secrets = None }
 
 [<Fable.Core.Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
 
 let private clock () = DateTimeOffset.UtcNow
+
+/// The secrets handlers (Plan 06): the ONLY place a verified AuthzSubject is built, so
+/// the route arms stay policy-free. Every deny is logged (subject/action/scope — never
+/// values); every permitted call goes straight to the store. Module-level so the
+/// authorization matrix is testable over a bare control server.
+let secretsApiFor (audit: TelemetryReceiver.Sink) (store: SecretStore.SecretStore) : Control.SecretsApi =
+    let authorize (caller: Control.ControlCaller) (action: SecretAction) (resource: AuthzResource) =
+        let request =
+            { Subject = { Session = Some caller.SessionId; Users = caller.Users }
+              Action = SecretAction action
+              Resource = resource }
+        match Policy.authorize request with
+        | Permit -> Ok ()
+        | Deny reason ->
+            audit (TelemetryReceiver.Audit.authzDeny caller.SessionId action resource reason)
+            Error (Control.SecretsDenied reason)
+    { Control.SecretsApi.Set =
+        fun caller request ->
+            async {
+                let id : SecretId = { Scope = request.Scope; Name = request.Name }
+                match authorize caller SetSecret (SecretResource id) with
+                | Error e -> return Error e
+                | Ok () ->
+                    match! store.Set id request.Value with
+                    | Ok metadata ->
+                        audit (TelemetryReceiver.Audit.secretSet caller.SessionId id true)
+                        return Ok metadata
+                    | Error e ->
+                        audit (TelemetryReceiver.Audit.secretSet caller.SessionId id false)
+                        return Error (Control.SecretsFailed e)
+            }
+      List =
+        fun caller request ->
+            async {
+                match authorize caller ListSecrets (SecretCollection request.Scope) with
+                | Error e -> return Error e
+                | Ok () ->
+                    let listed = store.List request.Scope
+                    audit (TelemetryReceiver.Audit.secretList caller.SessionId request.Scope listed.Length)
+                    return Ok listed
+            }
+      Delete =
+        fun caller request ->
+            async {
+                let id : SecretId = { Scope = request.Scope; Name = request.Name }
+                match authorize caller DeleteSecret (SecretResource id) with
+                | Error e -> return Error e
+                | Ok () ->
+                    match! store.Delete id with
+                    | Ok existed ->
+                        audit (TelemetryReceiver.Audit.secretDelete caller.SessionId id true)
+                        return Ok existed
+                    | Error e ->
+                        audit (TelemetryReceiver.Audit.secretDelete caller.SessionId id false)
+                        return Error (Control.SecretsFailed e)
+            } }
 
 /// Create the Manager. `ui` is the management surface (Step 25): a route handler that
 /// closes over the Manager itself, sharing the control endpoint's server.
@@ -131,6 +211,10 @@ let createWithUi
     // Per-launch telemetry bearer secrets (Plan 04): a session posts OTLP logs authenticated
     // with its bearer; the secret lives and dies with the launch, like the control secret.
     let mutable telemetrySecrets : Set<string> = Set.empty
+    // Users the Manager verified into a LAUNCH (Plan 06): recorded at ID-token issuance,
+    // keyed by the per-launch control secret so the binding dies with the launch, exactly
+    // like the client registration it derives from. Durable secrets, per-login access.
+    let mutable launchUsers : Map<string, Set<UserSubject>> = Map.empty
 
     // Manager→Session notifications (the reverse leg): live subscriber sinks keyed by the
     // same per-launch secret, so a session's stream dies exactly when its launch does.
@@ -179,7 +263,50 @@ let createWithUi
     // provider reads the issuer lazily, so the mutable slot resolves cleanly.
     let mutable endpointUrl : string option = None
     let issuerOf () = defaultArg endpointUrl ""
-    let! provider = ManagerOidc.create issuerOf (defaultArg options.Strategy Strategy.localhost)
+    // The Manager's audit sink (Plan 06 telemetry): the telemetry collector when one is
+    // configured (records route through it once, and reach the onRecord re-export
+    // seam), the stdout formatter otherwise. Built exactly once — either/or, never
+    // both, so a record prints exactly once.
+    let audit : TelemetryReceiver.Sink =
+        match options.Telemetry with
+        | Some collector -> collector.Record
+        | None -> TelemetryReceiver.Audit.stdout
+
+    // The secret store (Plan 06). A corrupt durable store fails the boot loudly — it
+    // must never look empty. The ephemeral mode warns loudly and leaves any durable
+    // file from a previous run untouched (inaccessible, never deleted).
+    let secretsPath = sprintf "%s/secrets.json" options.DataDir
+    let! secretStore =
+        async {
+            match options.Secrets with
+            | None -> return None
+            | Some (DurableSecrets keyStore) ->
+                match! SecretStore.openStore (Some secretsPath) keyStore with
+                | Ok store ->
+                    audit (TelemetryReceiver.Audit.storeOpen "durable" keyStore.Name store.KekMinted store.EntriesAtOpen)
+                    return Some store
+                | Error e ->
+                    audit (TelemetryReceiver.Audit.storeOpenFailed (SecretStore.OpenError.kind e) (SecretStore.OpenError.describe e))
+                    return failwithf "secrets store: %s" (SecretStore.OpenError.describe e)
+            | Some EphemeralSecrets ->
+                audit TelemetryReceiver.Audit.storeEphemeral
+                if Fs.exists secretsPath then
+                    audit (TelemetryReceiver.Audit.storeInaccessible secretsPath)
+                match! SecretStore.openStore None (KeyStore.random ()) with
+                | Ok store ->
+                    audit (TelemetryReceiver.Audit.storeOpen "ephemeral" "in-memory" store.KekMinted store.EntriesAtOpen)
+                    return Some store
+                | Error e -> return failwithf "secrets store (ephemeral): %s" (SecretStore.OpenError.describe e)
+        }
+
+    let recordTokenIssued (controlSecret: string) (sessionId: SessionId) (subject: UserSubject) : unit =
+        // Guarded by the live secret: a token redeemed in the same instant a launch
+        // dies must not resurrect its authority.
+        if Map.containsKey controlSecret secretSessions then
+            let existing = Map.tryFind controlSecret launchUsers |> Option.defaultValue Set.empty
+            launchUsers <- Map.add controlSecret (Set.add subject existing) launchUsers
+            audit (TelemetryReceiver.Audit.bindingRecorded sessionId subject)
+    let! provider = ManagerOidc.create issuerOf (defaultArg options.Strategy Strategy.localhost) recordTokenIssued
 
     // What a control secret resolves to: the launch's session plus its (optional)
     // environment grant. Registration works for every launch; environment routes 403
@@ -188,13 +315,26 @@ let createWithUi
         Map.tryFind secret secretSessions
         |> Option.map (fun sessionId ->
             { Control.ControlCaller.SessionId = sessionId
-              Capabilities = Map.tryFind secret secrets })
+              Capabilities = Map.tryFind secret secrets
+              Users = Map.tryFind secret launchUsers |> Option.defaultValue Set.empty })
+
+    let secretsApi : Control.SecretsApi option = secretStore |> Option.map (secretsApiFor audit)
+
+    // The union of user bindings across a session's live launches (in practice one).
+    let usersOf (sessionId: SessionId) : Set<UserSubject> =
+        secretSessions
+        |> Map.fold
+            (fun acc secret sid ->
+                if sid = sessionId then
+                    Set.union acc (Map.tryFind secret launchUsers |> Option.defaultValue Set.empty)
+                else acc)
+            Set.empty
 
     let! controlServer =
         async {
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                 let handled =
-                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient req res
+                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi (fun path -> audit (TelemetryReceiver.Audit.controlUnauthorized path)) req res
                     || (match options.Telemetry with
                         | Some collector ->
                             TelemetryReceiver.tryHandle (fun secret -> Set.contains secret telemetrySecrets) collector req res
@@ -285,12 +425,19 @@ let createWithUi
                 let revokeSecret () =
                     (match snd controlEnv with
                      | Some secret ->
+                         // Audit the binding teardown only when a binding existed (an
+                         // ordinary stop of a never-logged-in session is not an event).
+                         (match Map.tryFind secret secretSessions with
+                          | Some sessionId when Map.containsKey secret launchUsers ->
+                              audit (TelemetryReceiver.Audit.bindingRevoked sessionId)
+                          | _ -> ())
                          secrets <- Map.remove secret secrets
                          secretSessions <- Map.remove secret secretSessions
-                         // The launch's notification subscriptions and OAuth client
-                         // registration die with its authority.
+                         // The launch's notification subscriptions, OAuth client
+                         // registration, and user bindings die with its authority.
                          notifications.Drop secret
                          provider.RevokeByControlSecret secret
+                         launchUsers <- Map.remove secret launchUsers
                      | None -> ())
                     // The launch's telemetry authority dies with it too.
                     match snd telemetryEnv with
@@ -347,6 +494,11 @@ let createWithUi
                 |> Option.map (fun r -> { Record = r; Status = statusOf r })
           Notify = notify
           PublishMcpTools = mcp.Publish
+          UsersOf = usersOf
+          ResolveSecret =
+            match secretStore with
+            | Some store -> SecretStore.SecretResolution.compose (TelemetryReceiver.Audit.injectObserver audit) store usersOf SecretStore.SecretResolution.processEnv
+            | None -> SecretStore.SecretResolution.processEnv
           EndpointPort = controlServer |> Option.map Interop.serverPort
           StopAll =
             fun () ->

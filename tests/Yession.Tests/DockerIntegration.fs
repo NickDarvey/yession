@@ -67,7 +67,7 @@ let private start (spec: EnvironmentSpec) : Async<SessionId * SessionEnvironment
     async {
         let registry = Authority.ContainerRegistry ()
         let sessionId = SessionId.mint ()
-        let caps = Authority.grant registry (Backends.DockerBackend.create ()) sessionId
+        let caps = Authority.grant registry (Backends.DockerBackend.create SecretStore.SecretResolution.processEnv) sessionId
         match! caps.StartContainer spec with
         | ContainerStartFailed r -> return failwithf "container start failed: %s" r
         | ContainerStarted handle -> return sessionId, caps, handle
@@ -221,11 +221,52 @@ let tests =
                     // An unresolved secret ref fails start with a legible reason.
                     unsetEnv "YESSION_MISSING_SECRET"
                     let registry = Authority.ContainerRegistry ()
-                    let missingCaps = Authority.grant registry (Backends.DockerBackend.create ()) (SessionId.mint ())
+                    let missingCaps = Authority.grant registry (Backends.DockerBackend.create SecretStore.SecretResolution.processEnv) (SessionId.mint ())
                     let missingSpec =
                         { alpineSpec with EnvironmentVariables = Map.ofList [ "TOKEN", SecretRef (SecretName.create "YESSION_MISSING_SECRET" |> expect) ] }
                     match! missingCaps.StartContainer missingSpec with
                     | ContainerStartFailed reason -> Expect.isTrue (reason.Contains "YESSION_MISSING_SECRET") "the failure names the missing secret"
                     | ContainerStarted _ -> failwith "start should fail when a secret ref cannot be resolved"
+                })
+
+            Docker.gate "the Manager's secret store injects into the container env, gated by the ABAC walk (Plan 06)" (fun () ->
+                async {
+                    // A store seeded with a session-scoped secret, a user-scoped secret,
+                    // and a shadowed name that also exists in the process env.
+                    let! opened = SecretStore.openStore None (KeyStore.random ())
+                    let store = expect (opened |> Result.mapError SecretStore.OpenError.describe)
+                    let sessionId = SessionId.mint ()
+                    let alice = UserSubject.create "alice" |> expect
+                    let secretName n = SecretName.create n |> expect
+                    let! _ = store.Set { Scope = SessionScope sessionId; Name = secretName "SESSION_TOKEN" } "session-held"
+                    let! _ = store.Set { Scope = UserScope alice; Name = secretName "USER_TOKEN" } "user-held"
+                    setEnv "SESSION_TOKEN" "env-shadowed"
+                    let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) SecretStore.SecretResolution.processEnv
+                    let registry = Authority.ContainerRegistry ()
+                    let caps = Authority.grant registry (Backends.DockerBackend.create resolve) sessionId
+                    let spec =
+                        { alpineSpec with
+                            EnvironmentVariables =
+                                Map.ofList
+                                    [ "SESSION_TOKEN", SecretRef (secretName "SESSION_TOKEN")
+                                      "USER_TOKEN", SecretRef (secretName "USER_TOKEN") ] }
+                    match! caps.StartContainer spec with
+                    | ContainerStartFailed r -> failwithf "container start failed: %s" r
+                    | ContainerStarted handle ->
+                        let! _, out, _ = run caps handle (req "s-env" "printenv" [] Map.empty None None)
+                        Expect.isTrue (out.Contains "SESSION_TOKEN=session-held") "the store's session secret shadows the env fallback"
+                        Expect.isTrue (out.Contains "USER_TOKEN=user-held") "a bound user's secret injects"
+                        do! stop caps handle
+                    unsetEnv "SESSION_TOKEN"
+
+                    // Without the user binding, the user-scoped secret is unreachable.
+                    let unbound = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
+                    let registry2 = Authority.ContainerRegistry ()
+                    let session2 = SessionId.mint ()
+                    let caps2 = Authority.grant registry2 (Backends.DockerBackend.create unbound) session2
+                    let spec2 = { alpineSpec with EnvironmentVariables = Map.ofList [ "USER_TOKEN", SecretRef (secretName "USER_TOKEN") ] }
+                    match! caps2.StartContainer spec2 with
+                    | ContainerStartFailed reason -> Expect.isTrue (reason.Contains "USER_TOKEN") "refused: no bound user, and no env fallback"
+                    | ContainerStarted _ -> failwith "an unbound session must not receive a user's secret"
                 })
         ])

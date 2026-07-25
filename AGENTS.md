@@ -83,7 +83,9 @@ skip — never an error. Pass the caps THIS box has as args:
 check                        # cheap tier: pure/model/protocol on Node. Every PR. Fast.
 check Browser                # + host-free rich-editor E2E. Needs only Chromium.
 check Ports Native           # + WebRTC/host suites. Need the node-datachannel addon.
-verify                       # == check Browser Ports Native Docker LiveAgent. Release gate.
+bash scripts/with-keyring.sh check Keyring   # + the OS-credential-manager suite, headless.
+verify                       # == check Browser Ports Native Docker LiveAgent Keyring. Release
+                             #    gate; CI wraps it in with-keyring.sh for the Keyring cap.
 ```
 
 Capabilities:
@@ -95,6 +97,10 @@ Capabilities:
   so `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC data-channel E2E) RUN
   here. Outside Nix the addon is absent and they skip cleanly.
 - `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
+- `Keyring` — a usable OS credential manager (Plan 06: the secrets KEK lives there). On a
+  desktop, `check Keyring` drives the genuine Keychain / Credential Manager / Secret Service;
+  headless (this container, CI), wrap the run in `scripts/with-keyring.sh` — a private D-Bus
+  session + gnome-keyring (both devenv packages) unlocked with an empty password.
 
 To eyeball a rich-editor change in a real browser without any of the WebRTC machinery:
 `check Browser` (drives Chromium against `tests/browser/editor-harness.html`). The full

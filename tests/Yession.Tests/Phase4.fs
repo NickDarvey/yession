@@ -214,7 +214,7 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
         let table =
             secrets
             |> List.map (fun (secret, sessionId, capabilities) ->
-                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities }
+                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities; Users = Set.empty }
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
@@ -223,7 +223,7 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
         let registerClient _ (sessionId: SessionId) _ : Yession.Oidc.RegisterClientResponse =
             { ClientId = SessionId.value sessionId; ClientSecret = "unused"; Issuer = "http://unused" }
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None ignore req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
@@ -595,15 +595,18 @@ let private telemetryTests =
                     sprintf "tests/Yession.Tests/out/.data/tel-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
 
                 // The Manager's collector, with an onRecord signal so the test awaits the
-                // arriving record instead of polling the async batch export.
+                // arriving USAGE record instead of polling the async batch export. (The
+                // Manager's own audit records — Plan 06 — share this collector and arrive
+                // earlier, e.g. the login's binding_recorded; they must not satisfy the wait.)
                 let mutable fired = false
                 let mutable waiter : (unit -> unit) option = None
                 let collector =
-                    TelemetryReceiver.Collector.create (fun _ ->
-                        fired <- true
-                        match waiter with
-                        | Some resume -> waiter <- None; resume ()
-                        | None -> ())
+                    TelemetryReceiver.Collector.create (fun r ->
+                        if TelemetryReceiver.TurnUsage.ofLog r |> Option.isSome then
+                            fired <- true
+                            match waiter with
+                            | Some resume -> waiter <- None; resume ()
+                            | None -> ())
 
                 let! pm =
                     ProcessManager.create

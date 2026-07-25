@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Fable bindings to the `@napi-rs/keyring` npm package — the OS credential managers
+    (macOS Keychain, Windows Credential Manager, Linux Secret Service) behind the Rust
+    keyring via N-API, with per-platform prebuilds resolved by npm. Fable-only:
+    `dotnet build` only type-checks it; the runnable JS comes from Fable. Kept a
+    standalone project so the bindings are a distinct layer, mirroring Fable.Jose.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Keyring.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>

@@ -616,7 +616,7 @@ let private acceptanceE2eTests =
             async {
                 let registry = Authority.ContainerRegistry ()
                 let sessionId = SessionId.mint ()
-                let capabilities = Authority.grant registry (Backends.DockerBackend.create ()) sessionId
+                let capabilities = Authority.grant registry (Backends.DockerBackend.create Yession.Host.SecretStore.SecretResolution.processEnv) sessionId
                 match! capabilities.StartContainer EnvironmentSpec.localProcess with
                 | ContainerStartFailed reason -> failwithf "docker start failed: %s" reason
                 | ContainerStarted handle ->

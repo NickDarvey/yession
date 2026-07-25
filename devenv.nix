@@ -16,7 +16,10 @@ in
   languages.dotnet.enable = true;
   languages.dotnet.package = pkgs.dotnet-sdk_10;
 
-  packages = [ pkgs.git ];
+  # dbus + gnome-keyring back the `Keyring` test capability on headless hosts:
+  # `scripts/with-keyring.sh check Keyring` runs the OS-credential-manager suite against
+  # a private, empty-password-unlocked Secret Service (see the script).
+  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring ];
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
@@ -29,7 +32,7 @@ in
       ln -s ${yession.nodeModules}/node_modules node_modules
     fi
     export PATH="$PWD/node_modules/.bin:$PATH"
-    echo "yession — tasks: restore build start dev check verify package clean  (check <caps>: Browser Ports Native Docker LiveAgent)"
+    echo "yession — tasks: restore build start dev check verify package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring)"
   '';
 
   # --- build outputs (devenv build outputs.<name>) -------------------------------------------

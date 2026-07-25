@@ -186,4 +186,73 @@ let private receiverTests =
             }
     ]
 
-let tests = testList "Telemetry" [ bindingTests; emitterTests; receiverTests ]
+// --- Manager audit records (Plan 06 telemetry) -------------------------------------------
+
+let private auditTests =
+    let sessionId = SessionId.create "audit-sess" |> expect
+    let name = SecretName.create "deploy-token" |> expect
+    let id : SecretId = { Scope = SessionScope sessionId; Name = name }
+    let stringAttr key (r: TelemetryReceiver.ReceivedLog) =
+        match Map.tryFind key r.Attributes with
+        | Some (TelemetryReceiver.StringValue s) -> Some s
+        | _ -> None
+    testList "audit (Manager in-process records)" [
+        testCase "every constructor carries event.name, service.name, and its severity" <| fun () ->
+            let alice = UserSubject.create "alice" |> expect
+            let cases =
+                [ TelemetryReceiver.Audit.secretSet sessionId id true, "yession.secret.set", 9
+                  TelemetryReceiver.Audit.secretSet sessionId id false, "yession.secret.set", 13
+                  TelemetryReceiver.Audit.secretDelete sessionId id true, "yession.secret.delete", 9
+                  TelemetryReceiver.Audit.secretList sessionId (SessionScope sessionId) 2, "yession.secret.list", 9
+                  TelemetryReceiver.Audit.authzDeny sessionId SetSecret (SecretResource id) "why", "yession.authz.deny", 13
+                  TelemetryReceiver.Audit.inject sessionId name "session", "yession.secret.inject", 9
+                  TelemetryReceiver.Audit.injectMiss sessionId name "none left", "yession.secret.inject", 13
+                  TelemetryReceiver.Audit.storeOpen "durable" "in-memory" true 0, "yession.secrets.store_open", 9
+                  TelemetryReceiver.Audit.storeEphemeral, "yession.secrets.store_open", 13
+                  TelemetryReceiver.Audit.storeInaccessible "/tmp/x", "yession.secrets.store_open", 13
+                  TelemetryReceiver.Audit.storeOpenFailed "corrupt" "detail", "yession.secrets.store_open_failed", 17
+                  TelemetryReceiver.Audit.bindingRecorded sessionId alice, "yession.auth.binding_recorded", 9
+                  TelemetryReceiver.Audit.bindingRevoked sessionId, "yession.auth.binding_revoked", 9
+                  TelemetryReceiver.Audit.controlUnauthorized "/control/secrets/set", "yession.control.unauthorized", 13 ]
+            for r, expectedName, severity in cases do
+                Expect.equal (stringAttr "event.name" r) (Some expectedName) "event.name"
+                Expect.equal (stringAttr "service.name" r) (Some "yession-manager") "service.name"
+                Expect.equal r.Severity severity (sprintf "severity of %s" expectedName)
+
+        testCase "the deny record keeps the old printfn's full sentence and attributes" <| fun () ->
+            let r = TelemetryReceiver.Audit.authzDeny sessionId SetSecret (SecretResource id) "not the owning session"
+            Expect.equal r.Body "secrets: DENY SetSecret for session audit-sess: not the owning session" "printfn parity"
+            Expect.equal (stringAttr "yession.authz.action" r) (Some "SetSecret") "action attr"
+            Expect.equal (stringAttr "yession.secret.name" r) (Some "deploy-token") "resource name attr"
+            Expect.equal (stringAttr "yession.secret.scope" r) (Some "session") "scope attr"
+
+        // The only two rendered-string pins — everything else asserts attributes.
+        testCase "format renders one deterministic INFO line" <| fun () ->
+            let line = TelemetryReceiver.Audit.format (TelemetryReceiver.Audit.inject sessionId name "session")
+            Expect.equal
+                line
+                "audit INFO yession.secret.inject yession.inject.source=session yession.secret.name=deploy-token yession.session.id=audit-sess :: secret injected into environment"
+                "stable field order (Map is key-sorted)"
+        testCase "format renders one deterministic WARN line" <| fun () ->
+            let line = TelemetryReceiver.Audit.format (TelemetryReceiver.Audit.controlUnauthorized "/control/start")
+            Expect.equal
+                line
+                "audit WARN yession.control.unauthorized yession.http.path=/control/start :: invalid control secret"
+                "stable WARN rendering"
+
+        testCase "an audit record through the collector is retained, reaches onRecord, and is not usage" <| fun () ->
+            let mutable seen = []
+            let collector = TelemetryReceiver.Collector.create (fun r -> seen <- r :: seen)
+            let r = TelemetryReceiver.Audit.secretSet sessionId id true
+            collector.Record r
+            Expect.equal (collector.Received ()) [ r ] "retained"
+            Expect.equal seen [ r ] "hit the onRecord re-export seam"
+            Expect.isTrue (TelemetryReceiver.TurnUsage.ofLog r |> Option.isNone) "never read as agent-turn usage"
+
+        testCase "decode defaults severity to INFO when severityNumber is absent" <| fun () ->
+            match TelemetryReceiver.LogsWire.decode """{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"hi"},"attributes":[]}]}]}]}""" with
+            | Ok [ record ] -> Expect.equal record.Severity 9 "tolerant default"
+            | other -> failwithf "expected one record, got %A" other
+    ]
+
+let tests = testList "Telemetry" [ bindingTests; emitterTests; receiverTests; auditTests ]
