@@ -36,14 +36,20 @@ PATH.
 A fresh Claude Code container: install Nix ONCE (single-user, no daemon), then enter devenv.
 
 ```
+# Write nix.conf FIRST. The installer runs as root here with no `nixbld` group, and even
+# --no-daemon fails at the final profile step unless build-users-group is explicitly empty.
+mkdir -p ~/.config/nix && printf 'experimental-features = nix-command flakes\nbuild-users-group =\nsandbox = false\n' > ~/.config/nix/nix.conf
 sh <(curl -L https://nixos.org/nix/install) --no-daemon      # installs /nix + ~/.nix-profile
 . ~/.nix-profile/etc/profile.d/nix.sh                          # every shell (or re-login)
-mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
 export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt https_proxy="$HTTPS_PROXY"   # trust proxy CA
 scripts/devenv-local.sh                                       # write devenv.local.yaml (see below)
 nix shell 'https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz#devenv' \
   -c devenv shell -- build                                    # enter devenv, build everything
 ```
+
+If the installer already ran and failed with `the group 'nixbld' ... does not exist`, /nix is
+populated but the profile is missing: write the nix.conf above, then
+`/nix/store/*-nix-2.*/bin/nix-env -i /nix/store/*-nix-2.*` to create `~/.nix-profile`.
 
 **Why devenv works here without GitHub.** devenv's generated flake normally fetches
 `github:cachix/devenv`, which this sandbox blocks (the GitHub proxy scopes fetches to attached
@@ -102,6 +108,36 @@ Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-brows
 lives on GitHub releases, which the proxy blocks); Nix builds it from source and bakes it into
 the `nodeModules` derivation the dev shell symlinks in (and into the `outputs`) — so the
 `Native` tier just works (see devenv.nix / Testing).
+
+## Finding F# symbols
+
+Never search for a bare name. F# reuses one identifier across several unrelated symbols:
+`SessionId` is a type, its companion module, a DU case constructor, and twelve record
+fields. `rg '\bSessionId\b'` returns 321 hits; only 97 are the type.
+
+Search for the **declaration form** instead — it is anchored and unambiguous:
+
+```
+rg '^type SessionId\b'                      # the type
+rg '^module SessionId\b'                    # its companion module (usually just below)
+rg '^\s*(type|module|let|and)\s+Foo\b'      # any declaration of Foo, when unsure which
+```
+
+Then scope to the owning file, because short member names repeat across sibling modules —
+`rg '^\s+let value\b' src/Yession.Domain/Identity.fs` returns nine hits, one per identity
+type, disambiguated only by their pattern (`let value (SessionId s) = s`).
+
+Two properties make this reliable:
+
+- **Compile order is explicit.** Each `.fsproj` lists `<Compile Include>` in order, and a
+  symbol is always declared in that file or an earlier one — read the `.fsproj` to bound
+  the search.
+- **Scoping is strictly top-down.** Within a file, a definition precedes every use, so
+  going down, the first match is the declaration.
+
+The one thing text search cannot recover is a type F# inferred rather than wrote: `let x =
+foo bar` has no annotation to find. Follow the right-hand side to its declaration, or write
+the type you expect and let `check` tell you if you are wrong.
 
 ## Testing
 
