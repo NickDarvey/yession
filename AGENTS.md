@@ -20,7 +20,7 @@ Boundaries: code/commits/PRs written normal.
 
 ## Contributing changes
 
-Read `.claude/skills/contributing-changes/SKILL.md` when completing a plan to integrate
+Read `.agents/skills/contributing-changes/SKILL.md` when completing a plan to integrate
 changes. Short version: compare implementation to plan; if consistent (no interesting
 deviations, blockers, or uncompletable work), open PR with auto-merge, subscribe to PR
 events, then watch the master pipeline after merge — auto-fix failures and repeat the
