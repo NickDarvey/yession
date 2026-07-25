@@ -663,8 +663,15 @@ let private persistenceTests =
                 a.Connection.SendDraft a.Hello.PeerId
                 do! a.Runner.WaitFor (fun model ->
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "remember me"))
-                let! before = managed1.Host.Log.Read None Int32.MaxValue
+                // Snapshot AFTER the host has fully observed the disconnect: with the
+                // deterministic teardown the peer's departure reliably lands as a
+                // PeerLeft event, and the session-end signal fires only after the peer
+                // pump (which appends it) completes — so `before` is the settled
+                // first-life history, PeerLeft included.
+                let ended = managed1.Host.WaitForNextSessionEnd ()
                 do! a.Channel.Close ()
+                do! ended
+                let! before = managed1.Host.Log.Read None Int32.MaxValue
                 do! m1.Stop ()
 
                 // Second life: a fresh Manager + Process over the same file.
