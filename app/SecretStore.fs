@@ -162,7 +162,7 @@ let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async
 module SecretResolution =
 
     /// What one SecretRef resolution came to — the audit observation the Manager maps
-    /// to a log record (domain-shaped here; TelemetryReceiver compiles later).
+    /// to a log record (domain-shaped here; Audit compiles later).
     type InjectOutcome =
         | InjectedFromScope of SecretScope
         | InjectedFromFallback

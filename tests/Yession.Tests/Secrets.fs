@@ -510,7 +510,7 @@ let private routeTests =
             async {
                 let! store = openEphemeral ()
                 // Recording sinks: every audit record and every 401 path this run emits.
-                let mutable audited : TelemetryReceiver.ReceivedLog list = []
+                let mutable audited : Audit.Record list = []
                 let mutable unauthorized : string list = []
                 let! _, url =
                     startControlServer
@@ -524,7 +524,7 @@ let private routeTests =
                     |> List.rev
                     |> List.choose (fun r ->
                         match Map.tryFind "event.name" r.Attributes with
-                        | Some (TelemetryReceiver.StringValue n) -> Some n
+                        | Some (Audit.StringValue n) -> Some n
                         | _ -> None)
 
                 // Own scope: the full lifecycle.
@@ -578,7 +578,7 @@ let private routeTests =
                     "one audit record per authorization decision, in order"
                 Expect.equal unauthorized [ "/control/secrets/set" ] "the 401 hook carries the request path"
                 for r in audited do
-                    Expect.isFalse ((TelemetryReceiver.Audit.format r).Contains "hunter2") "no audit record ever renders a value"
+                    Expect.isFalse ((Audit.format r).Contains "hunter2") "no audit record ever renders a value"
             }
 
         testCaseAsync "the session-side typed capability drives the full lifecycle over the wire" <|
