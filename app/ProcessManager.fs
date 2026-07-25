@@ -134,7 +134,7 @@ let private clock () = DateTimeOffset.UtcNow
 /// the route arms stay policy-free. Every deny is logged (subject/action/scope — never
 /// values); every permitted call goes straight to the store. Module-level so the
 /// authorization matrix is testable over a bare control server.
-let secretsApiFor (audit: TelemetryReceiver.Sink) (store: SecretStore.SecretStore) : Control.SecretsApi =
+let secretsApiFor (audit: Audit.Sink) (store: SecretStore.SecretStore) : Control.SecretsApi =
     let authorize (caller: Control.ControlCaller) (action: SecretAction) (resource: AuthzResource) =
         let request =
             { Subject = { Session = Some caller.SessionId; Users = caller.Users }
@@ -143,7 +143,7 @@ let secretsApiFor (audit: TelemetryReceiver.Sink) (store: SecretStore.SecretStor
         match Policy.authorize request with
         | Permit -> Ok ()
         | Deny reason ->
-            audit (TelemetryReceiver.Audit.authzDeny caller.SessionId action resource reason)
+            audit (Audit.authzDeny caller.SessionId action resource reason)
             Error (Control.SecretsDenied reason)
     { Control.SecretsApi.Set =
         fun caller request ->
@@ -154,10 +154,10 @@ let secretsApiFor (audit: TelemetryReceiver.Sink) (store: SecretStore.SecretStor
                 | Ok () ->
                     match! store.Set id request.Value with
                     | Ok metadata ->
-                        audit (TelemetryReceiver.Audit.secretSet caller.SessionId id true)
+                        audit (Audit.secretSet caller.SessionId id true)
                         return Ok metadata
                     | Error e ->
-                        audit (TelemetryReceiver.Audit.secretSet caller.SessionId id false)
+                        audit (Audit.secretSet caller.SessionId id false)
                         return Error (Control.SecretsFailed e)
             }
       List =
@@ -167,7 +167,7 @@ let secretsApiFor (audit: TelemetryReceiver.Sink) (store: SecretStore.SecretStor
                 | Error e -> return Error e
                 | Ok () ->
                     let listed = store.List request.Scope
-                    audit (TelemetryReceiver.Audit.secretList caller.SessionId request.Scope listed.Length)
+                    audit (Audit.secretList caller.SessionId request.Scope listed.Length)
                     return Ok listed
             }
       Delete =
@@ -179,10 +179,10 @@ let secretsApiFor (audit: TelemetryReceiver.Sink) (store: SecretStore.SecretStor
                 | Ok () ->
                     match! store.Delete id with
                     | Ok existed ->
-                        audit (TelemetryReceiver.Audit.secretDelete caller.SessionId id true)
+                        audit (Audit.secretDelete caller.SessionId id true)
                         return Ok existed
                     | Error e ->
-                        audit (TelemetryReceiver.Audit.secretDelete caller.SessionId id false)
+                        audit (Audit.secretDelete caller.SessionId id false)
                         return Error (Control.SecretsFailed e)
             } }
 
@@ -265,7 +265,7 @@ let createWithUi
     // The Manager's audit sink (Plan 06 telemetry): one greppable audit line to stdout for
     // each authority decision. (Session telemetry is emitted directly by each process now —
     // there is no Manager-side collector; forwarding audit to a collector too is a follow-up.)
-    let audit : TelemetryReceiver.Sink = TelemetryReceiver.Audit.stdout
+    let audit : Audit.Sink = Audit.stdout
 
     // The secret store (Plan 06). A corrupt durable store fails the boot loudly — it
     // must never look empty. The ephemeral mode warns loudly and leaves any durable
@@ -278,18 +278,18 @@ let createWithUi
             | Some (DurableSecrets keyStore) ->
                 match! SecretStore.openStore (Some secretsPath) keyStore with
                 | Ok store ->
-                    audit (TelemetryReceiver.Audit.storeOpen "durable" keyStore.Name store.KekMinted store.EntriesAtOpen)
+                    audit (Audit.storeOpen "durable" keyStore.Name store.KekMinted store.EntriesAtOpen)
                     return Some store
                 | Error e ->
-                    audit (TelemetryReceiver.Audit.storeOpenFailed (SecretStore.OpenError.kind e) (SecretStore.OpenError.describe e))
+                    audit (Audit.storeOpenFailed (SecretStore.OpenError.kind e) (SecretStore.OpenError.describe e))
                     return failwithf "secrets store: %s" (SecretStore.OpenError.describe e)
             | Some EphemeralSecrets ->
-                audit TelemetryReceiver.Audit.storeEphemeral
+                audit Audit.storeEphemeral
                 if Fs.exists secretsPath then
-                    audit (TelemetryReceiver.Audit.storeInaccessible secretsPath)
+                    audit (Audit.storeInaccessible secretsPath)
                 match! SecretStore.openStore None (KeyStore.random ()) with
                 | Ok store ->
-                    audit (TelemetryReceiver.Audit.storeOpen "ephemeral" "in-memory" store.KekMinted store.EntriesAtOpen)
+                    audit (Audit.storeOpen "ephemeral" "in-memory" store.KekMinted store.EntriesAtOpen)
                     return Some store
                 | Error e -> return failwithf "secrets store (ephemeral): %s" (SecretStore.OpenError.describe e)
         }
@@ -300,7 +300,7 @@ let createWithUi
         if Map.containsKey controlSecret secretSessions then
             let existing = Map.tryFind controlSecret launchUsers |> Option.defaultValue Set.empty
             launchUsers <- Map.add controlSecret (Set.add subject existing) launchUsers
-            audit (TelemetryReceiver.Audit.bindingRecorded sessionId subject)
+            audit (Audit.bindingRecorded sessionId subject)
     let! provider = ManagerOidc.create issuerOf (defaultArg options.Strategy Strategy.localhost) recordTokenIssued
 
     // What a control secret resolves to: the launch's session plus its (optional)
@@ -329,7 +329,7 @@ let createWithUi
         async {
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                 let handled =
-                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi (fun path -> audit (TelemetryReceiver.Audit.controlUnauthorized path)) req res
+                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi (fun path -> audit (Audit.controlUnauthorized path)) req res
                     || provider.TryHandle req res
                     || (match ui, self with
                         | Some handle, Some pm -> handle pm req res
@@ -426,7 +426,7 @@ let createWithUi
                          // ordinary stop of a never-logged-in session is not an event).
                          (match Map.tryFind secret secretSessions with
                           | Some sessionId when Map.containsKey secret launchUsers ->
-                              audit (TelemetryReceiver.Audit.bindingRevoked sessionId)
+                              audit (Audit.bindingRevoked sessionId)
                           | _ -> ())
                          secrets <- Map.remove secret secrets
                          secretSessions <- Map.remove secret secretSessions
@@ -498,7 +498,7 @@ let createWithUi
           UsersOf = usersOf
           ResolveSecret =
             match secretStore with
-            | Some store -> SecretStore.SecretResolution.compose (TelemetryReceiver.Audit.injectObserver audit) store usersOf SecretStore.SecretResolution.processEnv
+            | Some store -> SecretStore.SecretResolution.compose (Audit.injectObserver audit) store usersOf SecretStore.SecretResolution.processEnv
             | None -> SecretStore.SecretResolution.processEnv
           EndpointPort = controlServer |> Option.map Interop.serverPort
           StopAll =
