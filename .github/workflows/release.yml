@@ -3,7 +3,8 @@ name: release
 # Trunk-based delivery: master is always production. Every push to master runs the full
 # verification gate and, when green, publishes a GitHub release with the npm package
 # tarball (`npm i -g` it; npm pulls the platform-native deps on install). Versions are
-# GitVersion-style continuous delivery: 1.0.0-beta.<commits on master>, auto-incrementing.
+# continuous delivery — 1.0.0-beta.<n>, auto-incrementing — with the major/minor/patch
+# triple moved by a `+semver:` marker in a commit message. The policy lives in tasks.fsx.
 
 on:
   push:
@@ -52,14 +53,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # the commit count IS the version
+          fetch-depth: 0 # the history (tags + commit messages) IS the version
       - uses: cachix/install-nix-action@v30
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
-      - name: Compute version (1.0.0-beta.<commit count>)
+      - name: Compute version (1.0.0-beta.<n>, or a +semver: bump)
         id: version
         # tasks.fsx owns the version policy. `devenv shell` prints its own banner/build progress
         # to stdout, so take only the last line (the version) — capturing all of it corrupts the

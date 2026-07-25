@@ -32,6 +32,24 @@ let private chunkToString (chunk: obj) : string = jsNative
 [<Emit("(() => { try { const p = JSON.parse($0); return (p && p.yession === 'ready' && typeof p.port === 'number') ? p.port : null } catch { return null } })()")>]
 let private parseReadyLine (line: string) : int option = jsNative
 
+/// The child's build, off the same readiness line. Absent from a session bundle older than the
+/// field, which must still launch — so this is an option, never a launch precondition.
+[<Emit("(() => { try { const p = JSON.parse($0); return (p && typeof p.version === 'string') ? p.version : null } catch { return null } })()")>]
+let private parseReadyVersion (line: string) : string option = jsNative
+
+/// Warn when the Manager and the session it just launched are from different MAJOR versions —
+/// the one difference that says their control protocol may genuinely disagree. Diagnostic only:
+/// a launch is never failed over version, and a build that cannot state a release version
+/// (`dev`, `test`) is never compared.
+let private warnOnMajorSkew (pid: int) (sessionVersion: string option) =
+    match sessionVersion with
+    | None -> ()
+    | Some session ->
+        match Version.majorOf Version.current, Version.majorOf session with
+        | Some ours, Some theirs when ours <> theirs ->
+            eprintfn "[session %d] version skew: manager %s, session %s" pid Version.current session
+        | _ -> ()
+
 [<Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = jsNative
 
@@ -112,6 +130,7 @@ let launch
                 match parseReadyLine line with
                 | Some port ->
                     clearTimeout timer
+                    warnOnMajorSkew child.pid (parseReadyVersion line)
                     settle (Ok (running, port))
                 | None ->
                     if line.Trim().Length > 0 then printfn "[session %d] %s" child.pid line))

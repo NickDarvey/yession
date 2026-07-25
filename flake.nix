@@ -21,8 +21,12 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      # `rev` is what a pure build reports as its version (nix/packages.nix) — .git never reaches
+      # the derivation, so this is the only way an installed `yession-manager --version` can name
+      # the commit it came from. `dirtyShortRev` covers a `nix build` off an uncommitted tree.
       packagesFor = system: import ./nix/packages.nix {
         pkgs = nixpkgs.legacyPackages.${system};
+        rev = self.shortRev or (self.dirtyShortRev or null);
       };
     in
     {

@@ -50,11 +50,14 @@ let emitTo (logger: OpenTelemetry.Logger) (sessionId: SessionId) (turnId: AgentT
               "body", box "agent turn usage"
               "attributes", box (createObj attributes) ])
 
-/// The resource identifying this session process as an OTel resource.
+/// The resource identifying this session process as an OTel resource. `service.version` is what
+/// attributes a record to a BUILD — without it the counts below cannot be told apart across
+/// releases.
 let private resourceFor (sessionId: SessionId) : OpenTelemetry.Resource =
     OpenTelemetry.resource (
         createObj
             [ "service.name", box serviceName
+              "service.version", box Version.current
               "service.namespace", box "yession"
               "service.instance.id", box (SessionId.value sessionId)
               "yession.session.id", box (SessionId.value sessionId) ])

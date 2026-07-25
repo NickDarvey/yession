@@ -53,8 +53,9 @@ in
   scripts.verify.exec = ''exec dotnet fsi tasks.fsx verify'';
   scripts.version.exec = ''exec dotnet fsi tasks.fsx version'';
   # Local package (compile + bundle + smoke + pack). For the release tarball as a Nix output,
-  # use `devenv build outputs.npm`. Usage: package 1.2.3
-  scripts.package.exec = ''exec dotnet fsi tasks.fsx package "''${1:-0.0.0-dev}"'';
+  # use `devenv build outputs.npm`. Usage: package [1.2.3] — with no argument tasks.fsx computes
+  # the version from the commit history, so there is no default to duplicate here.
+  scripts.package.exec = ''exec dotnet fsi tasks.fsx package "$@"'';
   scripts.clean.exec = ''exec dotnet fsi tasks.fsx clean'';
   # CI helpers (also plain tasks.fsx verbs): install-smoke <tgz>, clean-docker.
   scripts."install-smoke".exec = ''exec dotnet fsi tasks.fsx install-smoke "$@"'';

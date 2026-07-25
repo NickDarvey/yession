@@ -6,7 +6,7 @@
 #
 # All compile/bundle/assemble logic lives in tasks.fsx; these derivations only fetch deps
 # offline and drive `dotnet fsi tasks.fsx stage`, then wrap/pack the result.
-{ pkgs, lib ? pkgs.lib }:
+{ pkgs, lib ? pkgs.lib, rev ? null }:
 let
   # The native WebRTC addon, built from source (its npm prebuild is github-bound).
   node-datachannel = pkgs.callPackage ./node-datachannel.nix { };
@@ -18,9 +18,19 @@ let
     config.allowUnfreePredicate = p: lib.getName p == "claude-code";
   }).claude-code;
 
-  # Release version via YESSION_VERSION when set (impure builds); "" (pure flake / default) →
-  # the cosmetic default. The npm tarball's real version is passed by CI to `tasks.fsx package`.
-  version = let v = builtins.getEnv "YESSION_VERSION"; in if v == "" then "0.0.0-nix" else v;
+  # Release version via YESSION_VERSION when set (impure builds; `builtins.getEnv` is "" under the
+  # pure evaluation `nix build` / `nix profile install` use). A pure build genuinely cannot know a
+  # release number — `lib.cleanSource` below strips .git — so it reports the COMMIT it was built
+  # from rather than a placeholder that reads like a release. flake.nix passes that rev in.
+  #
+  # The `0.0.0-` prefix is load-bearing twice over: `npm pack` (the `npm` output) rejects a version
+  # that is not semver, and a prerelease sorts below every real release — which is exactly what an
+  # untagged build off a working tree is.
+  version =
+    let fromEnv = builtins.getEnv "YESSION_VERSION";
+    in if fromEnv != "" then fromEnv
+       else if rev != null then "0.0.0-g${rev}"
+       else "0.0.0-gdirty";
 
   # Only the files the build consumes, so editing devenv config / CI / docs doesn't invalidate
   # the (slow) F#/Fable build. README.md is kept — tasks.fsx copies it into the package.

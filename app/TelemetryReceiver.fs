@@ -77,9 +77,19 @@ module LogsWire =
         if isNullish root then Error "telemetry: body is not valid JSON"
         else
             asArray (prop root "resourceLogs")
-            |> Array.collect (fun rl -> asArray (prop rl "scopeLogs"))
-            |> Array.collect (fun sl -> asArray (prop sl "logRecords"))
-            |> Array.map logRecordOf
+            |> Array.collect (fun rl ->
+                // Resource attributes (`service.name`, `service.version`, `service.instance.id`)
+                // describe the EMITTER and are sent once per payload, not per record. Fold them
+                // onto every record underneath so a consumer of one record still knows which
+                // build produced it; a record-level attribute of the same name wins.
+                let holder = prop rl "resource"
+                let resource = if isNullish holder then Map.empty else attributesOf holder
+                asArray (prop rl "scopeLogs")
+                |> Array.collect (fun sl -> asArray (prop sl "logRecords"))
+                |> Array.map (fun lr ->
+                    let record = logRecordOf lr
+                    { record with
+                        Attributes = record.Attributes |> Map.fold (fun acc k v -> Map.add k v acc) resource }))
             |> List.ofArray
             |> Ok
 
@@ -93,7 +103,10 @@ type TurnUsage =
       OutputTokens : int
       CacheReadTokens : int
       CacheCreationTokens : int
-      Model : string option }
+      Model : string option
+      /// The emitting Session Process's build (`service.version` off its OTel resource).
+      /// None from an emitter old enough not to send one.
+      Version : string option }
 
 module TurnUsage =
     let private stringAttr key (r: ReceivedLog) =
@@ -117,10 +130,18 @@ module TurnUsage =
                   OutputTokens = intAttr "gen_ai.usage.output_tokens" r |> Option.defaultValue 0
                   CacheReadTokens = intAttr "anthropic.usage.cache_read_input_tokens" r |> Option.defaultValue 0
                   CacheCreationTokens = intAttr "anthropic.usage.cache_creation_input_tokens" r |> Option.defaultValue 0
-                  Model = stringAttr "gen_ai.response.model" r }
+                  Model = stringAttr "gen_ai.response.model" r
+                  Version = stringAttr "service.version" r }
         | _ -> None
 
 // --- The collector -----------------------------------------------------------------------
+
+/// The Manager's own OTel identity in its collector role (Plan 04 § Resource attributes): the
+/// `service.*` of the process that RECEIVED a record, as opposed to the session that emitted it.
+/// Carried here for the `onRecord` re-export seam, which will need to stamp it on what it
+/// forwards.
+let serviceName = "yession-manager"
+let serviceVersion = Version.current
 
 /// Aggregates per-session token totals and logs each turn. `Received` exposes every decoded
 /// record — the reuse point for the in-test double. `onRecord` is the seam where downstream
@@ -143,8 +164,9 @@ module Collector =
                     let totalsNow = inSoFar + u.InputTokens, outSoFar + u.OutputTokens
                     totals <- Map.add u.SessionId totalsNow totals
                     printfn
-                        "telemetry session=%s turn=%s in=%d out=%d cache_read=%d cache_create=%d model=%s (session totals in=%d out=%d)"
-                        u.SessionId u.TurnId u.InputTokens u.OutputTokens u.CacheReadTokens u.CacheCreationTokens
+                        "telemetry session=%s version=%s turn=%s in=%d out=%d cache_read=%d cache_create=%d model=%s (session totals in=%d out=%d)"
+                        u.SessionId (Option.defaultValue "-" u.Version) u.TurnId u.InputTokens u.OutputTokens
+                        u.CacheReadTokens u.CacheCreationTokens
                         (Option.defaultValue "-" u.Model) (fst totalsNow) (snd totalsNow)
                 | None -> printfn "telemetry non-usage record: %s" r.Body
                 onRecord r }
@@ -157,7 +179,9 @@ module Collector =
 
     /// The Manager's production collector: logs + aggregates per-session totals but retains
     /// no records (the Manager is long-lived — unbounded retention would leak).
-    let logging () : Collector = make false ignore
+    let logging () : Collector =
+        printfn "Yession Manager: telemetry collector %s %s" serviceName serviceVersion
+        make false ignore
 
 // --- The route handler -------------------------------------------------------------------
 

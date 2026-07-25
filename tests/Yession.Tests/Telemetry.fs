@@ -152,6 +152,45 @@ let private receiverTests =
             | Error _ -> ()
             | Ok _ -> failwith "malformed body must not decode"
 
+        // OTLP sends resource attributes ONCE per payload, not per record. They identify the
+        // emitter — `service.version` is what attributes a turn's counts to a build — so the
+        // decoder folds them onto every record underneath, or that identity is lost on arrival.
+        testCase "resource attributes land on every record" <| fun () ->
+            let json =
+                """{"resourceLogs":[{"resource":{"attributes":[
+                    {"key":"service.name","value":{"stringValue":"yession-session"}},
+                    {"key":"service.version","value":{"stringValue":"1.2.3-beta.4"}}]},
+                  "scopeLogs":[{"logRecords":[
+                    {"body":{"stringValue":"agent turn usage"},"attributes":[
+                        {"key":"yession.session.id","value":{"stringValue":"s"}},
+                        {"key":"yession.agent.turn.id","value":{"stringValue":"t"}}]},
+                    {"body":{"stringValue":"second"},"attributes":[]}]}]}]}"""
+            match TelemetryReceiver.LogsWire.decode json with
+            | Ok [ first; second ] ->
+                let version (r: TelemetryReceiver.ReceivedLog) = Map.tryFind "service.version" r.Attributes
+                Expect.equal (version first) (Some (TelemetryReceiver.StringValue "1.2.3-beta.4")) "the usage record carries the emitter's build"
+                Expect.equal (version second) (Some (TelemetryReceiver.StringValue "1.2.3-beta.4")) "so does every other record under that resource"
+                match TelemetryReceiver.TurnUsage.ofLog first with
+                | Some usage -> Expect.equal usage.Version (Some "1.2.3-beta.4") "usage reports the emitting build"
+                | None -> failwith "not recognised as agent-turn usage"
+            | other -> failwithf "expected two records, got %A" other
+
+        testCase "a record-level attribute wins over the resource, and a missing resource is not a crash" <| fun () ->
+            let json =
+                """{"resourceLogs":[{"resource":{"attributes":[
+                    {"key":"service.version","value":{"stringValue":"from-resource"}}]},
+                  "scopeLogs":[{"logRecords":[{"body":{"stringValue":"x"},"attributes":[
+                        {"key":"service.version","value":{"stringValue":"from-record"}}]}]}]},
+                  {"scopeLogs":[{"logRecords":[{"body":{"stringValue":"y"},"attributes":[]}]}]}]}"""
+            match TelemetryReceiver.LogsWire.decode json with
+            | Ok [ overridden; noResource ] ->
+                Expect.equal
+                    (Map.tryFind "service.version" overridden.Attributes)
+                    (Some (TelemetryReceiver.StringValue "from-record"))
+                    "the more specific record-level attribute wins"
+                Expect.isTrue (Map.isEmpty noResource.Attributes) "a resourceLogs entry with no resource block decodes, it does not throw"
+            | other -> failwithf "expected two records, got %A" other
+
         testCaseAsync "round-trip: the emitter's real OTLP payload decodes at the receiver into the turn's counts" <|
             async {
                 let! url, collector, close = startReceiver "rt-secret"
@@ -169,6 +208,9 @@ let private receiverTests =
                     Expect.equal u.TurnId "rt-turn" "turn id survives the wire"
                     Expect.equal (u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens) (42, 9, 4, 6) "all four counts survive"
                     Expect.equal u.Model (Some "claude-opus-4-8") "model survives"
+                    // The emitter puts this on the OTel *resource*, so this asserts the whole
+                    // path: resource -> OTLP payload -> decode -> folded onto the record.
+                    Expect.equal u.Version (Some Version.current) "the emitting build survives the wire"
                 | None -> failwith "the decoded record was not recognised as agent-turn usage"
                 close ()
             }
@@ -186,4 +228,24 @@ let private receiverTests =
             }
     ]
 
-let tests = testList "Telemetry" [ bindingTests; emitterTests; receiverTests ]
+// app/Version.fs. `majorOf` gates the spawn-time skew warning, so what it must NOT do is read a
+// major out of a build that has no release version — that would warn on every dev run.
+let private versionTests =
+    testList "version (app/Version.fs)" [
+        testCase "a release version yields its major" <| fun () ->
+            Expect.equal (Version.majorOf "1.0.0-beta.94") (Some 1) "prerelease of the 1.x line"
+            Expect.equal (Version.majorOf "2.0.0-beta.0") (Some 2) "the first build after a breaking change"
+            Expect.equal (Version.majorOf "0.0.0-g1a2b3c4") (Some 0) "a pure Nix build reports its rev off the 0.0.0 line"
+
+        testCase "a build with no release version has no major" <| fun () ->
+            Expect.equal (Version.majorOf "dev") None "an unbundled dev run"
+            Expect.equal (Version.majorOf "test") None "the test tiers"
+            Expect.equal (Version.majorOf "") None "empty"
+            Expect.equal (Version.majorOf "not.a.version") None "malformed"
+
+        testCase "an unbundled run reports dev, never a version-shaped placeholder" <| fun () ->
+            // These tests are Fable output run straight on Node — no esbuild, so no define.
+            Expect.equal Version.current "dev" "the fallback names the build path it belongs to"
+    ]
+
+let tests = testList "Telemetry" [ bindingTests; emitterTests; receiverTests; versionTests ]

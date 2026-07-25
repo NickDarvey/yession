@@ -11,6 +11,12 @@ open Fable.Core
 open Yession.Domain
 open Yession.Host
 
+// `--version` answers before any configuration is read: no data directory, no ports, no
+// Manager. It is the one thing a Session Process will do without a session.
+if Interop.versionFlag () then
+    printfn "%s" Version.current
+    Interop.exit 0
+
 let private expect =
     function
     | Ok v -> v
@@ -159,5 +165,7 @@ Async.StartImmediate (
                     }))
         // The one readiness line of the spawn contract — last, so the Manager can
         // treat everything before it as logs and everything after as a live session.
-        printfn """{"yession":"ready","port":%d}""" host.Port
+        // `version` lets the Manager notice it just launched a session from a different
+        // release; a Manager old enough not to read the field simply ignores it.
+        printfn """{"yession":"ready","port":%d,"version":"%s"}""" host.Port Version.current
     })

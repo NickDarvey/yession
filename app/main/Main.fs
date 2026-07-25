@@ -13,6 +13,12 @@ module Yession.Host.Main
 open Yession.Domain
 open Yession.Host
 
+// `--version` answers before any configuration is read: no data directory, no ports, no
+// sessions launched.
+if Interop.versionFlag () then
+    printfn "%s" Version.current
+    Interop.exit 0
+
 let private expect =
     function
     | Ok v -> v
@@ -50,7 +56,11 @@ Async.StartImmediate(
                 { ProcessManager.Options.defaults dataDir sessionCommand sessionArgs with
                     SessionPort = (if port = 0 then None else Some port)
                     Grant = Some (Yession.Manager.Authority.grant containers backend)
-                    ManagerPort = Some managerPort }
+                    ManagerPort = Some managerPort
+                    // The Manager IS the collector (Plan 04): this serves /v1/logs on its
+                    // endpoint and injects YESSION_OTLP_ENDPOINT/_SECRET into every launch,
+                    // so a session's turn usage is reported rather than discarded.
+                    Telemetry = Some (TelemetryReceiver.Collector.logging ()) }
                 (Some ManagerUi.tryHandle)
 
         // Ensure the default session exists (an existing registration is resume).
