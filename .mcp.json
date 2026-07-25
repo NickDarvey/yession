@@ -2,7 +2,7 @@
   "mcpServers": {
     "fsharp-lsp": {
       "command": "node",
-      "args": ["scripts/fsharp-lsp-mcp.mjs"],
+      "args": ["scripts/fsharp-lsp-mcp.js"],
       "env": {}
     }
   }

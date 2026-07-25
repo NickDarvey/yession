@@ -5,7 +5,7 @@
 // `rg '\bSessionId\b'` returns 321 hits spanning four distinct symbols (the type, the
 // module, the DU case constructor, a record field) plus strings and comments; FSAC
 // answers "97 references to the type" exactly, and resolves definitions across project
-// boundaries. See scripts/lsp-bench.mjs for the measurements behind those numbers.
+// boundaries.
 //
 // Positions are 1-based here (line 1 = first line, column 1 = first character) because
 // that is what editors, compiler diagnostics and `file.fs:12` references use. LSP itself
@@ -20,9 +20,31 @@ import { spawn } from 'node:child_process'
 import { readFileSync, existsSync } from 'node:fs'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { locateFsac, fsacEnv, fsacNotFoundMessage } from './fsac-locate.mjs'
 
 const ROOT = process.env.CLAUDE_PROJECT_DIR || process.cwd()
+
+// fsautocomplete comes from devenv, and agents are launched from the plain container
+// shell, so it is not on PATH. devenv mirrors the built environment at .devenv/profile —
+// a symlink into the Nix store, refreshed on every `devenv shell` — which is readable
+// whether or not we are inside the shell. That single path is the only way we look.
+const FSAC_BIN_DIR = path.join(ROOT, '.devenv', 'profile', 'bin')
+const FSAC = path.join(FSAC_BIN_DIR, 'fsautocomplete')
+
+const fsacInstalled = () => existsSync(FSAC)
+
+const FSAC_MISSING = `fsautocomplete not found at ${FSAC}. Build the environment once ` +
+  `(see Bootstrap in AGENTS.md — \`devenv shell -- build\`); it is picked up automatically ` +
+  `afterwards, with no need to restart this session.`
+
+// FSAC loads projects by shelling out to MSBuild. Without `dotnet` on PATH it starts
+// cleanly, loads zero projects, and answers every query with "Couldn't find <file> in
+// LoadedProjects" — a missing toolchain wearing the costume of a broken workspace. The
+// profile's bin directory carries dotnet too, and the nix dotnet wrapper supplies
+// DOTNET_ROOT itself, so putting that one directory on PATH is the whole fix.
+const fsacEnv = () => ({
+  ...process.env,
+  PATH: process.env.PATH ? `${FSAC_BIN_DIR}${path.delimiter}${process.env.PATH}` : FSAC_BIN_DIR,
+})
 // The first query after startup pays workspace load + typecheck (~20s here); the first
 // `references` additionally forces a whole-workspace check (~11s more). Budget for both.
 const READY_TIMEOUT_MS = +(process.env.FSAC_READY_TIMEOUT_MS ?? 180_000)
@@ -76,17 +98,13 @@ class LanguageServer {
 
   async _start() {
     const t0 = Date.now()
-    // Resolved per attempt, not once at import, so an agent that builds the environment
+    // Checked per attempt, not once at import, so an agent that builds the environment
     // mid-session is picked up by the next query.
-    const found = locateFsac(ROOT)
-    if (!found) throw new Error(fsacNotFoundMessage(ROOT))
-    const fsac = found.path
-    log(`starting ${fsac} (via ${found.source}) in ${ROOT}…`)
-    this.proc = spawn(fsac, [], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'], env: fsacEnv(found) })
+    if (!fsacInstalled()) throw new Error(FSAC_MISSING)
+    log(`starting ${FSAC} in ${ROOT}…`)
+    this.proc = spawn(FSAC, [], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'], env: fsacEnv() })
     this.proc.on('error', (e) => {
-      const hint = e.code === 'ENOENT'
-        ? `${fsac} is not executable or vanished. ${fsacNotFoundMessage(ROOT)}`
-        : `could not start ${fsac}: ${e.message}`
+      const hint = e.code === 'ENOENT' ? FSAC_MISSING : `could not start ${FSAC}: ${e.message}`
       log(hint)
       this.proc = null
       this._failAllPending(new Error(hint))
@@ -453,13 +471,13 @@ function warmUp() {
     // Don't take the MCP server down — tools/list still works, and the failure is
     // reported with context when a tool is actually called.
     server.starting = null
-    if (locateFsac(ROOT)) { log('warm-up failed (will retry on first query):', e.message); return }
+    if (fsacInstalled()) { log('warm-up failed (will retry on first query):', e.message); return }
     // The environment simply isn't built yet. That is the normal state of a fresh
     // container, where an agent runs the bootstrap as its first act — so wait for the
     // profile to appear instead of making them restart the session to get the server.
     log(`fsautocomplete unavailable yet; watching for the devenv profile. ${e.message}`)
     const timer = setInterval(() => {
-      if (!locateFsac(ROOT)) return
+      if (!fsacInstalled()) return
       clearInterval(timer)
       log('devenv profile appeared; warming up fsautocomplete')
       server.start().catch((e2) => { server.starting = null; log('warm-up failed:', e2.message) })

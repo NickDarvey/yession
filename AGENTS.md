@@ -112,7 +112,7 @@ the `nodeModules` derivation the dev shell symlinks in (and into the `outputs`) 
 ## Navigating the F# (don't grep for symbols)
 
 `fsautocomplete` — the F# language server behind Ionide — is a devenv package, and
-`scripts/fsharp-lsp-mcp.mjs` exposes it to agents over MCP (registered in `.mcp.json`). Four
+`scripts/fsharp-lsp-mcp.js` exposes it to agents over MCP (registered in `.mcp.json`). Four
 tools: `fsharp_definition`, `fsharp_references`, `fsharp_hover`, `fsharp_symbol_search`.
 Positions are 1-based, and you pass the identifier you care about rather than a column:
 
@@ -124,9 +124,8 @@ fsharp_definition { file: "app/Backends.fs", line: 100, symbol: "value" }
 Reach for these over `rg` whenever the question is "where is this defined / what uses this /
 what type is this". F# infers most types (so the answer often isn't in the text at all) and
 freely reuses one name across a type, its module, its DU case, and record fields — text search
-cannot tell them apart. Measured here: `rg '\bSessionId\b'` returns **321 hits**; the compiler
-finds **97** references to the type. Warm queries are also *faster* than ripgrep (~2ms vs ~7ms
-for a definition).
+cannot tell them apart. `rg '\bSessionId\b'` returns **321 hits** here; the compiler finds
+**97** references to the type.
 
 The cost is startup: ~20s to load the workspace and ~1.3GB resident, plus ~12s on the first
 `references` call (it forces a workspace-wide check). The MCP server therefore starts
@@ -134,13 +133,12 @@ fsautocomplete eagerly when the session starts, so that cost usually lands befor
 anything; `FSAC_LAZY=1` defers it to the first query instead.
 
 **You do not need to be inside `devenv shell` for this.** Agents are normally launched from
-the plain container shell, so `scripts/fsac-locate.mjs` finds the server through the devenv
-profile instead of PATH: `$FSAC_BIN`, then `$DEVENV_PROFILE` (set when you *are* in the
-shell), then `.devenv/profile` (the symlink devenv refreshes on every `devenv shell`), then
-PATH. It also puts that profile's `bin` on the spawned server's PATH — fsautocomplete loads
-projects by shelling out to MSBuild, and without `dotnet` there it starts happily, loads zero
-projects, and answers every query with "Couldn't find <file> in LoadedProjects", which looks
-like a broken workspace rather than a missing toolchain.
+the plain container shell, so the server is found at `.devenv/profile/bin/fsautocomplete` —
+devenv's mirror of the built environment, refreshed on every `devenv shell` — rather than on
+PATH. That directory also goes on the spawned server's PATH: fsautocomplete loads projects by
+shelling out to MSBuild, and without `dotnet` there it starts happily, loads zero projects,
+and answers every query with "Couldn't find <file> in LoadedProjects", which looks like a
+broken workspace rather than a missing toolchain.
 
 The one requirement is that the environment has been built at least once, since
 `.devenv/profile` is created by `devenv shell`. In a fresh container run the Bootstrap above
@@ -148,8 +146,7 @@ first. If the MCP server started before that, it watches for the profile and war
 appears — no session restart needed.
 
 Still use `rg` for what it's good at: string literals, comments, config, non-F# files, and
-"does this phrase appear anywhere". `lsp-bench` (a devenv script) re-runs the comparison above
-if you want to re-justify the dependency.
+"does this phrase appear anywhere".
 
 ## Testing
 
