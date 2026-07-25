@@ -53,7 +53,7 @@ discovers it in production. Items are roughly ordered by how much they matter.
   - **Hosts without a credential manager run in-memory only** (dev containers, CI,
     headless servers): secrets die with the Manager; loud at boot, never a plaintext
     key file. (Tests cover the real keyring via the `Keyring` capability —
-    `scripts/with-keyring.sh`.)
+    `check Keyring` self-wraps with dbus + gnome-keyring when headless.)
   - **No shared/Manager-global scope**, and **no user surface yet**: sessions cannot
     write user-scoped secrets; the Claude/GitHub sign-in strategies are the intended
     writers. User↔launch bindings are launch-lifetime (re-login re-forms them).
