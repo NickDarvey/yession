@@ -468,6 +468,16 @@ let check (caps: string list) =
 
 let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring" ]
 
+// --- lint: the GitHub Actions workflows -------------------------------------------------------
+
+// A workflow file is only validated by GitHub when it RUNS. release.yml runs on master — after a
+// PR has merged — so a syntax error in it is invisible to PR CI and lands already broken: a
+// colon-space in an unquoted step name once stopped the whole file parsing, and every master
+// release failed at startup (zero jobs) until it was fixed. actionlint parses every workflow and
+// type-checks its expressions, so the PR gate can catch that class of break before it merges.
+// Run from repoRoot with no arguments, it finds .github/workflows itself.
+let lint () = exec "actionlint" []
+
 // --- clean -----------------------------------------------------------------------------------
 
 let clean () =
@@ -513,6 +523,7 @@ match arg 1 with
 | Some "stage" -> stage (arg 2 |> Option.defaultWith defaultVersion)
 | Some "check" -> check (rest 2)
 | Some "verify" -> verify ()
+| Some "lint" -> lint ()
 | Some "package" -> package (arg 2 |> Option.defaultWith defaultVersion)
 | Some "install-smoke" ->
     match arg 2 with

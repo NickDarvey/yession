@@ -19,7 +19,7 @@ in
   # dbus + gnome-keyring back the `Keyring` test capability on headless hosts:
   # `scripts/with-keyring.sh check Keyring` runs the OS-credential-manager suite against
   # a private, empty-password-unlocked Secret Service (see the script).
-  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring ];
+  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint ];
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
@@ -32,7 +32,7 @@ in
       ln -s ${yession.nodeModules}/node_modules node_modules
     fi
     export PATH="$PWD/node_modules/.bin:$PATH"
-    echo "yession — tasks: restore build start dev check verify package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring)"
+    echo "yession — tasks: restore build start dev check verify lint package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring)"
   '';
 
   # --- build outputs (devenv build outputs.<name>) -------------------------------------------
@@ -54,6 +54,9 @@ in
   # Named `check`, not `test`, because `test` is a shell builtin and would shadow the script.
   scripts.check.exec = ''exec dotnet fsi tasks.fsx check "$@"'';
   scripts.verify.exec = ''exec dotnet fsi tasks.fsx verify'';
+  # actionlint over .github/workflows — release.yml is otherwise only validated when it runs,
+  # which is on master, after a merge.
+  scripts.lint.exec = ''exec dotnet fsi tasks.fsx lint'';
   scripts.version.exec = ''exec dotnet fsi tasks.fsx version'';
   # Local package (compile + bundle + smoke + pack). For the release tarball as a Nix output,
   # use `devenv build outputs.npm`. Usage: package [1.2.3] — with no argument tasks.fsx computes

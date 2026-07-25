@@ -62,7 +62,7 @@ offline npm tree with the native node-datachannel addon baked in — symlinked i
 so nothing runs an npm postinstall and there's no per-file addon linking. Off-Nix, `restore`
 falls back to `npm install --ignore-scripts`.
 Every Yession build function lives in `tasks.fsx` — it's the complete, standalone build
-interface (`restore`/`build`/`start`/`dev`/`check`/`verify`/`version`/`stage`/`package`/
+interface (`restore`/`build`/`start`/`dev`/`check`/`verify`/`lint`/`version`/`stage`/`package`/
 `install-smoke`/`boot-smoke`/`clean`/`clean-docker`). The devenv scripts and the GitHub Actions
 workflows are thin wrappers over it, and the Nix `outputs` call it too — throw devenv and CI
 away and `dotnet fsi tasks.fsx <verb>` still drives everything.
@@ -112,7 +112,14 @@ check Ports Native           # + WebRTC/host suites. Need the node-datachannel a
 bash scripts/with-keyring.sh check Keyring   # + the OS-credential-manager suite, headless.
 verify                       # == check Browser Ports Native Docker LiveAgent Keyring. Release
                              #    gate; CI wraps it in with-keyring.sh for the Keyring cap.
+lint                         # actionlint over .github/workflows. Runs first in the PR gate.
 ```
+
+`lint` is separate from `check` because it guards a different thing: a workflow file is only
+validated by GitHub when it RUNS, and `release.yml` runs on master — after a merge. A syntax error
+there is invisible to PR CI and lands already broken (a colon-space in an unquoted step name once
+took every master release down at startup, zero jobs). The PR gate runs `lint` first, so that
+class of break is caught in seconds rather than after merging.
 
 Capabilities:
 - `Browser` — Chromium via the .NET Playwright driver. Pins the .NET CLR runtime.
