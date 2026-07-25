@@ -1,7 +1,7 @@
 module Yession.Host.Version
 
-// What build am I? Both bins answer this — over `--version`, on their OpenTelemetry resource
-// (`service.version`), and across the spawn handshake — so a running Yession is never anonymous.
+// What build am I? Both bins answer this — over `--version`, and across the spawn handshake — so
+// a running Yession is never anonymous.
 //
 // The version is a COMPILE-TIME constant: `tasks.fsx stage` passes esbuild
 // `--define:YESSION_BUILD_VERSION="<version>"` when it bundles `manager.js` and `session.js`, so

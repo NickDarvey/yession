@@ -285,6 +285,65 @@ module ControlWire =
         { Encode = fun (l: McpToolList) -> Encode.object [ "tools", l.Tools |> List.map mcpTool.Encode |> Encode.list ]
           Decode = Decode.object (fun get -> { McpToolList.Tools = get.Required.Field "tools" (Decode.list mcpTool.Decode) }) }
 
+    // --- secrets (Plan 06) ---------------------------------------------------------------
+    // Requests carry an explicit scope: the wire is self-describing and deny paths are
+    // testable, even though v1 policy only ever permits a session's own scope for writes.
+    // NO response shape can carry a secret value — `set` answers with metadata, `list`
+    // with metadata, `delete` with a flag. There is deliberately no get/read shape.
+
+    type SetSecretRequest = { Scope : SecretScope; Name : SecretName; Value : string }
+    type ListSecretsRequest = { Scope : SecretScope }
+    type DeleteSecretRequest = { Scope : SecretScope; Name : SecretName }
+    type ListSecretsResponse = { Secrets : SecretMetadata list }
+    type DeleteSecretResponse = { Deleted : bool }
+
+    let secretMetadata : Codec<SecretMetadata> = SecretsCodec.secretMetadata
+
+    let setSecretRequest : Codec<SetSecretRequest> =
+        { Encode =
+            fun (r: SetSecretRequest) ->
+                Encode.object
+                    [ "scope", SecretsCodec.secretScope.Encode r.Scope
+                      "name", secretName.Encode r.Name
+                      "value", Encode.string r.Value ]
+          Decode =
+            Decode.object (fun get ->
+                { SetSecretRequest.Scope = get.Required.Field "scope" SecretsCodec.secretScope.Decode
+                  SetSecretRequest.Name = get.Required.Field "name" secretName.Decode
+                  SetSecretRequest.Value = get.Required.Field "value" Decode.string }) }
+
+    let listSecretsRequest : Codec<ListSecretsRequest> =
+        { Encode = fun (r: ListSecretsRequest) -> Encode.object [ "scope", SecretsCodec.secretScope.Encode r.Scope ]
+          Decode =
+            Decode.object (fun get ->
+                { ListSecretsRequest.Scope = get.Required.Field "scope" SecretsCodec.secretScope.Decode }) }
+
+    let deleteSecretRequest : Codec<DeleteSecretRequest> =
+        { Encode =
+            fun (r: DeleteSecretRequest) ->
+                Encode.object
+                    [ "scope", SecretsCodec.secretScope.Encode r.Scope
+                      "name", secretName.Encode r.Name ]
+          Decode =
+            Decode.object (fun get ->
+                { DeleteSecretRequest.Scope = get.Required.Field "scope" SecretsCodec.secretScope.Decode
+                  DeleteSecretRequest.Name = get.Required.Field "name" secretName.Decode }) }
+
+    let listSecretsResponse : Codec<ListSecretsResponse> =
+        { Encode =
+            fun (r: ListSecretsResponse) ->
+                Encode.object [ "secrets", r.Secrets |> List.map SecretsCodec.secretMetadata.Encode |> Encode.list ]
+          Decode =
+            Decode.object (fun get ->
+                { ListSecretsResponse.Secrets =
+                    get.Required.Field "secrets" (Decode.list SecretsCodec.secretMetadata.Decode) }) }
+
+    let deleteSecretResponse : Codec<DeleteSecretResponse> =
+        { Encode = fun (r: DeleteSecretResponse) -> Encode.object [ "deleted", Encode.bool r.Deleted ]
+          Decode =
+            Decode.object (fun get ->
+                { DeleteSecretResponse.Deleted = get.Required.Field "deleted" Decode.bool }) }
+
     let toString (codec: Codec<'a>) (value: 'a) : string = codec.Encode value |> Encode.toString 0
 
     let fromString (codec: Codec<'a>) (json: string) : Result<'a, string> = Decode.fromString codec.Decode json

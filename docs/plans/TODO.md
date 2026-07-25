@@ -145,16 +145,28 @@ Infrastructure delivered after Phase 4 acceptance, outside the numbered phase ta
 
 - **Telemetry (Plan 04)** — [04-telemetry.md](04-telemetry.md) (Status: delivered). Each completed
   agent turn emits one OpenTelemetry **log record** (token/cache counts + session/turn/model ids,
-  never message content) over OTLP/HTTP to the Manager, which is the collector (`/v1/logs`) and
-  logs + aggregates per-session totals to stdout; off unless the Manager enables it. Delivered in
-  `3fc06ce` (#10) + fix `f4d2689` (#12). (The plan doc's local Steps 28–33 are scoped to that doc,
-  not the tracker's Step 28.)
+  never message content). Every process is a **direct OTel emitter** — no Manager-side collector;
+  destination (stdout / a collector / both / off) is the standard `OTEL_*` env the Manager is
+  started with, passed through to each child (whose identity the Manager adapts). Delivered in
+  `3fc06ce` (#10) + fix `f4d2689` (#12); reshaped from Manager-as-collector to direct emitters +
+  env pass-through. (The plan doc's local Steps 28–33 are scoped to that doc, not the tracker's Step 28.)
 - **Manager→Session control-RPC reverse legs** — the Manager can push down to a running session
   over SSE on the shared control endpoint. `GET /control/notifications` (`ProcessManager.Notify`,
   `NotificationHub`) delivered in `2360e36` (#11); `GET /control/mcp` (`ProcessManager.PublishMcpTools`,
   `McpHub`, standard MCP `ListToolsResult`, retained snapshot) delivered in #13. Transport + wire
   codecs + hubs are done and verify-tier tested over real sockets; no production producer wires
   real payloads through them yet (a documented follow-up — see [GAPS.md](../GAPS.md)).
+- **Secrets + ABAC (Plan 06)** — [06-secrets-and-abac.md](06-secrets-and-abac.md)
+  (Status: delivered). A real Manager-owned secret store (AES-256-GCM file, KEK in the
+  OS credential manager via `@napi-rs/keyring`, non-extractable import; no credential
+  manager → in-memory only), a write/list/delete-only `/control/secrets/*` surface (no
+  value-returning route), a pure default-deny `Policy.authorize` over the composite
+  identity (session + users the Manager verified at ID-token issuance), store-backed
+  `SecretRef` injection into Docker environments, agent tools
+  (`set_secret`/`list_secrets`/`delete_secret`), and a `Keyring` test capability
+  driving the real OS credential manager (headless via `scripts/with-keyring.sh`).
+  Follow-up delivered: in-process **OTel audit records** for every secrets/ABAC
+  authority decision (see the plan doc's Telemetry section).
 
 ## Blockers log
 

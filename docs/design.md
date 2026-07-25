@@ -156,6 +156,14 @@ per-launch control secret — see docs/plans/04-session-authorization.md). The s
 authentication strategy trusts localhost, matching this threat model; upstream OIDC is
 a strategy swap, not a redesign.
 
+Secrets are Manager-owned authority (docs/plans/06-secrets-and-abac.md): encrypted at
+rest under a key the OS credential manager holds (no credential manager → no
+persistence), authorized by a pure default-deny policy over the composite identity the
+Manager verified itself (the calling session + the users bound to its launch at
+ID-token issuance). Sessions hold pre-scoped write/list/delete capabilities only —
+secret values reach workloads exclusively by Manager-side injection into a launched
+environment, never through the agent loop and never back over the control channel.
+
 ---
 
 ## 4. Naming

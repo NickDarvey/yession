@@ -1,8 +1,21 @@
-# Plan 04 — OpenTelemetry: the Manager as collector, Session Processes emit
+# Plan 04 — OpenTelemetry: direct emitters + env pass-through
 
-> **Status: delivered (Steps 28–33).** The logs-signal telemetry path is complete end to
-> end: sessions emit one OTel log record per completed turn; the Manager is the collector.
-> Metrics pipeline, traces, and downstream re-export remain documented follow-ups (Non-goals).
+> **Status: delivered (Steps 28–33), then reshaped.** The logs-signal telemetry path is
+> complete end to end: sessions emit one OTel log record per completed turn.
+>
+> **Update — the Manager is no longer a collector.** The original shape (below) made the
+> Manager an in-process OTLP `/v1/logs` receiver that decoded and re-logged session telemetry.
+> That was replaced by the standard OpenTelemetry deployment: **every process — the Manager and
+> each Session Process — is a direct emitter.** Destination is chosen by how the Manager is
+> started, using the standard env (`OTEL_LOGS_EXPORTER=console|otlp|none` — comma-separated for a
+> stdout+collector tee; `OTEL_EXPORTER_OTLP_*` for the collector endpoint), which the Manager
+> passes through to each child while adapting the child's identity (`service.name=yession-session`,
+> `service.instance.id=<sessionId>`). Default `console` (stdout); with no collector configured,
+> forwarding is simply dropped. This retired `app/TelemetryReceiver.fs`, the `LogsWire` decode, the
+> `YESSION_OTLP_*` spawn contract, and the per-launch telemetry bearer. Metrics and traces now
+> generalise trivially (same env selection, no collector to touch). The sections below describe the
+> original collector design and are kept for history; the emit model, attributes, and GenAI
+> conventions still hold.
 >
 > Phase 5 · Observability. Addresses [GAPS.md](../GAPS.md) § Delivery & operations
 > ("No telemetry, structured logging, or crash reporting; the Process logs to stdout")

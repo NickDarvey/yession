@@ -230,7 +230,7 @@ let dev () =
 // ssh2 (with an optional native addon), so it resolves from node_modules too. Everything else
 // (yjs, lib0, Thoth, prosemirror, …) inlines.
 let private externals =
-    [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "zod"; "dockerode" ]
+    [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "zod"; "dockerode"; "@napi-rs/keyring" ]
     |> List.map (sprintf "--external:%s")
 
 // The OTel SDK does a dynamic `require('util')`; esbuild's ESM output can't satisfy a runtime
@@ -287,6 +287,7 @@ let private packageJson (version: string) =
   "engines": { "node": ">=24" },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "%s",
+    "@napi-rs/keyring": "%s",
     "dockerode": "%s",
     "node-datachannel": "%s",
     "zod": "%s"
@@ -295,6 +296,7 @@ let private packageJson (version: string) =
 """
         version
         (depVersion "@anthropic-ai/claude-agent-sdk")
+        (depVersion "@napi-rs/keyring")
         (depVersion "dockerode")
         (depVersion "node-datachannel")
         (depVersion "zod")

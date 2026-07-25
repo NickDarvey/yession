@@ -38,6 +38,7 @@ type Need =
     | Native      // the native `node-datachannel` WebRTC addon (loaded by the real Session Process)
     | Docker      // a reachable Docker daemon
     | LiveAgent   // real model credentials
+    | Keyring     // a usable OS credential manager (Keychain / Credential Manager / Secret Service)
 
 // process.env under Node; the CLR reads it through System.Environment below. Guarded so this
 // branch is dead-code-eliminated out of the .NET build path — jsNative would throw there.
@@ -50,7 +51,7 @@ let private getEnv (name: string) : string =
         match System.Environment.GetEnvironmentVariable name with null -> "" | v -> v
     else jsEnv name
 
-let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent ]
+let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring ]
 
 let private parseNeed (s: string) : Need option =
     match s.Trim().ToLowerInvariant () with
@@ -59,6 +60,7 @@ let private parseNeed (s: string) : Need option =
     | "native"    -> Some Native
     | "docker"    -> Some Docker
     | "liveagent" -> Some LiveAgent
+    | "keyring"   -> Some Keyring
     | _           -> None
 
 let private hasCreds =

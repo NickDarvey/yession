@@ -165,9 +165,10 @@ markers can't accidentally cut a major release. A plain
 prints what the current commit would publish; the policy itself is at the top of
 [tasks.fsx](tasks.fsx).
 
-Both binaries report their build — `yession-manager --version`, `yession-session --version` — and
-carry it into telemetry as the OpenTelemetry `service.version` resource attribute. Builds that
-cannot know a release version say so rather than inventing one: `dev` for an unbundled dev run,
-`test` for the test tiers, and `0.0.0-g<rev>` for a Nix build (whose source has no `.git`). Set
-`YESSION_VERSION` to override the computation — that is how the Nix derivations are told what they
-are, and how a past release is rebuilt.
+Both binaries report their build — `yession-manager --version`, `yession-session --version` — and a
+session states it on the readiness line it prints at startup, so the Manager can warn when it has
+just launched a session from a different major version. Builds that cannot know a release version
+say so rather than inventing one: `dev` for an unbundled dev run, `test` for the test tiers, and
+`0.0.0-g<rev>` for a Nix build (whose source has no `.git`). Set `YESSION_VERSION` to override the
+computation — that is how the Nix derivations are told what they are, and how a past release is
+rebuilt.
