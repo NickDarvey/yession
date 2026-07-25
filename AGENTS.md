@@ -70,6 +70,11 @@ script is exactly that: `.claude/setup.sh` runs before Nix/devenv exist. Everyth
 including the headless D-Bus/keyring wrapping, which `check` arranges by re-execing itself —
 is a verb. Anything that could be a verb, is a verb.
 
+**No belt-and-braces.** When two mechanisms could satisfy the same requirement (two config
+locations, a fallback beside a primary), keep ONLY the one verified working here and delete
+the other. A redundant spare hides which path is live, rots unverified, and turns the next
+failure into an archaeology dig.
+
 ## Versioning
 
 The version is computed from the commit history (policy at the top of `tasks.fsx`), never stored
