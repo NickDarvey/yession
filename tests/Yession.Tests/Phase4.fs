@@ -580,49 +580,54 @@ let private compositionTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Plan 04 — telemetry over the process boundary. The Manager runs its OTLP `/v1/logs`
-// receiver on its own endpoint and injects `YESSION_OTLP_ENDPOINT`/`_SECRET` into the
-// launch; a real child (the credential-free `usage-probe` agent) runs one turn and its
-// token/cache counts reach the Manager's collector over real OTLP HTTP. Verify tier: a
-// real child process + a real WebRTC client trigger the turn.
+// Telemetry over the process boundary. Every process is a DIRECT OTel emitter — the
+// Manager does not collect. The Manager passes the standard OTEL_* env through to the
+// child (Spawn merges over process.env) and adapts its identity; the child (the
+// credential-free `usage-probe` agent) exports its token/cache counts straight to a stub
+// OTLP collector (the stand-in for a real OTel Collector), over real OTLP HTTP — the
+// Manager is not in the telemetry path. The Manager emits its own lifecycle signals via
+// OnEvent. Verify tier: a real child process + a real WebRTC client trigger the turn.
 // -----------------------------------------------------------------------------
 
 let private telemetryTests =
-    testList "Telemetry over the process boundary (Plan 04)" [
-        testCaseAsync "a real child session's turn usage reaches the Manager collector over OTLP" <|
+    testList "Telemetry over the process boundary" [
+        testCaseAsync "a real child session's turn usage reaches a collector directly over OTLP" <|
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/tel-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
 
-                // The Manager's collector, with an onRecord signal so the test awaits the
-                // arriving USAGE record instead of polling the async batch export. (The
-                // Manager's own audit records — Plan 06 — share this collector and arrive
-                // earlier, e.g. the login's binding_recorded; they must not satisfy the wait.)
+                // A stub OTLP collector with an arrival signal so the test awaits the record
+                // instead of polling the async batch export.
                 let mutable fired = false
                 let mutable waiter : (unit -> unit) option = None
-                let collector =
-                    TelemetryReceiver.Collector.create (fun r ->
-                        if TelemetryReceiver.TurnUsage.ofLog r |> Option.isSome then
-                            fired <- true
-                            match waiter with
-                            | Some resume -> waiter <- None; resume ()
-                            | None -> ())
+                let! stub =
+                    OtlpStub.startWith (fun _ ->
+                        fired <- true
+                        match waiter with
+                        | Some resume -> waiter <- None; resume ()
+                        | None -> ())
 
+                // The Manager is itself a direct emitter: capture its lifecycle signals.
+                let managerEvents = ResizeArray<string> ()
                 let! pm =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
-                            Telemetry = Some collector }
+                            OnEvent = fun body _ -> managerEvents.Add body }
                 let record = pm.CreateSession "tel-child" "Tel child" |> expect
 
-                // The child inherits our environment: run its built-in usage-probe agent.
+                // The child inherits our environment: run its usage-probe agent and export OTLP
+                // straight to the stub collector (no Manager receiver).
                 setEnv "YESSION_AGENT" "usage-probe"
+                setEnv "OTEL_LOGS_EXPORTER" "otlp"
+                setEnv "OTEL_EXPORTER_OTLP_ENDPOINT" stub.Url
                 let! launched = pm.Launch record.SessionId
                 unsetEnv "YESSION_AGENT"
+                unsetEnv "OTEL_LOGS_EXPORTER"
+                unsetEnv "OTEL_EXPORTER_OTLP_ENDPOINT"
                 let port = launched |> expect
 
                 // A real client messages the child; access rides the OIDC bounce; the probe
-                // turn runs and emits usage back to the Manager's receiver over the
-                // injected OTLP endpoint.
+                // turn runs and emits usage directly to the collector.
                 let! openedTel = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" port)
                 let! a = connectClient (sprintf "http://127.0.0.1:%d/signal" port) openedTel.PeerToken "ada" "Ada"
                 do! compose a a.Hello.PeerId "probe a turn"
@@ -630,14 +635,17 @@ let private telemetryTests =
 
                 do! Async.FromContinuations (fun (cont, _, _) -> if fired then cont () else waiter <- Some cont)
 
-                match collector.Received () |> List.choose TelemetryReceiver.TurnUsage.ofLog with
+                match stub.Received () |> List.choose OtlpStub.turnUsage with
                 | u :: _ ->
                     Expect.equal u.SessionId "tel-child" "the record is tagged with the child's session id"
                     Expect.equal (u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens) (111, 22, 3, 4) "the probe's counts crossed the process boundary"
                     Expect.equal u.Model (Some "probe-model") "the model crossed the boundary"
-                | [] -> failwith "no usage record reached the Manager collector"
+                | [] -> failwith "no usage record reached the collector"
+
+                Expect.isTrue (managerEvents.Contains "session launched") "the Manager emitted its own launch lifecycle signal"
 
                 do! a.Channel.Close ()
+                stub.Close ()
                 do! pm.StopAll ()
             }
     ]

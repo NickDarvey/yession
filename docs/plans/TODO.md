@@ -145,10 +145,11 @@ Infrastructure delivered after Phase 4 acceptance, outside the numbered phase ta
 
 - **Telemetry (Plan 04)** — [04-telemetry.md](04-telemetry.md) (Status: delivered). Each completed
   agent turn emits one OpenTelemetry **log record** (token/cache counts + session/turn/model ids,
-  never message content) over OTLP/HTTP to the Manager, which is the collector (`/v1/logs`) and
-  logs + aggregates per-session totals to stdout; off unless the Manager enables it. Delivered in
-  `3fc06ce` (#10) + fix `f4d2689` (#12). (The plan doc's local Steps 28–33 are scoped to that doc,
-  not the tracker's Step 28.)
+  never message content). Every process is a **direct OTel emitter** — no Manager-side collector;
+  destination (stdout / a collector / both / off) is the standard `OTEL_*` env the Manager is
+  started with, passed through to each child (whose identity the Manager adapts). Delivered in
+  `3fc06ce` (#10) + fix `f4d2689` (#12); reshaped from Manager-as-collector to direct emitters +
+  env pass-through. (The plan doc's local Steps 28–33 are scoped to that doc, not the tracker's Step 28.)
 - **Manager→Session control-RPC reverse legs** — the Manager can push down to a running session
   over SSE on the shared control endpoint. `GET /control/notifications` (`ProcessManager.Notify`,
   `NotificationHub`) delivered in `2360e36` (#11); `GET /control/mcp` (`ProcessManager.PublishMcpTools`,

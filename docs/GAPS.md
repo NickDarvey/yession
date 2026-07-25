@@ -203,16 +203,18 @@ discovers it in production. Items are roughly ordered by how much they matter.
   only by the Linux install-smoke — unverified per-commit on those platforms.
 - **Telemetry is agent-turn usage plus Manager audit records** (Plans 04 + 06): each
   completed turn emits one OpenTelemetry **log record** — the token/cache counts plus
-  session/turn/model ids, never message content — over OTLP/HTTP to the Manager, which
-  acts as the collector (`/v1/logs`) and logs + aggregates per-session totals to
-  stdout; and the Manager emits its own in-process `yession.*` audit records for the
-  secrets/ABAC surface (ops, denies, injection, KEK/store lifecycle, user↔launch
-  bindings, control 401s — see [Plan 06 § Telemetry](plans/06-secrets-and-abac.md)),
-  one greppable stdout line each, or through the collector's `onRecord` seam when one
-  runs. Still **no metrics pipeline, no traces, no downstream re-export** (all behind
-  `onRecord`), **no structured app logging or crash reporting** beyond stdout; the
-  telemetry receiver's own bearer 401 and a store failure during injection remain
-  un-audited.
+  session/turn/model ids, never message content. Every process (Manager and each session)
+  is a **direct OTel emitter**; there is no Manager-side collector. Destination is chosen by
+  the standard OTEL_* env the Manager is started with (`OTEL_LOGS_EXPORTER=console|otlp|none`,
+  comma-separated for a stdout+collector tee; `OTEL_EXPORTER_OTLP_*` for the collector) and
+  passed through to each child, whose identity the Manager adapts. Default `console` (stdout);
+  no collector configured ⇒ forwarding is dropped. Separately, the Manager emits its own
+  in-process `yession.*` **audit records** for the secrets/ABAC surface (ops, denies, injection,
+  KEK/store lifecycle, user↔launch bindings, control 401s — see
+  [Plan 06 § Telemetry](plans/06-secrets-and-abac.md)), one greppable stdout line each.
+  Still **no metrics pipeline, no traces** (the emitter path generalises to both — same env
+  selection, no collector to touch), **audit records not yet forwarded to a collector**, and
+  **no structured app logging or crash reporting** beyond stdout.
 - **Interactive terminal, multi-node/remote sessions, and work-intake integrations
   (Slack/Linear)** remain out of scope, as planned.
 

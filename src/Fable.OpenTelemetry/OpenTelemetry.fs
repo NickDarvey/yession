@@ -39,6 +39,11 @@ type [<AllowNullLiteral>] InMemoryLogRecordExporter =
     abstract getFinishedLogRecords: unit -> obj array
     abstract reset: unit -> unit
 
+/// Console exporter: writes finished records to stdout. A `LogRecordExporter`, so it drops
+/// straight into a processor — the standard "log to stdout" leg of a tee.
+type [<AllowNullLiteral>] ConsoleLogRecordExporter =
+    inherit LogRecordExporter
+
 [<Emit("new $0($1)")>]
 let private newWith (ctor: obj) (opts: obj) : 'a = jsNative
 
@@ -49,6 +54,7 @@ let private loggerProviderCtor : obj = import "LoggerProvider" "@opentelemetry/s
 let private batchProcessorCtor : obj = import "BatchLogRecordProcessor" "@opentelemetry/sdk-logs"
 let private simpleProcessorCtor : obj = import "SimpleLogRecordProcessor" "@opentelemetry/sdk-logs"
 let private inMemoryExporterCtor : obj = import "InMemoryLogRecordExporter" "@opentelemetry/sdk-logs"
+let private consoleExporterCtor : obj = import "ConsoleLogRecordExporter" "@opentelemetry/sdk-logs"
 let private otlpExporterCtor : obj = import "OTLPLogExporter" "@opentelemetry/exporter-logs-otlp-http"
 let private resourceFromAttributes : obj -> Resource = import "resourceFromAttributes" "@opentelemetry/resources"
 
@@ -62,6 +68,11 @@ let resource (attributes: obj) : Resource = resourceFromAttributes attributes
 /// A LoggerProvider wired to one processor over the given resource (SDK 2.x config form).
 let loggerProvider (resource: Resource) (processor: LogRecordProcessor) : LoggerProvider =
     newWith loggerProviderCtor (createObj [ "resource", box resource; "processors", box [| processor |] ])
+
+/// A LoggerProvider fanning one emit out to several processors — the SDK-native tee
+/// (each exporter gets a copy). E.g. console + OTLP: "log to stdout AND forward."
+let loggerProviderMulti (resource: Resource) (processors: LogRecordProcessor list) : LoggerProvider =
+    newWith loggerProviderCtor (createObj [ "resource", box resource; "processors", box (Array.ofList processors) ])
 
 // Both processors take an options object `{ exporter; ... }` (SDK 2.x) — NOT the bare
 // exporter. Passing the exporter directly silently no-ops: the export throws on
@@ -78,6 +89,14 @@ let simpleProcessor (exporter: LogRecordExporter) : LogRecordProcessor =
 /// OTLP/HTTP logs exporter (JSON) posting to `url`, with the given headers object.
 let otlpLogExporter (url: string) (headers: obj) : LogRecordExporter =
     newWith otlpExporterCtor (createObj [ "url", box url; "headers", box headers ])
+
+/// OTLP/HTTP logs exporter (JSON) self-configured from the environment — no explicit url:
+/// the SDK reads `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`/`OTEL_EXPORTER_OTLP_ENDPOINT` (+ `_HEADERS`).
+/// This is the standard "point me at the collector via env" form.
+let otlpLogExporterFromEnv () : LogRecordExporter = newEmpty otlpExporterCtor
+
+/// Console exporter (stdout) — the standard "log to stdout" leg of a tee.
+let consoleLogExporter () : LogRecordExporter = newEmpty consoleExporterCtor
 
 /// In-memory exporter for tests.
 let inMemoryExporter () : InMemoryLogRecordExporter = newEmpty inMemoryExporterCtor

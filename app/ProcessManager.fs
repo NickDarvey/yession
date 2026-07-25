@@ -87,10 +87,12 @@ type Options =
       /// product default is fixed — a second Manager instance must choose its own
       /// (the bind fails loudly on conflict, never a silent fallback).
       ManagerPort : int option
-      /// Telemetry (Plan 04): when set, the Manager runs an OTLP `/v1/logs` receiver on its
-      /// endpoint feeding this collector, and injects `YESSION_OTLP_ENDPOINT`/`_SECRET` into
-      /// every launch. None = telemetry off (children run with telemetry disabled).
-      Telemetry : TelemetryReceiver.Collector option
+      /// The Manager's own telemetry sink for session-lifecycle signals (launch/exit). The
+      /// Manager is a direct OTel emitter; this is its `Log`. Default = ignore. Sessions emit
+      /// their own telemetry directly — the Manager does not collect from them; it only passes
+      /// the standard `OTEL_*` env through to each child (Spawn merges over `process.env`) and
+      /// adapts the child's identity (service.name/instance.id).
+      OnEvent : string -> (string * obj) list -> unit
       /// How the OIDC provider authenticates the human at /authorize. None = the
       /// built-in trust-localhost strategy; an upstream OIDC integration is a
       /// different strategy value, not a different Manager.
@@ -119,7 +121,7 @@ module Options =
           StopGraceMs = 3000
           Grant = None
           ManagerPort = None
-          Telemetry = None
+          OnEvent = (fun _ _ -> ())
           Strategy = None
           Secrets = None }
 
@@ -208,9 +210,6 @@ let createWithUi
     // The same per-launch secret also names which session is reporting its display name
     // (the collaborative title); this map lives and dies with the secret.
     let mutable secretSessions : Map<string, SessionId> = Map.empty
-    // Per-launch telemetry bearer secrets (Plan 04): a session posts OTLP logs authenticated
-    // with its bearer; the secret lives and dies with the launch, like the control secret.
-    let mutable telemetrySecrets : Set<string> = Set.empty
     // Users the Manager verified into a LAUNCH (Plan 06): recorded at ID-token issuance,
     // keyed by the per-launch control secret so the binding dies with the launch, exactly
     // like the client registration it derives from. Durable secrets, per-login access.
@@ -263,14 +262,10 @@ let createWithUi
     // provider reads the issuer lazily, so the mutable slot resolves cleanly.
     let mutable endpointUrl : string option = None
     let issuerOf () = defaultArg endpointUrl ""
-    // The Manager's audit sink (Plan 06 telemetry): the telemetry collector when one is
-    // configured (records route through it once, and reach the onRecord re-export
-    // seam), the stdout formatter otherwise. Built exactly once — either/or, never
-    // both, so a record prints exactly once.
-    let audit : TelemetryReceiver.Sink =
-        match options.Telemetry with
-        | Some collector -> collector.Record
-        | None -> TelemetryReceiver.Audit.stdout
+    // The Manager's audit sink (Plan 06 telemetry): one greppable audit line to stdout for
+    // each authority decision. (Session telemetry is emitted directly by each process now —
+    // there is no Manager-side collector; forwarding audit to a collector too is a follow-up.)
+    let audit : TelemetryReceiver.Sink = TelemetryReceiver.Audit.stdout
 
     // The secret store (Plan 06). A corrupt durable store fails the boot loudly — it
     // must never look empty. The ephemeral mode warns loudly and leaves any durable
@@ -335,10 +330,6 @@ let createWithUi
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                 let handled =
                     Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi (fun path -> audit (TelemetryReceiver.Audit.controlUnauthorized path)) req res
-                    || (match options.Telemetry with
-                        | Some collector ->
-                            TelemetryReceiver.tryHandle (fun secret -> Set.contains secret telemetrySecrets) collector req res
-                        | None -> false)
                     || provider.TryHandle req res
                     || (match ui, self with
                         | Some handle, Some pm -> handle pm req res
@@ -405,15 +396,21 @@ let createWithUi
                         secretSessions <- Map.add secret record.SessionId secretSessions
                         [ "YESSION_CONTROL_URL", url; "YESSION_CONTROL_SECRET", secret ], Some secret
                     | None -> [], None
-                // Telemetry (Plan 04): the child exports OTLP logs to the Manager's own
-                // endpoint, authenticated with a per-launch bearer, when telemetry is enabled.
-                let telemetryEnv =
-                    match options.Telemetry, controlUrl () with
-                    | Some _, Some url ->
-                        let secret = Interop.randomSecret ()
-                        telemetrySecrets <- Set.add secret telemetrySecrets
-                        [ "YESSION_OTLP_ENDPOINT", url; "YESSION_OTLP_SECRET", secret ], Some secret
-                    | _ -> [], None
+                // Telemetry: the child is a direct OTel emitter. The Manager does NOT collect;
+                // it passes its own OTEL_* environment through (Spawn merges over `process.env`,
+                // so OTEL_LOGS_EXPORTER / OTEL_EXPORTER_OTLP_* flow to the child unchanged) and
+                // overrides only the child's IDENTITY — service.name=yession-session plus
+                // service.instance.id=<sessionId>, merged over any operator OTEL_RESOURCE_ATTRIBUTES
+                // so the child never inherits the Manager's own service.name.
+                let telemetryIdentityEnv =
+                    let sid = SessionId.value record.SessionId
+                    let inherited = Interop.envOr "OTEL_RESOURCE_ATTRIBUTES" ""
+                    let sessionAttrs =
+                        sprintf "service.instance.id=%s,service.namespace=yession,yession.session.id=%s" sid sid
+                    let resourceAttrs =
+                        if inherited.Trim().Length = 0 then sessionAttrs else inherited + "," + sessionAttrs
+                    [ "OTEL_SERVICE_NAME", "yession-session"
+                      "OTEL_RESOURCE_ATTRIBUTES", resourceAttrs ]
                 let env =
                     [ "YESSION_SESSION", SessionId.value record.SessionId
                       "YESSION_SESSION_DATA", sprintf "%s/%s" options.DataDir record.DataDir
@@ -421,7 +418,7 @@ let createWithUi
                       // The child watches its stdin and exits when this Manager dies.
                       "YESSION_PARENT_GUARD", "1" ]
                     @ fst controlEnv
-                    @ fst telemetryEnv
+                    @ telemetryIdentityEnv
                 let revokeSecret () =
                     (match snd controlEnv with
                      | Some secret ->
@@ -439,10 +436,6 @@ let createWithUi
                          provider.RevokeByControlSecret secret
                          launchUsers <- Map.remove secret launchUsers
                      | None -> ())
-                    // The launch's telemetry authority dies with it too.
-                    match snd telemetryEnv with
-                    | Some secret -> telemetrySecrets <- Set.remove secret telemetrySecrets
-                    | None -> ()
                 match! Spawn.launch options.SessionCommand options.SessionArgs env options.LaunchTimeoutMs with
                 | Error reason ->
                     revokeSecret ()
@@ -450,13 +443,21 @@ let createWithUi
                 | Ok (child, port) ->
                     children <- Map.add key (child, port) children
                     lastExit <- Map.remove key lastExit
+                    // The Manager emits its own lifecycle telemetry directly (session launched).
+                    options.OnEvent "session launched"
+                        [ "yession.session.id", box key; "yession.session.port", box port ]
                     child.OnExit (fun code ->
                         children <- Map.remove key children
                         // The launch's authority dies with it.
                         revokeSecret ()
                         // A stop's exit is the expected outcome, not a crash to report.
-                        if Set.contains key stopping then stopping <- Set.remove key stopping
-                        else lastExit <- Map.add key code lastExit)
+                        let stopped = Set.contains key stopping
+                        if stopped then stopping <- Set.remove key stopping
+                        else lastExit <- Map.add key code lastExit
+                        options.OnEvent "session exited"
+                            [ "yession.session.id", box key
+                              "yession.session.exit_code", box (defaultArg code -1)
+                              "yession.session.stopped", box stopped ])
                     return Ok port
         }
 

@@ -51,8 +51,10 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 let private auth =
     controlChannel |> Option.map (fun _ -> SessionAuth.create sessionId)
 
-// Telemetry (Plan 04): one OTel log record per completed turn, exported to the Manager's
-// collector. Configured from `YESSION_OTLP_ENDPOINT`/`_SECRET`; a pure no-op when absent.
+// Telemetry: this session is a direct OTel emitter — one OTel log record per completed turn.
+// Destination (stdout / a collector / both / off) comes from the standard OTEL_* env the
+// Manager passes through; identity (service.name=yession-session, service.instance.id=<id>)
+// the Manager adapts per child. No Manager-side collector, no bespoke endpoint.
 let private telemetry = Telemetry.fromEnv sessionId
 
 // The reverse leg over the same control channel: subscribe to the Manager's notification
