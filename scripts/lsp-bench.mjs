@@ -3,8 +3,9 @@
 // scripts/fsharp-lsp-mcp.mjs) against ripgrep, for the navigation questions an agent
 // actually asks: where is this defined, what references it, what type is it.
 //
-// Run inside `devenv shell` (fsautocomplete is a devenv package):
-//     node scripts/lsp-bench.mjs
+// Run it either way — as a devenv script, or directly, since it finds fsautocomplete
+// through the devenv profile without needing to be inside the shell:
+//     devenv shell -- lsp-bench      /      node scripts/lsp-bench.mjs
 //
 // Reports three things, because they trade off against each other:
 //   - cold:      time from process start to the first usable answer (paid per session)
@@ -20,9 +21,12 @@ import { spawn, execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
+import { locateFsac, fsacEnv, fsacNotFoundMessage } from './fsac-locate.mjs'
 
 const ROOT = path.resolve(import.meta.dirname, '..')
-const FSAC = process.env.FSAC_BIN || 'fsautocomplete'
+const found = locateFsac(ROOT)
+if (!found) { console.error(fsacNotFoundMessage(ROOT)); process.exit(1) }
+const FSAC = found.path
 const REPS = +(process.env.BENCH_REPS ?? 5)
 
 const now = () => Number(process.hrtime.bigint()) / 1e6
@@ -59,9 +63,9 @@ for (const t of TARGETS) {
 // Minimal LSP client
 // ---------------------------------------------------------------------------
 
-const proc = spawn(FSAC, [], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'] })
+const proc = spawn(FSAC, [], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'], env: fsacEnv(found) })
 let stderrTail = ''
-proc.on('error', (e) => { console.error(`cannot run ${FSAC}: ${e.message}\nRun inside 'devenv shell'.`); process.exit(1) })
+proc.on('error', (e) => { console.error(`cannot run ${FSAC}: ${e.message}`); process.exit(1) })
 proc.stderr.on('data', (d) => { stderrTail = (stderrTail + d).slice(-4000) })
 proc.on('exit', (c) => { if (c) { log(`FSAC exited ${c}`); console.error(stderrTail) } })
 
@@ -190,13 +194,17 @@ for (const t of TARGETS) {
 // ripgrep baseline, same questions
 // ---------------------------------------------------------------------------
 
+// A missing rg must not masquerade as "ripgrep found nothing" — that would read as the
+// language server winning on precision by default.
+let rgAvailable = true
+try { execFileSync('rg', ['--version'], { cwd: ROOT, stdio: 'ignore' }) } catch { rgAvailable = false }
+
 const rg = (args) => {
+  if (!rgAvailable) return { ms: NaN, hits: NaN }
   const t = now()
   let out = ''
   for (let i = 0; i < REPS; i++) {
-    const s = now()
     try { out = execFileSync('rg', args, { cwd: ROOT }).toString() } catch { out = '' }
-    if (i === 0) void s
   }
   const ms = (now() - t) / REPS
   return { ms: +ms.toFixed(1), hits: out.split('\n').filter(Boolean).length }
@@ -226,11 +234,12 @@ console.log('\nWARM (median per query)')
 for (const r of warm) console.log(`  ${pad(r.what, 48)} ${padL(r.median.toFixed(1) + 'ms', 10)}  ${r.hits} result(s)`)
 
 console.log('\nRIPGREP (same questions, text only)')
-for (const r of grepRows) console.log(`  ${pad(r.what, 48)} ${padL(r.ms.toFixed(1) + 'ms', 10)}  ${r.hits} hit(s)`)
+if (!rgAvailable) console.log('  ripgrep not found — skipping the text-search comparison')
+else for (const r of grepRows) console.log(`  ${pad(r.what, 48)} ${padL(r.ms.toFixed(1) + 'ms', 10)}  ${r.hits} hit(s)`)
 
 const refRow = warm.find((r) => r.what.startsWith('references (type declaration'))
 const wordRow = grepRows[1]
-if (refRow && wordRow) {
+if (refRow && wordRow && rgAvailable) {
   console.log(`\nPRECISION\n  ripgrep returns ${wordRow.hits} hits for "SessionId"; the compiler finds ${refRow.hits} references`)
   console.log(`  to the type itself. The difference is same-named modules, DU cases, record`)
   console.log(`  fields, strings and comments — lines you would otherwise read to discard.`)

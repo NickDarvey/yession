@@ -128,12 +128,24 @@ cannot tell them apart. Measured here: `rg '\bSessionId\b'` returns **321 hits**
 finds **97** references to the type. Warm queries are also *faster* than ripgrep (~2ms vs ~7ms
 for a definition).
 
-The cost is startup: ~20s to load the workspace and ~1.4GB resident, plus ~11s on the first
+The cost is startup: ~20s to load the workspace and ~1.3GB resident, plus ~12s on the first
 `references` call (it forces a workspace-wide check). The MCP server therefore starts
 fsautocomplete eagerly when the session starts, so that cost usually lands before you ask
-anything; `FSAC_LAZY=1` defers it to the first query instead. It needs `fsautocomplete` on
-PATH, i.e. an agent launched from inside `devenv shell` — otherwise every tool call returns
-that as its error. `FSAC_BIN` overrides the binary.
+anything; `FSAC_LAZY=1` defers it to the first query instead.
+
+**You do not need to be inside `devenv shell` for this.** Agents are normally launched from
+the plain container shell, so `scripts/fsac-locate.mjs` finds the server through the devenv
+profile instead of PATH: `$FSAC_BIN`, then `$DEVENV_PROFILE` (set when you *are* in the
+shell), then `.devenv/profile` (the symlink devenv refreshes on every `devenv shell`), then
+PATH. It also puts that profile's `bin` on the spawned server's PATH — fsautocomplete loads
+projects by shelling out to MSBuild, and without `dotnet` there it starts happily, loads zero
+projects, and answers every query with "Couldn't find <file> in LoadedProjects", which looks
+like a broken workspace rather than a missing toolchain.
+
+The one requirement is that the environment has been built at least once, since
+`.devenv/profile` is created by `devenv shell`. In a fresh container run the Bootstrap above
+first. If the MCP server started before that, it watches for the profile and warms up when it
+appears — no session restart needed.
 
 Still use `rg` for what it's good at: string literals, comments, config, non-F# files, and
 "does this phrase appear anywhere". `lsp-bench` (a devenv script) re-runs the comparison above

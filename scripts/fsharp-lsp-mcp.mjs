@@ -20,9 +20,9 @@ import { spawn } from 'node:child_process'
 import { readFileSync, existsSync } from 'node:fs'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { locateFsac, fsacEnv, fsacNotFoundMessage } from './fsac-locate.mjs'
 
 const ROOT = process.env.CLAUDE_PROJECT_DIR || process.cwd()
-const FSAC = process.env.FSAC_BIN || 'fsautocomplete'
 // The first query after startup pays workspace load + typecheck (~20s here); the first
 // `references` additionally forces a whole-workspace check (~11s more). Budget for both.
 const READY_TIMEOUT_MS = +(process.env.FSAC_READY_TIMEOUT_MS ?? 180_000)
@@ -76,15 +76,17 @@ class LanguageServer {
 
   async _start() {
     const t0 = Date.now()
-    log(`starting ${FSAC} in ${ROOT}…`)
-    this.proc = spawn(FSAC, [], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'] })
+    // Resolved per attempt, not once at import, so an agent that builds the environment
+    // mid-session is picked up by the next query.
+    const found = locateFsac(ROOT)
+    if (!found) throw new Error(fsacNotFoundMessage(ROOT))
+    const fsac = found.path
+    log(`starting ${fsac} (via ${found.source}) in ${ROOT}…`)
+    this.proc = spawn(fsac, [], { cwd: ROOT, stdio: ['pipe', 'pipe', 'pipe'], env: fsacEnv(found) })
     this.proc.on('error', (e) => {
-      // Almost always ENOENT: fsautocomplete comes from devenv, so this means the session
-      // was started outside `devenv shell`. Fail every waiter now with that explanation
-      // rather than letting them sit until the request timeout.
       const hint = e.code === 'ENOENT'
-        ? `${FSAC} not found on PATH — start Claude Code from inside 'devenv shell', or set FSAC_BIN to its path`
-        : `could not start ${FSAC}: ${e.message}`
+        ? `${fsac} is not executable or vanished. ${fsacNotFoundMessage(ROOT)}`
+        : `could not start ${fsac}: ${e.message}`
       log(hint)
       this.proc = null
       this._failAllPending(new Error(hint))
@@ -446,14 +448,29 @@ process.on('exit', () => server.proc?.kill())
 // critical path: MCP servers launch when the session starts, so the cost is usually spent
 // before anyone asks a question. The trade is ~1.4GB resident in sessions that never query;
 // set FSAC_LAZY=1 to defer startup to the first tool call instead.
+function warmUp() {
+  server.start().catch((e) => {
+    // Don't take the MCP server down — tools/list still works, and the failure is
+    // reported with context when a tool is actually called.
+    server.starting = null
+    if (locateFsac(ROOT)) { log('warm-up failed (will retry on first query):', e.message); return }
+    // The environment simply isn't built yet. That is the normal state of a fresh
+    // container, where an agent runs the bootstrap as its first act — so wait for the
+    // profile to appear instead of making them restart the session to get the server.
+    log(`fsautocomplete unavailable yet; watching for the devenv profile. ${e.message}`)
+    const timer = setInterval(() => {
+      if (!locateFsac(ROOT)) return
+      clearInterval(timer)
+      log('devenv profile appeared; warming up fsautocomplete')
+      server.start().catch((e2) => { server.starting = null; log('warm-up failed:', e2.message) })
+    }, 15_000)
+    timer.unref() // never hold the process open on account of this poll
+  })
+}
+
 if (process.env.FSAC_LAZY === '1') {
   log(`ready (root=${ROOT}); fsautocomplete starts on first query`)
 } else {
   log(`ready (root=${ROOT}); warming up fsautocomplete`)
-  server.start().catch((e) => {
-    // Don't take the MCP server down — tools/list still works, and the failure gets
-    // reported with context when a tool is actually called.
-    log('warm-up failed (will retry on first query):', e.message)
-    server.starting = null
-  })
+  warmUp()
 }

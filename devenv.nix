@@ -24,7 +24,9 @@ in
   # any build or test path — it backs `scripts/fsharp-lsp-mcp.mjs`, which gives agents
   # compiler-accurate go-to-definition / find-references instead of text search. It reads
   # Yession.slnx directly and loads every project with no configuration.
-  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint pkgs.fsautocomplete ];
+  # ripgrep is the baseline `lsp-bench` measures against (and the right tool for the
+  # searches the language server does not answer: strings, comments, non-F# files).
+  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint pkgs.fsautocomplete pkgs.ripgrep ];
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
