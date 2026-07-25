@@ -19,7 +19,12 @@ in
   # dbus + gnome-keyring back the `Keyring` test capability on headless hosts:
   # `scripts/with-keyring.sh check Keyring` runs the OS-credential-manager suite against
   # a private, empty-password-unlocked Secret Service (see the script).
-  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint ];
+  #
+  # fsautocomplete is the F# language server (the engine behind Ionide). It is not part of
+  # any build or test path — it backs `scripts/fsharp-lsp-mcp.mjs`, which gives agents
+  # compiler-accurate go-to-definition / find-references instead of text search. It reads
+  # Yession.slnx directly and loads every project with no configuration.
+  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint pkgs.fsautocomplete ];
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
@@ -63,6 +68,9 @@ in
   # the version from the commit history, so there is no default to duplicate here.
   scripts.package.exec = ''exec dotnet fsi tasks.fsx package "$@"'';
   scripts.clean.exec = ''exec dotnet fsi tasks.fsx clean'';
+  # Not a build verb (so not in tasks.fsx): measures the F# language server against
+  # ripgrep for go-to-definition / find-references, to justify keeping the former.
+  scripts."lsp-bench".exec = ''exec node scripts/lsp-bench.mjs "$@"'';
   # CI helpers (also plain tasks.fsx verbs): install-smoke <tgz>, clean-docker.
   scripts."install-smoke".exec = ''exec dotnet fsi tasks.fsx install-smoke "$@"'';
   scripts."clean-docker".exec = ''exec dotnet fsi tasks.fsx clean-docker'';

@@ -36,14 +36,20 @@ PATH.
 A fresh Claude Code container: install Nix ONCE (single-user, no daemon), then enter devenv.
 
 ```
+# Write nix.conf FIRST. The installer runs as root here with no `nixbld` group, and even
+# --no-daemon fails at the final profile step unless build-users-group is explicitly empty.
+mkdir -p ~/.config/nix && printf 'experimental-features = nix-command flakes\nbuild-users-group =\nsandbox = false\n' > ~/.config/nix/nix.conf
 sh <(curl -L https://nixos.org/nix/install) --no-daemon      # installs /nix + ~/.nix-profile
 . ~/.nix-profile/etc/profile.d/nix.sh                          # every shell (or re-login)
-mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
 export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt https_proxy="$HTTPS_PROXY"   # trust proxy CA
 scripts/devenv-local.sh                                       # write devenv.local.yaml (see below)
 nix shell 'https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz#devenv' \
   -c devenv shell -- build                                    # enter devenv, build everything
 ```
+
+If the installer already ran and failed with `the group 'nixbld' ... does not exist`, /nix is
+populated but the profile is missing: write the nix.conf above, then
+`/nix/store/*-nix-2.*/bin/nix-env -i /nix/store/*-nix-2.*` to create `~/.nix-profile`.
 
 **Why devenv works here without GitHub.** devenv's generated flake normally fetches
 `github:cachix/devenv`, which this sandbox blocks (the GitHub proxy scopes fetches to attached
@@ -102,6 +108,36 @@ Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-brows
 lives on GitHub releases, which the proxy blocks); Nix builds it from source and bakes it into
 the `nodeModules` derivation the dev shell symlinks in (and into the `outputs`) — so the
 `Native` tier just works (see devenv.nix / Testing).
+
+## Navigating the F# (don't grep for symbols)
+
+`fsautocomplete` — the F# language server behind Ionide — is a devenv package, and
+`scripts/fsharp-lsp-mcp.mjs` exposes it to agents over MCP (registered in `.mcp.json`). Four
+tools: `fsharp_definition`, `fsharp_references`, `fsharp_hover`, `fsharp_symbol_search`.
+Positions are 1-based, and you pass the identifier you care about rather than a column:
+
+```
+fsharp_definition { file: "app/Backends.fs", line: 100, symbol: "value" }
+  -> src/Yession.Domain/Identity.fs:78:9   let value (SessionId s) = s
+```
+
+Reach for these over `rg` whenever the question is "where is this defined / what uses this /
+what type is this". F# infers most types (so the answer often isn't in the text at all) and
+freely reuses one name across a type, its module, its DU case, and record fields — text search
+cannot tell them apart. Measured here: `rg '\bSessionId\b'` returns **321 hits**; the compiler
+finds **97** references to the type. Warm queries are also *faster* than ripgrep (~2ms vs ~7ms
+for a definition).
+
+The cost is startup: ~20s to load the workspace and ~1.4GB resident, plus ~11s on the first
+`references` call (it forces a workspace-wide check). The MCP server therefore starts
+fsautocomplete eagerly when the session starts, so that cost usually lands before you ask
+anything; `FSAC_LAZY=1` defers it to the first query instead. It needs `fsautocomplete` on
+PATH, i.e. an agent launched from inside `devenv shell` — otherwise every tool call returns
+that as its error. `FSAC_BIN` overrides the binary.
+
+Still use `rg` for what it's good at: string literals, comments, config, non-F# files, and
+"does this phrase appear anywhere". `lsp-bench` (a devenv script) re-runs the comparison above
+if you want to re-justify the dependency.
 
 ## Testing
 
