@@ -33,33 +33,17 @@ The dev environment, tasks, and build outputs are all declared in **devenv.nix**
 On a laptop / in CI: `devenv shell` drops you in with `node`, `dotnet`, and the task scripts on
 PATH.
 
-A fresh Claude Code container: install Nix ONCE (single-user, no daemon), then enter devenv.
+A fresh Claude Code container: run `bash .claude/setup.sh` once (idempotent; minutes cold,
+cheap to re-run). It installs single-user Nix with the container-specific fixes, makes every
+later shell inherit it, writes the gitignored `devenv.local.yaml` that lets devenv resolve
+without GitHub (the sandbox proxy blocks devenv's normal `github:cachix/devenv` fetch, so the
+input is repointed at devenv's own source substituted from `cache.nixos.org`; on a laptop/CI
+the committed `devenv.yaml` with the normal github input is used), puts the `devenv` CLI on
+PATH, and warm-builds. The SessionStart hook (`.claude/settings.json`) re-runs it with
+`--hook`, which only refreshes `devenv.local.yaml`.
 
-```
-# Write nix.conf FIRST. The installer runs as root here with no `nixbld` group, and even
-# --no-daemon fails at the final profile step unless build-users-group is explicitly empty.
-mkdir -p ~/.config/nix && printf 'experimental-features = nix-command flakes\nbuild-users-group =\nsandbox = false\n' > ~/.config/nix/nix.conf
-sh <(curl -L https://nixos.org/nix/install) --no-daemon      # installs /nix + ~/.nix-profile
-export USER=root                                              # unset in container; nix.sh silently no-ops without it
-. ~/.nix-profile/etc/profile.d/nix.sh                          # every shell (or re-login)
-export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt https_proxy="$HTTPS_PROXY"   # trust proxy CA
-scripts/devenv-local.sh                                       # write devenv.local.yaml (see below)
-nix shell 'https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz#devenv' \
-  -c devenv shell -- build                                    # enter devenv, build everything
-```
-
-If the installer already ran and failed with `the group 'nixbld' ... does not exist`, /nix is
-populated but the profile is missing: write the nix.conf above, then
-`/nix/store/*-nix-2.*/bin/nix-env -i /nix/store/*-nix-2.*` to create `~/.nix-profile`.
-
-**Why devenv works here without GitHub.** The sandbox proxy blocks the GitHub fetches devenv's
-generated flake normally makes. So `devenv.yaml` pins nixpkgs to a `nixos.org` channel tarball,
-and `scripts/devenv-local.sh` (run automatically by the SessionStart hook in
-`.claude/settings.json`) writes a gitignored `devenv.local.yaml` that repoints the `devenv`
-input at devenv's own source substituted from `cache.nixos.org` — zero GitHub. On a laptop/CI
-the committed `devenv.yaml` (normal github input) is used and the hook no-ops.
-
-Then use the task scripts (inside `devenv shell`): `check` / `build` / `verify`. `restore`
+Then use the task scripts (`devenv shell -- <task>`, or bare inside the shell): `check` /
+`build` / `verify`. `restore`
 (dotnet tools; npm only when `node_modules` is absent) is called by the others — no need to run
 it by hand. Do NOT invoke `dotnet`/`fable`/`esbuild` directly to "run the suite"; go through the
 scripts so tool versions and PATH match CI. Under devenv, `node_modules` is a Nix artifact — the
@@ -82,7 +66,7 @@ workflows, and the Nix `outputs` are thin wrappers over it — throw devenv and 
 
 **No new helper scripts.** New build/dev/repo functionality is a `tasks.fsx` verb, not a shell
 script. Only glue that must run where `dotnet` cannot stays outside, and the two existing
-scripts are exactly that: `scripts/devenv-local.sh` runs before Nix/devenv exist, and
+scripts are exactly that: `.claude/setup.sh` runs before Nix/devenv exist, and
 `scripts/with-keyring.sh` must wrap the whole process in a private D-Bus session before it
 starts. Anything that could be a verb, is a verb.
 

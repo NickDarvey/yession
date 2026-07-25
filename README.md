@@ -114,17 +114,19 @@ as `outputs.{staged,nix,npm}`. To pin it in a system, add the flake as an input 
 
 ### Cloud sessions (Claude Code on the web)
 
-Set the environment's **setup script** to install Nix (`sh <(curl -L
-https://nixos.org/nix/install) --no-daemon`, flakes enabled). `*.nixos.org` and
-`cache.nixos.org` are in the default Trusted network allowlist, so nixpkgs (a `nixos.org`
-channel tarball, not a `github:` input) resolves and substitutes with no extra allowed domains.
+Set the environment's **setup script** to `bash .claude/setup.sh`. It installs single-user
+Nix (flakes enabled, with the container-specific fixes), puts the `devenv` CLI on PATH, and
+warm-builds. `*.nixos.org` and `cache.nixos.org` are in the default Trusted network
+allowlist, so nixpkgs (a `nixos.org` channel tarball, not a `github:` input) resolves and
+substitutes with no extra allowed domains.
 
-devenv itself would normally fetch `github:cachix/devenv`, which the sandbox blocks. The
-committed [`.claude/settings.json`](.claude/settings.json) runs
-[`scripts/devenv-local.sh`](scripts/devenv-local.sh) on session start, which writes a
-gitignored `devenv.local.yaml` repointing the `devenv` input at devenv's own source
-**substituted from `cache.nixos.org`** — so `devenv shell` works with zero GitHub access.
-On a laptop / in CI the hook no-ops and the normal `github:` input is used.
+devenv itself would normally fetch `github:cachix/devenv`, which the sandbox blocks. So
+[`.claude/setup.sh`](.claude/setup.sh) also writes a gitignored `devenv.local.yaml`
+repointing the `devenv` input at devenv's own source **substituted from `cache.nixos.org`**
+— `devenv shell` works with zero GitHub access — and the committed
+[`.claude/settings.json`](.claude/settings.json) re-runs it with `--hook` on session start
+to refresh that file. On a laptop / in CI the script no-ops and the normal `github:` input
+is used.
 
 ### Testing
 
