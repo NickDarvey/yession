@@ -63,7 +63,8 @@ jobs:
             experimental-features = nix-command flakes
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
-      - name: Compute version (1.0.0-beta.<n>, or a +semver: bump)
+      # Quoted: the name contains a colon-space, which is a mapping separator in a bare scalar.
+      - name: "Compute version (1.0.0-beta.<n>, or a +semver: marker bump)"
         id: version
         # tasks.fsx owns the version policy. `devenv shell` prints its own banner/build progress
         # to stdout, so take only the last line (the version) — capturing all of it corrupts the
