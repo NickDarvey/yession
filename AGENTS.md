@@ -67,6 +67,32 @@ interface (`restore`/`build`/`start`/`dev`/`check`/`verify`/`version`/`stage`/`p
 workflows are thin wrappers over it, and the Nix `outputs` call it too — throw devenv and CI
 away and `dotnet fsi tasks.fsx <verb>` still drives everything.
 
+## Versioning
+
+The version is computed from the commit history (policy at the top of `tasks.fsx`), never stored
+in a file. Every green master push publishes `1.0.0-beta.<n>`. To move the triple, put a marker in
+the commit message — for a squash-merged PR, its title or body:
+
+```
++semver: major   (or breaking, or a BREAKING CHANGE: footer)  -> 2.0.0-beta.0
++semver: minor   (or feature)                                 -> 1.1.0-beta.0
++semver: fix     (or patch)                                   -> 1.0.1-beta.0
+```
+
+A marker is read ONLY from the footer — the last blank-line-separated block of the message — and
+must be a line of its own there. So put it last. Prose discussing a marker anywhere above it
+(including this section's examples) never moves the version.
+
+A plain `feat:` does NOT bump — a tag is cut per push, so nearly every release would. `version`
+needs full history: it refuses a shallow clone rather than emitting an already-released number
+(`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the computation, which is how the
+Nix derivations (their source has no `.git`) are told what they are.
+
+Both bins answer `--version`, and a session reports its build to the Manager on the spawn
+readiness line (the Manager warns on a MAJOR mismatch only). A build that cannot know a release
+version says what it is instead — `dev` unbundled, `test` under `check`, `0.0.0-g<rev>` from Nix.
+Never invent a version-shaped placeholder.
+
 Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-browsers`) — the
 `Browser` cap works here. The `node-datachannel` WebRTC addon is NOT built by npm (its prebuilt
 lives on GitHub releases, which the proxy blocks); Nix builds it from source and bakes it into

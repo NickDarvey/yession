@@ -163,3 +163,8 @@ let readAsset (assetName: string) (fallbackPath: string) (fs: obj) : string opti
 /// Terminate the Node process with an exit code.
 [<Emit("process.exit($0)")>]
 let exit (code: int) : unit = jsNative
+
+/// Was `--version` (or `-v`) passed? The two entries are otherwise configured entirely from the
+/// environment and never look at argv.
+[<Emit("process.argv.slice(2).some(a => a === '--version' || a === '-v')")>]
+let versionFlag () : bool = jsNative

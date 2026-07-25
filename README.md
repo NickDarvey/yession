@@ -141,6 +141,34 @@ Almost everything runs on Node. .NET is a build tool, and the tests exercise the
 JavaScript the product ships. The one exception is the browser E2E, which runs on the .NET
 CLR so it can drive Chromium through Playwright against a live Session Process.
 
-Versions are pinned centrally: npm packages in [package.json](package.json), and NuGet
+Dependency versions are pinned centrally: npm packages in [package.json](package.json), and NuGet
 packages (including [Ylmish](Directory.Packages.props), the Elmish↔Yjs sync boundary) in
 [Directory.Packages.props](Directory.Packages.props).
+
+## Versioning
+
+Yession's own version is computed from the commit history, never stored in a file. Master is
+trunk, and every green push publishes `1.0.0-beta.<n>`. To move the major/minor/patch triple, put
+a marker in the commit message — for a squash-merged PR, its title or body:
+
+```
+Rework the Manager control protocol (#42)
+
++semver: major
+```
+
+`+semver: major` (or `breaking`, or a `BREAKING CHANGE:` footer) → `2.0.0-beta.0`; `+semver: minor`
+(`feature`) and `+semver: fix` (`patch`) move the other two. A marker only counts in the footer —
+the last blank-line-separated block — on a line of its own, so a commit that merely talks about
+markers can't accidentally cut a major release. A plain
+`feat:` does *not* bump on its own — a tag is cut on every push, so nearly every release would. `dotnet fsi tasks.fsx version`
+prints what the current commit would publish; the policy itself is at the top of
+[tasks.fsx](tasks.fsx).
+
+Both binaries report their build — `yession-manager --version`, `yession-session --version` — and a
+session states it on the readiness line it prints at startup, so the Manager can warn when it has
+just launched a session from a different major version. Builds that cannot know a release version
+say so rather than inventing one: `dev` for an unbundled dev run, `test` for the test tiers, and
+`0.0.0-g<rev>` for a Nix build (whose source has no `.git`). Set `YESSION_VERSION` to override the
+computation — that is how the Nix derivations are told what they are, and how a past release is
+rebuilt.

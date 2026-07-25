@@ -13,6 +13,12 @@ module Yession.Host.Main
 open Yession.Domain
 open Yession.Host
 
+// `--version` answers before any configuration is read: no data directory, no ports, no
+// sessions launched.
+if Interop.versionFlag () then
+    printfn "%s" Version.current
+    Interop.exit 0
+
 let private expect =
     function
     | Ok v -> v

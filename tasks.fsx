@@ -16,6 +16,7 @@
 open System
 open System.Diagnostics
 open System.IO
+open System.Text.RegularExpressions
 
 let repoRoot = Path.GetFullPath __SOURCE_DIRECTORY__
 let dist = Path.Combine (repoRoot, "dist")
@@ -52,9 +53,130 @@ let exec (command: string) (arguments: string list) : unit =
     let code = runInherit repoRoot command arguments
     if code <> 0 then failwithf "%s %s failed (%d)" command (String.concat " " arguments) code
 
-// --- version: the GitVersion-style continuous-delivery number --------------------------------
+// --- version: the continuous-delivery number, bumped from commit messages ---------------------
 
-let gitVersion () = sprintf "1.0.0-beta.%s" (run "git" [ "rev-list"; "--count"; "HEAD" ])
+// Trunk-based continuous delivery: every green master push publishes 1.0.0-beta.<n>. To move the
+// triple, put a marker in the commit message — for a squash-merged PR, its title or body:
+//
+//     +semver: major | breaking   (or a BREAKING CHANGE: footer)  -> 2.0.0-beta.0
+//     +semver: minor | feature                                    -> 1.1.0-beta.0
+//     +semver: fix   | patch                                      -> 1.0.1-beta.0
+//
+// Markers are scanned over the commits since the last reachable v* tag. A tag is cut on every
+// green push, so that range is normally the single merge commit. A plain `feat:` deliberately
+// does NOT bump minor: with a tag per push, nearly every release would bump. Breaking changes
+// are the case worth catching automatically, so BREAKING CHANGE: is honoured alongside the
+// explicit marker.
+
+type private Bump =
+    | Major
+    | Minor
+    | Patch
+
+/// The FOOTER: the last blank-line-separated block of the message, where conventional commits put
+/// their trailers. Markers are read ONLY here, so a body that DISCUSSES a marker cannot move the
+/// release. Both commits that built this policy tripped looser rules — one quoted the marker
+/// table, the next line-wrapped so a breaking-change trailer began a line — and a wrong bump is
+/// only noticed once the tag is cut.
+let private footerOf (message: string) =
+    let blocks = Regex.Split (message.Replace("\r\n", "\n").Trim (), @"\n[ \t]*\n")
+    if blocks.Length = 0 then "" else blocks.[blocks.Length - 1]
+
+/// Within that footer a marker must also be a line of its own (a breaking-change trailer must
+/// start one).
+let private bumpOf (message: string) =
+    let footer = footerOf message
+    let has pattern =
+        Regex.IsMatch (footer, pattern, RegexOptions.IgnoreCase ||| RegexOptions.Multiline)
+    if has @"^[ \t]*\+semver:\s?(breaking|major)[ \t]*\r?$"
+       || Regex.IsMatch (footer, @"^BREAKING[ -]CHANGE:", RegexOptions.Multiline) then Some Major
+    elif has @"^[ \t]*\+semver:\s?(feature|minor)[ \t]*\r?$" then Some Minor
+    elif has @"^[ \t]*\+semver:\s?(fix|patch)[ \t]*\r?$" then Some Patch
+    else None
+
+// Run a command, returning None instead of failing when it exits non-zero. `git describe` reports
+// "no tag" that way, which is a legitimate state (a repository before its first release).
+let private tryRun (command: string) (arguments: string list) : string option =
+    let psi = ProcessStartInfo (command)
+    arguments |> List.iter psi.ArgumentList.Add
+    psi.WorkingDirectory <- repoRoot
+    psi.RedirectStandardOutput <- true
+    psi.RedirectStandardError <- true // "fatal: No names found" is an answer here, not an error.
+    use p = Process.Start psi
+    let output = p.StandardOutput.ReadToEnd ()
+    p.StandardError.ReadToEnd () |> ignore
+    p.WaitForExit ()
+    if p.ExitCode = 0 then Some (output.Trim ()) else None
+
+/// The version source: the nearest reachable v* tag, plus every commit message since it, OLDEST
+/// FIRST. `%x1e` separates the records because a message is multi-line and a marker may sit in a
+/// footer. `describe` walks history rather than sorting tag names, so the tag is the one this
+/// commit actually descends from.
+let private versionHistory () =
+    if tryRun "git" [ "rev-parse"; "--is-shallow-repository" ] = Some "true" then
+        failwith "version: shallow clone — the history IS the version (git fetch --unshallow --tags)"
+
+    let tag = tryRun "git" [ "describe"; "--tags"; "--abbrev=0"; "--match"; "v*" ]
+    let range = match tag with Some t -> t + "..HEAD" | None -> "HEAD"
+    let messages =
+        (run "git" [ "log"; range; "--reverse"; "--format=%B%x1e" ]).Split '\u001e'
+        |> Array.map (fun message -> message.Trim ())
+        |> Array.filter (fun message -> message <> "")
+    tag, messages
+
+/// `v1.0.0-beta.94` -> (1, 0, 0, Some 94). A tag off this scheme's shape yields None, and is
+/// treated as no tag at all.
+let private parseTag (tag: string) =
+    let m = Regex.Match (tag, @"^v?(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$")
+    if not m.Success then None
+    else
+        let value (i: int) = int m.Groups.[i].Value
+        Some (value 1, value 2, value 3, (if m.Groups.[4].Success then Some (value 4) else None))
+
+let private computeVersion () =
+    let tag, messages = versionHistory ()
+    let count = messages.Length
+
+    // Every marker in the range, with its position. The STRONGEST decides the new triple; the
+    // EARLIEST decides where the prerelease counter restarts.
+    let marks =
+        messages
+        |> Array.mapi (fun i message -> i, bumpOf message)
+        |> Array.choose (fun (i, bump) -> bump |> Option.map (fun b -> i, b))
+    let strongest =
+        if Array.isEmpty marks then None
+        else Some (marks |> Array.map snd |> Array.minBy (function Major -> 0 | Minor -> 1 | Patch -> 2))
+
+    match tag |> Option.bind parseTag, strongest with
+    // No release tag yet — seed the line.
+    | None, _ -> sprintf "1.0.0-beta.%d" count
+
+    // No marker: carry the tag's own prerelease counter forward, so the number keeps climbing
+    // across releases (v1.0.0-beta.94 + 1 commit -> 1.0.0-beta.95).
+    | Some (major, minor, patch, Some n), None -> sprintf "%d.%d.%d-beta.%d" major minor patch (n + count)
+
+    // A tag with no prerelease (this scheme never cuts one, but a human might). ON the tag, that
+    // release IS the version; past it bump patch, because X.Y.Z-beta.n would sort BELOW the tag.
+    | Some (major, minor, patch, None), None when count = 0 -> sprintf "%d.%d.%d" major minor patch
+    | Some (major, minor, patch, None), None -> sprintf "%d.%d.%d-beta.%d" major minor (patch + 1) count
+
+    // Marked: bump the triple and restart the counter AT the marker, so the first build carrying
+    // a breaking change is X.0.0-beta.0 and every commit after it gets a fresh number.
+    | Some (major, minor, patch, _), Some bump ->
+        let major, minor, patch =
+            match bump with
+            | Major -> major + 1, 0, 0
+            | Minor -> major, minor + 1, 0
+            | Patch -> major, minor, patch + 1
+        sprintf "%d.%d.%d-beta.%d" major minor patch (count - 1 - fst marks.[0])
+
+// YESSION_VERSION wins when set. It is how a version enters a build that cannot compute one: the
+// Nix derivations (lib.cleanSource strips .git, so nix/packages.nix supplies it), and rebuilding
+// a past release without today's history reporting today's number.
+let gitVersion () =
+    match Environment.GetEnvironmentVariable "YESSION_VERSION" with
+    | null | "" -> computeVersion ()
+    | version -> version
 
 // --- restore: deps (npm + .NET tools) -------------------------------------------------------
 
@@ -68,6 +190,12 @@ let restore () =
     if not (Directory.Exists (Path.Combine (repoRoot, "node_modules"))) then
         exec "npm" [ "install"; "--ignore-scripts" ]
     exec "dotnet" [ "tool"; "restore" ]
+
+/// The version to build with when the caller supplied none. GitVersion is a dotnet local tool,
+/// so the manifest has to be restored before it can be asked.
+let private defaultVersion () =
+    restore ()
+    gitVersion ()
 
 // --- compile: F# -> JS (both entries), the browser client bundle, and the stylesheet --------
 
@@ -110,9 +238,14 @@ let private externals =
 let private banner =
     "--banner:js=import { createRequire as __createRequire } from 'module'; const require = __createRequire(import.meta.url);"
 
-let private bundle (entry: string) (outFile: string) =
+// The build version is a COMPILE-TIME constant: esbuild substitutes the `YESSION_BUILD_VERSION`
+// identifier for this literal, so `Version.current` costs nothing at run time and the bundle
+// needs no package.json (it never ships next to one it could trust). An unbundled run of the
+// Fable output has no define and reports "dev" — see app/Version.fs.
+let private bundle (version: string) (entry: string) (outFile: string) =
     run esbuild
-        ([ Path.Combine (repoRoot, entry); "--bundle"; "--platform=node"; "--format=esm"; banner ]
+        ([ Path.Combine (repoRoot, entry); "--bundle"; "--platform=node"; "--format=esm"; banner
+           sprintf "--define:YESSION_BUILD_VERSION=\"%s\"" version ]
          @ externals
          @ [ sprintf "--outfile=%s" (Path.Combine (pkg, outFile)) ])
     |> ignore
@@ -169,6 +302,11 @@ let private packageJson (version: string) =
         (depVersion "zod")
 
 let stage (version: string) =
+    // Every build states what it is — a release number, `test`, `dev`, or a rev. An empty string
+    // is no provenance at all, and would reach the published package.json, so it fails here.
+    if String.IsNullOrWhiteSpace version then
+        failwith "stage: no version (pass one, or set YESSION_VERSION)"
+
     compile ()
     printfn "staging yession %s (npm, one package / two bins) -> dist/npm" version
 
@@ -181,8 +319,8 @@ let stage (version: string) =
     Directory.CreateDirectory (Path.Combine (pkg, "bin")) |> ignore
     Directory.CreateDirectory (Path.Combine (pkg, "assets")) |> ignore
 
-    bundle "app/out/Main.js" "manager.js"
-    bundle "app/SessionMain.js" "session.js"
+    bundle version "app/out/Main.js" "manager.js"
+    bundle version "app/SessionMain.js" "session.js"
 
     // Assets (read package-relative at runtime by Interop.readAsset).
     File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
@@ -305,8 +443,9 @@ let private runCheckOnce (caps: string list) =
         exec "dotnet" [ "fable"; "app/browser/Yession.Browser.fsproj"; "-o"; "app/out/browser" ]
 
     // Host-spawning Node suites drive the assembled npm package — stage it (compile + bundle).
+    // `test` names what this build is; the suites assert the bins report it back.
     if hasAny capSet [ "Ports"; "Native"; "Docker"; "LiveAgent" ] then
-        stage "0.0.0-test"
+        stage "test"
 
     // The Node (Fable/JS) path — always runs; self-skips suites whose caps/runtime don't match.
     exec "dotnet" [ "fable"; "tests/Yession.Tests/Yession.Tests.fsproj"; "-o"; "tests/Yession.Tests/out" ]
@@ -370,11 +509,11 @@ match arg 1 with
 | Some "build" -> build ()
 | Some "start" -> start ()
 | Some "dev" -> dev ()
-| Some "version" -> printfn "%s" (gitVersion ())
-| Some "stage" -> stage (arg 2 |> Option.defaultValue "0.0.0-dev")
+| Some "version" -> printfn "%s" (defaultVersion ())
+| Some "stage" -> stage (arg 2 |> Option.defaultWith defaultVersion)
 | Some "check" -> check (rest 2)
 | Some "verify" -> verify ()
-| Some "package" -> package (arg 2 |> Option.defaultValue "0.0.0-dev")
+| Some "package" -> package (arg 2 |> Option.defaultWith defaultVersion)
 | Some "install-smoke" ->
     match arg 2 with
     | Some tgz -> installSmoke tgz
@@ -386,4 +525,4 @@ match arg 1 with
 | Some "clean" -> clean ()
 | Some "clean-docker" -> cleanDocker ()
 | Some version -> package version // backwards compat: `tasks.fsx <version>` == `package <version>`
-| None -> package "0.0.0-dev"
+| None -> package (defaultVersion ())
