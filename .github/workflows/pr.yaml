@@ -32,6 +32,11 @@ jobs:
             experimental-features = nix-command flakes
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
+      # First, and cheap: actionlint over .github/workflows. release.yml only runs on master, so
+      # nothing else here would notice it was broken until after a merge — which is exactly how a
+      # colon-space in an unquoted step name once took every master release down at startup.
+      - name: Lint the workflows (release.yml is only exercised on master)
+        run: devenv shell -- lint
       # `check` does everything Yession-specific: restore + link the addon, provision Chromium
       # for the browser E2Es, and run the gate.
       - name: Cheap tier + browser + native WebRTC/host E2E
