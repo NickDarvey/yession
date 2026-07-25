@@ -139,6 +139,11 @@ The one thing text search cannot recover is a type F# inferred rather than wrote
 foo bar` has no annotation to find. Follow the right-hand side to its declaration, or write
 the type you expect and let `check` tell you if you are wrong.
 
+The 97 above comes from the compiler, not from search. A language server was integrated and
+measured before settling on this — see
+[docs/decisions/2026-07-25-lsp.md](docs/decisions/2026-07-25-lsp.md) before reaching for one
+again.
+
 ## Testing
 
 Tests gated by CAPABILITIES the run declares, not folders (`tests/Yession.Tests/Tags.fs`). A
