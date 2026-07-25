@@ -1,11 +1,22 @@
 module Yession.Host.Telemetry
 
-// Plan 04, Step 30: the Session Process telemetry emitter. One OpenTelemetry *log record*
-// per completed agent turn, carrying the token/cache counts — never message content.
-// Fire-and-forget: a dropped export must never fail or stall a turn, so `Emit` swallows
-// everything and the batch processor exports asynchronously off the turn path. Lives in the
-// host layer over Fable.OpenTelemetry; `Yession.SessionProcess` stays OTel-free and receives
-// `Emit` as an injected sink (wired through `Host.startFull` in Step 32).
+// The OpenTelemetry emitter, shared by both the Manager and each Session Process — every
+// process is a *direct* OTel emitter (there is no Manager-side collector). One OTel *log
+// record* per completed agent turn carries token/cache counts — never message content.
+// Fire-and-forget: a dropped export must never fail or stall a turn, so `Emit`/`Log` swallow
+// everything and the batch processor exports asynchronously off the turn path.
+//
+// Destination is chosen by how the process is started, using the STANDARD OTel env vars —
+// nothing hand-rolled, nothing bespoke:
+//   OTEL_LOGS_EXPORTER      console | otlp | none  (comma-separated ⇒ tee, e.g. `console,otlp`)
+//   OTEL_EXPORTER_OTLP_*    the collector endpoint/headers (read by the OTLP exporter itself)
+//   OTEL_SERVICE_NAME       identity override (else the per-process default below)
+//   OTEL_RESOURCE_ATTRIBUTES  extra/override resource attributes (k=v,k=v)
+//   OTEL_SDK_DISABLED=true  hard off
+// Unset `OTEL_LOGS_EXPORTER` defaults to `console` (stdout visibility, no network); with only
+// `console`, an absent collector simply means nothing is forwarded — the "otherwise drop" case.
+// The Manager passes its OTEL_* environment through to each child (Spawn merges over
+// `process.env`); it overrides only the child's identity (service.name/instance.id).
 
 open Fable.Core
 open Fable.Core.JsInterop
@@ -17,16 +28,17 @@ module OpenTelemetry = Fable.OpenTelemetry
 [<Emit("Promise.resolve()")>]
 let private resolved () : JS.Promise<unit> = jsNative
 
-/// The turn-usage sink plus a graceful flush. `Emit turnId usage` records one log record;
-/// `Shutdown` flushes the batch processor (call on process exit so buffered records ship).
+/// The telemetry sink plus a graceful flush. `Emit turnId usage` records one agent-turn log
+/// record (session emitters); `Log body attrs` records a general log record (the Manager's
+/// lifecycle signals); `Shutdown` flushes the batch processor (call on exit so buffered
+/// records ship).
 type Emitter =
     { Emit : AgentTurnId -> AgentUsage -> unit
+      Log : string -> (string * obj) list -> unit
       Shutdown : unit -> JS.Promise<unit> }
 
 /// Telemetry off: every emit is a no-op, shutdown resolves immediately.
-let disabled : Emitter = { Emit = (fun _ _ -> ()); Shutdown = resolved }
-
-let private serviceName = "yession-session"
+let disabled : Emitter = { Emit = (fun _ _ -> ()); Log = (fun _ _ -> ()); Shutdown = resolved }
 
 /// Build and emit one log record on `logger` for a completed turn. Attribute names follow
 /// the OTel GenAI conventions; the `cache_*` pair is an Anthropic extension. Identifiers
@@ -50,31 +62,99 @@ let emitTo (logger: OpenTelemetry.Logger) (sessionId: SessionId) (turnId: AgentT
               "body", box "agent turn usage"
               "attributes", box (createObj attributes) ])
 
-/// The resource identifying this session process as an OTel resource.
-let private resourceFor (sessionId: SessionId) : OpenTelemetry.Resource =
-    OpenTelemetry.resource (
+/// Emit one general log record (no session/turn context) — used by the Manager for its own
+/// lifecycle signals (startup, session launch/exit).
+let emitLogTo (logger: OpenTelemetry.Logger) (body: string) (attributes: (string * obj) list) : unit =
+    logger.emit (
         createObj
-            [ "service.name", box serviceName
-              "service.namespace", box "yession"
-              "service.instance.id", box (SessionId.value sessionId)
-              "yession.session.id", box (SessionId.value sessionId) ])
+            [ "severityNumber", box OpenTelemetry.severityInfo
+              "body", box body
+              "attributes", box (createObj attributes) ])
 
-/// An emitter exporting OTLP logs (JSON) to `endpoint`/v1/logs with a bearer secret. The
-/// batch processor exports asynchronously off the turn path; `Emit` additionally swallows
-/// any synchronous throw, so telemetry can never break a turn.
-let create (sessionId: SessionId) (endpoint: string) (secret: string) : Emitter =
-    let url = endpoint.TrimEnd '/' + "/v1/logs"
-    let headers = createObj [ "Authorization", box ("Bearer " + secret) ]
-    let exporter = OpenTelemetry.otlpLogExporter url headers
-    let provider = OpenTelemetry.loggerProvider (resourceFor sessionId) (OpenTelemetry.batchProcessor exporter)
-    let logger = provider.getLogger serviceName
-    { Emit = fun turnId usage -> try emitTo logger sessionId turnId usage with _ -> ()
-      Shutdown = fun () -> provider.shutdown () }
+// --- Resource identity (code default, overridable by the standard env vars) --------------
 
-/// The emitter configured from the Manager's spawn contract: `YESSION_OTLP_ENDPOINT` and
-/// `YESSION_OTLP_SECRET`. An absent endpoint ⇒ `disabled` (telemetry off, pure no-op), so a
-/// session launched without a telemetry-enabled Manager still runs normally.
+/// Parse `OTEL_RESOURCE_ATTRIBUTES` (`k1=v1,k2=v2`) into pairs; malformed entries are skipped.
+let private envResourceAttributes () : (string * string) list =
+    match Interop.envOr "OTEL_RESOURCE_ATTRIBUTES" "" with
+    | "" -> []
+    | s ->
+        s.Split ','
+        |> Array.choose (fun kv ->
+            match kv.Split ([| '=' |], 2) with
+            | [| k; v |] when k.Trim().Length > 0 -> Some (k.Trim (), v.Trim ())
+            | _ -> None)
+        |> List.ofArray
+
+/// The resource for this process: the per-process defaults (`service.name`, namespace, and an
+/// optional `service.instance.id`) overlaid by `OTEL_RESOURCE_ATTRIBUTES` then `OTEL_SERVICE_NAME`
+/// (env wins — the Manager sets these on a child to adapt its identity).
+let private resourceOf (defaultServiceName: string) (instanceId: string option) : OpenTelemetry.Resource =
+    let baseAttrs =
+        [ "service.name", defaultServiceName
+          "service.namespace", "yession" ]
+        @ (match instanceId with Some id -> [ "service.instance.id", id ] | None -> [])
+    // env attributes override the defaults; OTEL_SERVICE_NAME wins for service.name.
+    let merged =
+        (baseAttrs @ envResourceAttributes ())
+        |> List.fold (fun acc (k, v) -> Map.add k v acc) Map.empty
+    let merged =
+        match Interop.envOr "OTEL_SERVICE_NAME" "" with
+        | "" -> merged
+        | name -> Map.add "service.name" name merged
+    OpenTelemetry.resource (createObj [ for KeyValue (k, v) in merged -> k, box v ])
+
+// --- Exporter selection from OTEL_LOGS_EXPORTER ------------------------------------------
+
+/// The processors selected by the environment: `console` → stdout, `otlp` → the collector
+/// (endpoint from `OTEL_EXPORTER_OTLP_*`). Empty ⇒ telemetry disabled (`none`/`OTEL_SDK_DISABLED`).
+let private processorsFromEnv () : OpenTelemetry.LogRecordProcessor list =
+    if (Interop.envOr "OTEL_SDK_DISABLED" "").Trim().ToLowerInvariant() = "true" then []
+    else
+        (Interop.envOr "OTEL_LOGS_EXPORTER" "console").Split ','
+        |> Array.map (fun s -> s.Trim().ToLowerInvariant ())
+        |> Array.filter (fun s -> s <> "" && s <> "none")
+        |> Array.distinct
+        |> Array.choose (function
+            | "console" -> Some (OpenTelemetry.simpleProcessor (OpenTelemetry.consoleLogExporter ()))
+            | "otlp" -> Some (OpenTelemetry.batchProcessor (OpenTelemetry.otlpLogExporterFromEnv ()))
+            | _ -> None)  // unknown exporter names are ignored, not fatal
+        |> List.ofArray
+
+/// Build an emitter over the given processors and identity. `emitFor` is the session this
+/// emitter tags agent-turn records with (`None` for the Manager, whose `Emit` is inert).
+/// Empty processors ⇒ `disabled`.
+let private build
+    (defaultServiceName: string)
+    (instanceId: string option)
+    (emitFor: SessionId option)
+    (processors: OpenTelemetry.LogRecordProcessor list)
+    : Emitter =
+    match processors with
+    | [] -> disabled
+    | _ ->
+        let provider = OpenTelemetry.loggerProviderMulti (resourceOf defaultServiceName instanceId) processors
+        let logger = provider.getLogger defaultServiceName
+        { Emit =
+            (match emitFor with
+             | Some sessionId -> fun turnId usage -> try emitTo logger sessionId turnId usage with _ -> ()
+             | None -> fun _ _ -> ())
+          Log = fun body attrs -> try emitLogTo logger body attrs with _ -> ()
+          Shutdown = fun () -> provider.shutdown () }
+
+// --- Constructors ------------------------------------------------------------------------
+
+/// The Session Process emitter, configured from the environment (the Manager passes OTEL_*
+/// through and sets this child's identity). Tags agent-turn records with `sessionId`.
 let fromEnv (sessionId: SessionId) : Emitter =
-    match Interop.envOr "YESSION_OTLP_ENDPOINT" "" with
-    | "" -> disabled
-    | endpoint -> create sessionId endpoint (Interop.envOr "YESSION_OTLP_SECRET" "")
+    build "yession-session" (Some (SessionId.value sessionId)) (Some sessionId) (processorsFromEnv ())
+
+/// The Manager's own emitter, configured from the environment. Identity `yession-manager`;
+/// it emits lifecycle records via `Log` (never agent-turn usage).
+let managerFromEnv () : Emitter =
+    build "yession-manager" None None (processorsFromEnv ())
+
+/// A session emitter forwarding OTLP to an explicit `url` (tests / programmatic use — the
+/// stand-in for a real collector). Bypasses env exporter selection.
+let createOtlp (sessionId: SessionId) (url: string) : Emitter =
+    build "yession-session" (Some (SessionId.value sessionId)) (Some sessionId)
+        [ OpenTelemetry.batchProcessor (OpenTelemetry.otlpLogExporter url (createObj [])) ]

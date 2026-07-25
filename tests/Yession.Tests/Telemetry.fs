@@ -1,10 +1,12 @@
 module Yession.Tests.Telemetry
 
-// Plan 04, Steps 29–30. Two cheap-tier suites (in-memory exporter, no ports, no
-// credentials, no native addons):
+// Cheap-tier telemetry suites (no ports beyond localhost, no credentials, no native addons):
 //   - the Fable.OpenTelemetry bindings resolve against the real SDK and round-trip a record;
 //   - the app/Telemetry.fs emitter maps an AgentUsage onto a log record with the right
-//     attributes, and never throws (disabled no-op; dead-endpoint export).
+//     attributes, never throws, and selects its exporters from the standard OTEL_* env;
+//   - a real OTLP payload reaches a stub collector intact — with no message content.
+// Every process is a direct emitter now (no Manager-side collector); the stub stands in for a
+// real OpenTelemetry Collector.
 
 open Fable.Core
 open Fable.Core.JsInterop
@@ -14,12 +16,18 @@ open Yession.Domain
 open Yession.Host
 
 // Local (not `Support.expect`) so this suite stays free of the WebRTC/native-addon import
-// chain — the telemetry tests are pure in-memory and need none of the client harness.
+// chain — the telemetry tests are pure in-memory / localhost and need none of the client harness.
 let private expect = function Ok v -> v | Error e -> failwith e
 
 /// Read a JS field by (possibly dotted) string key — attribute keys aren't F# identifiers.
 [<Emit("$0[$1]")>]
 let private field (o: obj) (key: string) : obj = jsNative
+
+[<Emit("process.env[$0] = $1")>]
+let private setEnv (key: string) (value: string) : unit = jsNative
+
+[<Emit("delete process.env[$0]")>]
+let private unsetEnv (key: string) : unit = jsNative
 
 /// A logger backed by an in-memory exporter, plus the exporter for assertions.
 let private inMemoryLogger () : Logger * InMemoryLogRecordExporter =
@@ -42,6 +50,18 @@ let private bindingTests =
                 ]
             )
             Expect.equal (mem.getFinishedLogRecords ()).Length 1 "exactly one record reached the exporter"
+
+        testCase "a two-processor provider tees one emit to both exporters (console + in-memory)" <| fun () ->
+            // The SDK-native tee: console (stdout) + in-memory, one emit, both fire.
+            let mem = inMemoryExporter ()
+            let provider =
+                loggerProviderMulti
+                    (resource (createObj [ "service.name", box "yession-test" ]))
+                    [ simpleProcessor (consoleLogExporter ())
+                      simpleProcessor (mem :> LogRecordExporter) ]
+            let logger = provider.getLogger "yession-test"
+            logger.emit (createObj [ "severityNumber", box severityInfo; "body", box "tee"; "attributes", box (createObj []) ])
+            Expect.equal (mem.getFinishedLogRecords ()).Length 1 "the in-memory leg of the tee received the record"
     ]
 
 let private emitterTests =
@@ -83,107 +103,73 @@ let private emitterTests =
             let turnId = AgentTurnId.create "turn-2" |> expect
             Telemetry.disabled.Emit turnId
                 { InputTokens = 1; OutputTokens = 1; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
+            Telemetry.disabled.Log "manager started" [ "k", box "v" ]
 
-        testCaseAsync "fromEnv without an endpoint is disabled; a dead endpoint never throws on Emit" <|
+        testCaseAsync "OTEL_LOGS_EXPORTER=none (or OTEL_SDK_DISABLED) yields a disabled emitter" <|
             async {
-                let sessionId = SessionId.create "sess-z" |> expect
-                // No YESSION_OTLP_ENDPOINT in the cheap tier -> disabled.
+                let sessionId = SessionId.create "sess-none" |> expect
+                setEnv "OTEL_LOGS_EXPORTER" "none"
                 let off = Telemetry.fromEnv sessionId
                 off.Emit (AgentTurnId.create "t" |> expect)
-                    { InputTokens = 0; OutputTokens = 0; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
+                    { InputTokens = 9; OutputTokens = 9; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
                 do! off.Shutdown () |> Async.AwaitPromise
+                unsetEnv "OTEL_LOGS_EXPORTER"
+            }
 
-                // A real emitter to a dead endpoint: Emit enqueues (async export), never throws;
-                // Shutdown flushes and clears the batch timer.
-                let dead = Telemetry.create sessionId "http://127.0.0.1:1" "secret"
+        testCaseAsync "a dead OTLP endpoint never throws on Emit; Shutdown flushes cleanly" <|
+            async {
+                let sessionId = SessionId.create "sess-z" |> expect
+                let dead = Telemetry.createOtlp sessionId "http://127.0.0.1:1/v1/logs"
                 dead.Emit (AgentTurnId.create "t2" |> expect)
                     { InputTokens = 2; OutputTokens = 2; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
                 do! dead.Shutdown () |> Async.AwaitPromise
             }
     ]
 
-// fetch helpers for the receiver's HTTP surface.
-[<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/json', 'authorization': $2 }, body: $1 }).then(r => r.status)")>]
-let private postJson (url: string) (body: string) (auth: string) : JS.Promise<int> = jsNative
-
-[<Emit("fetch($0).then(r => r.status)")>]
-let private getStatus (url: string) : JS.Promise<int> = jsNative
-
-/// A running receiver server: its base URL, the collector, and a close.
-let private startReceiver (secret: string) : Async<string * TelemetryReceiver.Collector * (unit -> unit)> =
-    async {
-        let collector = TelemetryReceiver.Collector.inMemory ()
-        let server =
-            Interop.createServer (fun req res ->
-                if not (TelemetryReceiver.tryHandle (fun s -> s = secret) collector req res) then
-                    res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-                    res.``end`` "not found")
-        let! url =
-            Async.FromContinuations (fun (cont, _, _) ->
-                server.listen (0, "127.0.0.1", fun () -> cont (sprintf "http://127.0.0.1:%d" (Interop.serverPort server)))
-                |> ignore)
-        return url, collector, (fun () -> server.close ignore)
-    }
-
-let private receiverTests =
-    testList "receiver (app/TelemetryReceiver.fs)" [
-        testCase "decode reads records and tolerates intValue as number or string" <| fun () ->
-            let json =
-                """{"resourceLogs":[{"scopeLogs":[{"logRecords":[
-                    {"body":{"stringValue":"agent turn usage"},"attributes":[
-                        {"key":"yession.session.id","value":{"stringValue":"s"}},
-                        {"key":"yession.agent.turn.id","value":{"stringValue":"t"}},
-                        {"key":"gen_ai.usage.input_tokens","value":{"intValue":11}},
-                        {"key":"gen_ai.usage.output_tokens","value":{"intValue":"7"}}]}]}]}]}"""
-            match TelemetryReceiver.LogsWire.decode json with
-            | Ok [ record ] ->
-                match TelemetryReceiver.TurnUsage.ofLog record with
-                | Some usage -> Expect.equal (usage.InputTokens, usage.OutputTokens) (11, 7) "intValue decodes whether number or string"
-                | None -> failwith "not recognised as agent-turn usage"
-            | other -> failwithf "expected exactly one record, got %A" other
-
-        testCase "a non-usage record (no yession ids) is decoded but not read as usage" <| fun () ->
-            match TelemetryReceiver.LogsWire.decode """{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"hi"},"attributes":[]}]}]}]}""" with
-            | Ok [ record ] -> Expect.isTrue (TelemetryReceiver.TurnUsage.ofLog record |> Option.isNone) "no yession ids -> not usage"
-            | other -> failwithf "expected one record, got %A" other
-
-        testCase "malformed JSON is a decode error, never a crash" <| fun () ->
-            match TelemetryReceiver.LogsWire.decode "{not json" with
-            | Error _ -> ()
-            | Ok _ -> failwith "malformed body must not decode"
-
-        testCaseAsync "round-trip: the emitter's real OTLP payload decodes at the receiver into the turn's counts" <|
+let private forwardingTests =
+    testList "forwarding to a collector (stub stands in for a real OTel Collector)" [
+        testCaseAsync "round-trip: the emitter's real OTLP payload reaches the collector with counts + ids, no content" <|
             async {
-                let! url, collector, close = startReceiver "rt-secret"
+                let! stub = OtlpStub.start ()
                 let sessionId = SessionId.create "rt-sess" |> expect
-                let emitter = Telemetry.create sessionId url "rt-secret"
+                let emitter = Telemetry.createOtlp sessionId stub.Url
                 emitter.Emit (AgentTurnId.create "rt-turn" |> expect)
                     { InputTokens = 42; OutputTokens = 9; CacheReadTokens = 4; CacheCreationTokens = 6; Model = Some "claude-opus-4-8" }
                 do! emitter.Shutdown () |> Async.AwaitPromise
 
-                let received = collector.Received ()
-                Expect.equal received.Length 1 "the receiver decoded exactly one record"
-                match TelemetryReceiver.TurnUsage.ofLog received.[0] with
+                let received = stub.Received ()
+                Expect.equal received.Length 1 "the collector received exactly one record"
+                match OtlpStub.turnUsage received.[0] with
                 | Some u ->
                     Expect.equal u.SessionId "rt-sess" "session id survives the wire"
                     Expect.equal u.TurnId "rt-turn" "turn id survives the wire"
                     Expect.equal (u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens) (42, 9, 4, 6) "all four counts survive"
                     Expect.equal u.Model (Some "claude-opus-4-8") "model survives"
-                | None -> failwith "the decoded record was not recognised as agent-turn usage"
-                close ()
+                    Expect.equal received.[0].Body "agent turn usage" "the body names the signal — never message content"
+                | None -> failwith "the received record was not recognised as agent-turn usage"
+                stub.Close ()
             }
 
-        testCaseAsync "auth: a wrong bearer is 401; an authorized empty payload is 200; a non-telemetry path falls through" <|
+        testCaseAsync "OTEL_LOGS_EXPORTER=otlp + OTEL_EXPORTER_OTLP_ENDPOINT routes fromEnv to the collector" <|
             async {
-                let! url, _, close = startReceiver "good-secret"
-                let! badBearer = postJson (url + "/v1/logs") """{"resourceLogs":[]}""" "Bearer wrong" |> Async.AwaitPromise
-                Expect.equal badBearer 401 "a wrong bearer is rejected"
-                let! authorized = postJson (url + "/v1/logs") """{"resourceLogs":[]}""" "Bearer good-secret" |> Async.AwaitPromise
-                Expect.equal authorized 200 "an authorized payload is accepted"
-                let! fellThrough = getStatus (url + "/not-telemetry") |> Async.AwaitPromise
-                Expect.equal fellThrough 404 "a non-telemetry path falls through to the composing server"
-                close ()
+                let! stub = OtlpStub.start ()
+                let sessionId = SessionId.create "env-sess" |> expect
+                setEnv "OTEL_LOGS_EXPORTER" "otlp"
+                setEnv "OTEL_EXPORTER_OTLP_ENDPOINT" stub.Url
+                let emitter = Telemetry.fromEnv sessionId
+                emitter.Emit (AgentTurnId.create "env-turn" |> expect)
+                    { InputTokens = 5; OutputTokens = 6; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
+                do! emitter.Shutdown () |> Async.AwaitPromise
+                unsetEnv "OTEL_LOGS_EXPORTER"
+                unsetEnv "OTEL_EXPORTER_OTLP_ENDPOINT"
+
+                match stub.Received () |> List.choose OtlpStub.turnUsage with
+                | [ u ] ->
+                    Expect.equal u.SessionId "env-sess" "the env-configured emitter reached the collector"
+                    Expect.equal (u.InputTokens, u.OutputTokens) (5, 6) "counts intact"
+                | other -> failwithf "expected one record via the env-configured exporter, got %d" (List.length other)
+                stub.Close ()
             }
     ]
 
-let tests = testList "Telemetry" [ bindingTests; emitterTests; receiverTests ]
+let tests = testList "Telemetry" [ bindingTests; emitterTests; forwardingTests ]

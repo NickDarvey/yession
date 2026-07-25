@@ -19,6 +19,7 @@
     <Compile Include="Domain.fs" />
     <Compile Include="SessionProcess.fs" />
     <Compile Include="Support.fs" />
+    <Compile Include="OtlpStub.fs" />
     <Compile Include="Sync.fs" />
     <Compile Include="Editor.fs" />
     <Compile Include="Agent.fs" />
