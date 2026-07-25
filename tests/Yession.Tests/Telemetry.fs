@@ -128,6 +128,16 @@ let private emitterTests =
 
 let private forwardingTests =
     testList "forwarding to a collector (stub stands in for a real OTel Collector)" [
+        // The resource block is optional in OTLP, and the decoder must not assume it — a payload
+        // without one is a decode with no resource attributes, never a throw.
+        testCase "a payload with no resource block still decodes" <| fun () ->
+            let json = """{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"body":{"stringValue":"x"},"attributes":[]}]}]}]}"""
+            match OtlpStub.decode json with
+            | [ record ] ->
+                Expect.isTrue (Map.isEmpty record.Resource) "no resource block means no resource attributes"
+                Expect.equal (OtlpStub.resourceAttr "service.version" record) None "and nothing to read off it"
+            | other -> failwithf "expected one record, got %d" (List.length other)
+
         testCaseAsync "round-trip: the emitter's real OTLP payload reaches the collector with counts + ids, no content" <|
             async {
                 let! stub = OtlpStub.start ()
@@ -147,6 +157,17 @@ let private forwardingTests =
                     Expect.equal u.Model (Some "claude-opus-4-8") "model survives"
                     Expect.equal received.[0].Body "agent turn usage" "the body names the signal — never message content"
                 | None -> failwith "the received record was not recognised as agent-turn usage"
+                // The emitting BUILD, off the resource — this is the whole path: code default ->
+                // OTel resource -> OTLP payload -> decode. Without it a collector cannot tell two
+                // releases' counts apart.
+                Expect.equal
+                    (OtlpStub.resourceAttr "service.version" received.[0])
+                    (Some Version.current)
+                    "the record names the build that emitted it"
+                Expect.equal
+                    (OtlpStub.resourceAttr "service.name" received.[0])
+                    (Some "yession-session")
+                    "alongside the identity it already carried"
                 stub.Close ()
             }
 
@@ -168,6 +189,35 @@ let private forwardingTests =
                     Expect.equal u.SessionId "env-sess" "the env-configured emitter reached the collector"
                     Expect.equal (u.InputTokens, u.OutputTokens) (5, 6) "counts intact"
                 | other -> failwithf "expected one record via the env-configured exporter, got %d" (List.length other)
+                stub.Close ()
+            }
+
+        // Env beats the code default, per the standard OTel precedence `resourceOf` implements.
+        // This is precisely why `service.version` must NOT go into the OTEL_RESOURCE_ATTRIBUTES
+        // the Manager injects into a child: doing so would override the child's own build with
+        // the Manager's, and a version skew would become invisible instead of obvious.
+        testCaseAsync "OTEL_RESOURCE_ATTRIBUTES overrides the built-in service.version" <|
+            async {
+                let! stub = OtlpStub.start ()
+                let sessionId = SessionId.create "ovr-sess" |> expect
+                setEnv "OTEL_LOGS_EXPORTER" "otlp"
+                setEnv "OTEL_EXPORTER_OTLP_ENDPOINT" stub.Url
+                setEnv "OTEL_RESOURCE_ATTRIBUTES" "service.version=set-by-operator"
+                let emitter = Telemetry.fromEnv sessionId
+                emitter.Emit (AgentTurnId.create "ovr-turn" |> expect)
+                    { InputTokens = 1; OutputTokens = 1; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
+                do! emitter.Shutdown () |> Async.AwaitPromise
+                unsetEnv "OTEL_LOGS_EXPORTER"
+                unsetEnv "OTEL_EXPORTER_OTLP_ENDPOINT"
+                unsetEnv "OTEL_RESOURCE_ATTRIBUTES"
+
+                match stub.Received () with
+                | r :: _ ->
+                    Expect.equal
+                        (OtlpStub.resourceAttr "service.version" r)
+                        (Some "set-by-operator")
+                        "an operator-set resource attribute wins over the code default"
+                | [] -> failwith "no record reached the collector"
                 stub.Close ()
             }
     ]

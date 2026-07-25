@@ -19,7 +19,13 @@ type LogValue =
 
 type ReceivedLog =
     { Body : string
-      Attributes : Map<string, LogValue> }
+      Attributes : Map<string, LogValue>
+      /// The attributes of the RESOURCE this record was emitted under (`service.name`,
+      /// `service.version`, …). OTLP sends these once per payload, not per record, so they are
+      /// folded onto each record here — but kept in their own field rather than merged into
+      /// `Attributes`, so a test asserting a resource attribute cannot be satisfied by a
+      /// record-level one of the same name.
+      Resource : Map<string, LogValue> }
 
 [<Emit("$0[$1]")>]
 let private prop (o: obj) (key: string) : obj = jsNative
@@ -57,30 +63,39 @@ let private attributesOf (holder: obj) : Map<string, LogValue> =
             | _ -> acc)
         Map.empty
 
-let private logRecordOf (lr: obj) : ReceivedLog =
+let private logRecordOf (resource: Map<string, LogValue>) (lr: obj) : ReceivedLog =
     let body =
         let b = prop lr "body"
         if isNullish b then ""
         else
             let s = prop b "stringValue"
             if isNullish s then "" else unbox<string> s
-    { Body = body; Attributes = attributesOf lr }
+    { Body = body; Attributes = attributesOf lr; Resource = resource }
 
-/// Decode an OTLP/HTTP JSON logs payload into the flat list of records it carries.
+/// Decode an OTLP/HTTP JSON logs payload into the flat list of records it carries, each carrying
+/// the attributes of the resource it was emitted under.
 let decode (json: string) : ReceivedLog list =
     let root = tryParse json
     if isNullish root then []
     else
         asArray (prop root "resourceLogs")
-        |> Array.collect (fun rl -> asArray (prop rl "scopeLogs"))
-        |> Array.collect (fun sl -> asArray (prop sl "logRecords"))
-        |> Array.map logRecordOf
+        |> Array.collect (fun rl ->
+            // A payload need not carry a resource block; that decodes to no attributes, not a throw.
+            let holder = prop rl "resource"
+            let resource = if isNullish holder then Map.empty else attributesOf holder
+            asArray (prop rl "scopeLogs")
+            |> Array.collect (fun sl -> asArray (prop sl "logRecords"))
+            |> Array.map (logRecordOf resource))
         |> List.ofArray
 
 // --- Accessors ---------------------------------------------------------------------------
 
 let stringAttr (key: string) (r: ReceivedLog) : string option =
     match Map.tryFind key r.Attributes with Some (StringValue s) -> Some s | _ -> None
+
+/// A string attribute of the record's RESOURCE — the emitting process's identity.
+let resourceAttr (key: string) (r: ReceivedLog) : string option =
+    match Map.tryFind key r.Resource with Some (StringValue s) -> Some s | _ -> None
 
 let intAttr (key: string) (r: ReceivedLog) : int option =
     match Map.tryFind key r.Attributes with Some (IntValue i) -> Some i | _ -> None

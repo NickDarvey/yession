@@ -91,6 +91,12 @@ let private envResourceAttributes () : (string * string) list =
 let private resourceOf (defaultServiceName: string) (instanceId: string option) : OpenTelemetry.Resource =
     let baseAttrs =
         [ "service.name", defaultServiceName
+          // The BUILD these records came from — without it two releases' counts are
+          // indistinguishable at the collector. It belongs here, in the code default, and NOT in
+          // the OTEL_RESOURCE_ATTRIBUTES the Manager injects into a child (ProcessManager): env
+          // wins below, so injecting it would make every session report the MANAGER's version and
+          // hide exactly the skew this is here to expose. Each process reports its own.
+          "service.version", Version.current
           "service.namespace", "yession" ]
         @ (match instanceId with Some id -> [ "service.instance.id", id ] | None -> [])
     // env attributes override the defaults; OTEL_SERVICE_NAME wins for service.name.
