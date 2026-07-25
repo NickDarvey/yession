@@ -2,7 +2,7 @@
 # Run a command with a working Secret Service on a headless host: a private D-Bus
 # session plus gnome-keyring's secrets component, unlocked with an empty password.
 # This is how the `Keyring` test capability runs in the dev container and CI
-# (`scripts/with-keyring.sh check Keyring`); on a desktop with a real credential
+# (`.claude/with-keyring.sh check Keyring`); on a desktop with a real credential
 # manager, run the command directly instead. Both `dbus-run-session` and
 # `gnome-keyring-daemon` come from devenv (devenv.nix).
 set -euo pipefail

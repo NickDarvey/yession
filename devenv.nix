@@ -17,7 +17,7 @@ in
   languages.dotnet.package = pkgs.dotnet-sdk_10;
 
   # dbus + gnome-keyring back the `Keyring` test capability on headless hosts:
-  # `scripts/with-keyring.sh check Keyring` runs the OS-credential-manager suite against
+  # `.claude/with-keyring.sh check Keyring` runs the OS-credential-manager suite against
   # a private, empty-password-unlocked Secret Service (see the script).
   packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint ];
 

@@ -359,7 +359,7 @@ let private storeTests =
 // --- Step 4: the real OS credential manager ([Keyring]) ---------------------------------
 // Runs only where the run declares a usable credential store: `check Keyring` on a
 // desktop (genuine Keychain / Credential Manager / Secret Service), or through
-// `scripts/with-keyring.sh` (dbus + gnome-keyring) in headless containers and CI.
+// `.claude/with-keyring.sh` (dbus + gnome-keyring) in headless containers and CI.
 
 let private keyringTests =
     testList "OS keyring round-trip" [

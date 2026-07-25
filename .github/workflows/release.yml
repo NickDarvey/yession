@@ -39,7 +39,7 @@ jobs:
         # with-keyring.sh backs the `Keyring` capability on this headless runner: a
         # private D-Bus session + gnome-keyring (both provided by devenv) stand in for
         # a desktop Secret Service, so the OS-credential-manager suite runs for real.
-        run: devenv shell -- bash scripts/with-keyring.sh verify
+        run: devenv shell -- bash .claude/with-keyring.sh verify
       # Reused runners must not leak session containers/volumes between jobs.
       - name: Clean up Yession Docker artefacts
         if: always()
