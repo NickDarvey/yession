@@ -28,17 +28,19 @@ nix_sh="$HOME/.nix-profile/etc/profile.d/nix.sh"
 nixpkgs="https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz"
 
 if ! $hook_only; then
+  # nix.conf FIRST: the installer runs as root with no nixbld group and aborts at its final
+  # profile step unless build-users-group is explicitly empty (written to the user conf, and
+  # to /etc as belt-and-braces). sandbox=false because some containers lack the namespaces
+  # the build sandbox needs. Then the single-user install — idempotent, so a half-failed
+  # earlier attempt is repaired by simply re-running it.
   if ! [ -e "$nix_sh" ]; then
-    # Single-user install. The container runs as root with no nixbld group — the installer
-    # aborts unless build-users-group is emptied first.
-    mkdir -p /etc/nix
+    mkdir -p "$HOME/.config/nix" /etc/nix
+    printf 'experimental-features = nix-command flakes\nbuild-users-group =\nsandbox = false\n' \
+      > "$HOME/.config/nix/nix.conf"
     grep -q '^build-users-group' /etc/nix/nix.conf 2>/dev/null \
       || echo 'build-users-group =' >> /etc/nix/nix.conf
     sh <(curl -L https://nixos.org/nix/install) --no-daemon
   fi
-  mkdir -p "$HOME/.config/nix"
-  grep -q '^experimental-features' "$HOME/.config/nix/nix.conf" 2>/dev/null \
-    || echo 'experimental-features = nix-command flakes' >> "$HOME/.config/nix/nix.conf"
 
   # Future shells get nix + devenv without any ceremony. Fresh Claude Code Bash calls read
   # no rc file, so rc snippets aren't enough — PATH-level wrappers carry the env instead.
