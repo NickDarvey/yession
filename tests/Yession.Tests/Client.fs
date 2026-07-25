@@ -91,6 +91,12 @@ let tests =
                 match host with
                 | Some h -> do! h.Stop ()
                 | None -> ()
+                // The previous case deliberately DROPPED a live connection; libdatachannel
+                // runs its own threads, and a close callback delivered after the global
+                // teardown frees the library is a use-after-free (verify run 30137017551
+                // died exactly here with SIGSEGV). Yield long enough for those callbacks
+                // to drain before cleanup — sequencing, not a retry.
+                do! Async.Sleep 250
                 Interop.cleanup ()
             }
     ]
