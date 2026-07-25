@@ -33,9 +33,10 @@ let private chunkToString (chunk: obj) : string = jsNative
 let private parseReadyLine (line: string) : int option = jsNative
 
 /// The child's build, off the same readiness line. Absent from a session bundle older than the
-/// field, which must still launch — so this is an option, never a launch precondition.
+/// field, which must still launch — so this is an option, never a launch precondition. Public
+/// only so that back-compat can be asserted directly.
 [<Emit("(() => { try { const p = JSON.parse($0); return (p && typeof p.version === 'string') ? p.version : null } catch { return null } })()")>]
-let private parseReadyVersion (line: string) : string option = jsNative
+let parseReadyVersion (line: string) : string option = jsNative
 
 /// Warn when the Manager and the session it just launched are from different MAJOR versions —
 /// the one difference that says their control protocol may genuinely disagree. Diagnostic only:

@@ -246,6 +246,19 @@ let private versionTests =
         testCase "an unbundled run reports dev, never a version-shaped placeholder" <| fun () ->
             // These tests are Fable output run straight on Node — no esbuild, so no define.
             Expect.equal Version.current "dev" "the fallback names the build path it belongs to"
+
+        // The readiness line grew a `version` field. A Manager must still launch a session bundle
+        // from before it existed, so the field is an option and never a launch precondition.
+        testCase "a readiness line without a version is still a valid readiness line" <| fun () ->
+            Expect.equal
+                (Spawn.parseReadyVersion """{"yession":"ready","port":1234}""")
+                None
+                "an older session bundle reports no version — and is not compared against one"
+            Expect.equal
+                (Spawn.parseReadyVersion """{"yession":"ready","port":1234,"version":"2.0.0-beta.1"}""")
+                (Some "2.0.0-beta.1")
+                "a current bundle reports its build"
+            Expect.equal (Spawn.parseReadyVersion "not json at all") None "a log line is not a readiness line"
     ]
 
 let tests = testList "Telemetry" [ bindingTests; emitterTests; receiverTests; versionTests ]
