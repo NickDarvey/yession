@@ -458,11 +458,66 @@ let private runCheckOnce (caps: string list) =
         exec esbuild [ "app/out/browser/EditorHarness.js"; "--bundle"; "--format=esm"; "--outfile=tests/browser/out/harness.js" ]
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 
+// The Keyring-tagged suites need a usable Secret Service. A desktop has one; a headless Linux
+// host (CI, dev containers) has no session bus at all, so `check` wraps ITSELF in a private
+// D-Bus session with gnome-keyring's secrets component unlocked by an empty password. The bus
+// must be an ancestor of every test process, which a running process cannot arrange for itself
+// — hence the re-exec under this script rather than an env tweak.
+let private keyringWrapper = """#!/usr/bin/env bash
+set -euo pipefail
+# The Nix dbus package expects its config in /etc, which headless containers lack — hand the
+# daemon the config that ships inside the package instead. dbus-run-session only accepts a
+# bare binary name, so wrap the flag in a shim.
+dbus_bin="$(readlink -f "$(command -v dbus-daemon)")"
+session_conf="$(dirname "$dbus_bin")/../share/dbus-1/session.conf"
+shim_dir="$(mktemp -d)"
+trap 'rm -rf "$shim_dir"' EXIT
+cat > "$shim_dir/dbus-daemon-shim" <<SHIM
+#!/usr/bin/env bash
+# dbus-run-session passes --session; replace it with the packaged config file.
+args=()
+for a in "\$@"; do [ "\$a" = "--session" ] || args+=("\$a"); done
+exec "$dbus_bin" --config-file="$session_conf" "\${args[@]}"
+SHIM
+chmod +x "$shim_dir/dbus-daemon-shim"
+
+exec dbus-run-session --dbus-daemon="$shim_dir/dbus-daemon-shim" -- bash -euo pipefail -c '
+  # An isolated keyring home so runs never touch (or depend on) a real user keyring.
+  export XDG_DATA_HOME="$(mktemp -d)"
+  export XDG_RUNTIME_DIR="$XDG_DATA_HOME/runtime"
+  mkdir -p "$XDG_RUNTIME_DIR"
+  chmod 700 "$XDG_RUNTIME_DIR"
+  # Unlock with an empty (newline) password on stdin — the keyring-rs CI recipe: this
+  # creates + unlocks the login collection and its "default" alias on first run.
+  eval "$(printf "\n" | gnome-keyring-daemon --unlock | sed "s/^/export /")"
+  exec "$@"
+' -- "$@"
+"""
+
+let private needsKeyringWrap (caps: string list) =
+    List.contains "Keyring" caps
+    && OperatingSystem.IsLinux ()
+    && String.IsNullOrEmpty (Environment.GetEnvironmentVariable "DBUS_SESSION_BUS_ADDRESS")
+    && Environment.GetEnvironmentVariable "YESSION_KEYRING_WRAPPED" <> "1"
+
+let private rerunUnderKeyring (caps: string list) : int =
+    for tool in [ "dbus-run-session"; "gnome-keyring-daemon" ] do
+        if runInherit repoRoot "bash" [ "-c"; sprintf "command -v %s >/dev/null" tool ] <> 0 then
+            failwithf "check Keyring: %s not found — it backs the headless Secret Service (devenv provides it; see devenv.nix packages)" tool
+    let script = Path.Combine (Path.GetTempPath (), sprintf "yession-keyring-%s.sh" (Path.GetRandomFileName ()))
+    File.WriteAllText (script, keyringWrapper)
+    try
+        Environment.SetEnvironmentVariable ("YESSION_KEYRING_WRAPPED", "1")
+        runInherit repoRoot "bash" ([ script; "dotnet"; "fsi"; "tasks.fsx"; "check" ] @ caps)
+    finally
+        File.Delete script
+
 // check [caps…]. Default = cheap tier; each cap adds its suites (Browser, Ports, Native, …).
 // The gate runs once and is deterministic — the native WebRTC suites used to abort intermittently,
 // but that was a real defect (the addon carried its own C++ runtime; see nix/node-datachannel.nix),
 // now fixed, not inherent flakiness. A failure here is a genuine break, so don't paper it over.
 let check (caps: string list) =
+    if needsKeyringWrap caps then exit (rerunUnderKeyring caps)
     restore ()
     runCheckOnce caps
 

@@ -149,7 +149,7 @@ non-extractability (export rejects). Ports tier: binding lifecycle over the real
 bounce (absent → present → revoked); the route matrix over a real Manager + child
 (metadata-only responses asserted by raw body inspection, cross-session 403 by raw
 HTTP, get-route 404, restart durability vs. ephemeral loss). Keyring tier: the real
-`@napi-rs/keyring` round-trip (`.claude/with-keyring.sh check Keyring` in the dev
+`@napi-rs/keyring` round-trip (`check Keyring` in the dev
 container; the genuine OS store elsewhere). Docker tier: `SecretRef` injection of
 stored session- and user-scoped values, binding-gated, env fallback shadowed.
 

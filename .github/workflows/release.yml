@@ -36,10 +36,10 @@ jobs:
           # Testing-scoped credential; enables the live agent smoke tests.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           YESSION_REQUIRE_DOCKER: "1"
-        # with-keyring.sh backs the `Keyring` capability on this headless runner: a
-        # private D-Bus session + gnome-keyring (both provided by devenv) stand in for
-        # a desktop Secret Service, so the OS-credential-manager suite runs for real.
-        run: devenv shell -- bash .claude/with-keyring.sh verify
+        # On this headless runner `check` self-wraps in a private D-Bus session +
+        # gnome-keyring (both provided by devenv) to stand in for a desktop Secret
+        # Service, so the OS-credential-manager suite runs for real.
+        run: devenv shell -- verify
       # Reused runners must not leak session containers/volumes between jobs.
       - name: Clean up Yession Docker artefacts
         if: always()

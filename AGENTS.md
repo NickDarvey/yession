@@ -65,10 +65,10 @@ workflows, and the Nix `outputs` are thin wrappers over it — throw devenv and 
 `dotnet fsi tasks.fsx <verb>` still drives everything.
 
 **No new helper scripts.** New build/dev/repo functionality is a `tasks.fsx` verb, not a shell
-script. Only glue that must run where `dotnet` cannot stays outside, and the two existing
-scripts are exactly that: `.claude/setup.sh` runs before Nix/devenv exist, and
-`.claude/with-keyring.sh` must wrap the whole process in a private D-Bus session before it
-starts. Anything that could be a verb, is a verb.
+script. Only glue that must run where `dotnet` cannot stays outside, and the one existing
+script is exactly that: `.claude/setup.sh` runs before Nix/devenv exist. Everything else —
+including the headless D-Bus/keyring wrapping, which `check` arranges by re-execing itself —
+is a verb. Anything that could be a verb, is a verb.
 
 ## Versioning
 
@@ -150,9 +150,10 @@ skip — never an error. Pass the caps THIS box has as args:
 check                        # cheap tier: pure/model/protocol on Node. Every PR. Fast.
 check Browser                # + host-free rich-editor E2E. Needs only Chromium.
 check Ports Native           # + WebRTC/host suites. Need the node-datachannel addon.
-bash .claude/with-keyring.sh check Keyring   # + the OS-credential-manager suite, headless.
+check Keyring                # + the OS-credential-manager suite. Headless, check re-execs
+                             #   itself under a private D-Bus session + gnome-keyring.
 verify                       # == check Browser Ports Native Docker LiveAgent Keyring. Release
-                             #    gate; CI wraps it in with-keyring.sh for the Keyring cap.
+                             #    gate; what CI runs on master.
 lint                         # actionlint over .github/workflows. Runs first in the PR gate.
 ```
 
@@ -171,8 +172,8 @@ Capabilities:
 - `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
 - `Keyring` — a usable OS credential manager (the secrets KEK lives there). On a desktop,
   `check Keyring` drives the genuine Keychain / Credential Manager / Secret Service; headless
-  (this container, CI), wrap the run in `.claude/with-keyring.sh` — a private D-Bus session +
-  gnome-keyring unlocked with an empty password.
+  (this container, CI), it re-execs itself under a private D-Bus session + gnome-keyring
+  unlocked with an empty password (both from devenv).
 
 To eyeball a rich-editor change in a real browser without any of the WebRTC machinery:
 `check Browser` (drives Chromium against `tests/browser/editor-harness.html`). The full
