@@ -178,35 +178,35 @@ let private auditTests =
     let sessionId = SessionId.create "audit-sess" |> expect
     let name = SecretName.create "deploy-token" |> expect
     let id : SecretId = { Scope = SessionScope sessionId; Name = name }
-    let stringAttr key (r: Audit.Record) =
+    let stringAttr key (r: SecretStore.Audit.Record) =
         match Map.tryFind key r.Attributes with
-        | Some (Audit.StringValue s) -> Some s
+        | Some (SecretStore.Audit.StringValue s) -> Some s
         | _ -> None
     testList "audit (Manager in-process records)" [
         testCase "every constructor carries event.name, service.name, and its severity" <| fun () ->
             let alice = UserSubject.create "alice" |> expect
             let cases =
-                [ Audit.secretSet sessionId id true, "yession.secret.set", 9
-                  Audit.secretSet sessionId id false, "yession.secret.set", 13
-                  Audit.secretDelete sessionId id true, "yession.secret.delete", 9
-                  Audit.secretList sessionId (SessionScope sessionId) 2, "yession.secret.list", 9
-                  Audit.authzDeny sessionId SetSecret (SecretResource id) "why", "yession.authz.deny", 13
-                  Audit.inject sessionId name "session", "yession.secret.inject", 9
-                  Audit.injectMiss sessionId name "none left", "yession.secret.inject", 13
-                  Audit.storeOpen "durable" "in-memory" true 0, "yession.secrets.store_open", 9
-                  Audit.storeEphemeral, "yession.secrets.store_open", 13
-                  Audit.storeInaccessible "/tmp/x", "yession.secrets.store_open", 13
-                  Audit.storeOpenFailed "corrupt" "detail", "yession.secrets.store_open_failed", 17
-                  Audit.bindingRecorded sessionId alice, "yession.auth.binding_recorded", 9
-                  Audit.bindingRevoked sessionId, "yession.auth.binding_revoked", 9
-                  Audit.controlUnauthorized "/control/secrets/set", "yession.control.unauthorized", 13 ]
+                [ SecretStore.Audit.secretSet sessionId id true, "yession.secret.set", 9
+                  SecretStore.Audit.secretSet sessionId id false, "yession.secret.set", 13
+                  SecretStore.Audit.secretDelete sessionId id true, "yession.secret.delete", 9
+                  SecretStore.Audit.secretList sessionId (SessionScope sessionId) 2, "yession.secret.list", 9
+                  SecretStore.Audit.authzDeny sessionId SetSecret (SecretResource id) "why", "yession.authz.deny", 13
+                  SecretStore.Audit.inject sessionId name "session", "yession.secret.inject", 9
+                  SecretStore.Audit.injectMiss sessionId name "none left", "yession.secret.inject", 13
+                  SecretStore.Audit.storeOpen "durable" "in-memory" true 0, "yession.secrets.store_open", 9
+                  SecretStore.Audit.storeEphemeral, "yession.secrets.store_open", 13
+                  SecretStore.Audit.storeInaccessible "/tmp/x", "yession.secrets.store_open", 13
+                  SecretStore.Audit.storeOpenFailed "corrupt" "detail", "yession.secrets.store_open_failed", 17
+                  SecretStore.Audit.bindingRecorded sessionId alice, "yession.auth.binding_recorded", 9
+                  SecretStore.Audit.bindingRevoked sessionId, "yession.auth.binding_revoked", 9
+                  SecretStore.Audit.controlUnauthorized "/control/secrets/set", "yession.control.unauthorized", 13 ]
             for r, expectedName, severity in cases do
                 Expect.equal (stringAttr "event.name" r) (Some expectedName) "event.name"
                 Expect.equal (stringAttr "service.name" r) (Some "yession-manager") "service.name"
                 Expect.equal r.Severity severity (sprintf "severity of %s" expectedName)
 
         testCase "the deny record keeps the old printfn's full sentence and attributes" <| fun () ->
-            let r = Audit.authzDeny sessionId SetSecret (SecretResource id) "not the owning session"
+            let r = SecretStore.Audit.authzDeny sessionId SetSecret (SecretResource id) "not the owning session"
             Expect.equal r.Body "secrets: DENY SetSecret for session audit-sess: not the owning session" "printfn parity"
             Expect.equal (stringAttr "yession.authz.action" r) (Some "SetSecret") "action attr"
             Expect.equal (stringAttr "yession.secret.name" r) (Some "deploy-token") "resource name attr"
@@ -214,13 +214,13 @@ let private auditTests =
 
         // The only two rendered-string pins — everything else asserts attributes.
         testCase "format renders one deterministic INFO line" <| fun () ->
-            let line = Audit.format (Audit.inject sessionId name "session")
+            let line = SecretStore.Audit.format (SecretStore.Audit.inject sessionId name "session")
             Expect.equal
                 line
                 "audit INFO yession.secret.inject yession.inject.source=session yession.secret.name=deploy-token yession.session.id=audit-sess :: secret injected into environment"
                 "stable field order (Map is key-sorted)"
         testCase "format renders one deterministic WARN line" <| fun () ->
-            let line = Audit.format (Audit.controlUnauthorized "/control/start")
+            let line = SecretStore.Audit.format (SecretStore.Audit.controlUnauthorized "/control/start")
             Expect.equal
                 line
                 "audit WARN yession.control.unauthorized yession.http.path=/control/start :: invalid control secret"

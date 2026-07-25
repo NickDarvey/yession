@@ -161,8 +161,8 @@ let openStore (persistPath: string option) (keyStore: KeyStore.KeyStore) : Async
 /// only a store FAILURE stops the walk.
 module SecretResolution =
 
-    /// What one SecretRef resolution came to — the audit observation the Manager maps
-    /// to a log record (domain-shaped here; Audit compiles later).
+    /// What one SecretRef resolution came to — the feature's own observation type; the
+    /// `Audit` submodule below adapts it to a log record (`Audit.injectObserver`).
     type InjectOutcome =
         | InjectedFromScope of SecretScope
         | InjectedFromFallback
@@ -227,3 +227,180 @@ module SecretResolution =
                     }
                 return! walk (scopesFor sessionId users)
             }
+
+/// The secrets/ABAC feature's audit telemetry (Plan 06). Audit is a cross-cutting concern,
+/// but its records are a vertical feature concern: the Manager emits OTel-log-shaped records
+/// about its own authority decisions here, in the feature that owns them — secrets operations,
+/// policy denies, SecretRef injection, KEK/store lifecycle, user↔launch bindings, and
+/// control-channel 401s. Identifiers and names only — no constructor accepts a secret value,
+/// KEK material, or control secret, so content cannot leak by type. Records carry `event.name`
+/// (`yession.*`) and `service.name = yession-manager`.
+///
+/// The cross-cutting *convention* is small: a `Record` shape and a `Sink` (a record consumer)
+/// any feature could reuse. It lives with secrets — the only feature emitting audit today —
+/// rather than in a horizontal audit module; extract it when a second feature needs it.
+module Audit =
+
+    /// A log attribute value — string or int (the two the audit records use).
+    type LogValue =
+        | StringValue of string
+        | IntValue of int
+
+    /// An OTel-log-shaped audit record: a human `Body`, a severity number
+    /// (9 INFO / 13 WARN / 17 ERROR), and identifier/name attributes. Never a secret value.
+    type Record =
+        { Body : string
+          Severity : int
+          Attributes : Map<string, LogValue> }
+
+    /// An audit record consumer — the cross-cutting seam. Built ONCE per Manager (createWithUi).
+    type Sink = Record -> unit
+
+    module Severity =
+        let info = 9
+        let warn = 13
+        let error = 17
+
+    let private make (name: string) (severity: int) (attributes: (string * LogValue) list) (body: string) : Record =
+        { Body = body
+          Severity = severity
+          Attributes =
+            Map.ofList
+                ([ "event.name", StringValue name
+                   "service.name", StringValue "yession-manager" ]
+                 @ attributes) }
+
+    let private scopeAttrs (scope: SecretScope) : (string * LogValue) list =
+        match scope with
+        | SessionScope sessionId ->
+            [ "yession.secret.scope", StringValue "session"
+              "yession.secret.scope_key", StringValue (SessionId.value sessionId) ]
+        | UserScope user ->
+            [ "yession.secret.scope", StringValue "user"
+              "yession.secret.scope_key", StringValue (UserSubject.value user) ]
+
+    let private session (sessionId: SessionId) = "yession.session.id", StringValue (SessionId.value sessionId)
+    let private outcome ok = "yession.outcome", StringValue (if ok then "ok" else "failed")
+
+    let private secretOp (op: string) (sessionId: SessionId) (id: SecretId) (ok: bool) : Record =
+        make
+            (sprintf "yession.secret.%s" op)
+            (if ok then Severity.info else Severity.warn)
+            ([ session sessionId
+               "yession.secret.name", StringValue (SecretName.value id.Name)
+               outcome ok ]
+             @ scopeAttrs id.Scope)
+            (sprintf "secret %s %s" op (if ok then "ok" else "failed"))
+
+    let secretSet (sessionId: SessionId) (id: SecretId) (ok: bool) : Record = secretOp "set" sessionId id ok
+    let secretDelete (sessionId: SessionId) (id: SecretId) (ok: bool) : Record = secretOp "delete" sessionId id ok
+
+    let secretList (sessionId: SessionId) (scope: SecretScope) (count: int) : Record =
+        make "yession.secret.list" Severity.info
+            ([ session sessionId; "yession.secret.count", IntValue count ] @ scopeAttrs scope)
+            "secret list"
+
+    let authzDeny (sessionId: SessionId) (action: SecretAction) (resource: AuthzResource) (reason: string) : Record =
+        let resourceAttrs =
+            match resource with
+            | SecretResource id ->
+                ("yession.secret.name", StringValue (SecretName.value id.Name)) :: scopeAttrs id.Scope
+            | SecretCollection scope -> scopeAttrs scope
+        make "yession.authz.deny" Severity.warn
+            ([ session sessionId
+               "yession.authz.action", StringValue (sprintf "%A" action)
+               "yession.authz.reason", StringValue reason ]
+             @ resourceAttrs)
+            (sprintf "secrets: DENY %A for session %s: %s" action (SessionId.value sessionId) reason)
+
+    let inject (sessionId: SessionId) (name: SecretName) (source: string) : Record =
+        make "yession.secret.inject" Severity.info
+            [ session sessionId
+              "yession.secret.name", StringValue (SecretName.value name)
+              "yession.inject.source", StringValue source ]
+            "secret injected into environment"
+
+    let injectMiss (sessionId: SessionId) (name: SecretName) (reason: string) : Record =
+        make "yession.secret.inject" Severity.warn
+            [ session sessionId
+              "yession.secret.name", StringValue (SecretName.value name)
+              "yession.inject.source", StringValue "none"
+              "yession.authz.reason", StringValue reason ]
+            "secret injection missed"
+
+    let storeOpen (mode: string) (keystore: string) (kekMinted: bool) (entries: int) : Record =
+        make "yession.secrets.store_open" Severity.info
+            [ "yession.secrets.mode", StringValue mode
+              "yession.secrets.keystore", StringValue keystore
+              "yession.secrets.kek", StringValue (if kekMinted then "created" else "loaded")
+              "yession.secrets.entries", IntValue entries ]
+            (sprintf "secrets store open (%s)" mode)
+
+    let storeEphemeral : Record =
+        make "yession.secrets.store_open" Severity.warn
+            [ "yession.secrets.mode", StringValue "ephemeral" ]
+            "secrets: no OS credential manager available — secrets are IN-MEMORY ONLY and die with this Manager"
+
+    let storeInaccessible (path: string) : Record =
+        make "yession.secrets.store_open" Severity.warn
+            [ "yession.secrets.mode", StringValue "ephemeral"
+              "yession.secrets.path", StringValue path ]
+            (sprintf "secrets: %s exists but its key lives in a credential manager this host cannot reach — stored secrets stay inaccessible (and untouched) until one is available" path)
+
+    let storeOpenFailed (kind: string) (detail: string) : Record =
+        make "yession.secrets.store_open_failed" Severity.error
+            [ "yession.secrets.reason", StringValue kind ]
+            detail
+
+    let bindingRecorded (sessionId: SessionId) (subject: UserSubject) : Record =
+        make "yession.auth.binding_recorded" Severity.info
+            [ session sessionId; "yession.auth.sub", StringValue (UserSubject.value subject) ]
+            "user verified into launch"
+
+    let bindingRevoked (sessionId: SessionId) : Record =
+        make "yession.auth.binding_revoked" Severity.info
+            [ session sessionId ]
+            "user bindings revoked with launch"
+
+    let controlUnauthorized (path: string) : Record =
+        make "yession.control.unauthorized" Severity.warn
+            [ "yession.http.path", StringValue path ]
+            "invalid control secret"
+
+    let private severityLabel (severity: int) : string =
+        if severity = Severity.info then "INFO"
+        elif severity = Severity.warn then "WARN"
+        elif severity = Severity.error then "ERROR"
+        else string severity
+
+    /// One greppable line, deterministic (Map iterates key-sorted): severity, event
+    /// name, attributes (minus the two that lead the line), then the human body.
+    let format (r: Record) : string =
+        let name =
+            match Map.tryFind "event.name" r.Attributes with
+            | Some (StringValue n) -> n
+            | _ -> "-"
+        let attrs =
+            r.Attributes
+            |> Map.toList
+            |> List.filter (fun (k, _) -> k <> "event.name" && k <> "service.name")
+            |> List.map (fun (k, v) ->
+                match v with
+                | StringValue s -> sprintf "%s=%s" k s
+                | IntValue i -> sprintf "%s=%d" k i)
+            |> String.concat " "
+        sprintf "audit %s %s %s :: %s" (severityLabel r.Severity) name attrs r.Body
+
+    /// The prod sink: one greppable audit line to stdout. (Forwarding audit to an OTel
+    /// collector alongside session telemetry is a documented follow-up.)
+    let stdout : Sink = fun r -> printfn "%s" (format r)
+
+    /// Map an injection walk's outcome (SecretResolution.InjectOutcome) to a record — the
+    /// feature's own observation type, adapted to an audit record right here beside it.
+    let injectObserver (sink: Sink) : SecretResolution.Observe =
+        fun sessionId name outcome ->
+            match outcome with
+            | SecretResolution.InjectedFromScope (SessionScope _) -> sink (inject sessionId name "session")
+            | SecretResolution.InjectedFromScope (UserScope _) -> sink (inject sessionId name "user")
+            | SecretResolution.InjectedFromFallback -> sink (inject sessionId name "env")
+            | SecretResolution.InjectMissed reason -> sink (injectMiss sessionId name reason)
