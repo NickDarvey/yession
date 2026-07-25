@@ -40,6 +40,7 @@ A fresh Claude Code container: install Nix ONCE (single-user, no daemon), then e
 # --no-daemon fails at the final profile step unless build-users-group is explicitly empty.
 mkdir -p ~/.config/nix && printf 'experimental-features = nix-command flakes\nbuild-users-group =\nsandbox = false\n' > ~/.config/nix/nix.conf
 sh <(curl -L https://nixos.org/nix/install) --no-daemon      # installs /nix + ~/.nix-profile
+export USER=root                                              # unset in container; nix.sh silently no-ops without it
 . ~/.nix-profile/etc/profile.d/nix.sh                          # every shell (or re-login)
 export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt https_proxy="$HTTPS_PROXY"   # trust proxy CA
 scripts/devenv-local.sh                                       # write devenv.local.yaml (see below)
