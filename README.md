@@ -158,8 +158,10 @@ Rework the Manager control protocol (#42)
 ```
 
 `+semver: major` (or `breaking`, or a `BREAKING CHANGE:` footer) → `2.0.0-beta.0`; `+semver: minor`
-(`feature`) and `+semver: fix` (`patch`) move the other two. A plain `feat:` does *not* bump on its
-own — a tag is cut on every push, so nearly every release would. `dotnet fsi tasks.fsx version`
+(`feature`) and `+semver: fix` (`patch`) move the other two. A marker only counts in the footer —
+the last blank-line-separated block — on a line of its own, so a commit that merely talks about
+markers can't accidentally cut a major release. A plain
+`feat:` does *not* bump on its own — a tag is cut on every push, so nearly every release would. `dotnet fsi tasks.fsx version`
 prints what the current commit would publish; the policy itself is at the top of
 [tasks.fsx](tasks.fsx).
 

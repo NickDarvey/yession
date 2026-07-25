@@ -73,11 +73,25 @@ type private Bump =
     | Minor
     | Patch
 
+/// The FOOTER: the last blank-line-separated block of the message, where conventional commits put
+/// their trailers. Markers are read ONLY here, so a body that DISCUSSES a marker cannot move the
+/// release. Both commits that built this policy tripped looser rules — one quoted the marker
+/// table, the next line-wrapped so a breaking-change trailer began a line — and a wrong bump is
+/// only noticed once the tag is cut.
+let private footerOf (message: string) =
+    let blocks = Regex.Split (message.Replace("\r\n", "\n").Trim (), @"\n[ \t]*\n")
+    if blocks.Length = 0 then "" else blocks.[blocks.Length - 1]
+
+/// Within that footer a marker must also be a line of its own (a breaking-change trailer must
+/// start one).
 let private bumpOf (message: string) =
-    let has pattern = Regex.IsMatch (message, pattern, RegexOptions.IgnoreCase)
-    if has @"\+semver:\s?(breaking|major)" || Regex.IsMatch (message, "BREAKING[ -]CHANGE:") then Some Major
-    elif has @"\+semver:\s?(feature|minor)" then Some Minor
-    elif has @"\+semver:\s?(fix|patch)" then Some Patch
+    let footer = footerOf message
+    let has pattern =
+        Regex.IsMatch (footer, pattern, RegexOptions.IgnoreCase ||| RegexOptions.Multiline)
+    if has @"^[ \t]*\+semver:\s?(breaking|major)[ \t]*\r?$"
+       || Regex.IsMatch (footer, @"^BREAKING[ -]CHANGE:", RegexOptions.Multiline) then Some Major
+    elif has @"^[ \t]*\+semver:\s?(feature|minor)[ \t]*\r?$" then Some Minor
+    elif has @"^[ \t]*\+semver:\s?(fix|patch)[ \t]*\r?$" then Some Patch
     else None
 
 // Run a command, returning None instead of failing when it exits non-zero. `git describe` reports

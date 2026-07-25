@@ -71,6 +71,10 @@ the commit message — for a squash-merged PR, its title or body:
 +semver: fix     (or patch)                                   -> 1.0.1-beta.0
 ```
 
+A marker is read ONLY from the footer — the last blank-line-separated block of the message — and
+must be a line of its own there. So put it last. Prose discussing a marker anywhere above it
+(including this section's examples) never moves the version.
+
 A plain `feat:` does NOT bump — a tag is cut per push, so nearly every release would. `version`
 needs full history: it refuses a shallow clone rather than emitting an already-released number
 (`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the computation, which is how the
