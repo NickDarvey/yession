@@ -15,6 +15,11 @@ module Yession.Host.Control
 //   POST /control/execute          ExecuteRequest   -> NDJSON: chunk* then exactly one result
 //   POST /control/name             { name }         -> "ok" (updates the registry display name)
 //   POST /control/register-client  { redirectUri }  -> { clientId, clientSecret, issuer }
+//   POST /control/secrets/set      { scope, name, value } -> secret metadata (never a value)
+//   POST /control/secrets/list     { scope }        -> { secrets: metadata[] } (never values)
+//   POST /control/secrets/delete   { scope, name }  -> { deleted }
+//        (there is deliberately NO /control/secrets/get: values leave the Manager only
+//         by environment injection at container start — see Plan 06)
 //   GET  /control/notifications                     -> text/event-stream (the reverse leg:
 //        the Manager pushing notifications DOWN to this session, multiplexed as SSE frames
 //        of `ControlWire.sessionNotification` JSON — see NotificationHub / SessionNotification)
@@ -41,11 +46,30 @@ let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Ut
 [<Fable.Core.Emit("clearInterval($0)")>]
 let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
 
-/// What a control secret resolves to: WHICH launch is calling, and the environment
-/// capabilities that launch was granted (None = environment-less session).
+/// What a control secret resolves to: WHICH launch is calling, the environment
+/// capabilities that launch was granted (None = environment-less session), and the
+/// users the Manager verified into the launch at ID-token issuance (empty until a
+/// login completes). Manager-verified, never self-asserted — this is the ABAC
+/// composite identity (Plan 06).
 type ControlCaller =
     { SessionId : SessionId
-      Capabilities : SessionEnvironmentCapabilities option }
+      Capabilities : SessionEnvironmentCapabilities option
+      Users : Set<UserSubject> }
+
+/// A secrets-route failure: a policy Deny (403, with the policy's reason) or a store
+/// failure (500). Distinct so the route arms stay thin and policy-free — only the
+/// Manager can build a verified AuthzSubject, so authorization happens in its handlers.
+type SecretsError =
+    | SecretsDenied of reason: string
+    | SecretsFailed of reason: string
+
+/// The Manager's secrets handlers (Plan 06), pre-composed with authorization. NO
+/// operation returns a secret value — set answers metadata, list metadata, delete a
+/// flag; injection is the only read and it happens Manager-side at container start.
+type SecretsApi =
+    { Set : ControlCaller -> ControlWire.SetSecretRequest -> Async<Result<SecretMetadata, SecretsError>>
+      List : ControlCaller -> ControlWire.ListSecretsRequest -> Async<Result<SecretMetadata list, SecretsError>>
+      Delete : ControlCaller -> ControlWire.DeleteSecretRequest -> Async<Result<bool, SecretsError>> }
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
@@ -71,6 +95,10 @@ let tryHandle
     (registerNotificationSink: string -> (SessionNotification -> unit) -> (unit -> unit))
     (registerMcpSink: (McpToolList -> unit) -> (unit -> unit))
     (registerClient: string -> SessionId -> string -> RegisterClientResponse)
+    (secretsApi: SecretsApi option)
+    // Audit hook (Plan 06 telemetry): called with the request path whenever a control
+    // secret fails to resolve — the one place the path and the failure meet.
+    (onUnauthorized: string -> unit)
     (req: IncomingMessage)
     (res: ServerResponse)
     : bool =
@@ -79,7 +107,9 @@ let tryHandle
     else
         let secret = headerOf req "x-yession-control"
         match secret |> Option.bind resolve with
-        | None -> respond res 401 "invalid control secret"
+        | None ->
+            onUnauthorized path
+            respond res 401 "invalid control secret"
         | Some caller ->
             let decodeAnd (decode: string -> Result<'a, string>) (handle: 'a -> unit) =
                 readBody req (fun body ->
@@ -141,6 +171,46 @@ let tryHandle
                 decodeAnd (Wire.fromString Wire.registerClientRequest) (fun request ->
                     let response = registerClient (Option.defaultValue "" secret) caller.SessionId request.RedirectUri
                     respondJson res (Wire.toString Wire.registerClientResponse response))
+            | "POST", ("/control/secrets/set" | "/control/secrets/list" | "/control/secrets/delete" as secretsPath) ->
+                // Secrets (Plan 06). The arms stay thin: decode, hand the verified
+                // caller to the Manager's pre-authorized handlers, map the outcome.
+                // No store configured -> a clean 403 (the withCapabilities shape);
+                // a policy Deny -> 403 with its reason; a store failure -> 500.
+                match secretsApi with
+                | None -> respond res 403 "no secrets store configured"
+                | Some api ->
+                    let respondWith (encode: 'ok -> string) (outcome: Result<'ok, SecretsError>) =
+                        match outcome with
+                        | Ok value -> respondJson res (encode value)
+                        | Error (SecretsDenied reason) -> respond res 403 reason
+                        | Error (SecretsFailed reason) -> respond res 500 reason
+                    match secretsPath with
+                    | "/control/secrets/set" ->
+                        decodeAnd (ControlWire.fromString ControlWire.setSecretRequest) (fun request ->
+                            Async.StartImmediate (
+                                async {
+                                    let! outcome = api.Set caller request
+                                    respondWith (ControlWire.toString ControlWire.secretMetadata) outcome
+                                }))
+                    | "/control/secrets/list" ->
+                        decodeAnd (ControlWire.fromString ControlWire.listSecretsRequest) (fun request ->
+                            Async.StartImmediate (
+                                async {
+                                    let! outcome = api.List caller request
+                                    respondWith
+                                        (fun secretsList ->
+                                            ControlWire.toString ControlWire.listSecretsResponse { Secrets = secretsList })
+                                        outcome
+                                }))
+                    | _ ->
+                        decodeAnd (ControlWire.fromString ControlWire.deleteSecretRequest) (fun request ->
+                            Async.StartImmediate (
+                                async {
+                                    let! outcome = api.Delete caller request
+                                    respondWith
+                                        (fun deleted -> ControlWire.toString ControlWire.deleteSecretResponse { Deleted = deleted })
+                                        outcome
+                                }))
             | "GET", "/control/notifications" ->
                 // The reverse leg: a long-lived SSE stream the Manager pushes notifications
                 // down. The secret already resolved to capabilities above, so it is valid —

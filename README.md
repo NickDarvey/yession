@@ -39,10 +39,19 @@ The full reasoning, and the invariants that have to survive code review, are in
 
 ## Getting started
 
-The dev environment, tasks, and build outputs are all declared by [devenv](https://devenv.sh)
-([devenv.nix](devenv.nix)): the toolchain (Node + .NET SDK), the tasks (devenv scripts), and
-the installable Nix package + npm tarball (devenv outputs). Exact versions are pinned via
-nixpkgs in [devenv.nix](devenv.nix) (`nodejs_24`, `dotnet-sdk_10`).
+Everything — the dev environment, the tasks, and the two install channels — is declared once by
+[devenv](https://devenv.sh) ([devenv.nix](devenv.nix)) and pinned through nixpkgs, so what you
+hack on and what you install are built the same way. The toolchain (Node 24, .NET SDK 10) comes
+from that declaration; you never install it by hand.
+
+### Developing
+
+**Prerequisites**
+
+- [devenv](https://devenv.sh) (and the Nix it runs on, flakes enabled) — it brings the pinned
+  Node 24 and .NET SDK 10, so there's nothing else to install.
+
+**Steps**
 
 ```sh
 devenv shell       # enter the environment (Node, .NET on PATH)
@@ -51,35 +60,57 @@ check              # run the cheap test tier (check Browser / Ports Native / …
 start              # run the Session Process locally
 ```
 
-Tasks are devenv scripts: `restore`, `build`, `start`, `dev`, `check` (tests; capabilities pass
-as args — `check Browser`), `verify`, `package`, `clean`. Each is a thin wrapper over one place,
-[`tasks.fsx`](tasks.fsx) — the complete, standalone build interface. The devenv
-scripts, the GitHub Actions workflows, and the Nix outputs all call it; `dotnet fsi
-tasks.fsx <verb>` drives everything on its own if you throw devenv and CI away.
+Tasks are devenv scripts — `restore`, `build`, `start`, `dev`, `check` (tests; capabilities pass
+as args, e.g. `check Browser`), `verify`, `package`, `clean` — each a thin wrapper over
+[`tasks.fsx`](tasks.fsx), the complete, standalone build interface. The devenv scripts, the
+GitHub Actions workflows, and the Nix outputs all call it; `dotnet fsi tasks.fsx <verb>` drives
+everything on its own if you throw devenv and CI away.
 
-Yession ships two ways, side by side, each giving the commands `yession` (the Manager) and
-`yession-session` (a Session Process). Either way `yession` serves a management UI (default
-http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its own process.
+### Installing
 
-- **npm package** — `outputs.packaged`. `npm i -g <release-tarball>` pulls the platform-native
-  pieces (the WebRTC transport and the agent's native Claude Code binary) on install; Node ≥24
-  is the only prerequisite. Build it locally with `devenv build outputs.packaged`.
-- **Nix package** — the `installed` derivation. Reproducible and self-contained: the native
-  WebRTC addon is built from source, the agent points at nixpkgs `claude-code`, nothing runs an
-  npm postinstall. Build/install:
+Yession ships two ways, side by side. Either gives you two commands — `yession-manager` (the
+Manager) and `yession-session` (a Session Process) — and `yession-manager` serves a management UI
+(default http://127.0.0.1:8321) to create, launch, resume, and stop sessions, each in its own
+process.
 
-  ```sh
-  nix build          github:NickDarvey/yession#yession  # build the two wrapped bins
-  nix run            github:NickDarvey/yession           # run the Manager
-  nix profile install github:NickDarvey/yession          # add yession + yession-session
-  ```
+#### Installing with npm
 
-  The installable derivations live in [`nix/packages.nix`](nix/packages.nix), and
-  [`flake.nix`](flake.nix) builds `packages.<system>.{default,yession,packaged}` from it
-  directly — no devenv involved, so `nix build` / `nix profile install` are pure (only the
-  nixpkgs input). devenv.nix imports the same file for `devenv build outputs.<name>`, so the two
-  never diverge. Add the flake as an input and put `yession.packages.<system>.default` in a NixOS
-  `environment.systemPackages` / home-manager `home.packages` list.
+**Prerequisites**
+
+- Node ≥24 — the only prerequisite.
+
+**Steps**
+
+```sh
+npm i -g <release-tarball>   # installs yession-manager + yession-session
+```
+
+npm pulls the platform-native pieces — the WebRTC transport and the agent's native Claude Code
+binary — through optional dependencies on install, so that one command is all it takes. Build the
+tarball locally with `devenv build outputs.npm`.
+
+#### Installing with Nix
+
+**Prerequisites**
+
+- Nix, flakes enabled.
+
+**Steps**
+
+```sh
+nix profile install github:NickDarvey/yession          # add yession-manager + yession-session
+nix run             github:NickDarvey/yession           # run the Manager without installing
+nix build           github:NickDarvey/yession#yession   # just build the two wrapped bins
+```
+
+The Nix package is reproducible and self-contained: the native WebRTC addon is built from source,
+the agent points at nixpkgs `claude-code`, and nothing runs an npm postinstall. The installable
+derivations live in [`nix/packages.nix`](nix/packages.nix); [`flake.nix`](flake.nix) builds
+`packages.<system>.{default,yession,npm}` from it directly — no devenv, so `nix build` /
+`nix profile install` are pure (only the nixpkgs input) — and devenv exposes the same derivations
+as `outputs.{staged,nix,npm}`. To pin it in a system, add the flake as an input and put
+`yession.packages.<system>.default` in a NixOS `environment.systemPackages` / home-manager
+`home.packages` list.
 
 ### Cloud sessions (Claude Code on the web)
 
@@ -94,6 +125,8 @@ committed [`.claude/settings.json`](.claude/settings.json) runs
 gitignored `devenv.local.yaml` repointing the `devenv` input at devenv's own source
 **substituted from `cache.nixos.org`** — so `devenv shell` works with zero GitHub access.
 On a laptop / in CI the hook no-ops and the normal `github:` input is used.
+
+### Testing
 
 Tests declare what they need in code, not by folder — `Ports`, `Docker`, `LiveAgent`,
 `Browser`, or nothing for a pure suite — and the harness runs each one only where those

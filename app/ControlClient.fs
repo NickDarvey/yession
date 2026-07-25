@@ -113,6 +113,48 @@ let nameReporter (baseUrl: string) (secret: string) : string -> Async<unit> =
             with _ -> return ()
         }
 
+[<Emit("""fetch($0, { method: 'POST', headers: { 'x-yession-control': $1, 'content-type': 'application/json' }, body: $2 })
+  .then(async r => ({ status: r.status, body: await r.text() }))""")>]
+let private postJsonReply (url: string) (secret: string) (body: string) : JS.Promise<{| status: int; body: string |}> = jsNative
+
+/// The session's secrets capability (Plan 06), pre-bound to ITS OWN session scope —
+/// "capabilities are scoped, not ambient": this surface cannot even express another
+/// scope. Write/list/delete only; there is no read — a stored secret is USED by
+/// referencing its name in an EnvironmentSpec env var (SecretRef), resolved
+/// Manager-side straight into the container. Failures (including policy 403s, with
+/// the Manager's reason) are values, never exceptions.
+type SessionSecretsCapabilities =
+    { SetSecret : SecretName -> string -> Async<Result<SecretMetadata, string>>
+      ListSecrets : unit -> Async<Result<SecretMetadata list, string>>
+      DeleteSecret : SecretName -> Async<Result<bool, string>> }
+
+let secretsCapabilities (baseUrl: string) (secret: string) (sessionId: SessionId) : SessionSecretsCapabilities =
+    let scope = SessionScope sessionId
+    let post (route: string) (body: string) (decode: string -> Result<'a, string>) : Async<Result<'a, string>> =
+        async {
+            try
+                let! reply = postJsonReply (sprintf "%s/control/secrets/%s" baseUrl route) secret body |> Async.AwaitPromise
+                if reply.status = 200 then return decode reply.body
+                else return Error (sprintf "secrets %s refused (%d): %s" route reply.status reply.body)
+            with e ->
+                return Error (sprintf "control unreachable: %s" e.Message)
+        }
+    { SetSecret =
+        fun name value ->
+            post "set"
+                (ControlWire.toString ControlWire.setSecretRequest { Scope = scope; Name = name; Value = value })
+                (ControlWire.fromString ControlWire.secretMetadata)
+      ListSecrets =
+        fun () ->
+            post "list"
+                (ControlWire.toString ControlWire.listSecretsRequest { Scope = scope })
+                (ControlWire.fromString ControlWire.listSecretsResponse >> Result.map (fun r -> r.Secrets))
+      DeleteSecret =
+        fun name ->
+            post "delete"
+                (ControlWire.toString ControlWire.deleteSecretRequest { Scope = scope; Name = name })
+                (ControlWire.fromString ControlWire.deleteSecretResponse >> Result.map (fun r -> r.Deleted)) }
+
 /// Dynamic client registration: bind this launch's OAuth client to its control secret.
 /// Called after the session's server listens — the redirect URI needs the OS-assigned
 /// port. NOT best-effort: a session that cannot register cannot authorize users, so the

@@ -45,6 +45,24 @@ type private RunOutcome =
           'Run a command in the session environment. Returns the exit result followed by the streamed output.',
           { executable: z.string(), arguments: z.array(z.string()).describe('argv, one element per argument') },
           async (args) => ({ content: [{ type: 'text', text: await $4(args.executable, args.arguments) }] })
+        ),
+        sdk.tool(
+          'set_secret',
+          'Persist a named secret for this session (WRITE-ONLY: no tool can read it back). To USE it, reference its name as an environment variable secret ref when an environment starts — the value is injected there directly and never appears in the conversation.',
+          { name: z.string().describe('the secret name, e.g. DEPLOY_TOKEN'), value: z.string().describe('the secret value to store') },
+          async (args) => ({ content: [{ type: 'text', text: await $7(args.name, args.value) }] })
+        ),
+        sdk.tool(
+          'list_secrets',
+          'List the names and timestamps of this session\'s stored secrets. Never returns values.',
+          {},
+          async () => ({ content: [{ type: 'text', text: await $8() }] })
+        ),
+        sdk.tool(
+          'delete_secret',
+          'Delete one of this session\'s stored secrets by name.',
+          { name: z.string().describe('the secret name to delete') },
+          async (args) => ({ content: [{ type: 'text', text: await $9(args.name) }] })
         )
       ]
     })
@@ -56,7 +74,7 @@ type private RunOutcome =
         settingSources: [],
         includePartialMessages: true,
         mcpServers: { yession },
-        allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command'],
+        allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret'],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {})
       }
@@ -102,6 +120,9 @@ let private runQuery
     (executeCommand: string -> string array -> JS.Promise<string>)
     (onChunk: string -> unit)
     (registerAbort: (unit -> unit) -> unit)
+    (setSecret: string -> string -> JS.Promise<string>)
+    (listSecrets: unit -> JS.Promise<string>)
+    (deleteSecret: string -> JS.Promise<string>)
     : JS.Promise<RunOutcome> =
     jsNative
 
@@ -171,6 +192,47 @@ let private executeFor (capabilities: AgentCapabilities) : string -> string arra
         }
         |> Async.StartAsPromise
 
+/// The secrets tool bodies (Plan 06): the typed WRITE-ONLY capabilities rendered as
+/// tool text. Values never flow back — a set/delete confirms, a list names.
+let private setSecretFor (capabilities: AgentCapabilities) : string -> string -> JS.Promise<string> =
+    fun name value ->
+        async {
+            match SecretName.create name with
+            | Error e -> return sprintf "invalid secret name: %s" e
+            | Ok secretName ->
+                match! capabilities.SetSecret secretName value with
+                | Ok metadata -> return sprintf "stored secret '%s' (updated %s)" (SecretName.value metadata.Id.Name) (metadata.UpdatedAt.ToString "o")
+                | Error e -> return sprintf "could not store secret: %s" e
+        }
+        |> Async.StartAsPromise
+
+let private listSecretsFor (capabilities: AgentCapabilities) : unit -> JS.Promise<string> =
+    fun () ->
+        async {
+            match! capabilities.ListSecrets () with
+            | Error e -> return sprintf "could not list secrets: %s" e
+            | Ok [] -> return "no secrets stored for this session"
+            | Ok listed ->
+                return
+                    listed
+                    |> List.map (fun m -> sprintf "%s (updated %s)" (SecretName.value m.Id.Name) (m.UpdatedAt.ToString "o"))
+                    |> String.concat "\n"
+        }
+        |> Async.StartAsPromise
+
+let private deleteSecretFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+    fun name ->
+        async {
+            match SecretName.create name with
+            | Error e -> return sprintf "invalid secret name: %s" e
+            | Ok secretName ->
+                match! capabilities.DeleteSecret secretName with
+                | Ok true -> return sprintf "deleted secret '%s'" name
+                | Ok false -> return sprintf "no secret named '%s'" name
+                | Error e -> return sprintf "could not delete secret: %s" e
+        }
+        |> Async.StartAsPromise
+
 /// The Claude Agent SDK–backed `RunAgent`. Streams text deltas as chunks; the typed
 /// capabilities surface as MCP tools; failures are values, never exceptions. The abort
 /// signal maps onto the SDK's AbortController, so an interrupt cancels the live query
@@ -187,6 +249,9 @@ let run : RunAgent =
                     (executeFor capabilities)
                     (fun text -> onChunk { Text = text })
                     signal.OnAbort
+                    (setSecretFor capabilities)
+                    (listSecretsFor capabilities)
+                    (deleteSecretFor capabilities)
                 |> Async.AwaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens

@@ -60,8 +60,15 @@ type Provider =
       RevokeByControlSecret : string -> unit }
 
 /// Create the provider. `issuerOf` is read lazily per request because the Manager's
-/// endpoint port is only known once its server listens.
-let create (issuerOf: unit -> string) (strategy: AuthenticationStrategy) : Async<Provider> =
+/// endpoint port is only known once its server listens. `onTokenIssued` fires on every
+/// successful /token redeem with the launch's control secret, the client session, and
+/// the authenticated subject — the Manager's one chance to RECORD which user it
+/// verified into which launch (Plan 06: the subject↔session binding behind ABAC).
+let create
+    (issuerOf: unit -> string)
+    (strategy: AuthenticationStrategy)
+    (onTokenIssued: string -> SessionId -> UserSubject -> unit)
+    : Async<Provider> =
     async {
         // Ed25519 via WebCrypto; the `false` here is the non-extractability invariant.
         let! keys = Fable.Jose.generateKeyPair "EdDSA" (createObj [ "extractable" ==> false ]) |> Async.AwaitPromise
@@ -111,6 +118,14 @@ let create (issuerOf: unit -> string) (strategy: AuthenticationStrategy) : Async
                 | Error (InvalidGrant _) -> respond res 400 "application/json" (Wire.toString Wire.tokenError "invalid_grant")
                 | Error (InvalidRequest _) -> respond res 400 "application/json" (Wire.toString Wire.tokenError "invalid_request")
                 | Ok grant ->
+                    // Record the binding BEFORE the token response leaves: the moment
+                    // the RP holds the token, the Manager already knows the user.
+                    // ClientId is a session id by construction (only DCR from the
+                    // control channel registers clients); a parse failure is a bug
+                    // surfaced by the policy denying, never a crash here.
+                    (match SessionId.create grant.Client.ClientId, UserSubject.create grant.Subject with
+                     | Ok sessionId, Ok subject -> onTokenIssued grant.Client.ControlSecret sessionId subject
+                     | _ -> ())
                     Async.StartImmediate (
                         async {
                             let! idToken =

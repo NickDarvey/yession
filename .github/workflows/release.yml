@@ -35,13 +35,18 @@ jobs:
           # Testing-scoped credential; enables the live agent smoke tests.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           YESSION_REQUIRE_DOCKER: "1"
-        run: devenv shell -- verify
+        # with-keyring.sh backs the `Keyring` capability on this headless runner: a
+        # private D-Bus session + gnome-keyring (both provided by devenv) stand in for
+        # a desktop Secret Service, so the OS-credential-manager suite runs for real.
+        run: devenv shell -- bash scripts/with-keyring.sh verify
       # Reused runners must not leak session containers/volumes between jobs.
       - name: Clean up Yession Docker artefacts
         if: always()
         run: devenv shell -- clean-docker
 
-  package:
+  # One of the two parallel packaging channels (both only need `verify`): the npm tarball.
+  package-npm:
+    name: "package:npm"
     needs: verify
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
@@ -75,10 +80,11 @@ jobs:
           name: dist-npm
           path: dist/*.tgz
 
-  # The other distribution channel: the reproducible Nix package. Build it and boot-smoke the
-  # two wrapped bins, so `nix profile install github:NickDarvey/yession` stays green. (Add a
+  # The other parallel channel: the reproducible Nix package. Build it and boot-smoke the two
+  # wrapped bins, so `nix profile install github:NickDarvey/yession` stays green. (Add a
   # `cachix/cachix-action` push here to serve binaries and spare consumers the source build.)
-  nix-package:
+  package-nix:
+    name: "package:nix"
     needs: verify
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
@@ -97,19 +103,19 @@ jobs:
       - name: Boot smoke (both surfaces serve)
         run: |
           out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=0 \
-            timeout 30 ./result/bin/yession 2>&1 || true)"
+            timeout 30 ./result/bin/yession-manager 2>&1 || true)"
           echo "$out" | grep -q "management UI at" \
             || { echo "the Nix package did not boot:"; echo "$out"; exit 1; }
           echo "nix package boot smoke passed"
 
   release:
-    needs: package
+    needs: package-npm
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     env:
-      # The versioning policy lives in build.fsx; the package job computed it — reuse it here
+      # The versioning policy lives in tasks.fsx; the package:npm job computed it — reuse it here
       # rather than recompute, so this job needs no devenv/dotnet just for the tag name.
-      VERSION: ${{ needs.package.outputs.version }}
+      VERSION: ${{ needs.package-npm.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -147,16 +153,16 @@ jobs:
       #   run: |
       #     if [ -s RELEASE_NOTES.md ]; then echo "body=RELEASE_NOTES.md" >> "$GITHUB_OUTPUT"
       #     else echo "body=" >> "$GITHUB_OUTPUT"; fi
-      # - uses: actions/download-artifact@v4
-      #   with:
-      #     path: dist
-      #     merge-multiple: true
+      # Pull the tarball the package:npm job built (uploaded as the `dist-npm` artifact) into
+      # dist/, so the release actually carries it — this job's own checkout has no dist/.
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-npm
+          path: dist
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
           name: Yession ${{ env.VERSION }}
           prerelease: true
-          # Claude-drafted notes when present, GitHub's generated notes otherwise.
-          body_path: ${{ steps.notes.outputs.body }}
-          generate_release_notes: ${{ steps.notes.outputs.body == '' }}
+          generate_release_notes: true
           files: dist/*.tgz

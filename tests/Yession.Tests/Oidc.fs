@@ -290,7 +290,7 @@ let private opTests =
         testCaseAsync "authorize -> token issues a jose-verifiable ID token; replay, bad verifier, and bad secret are refused per spec" <|
             async {
                 let mutable issuer = ""
-                let! provider = ManagerOidc.create (fun () -> issuer) Strategy.localhost
+                let! provider = ManagerOidc.create (fun () -> issuer) Strategy.localhost (fun _ _ _ -> ())
                 let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                     if not (provider.TryHandle req res) then
                         res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
@@ -418,11 +418,21 @@ let private flowTests =
                 Expect.equal login.Status 302 "/login redirects into the authorize chain"
                 Expect.isTrue (login.Location.StartsWith (managerUrl + "/authorize")) "to the manager's authorize endpoint"
 
+                // No login has completed yet, so the Manager has bound no user (Plan 06).
+                Expect.equal (pm.UsersOf record.SessionId) Set.empty "no user binding before a login"
+
                 // The full chain: login -> authorize -> callback -> cookie -> /me token.
                 let! opened = OidcHttp.openSession sessionUrl
                 Expect.isTrue (opened.PeerToken.Length > 0) "a peer token is minted for the authorized user"
                 let! events = OidcHttp.getWithJar opened.Jar (sessionUrl + "/events/0")
                 Expect.equal events.Status 200 "the cookie authorizes the event log"
+
+                // The token issuance recorded the subject↔session binding (Plan 06):
+                // the composite identity is Manager-verified, never self-asserted.
+                Expect.equal
+                    (pm.UsersOf record.SessionId)
+                    (Set.singleton (UserSubject.create "local" |> expect))
+                    "the login bound the localhost strategy's user to the launch"
 
                 // DCR with a forged control secret is refused at the door.
                 let! forged =
@@ -441,6 +451,9 @@ let private flowTests =
                         (OidcHttp.newJar ())
                         (sprintf "%s/authorize?client_id=oidc-child&redirect_uri=%s/callback&response_type=code&state=s&code_challenge=%s&code_challenge_method=S256" managerUrl sessionUrl challenge)
                 Expect.equal revoked.Status 400 "a stopped launch's client is revoked"
+
+                // The user binding died with the launch, exactly like the registration.
+                Expect.equal (pm.UsersOf record.SessionId) Set.empty "bindings die with the launch"
 
                 do! pm.StopAll ()
             }

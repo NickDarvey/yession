@@ -41,6 +41,11 @@ let private environmentCapabilities =
 let private reportName =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.nameReporter url secret)
 
+// Secrets (Plan 06): the session's write/list/delete surface over the same channel,
+// pre-bound to this session's own scope. Built after the session id parses (below).
+let private secretsCapabilitiesFor (sessionId: SessionId) =
+    controlChannel |> Option.map (fun (url, secret) -> ControlClient.secretsCapabilities url secret sessionId)
+
 // User authorization: with a Manager, this session is an OIDC client of it; the RP
 // configuration completes after listen (the redirect URI needs the bound port).
 let private auth =
@@ -130,7 +135,7 @@ Async.StartImmediate (
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
-        let! host = Host.startFull runAgent environmentCapabilities (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp sessionId auth port
+        let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp sessionId auth port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

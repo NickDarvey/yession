@@ -50,13 +50,21 @@ Async.StartImmediate(
         // session-lifecycle signals and passes its OTEL_* environment through to each child.
         let telemetry = Telemetry.managerFromEnv ()
         telemetry.Log "manager started" [ "yession.manager.data_dir", box dataDir ]
+        // Secrets (Plan 06): the OS credential manager keys the durable store; a host
+        // without one runs in-memory only (loud at boot) — never a plaintext key file.
+        let! keyStore = KeyStore.detect ()
+        let secretsBacking =
+            match keyStore with
+            | Some store -> ProcessManager.DurableSecrets store
+            | None -> ProcessManager.EphemeralSecrets
         let! manager =
             ProcessManager.createWithUi
                 { ProcessManager.Options.defaults dataDir sessionCommand sessionArgs with
                     SessionPort = (if port = 0 then None else Some port)
                     Grant = Some (Yession.Manager.Authority.grant containers backend)
                     ManagerPort = Some managerPort
-                    OnEvent = telemetry.Log }
+                    OnEvent = telemetry.Log
+                    Secrets = Some secretsBacking }
                 (Some ManagerUi.tryHandle)
 
         // Ensure the default session exists (an existing registration is resume).
