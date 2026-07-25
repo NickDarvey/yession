@@ -88,10 +88,14 @@ needs full history: it refuses a shallow clone rather than emitting an already-r
 (`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the computation, which is how the
 Nix derivations (their source has no `.git`) are told what they are.
 
-Both bins answer `--version`, and a session reports its build to the Manager on the spawn
-readiness line (the Manager warns on a MAJOR mismatch only). A build that cannot know a release
-version says what it is instead — `dev` unbundled, `test` under `check`, `0.0.0-g<rev>` from Nix.
-Never invent a version-shaped placeholder.
+Both bins answer `--version`, a session reports its build to the Manager on the spawn readiness
+line (the Manager warns on a MAJOR mismatch only), and every process puts it on its OTel resource
+as `service.version` — so a turn's counts can be attributed to a build at the collector. That
+attribute is a CODE default and deliberately not part of the `OTEL_RESOURCE_ATTRIBUTES` the
+Manager injects into a child: env wins, so injecting it would make sessions report the Manager's
+version and hide the skew. A build that cannot know a release version says what it is instead —
+`dev` unbundled, `test` under `check`, `0.0.0-g<rev>` from Nix. Never invent a version-shaped
+placeholder.
 
 Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-browsers`) — the
 `Browser` cap works here. The `node-datachannel` WebRTC addon is NOT built by npm (its prebuilt

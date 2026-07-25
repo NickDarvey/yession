@@ -642,6 +642,19 @@ let private telemetryTests =
                     Expect.equal u.Model (Some "probe-model") "the model crossed the boundary"
                 | [] -> failwith "no usage record reached the collector"
 
+                // The emitting build survives the real spawn + OTLP path, on the child's own
+                // resource. It cannot discriminate parent from child here — the suite spawns the
+                // unbundled `app/SessionMain.js`, so both processes are the same build (`dev`).
+                // That each process reports ITS OWN build rests on `service.version` living in
+                // the code default and never in the OTEL_RESOURCE_ATTRIBUTES the Manager injects.
+                match stub.Received () with
+                | r :: _ ->
+                    Expect.equal (OtlpStub.resourceAttr "service.version" r) (Some Version.current)
+                        "the child's record names the build it came from"
+                    Expect.equal (OtlpStub.resourceAttr "service.name" r) (Some "yession-session")
+                        "under the identity the Manager adapted for it"
+                | [] -> failwith "no record reached the collector"
+
                 Expect.isTrue (managerEvents.Contains "session launched") "the Manager emitted its own launch lifecycle signal"
 
                 do! a.Channel.Close ()
