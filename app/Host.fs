@@ -298,7 +298,7 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        let! server = Signalling.start sessionId onConnection (Some eventsEndpoint) auth peerTokens.Mint port
+        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth peerTokens.Mint port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -337,6 +337,10 @@ let startFull
                         unsubscribeNotifications |> Option.iter (fun cancel -> cancel ())
                         unsubscribeMcp |> Option.iter (fun cancel -> cancel ())
                         server.close ignore
+                        // Drain every accepted peer connection: Stop resolves only once
+                        // libdatachannel has reported each one closed, so a caller may
+                        // follow with the global native teardown deterministically.
+                        do! closeConnections ()
                     } }
     }
 

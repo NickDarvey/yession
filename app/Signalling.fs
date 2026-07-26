@@ -69,6 +69,10 @@ type EventsEndpoint =
 /// cacheable — offline-first — because it is a pure function of the session id with no
 /// content and no secrets; authorization gates the data surfaces, and the browser client
 /// renavigates to `/login` when `/me` says it must.
+/// Start the bootstrap/signalling server. Returns the server AND `closeConnections`:
+/// close every peer connection this server accepted and resolve once libdatachannel has
+/// reported each one closed — the deterministic drain a stopping Host runs before any
+/// global teardown (no live native objects may outlive it).
 let start
     (sessionId: SessionId)
     (onConnection: FrameChannel<string> -> unit)
@@ -76,8 +80,12 @@ let start
     (auth: SessionAuth.Auth option)
     (mintPeerToken: PeerAttribution -> string)
     (port: int)
-    : Async<HttpServer> =
+    : Async<HttpServer * (unit -> Async<unit>)> =
     let bootstrapHtml = bootstrapHtml sessionId
+    // Every accepted peer connection, so a stopping Host can drain them. Never pruned
+    // mid-life (closePeerConnection resolves immediately for already-closed ones, and a
+    // session hosts a bounded handful of peers).
+    let connections = ResizeArray<PeerConnection> ()
     let authorized (req: IncomingMessage) (url: string) (validateToken: string -> bool) =
         (match auth with
          | Some a -> a.IsAuthenticated req
@@ -106,6 +114,7 @@ let start
             readBody req (fun body ->
                 let offerSdp = sdpField body
                 let pc = createPeerConnection "yession-process"
+                connections.Add pc
                 pc.onDataChannel (fun dc -> onConnection (frameChannel dc))
                 Async.StartImmediate(
                     async {
@@ -212,5 +221,11 @@ let start
             res.``end`` "not found"
 
     let server = createServer handler
+    let closeConnections () : Async<unit> =
+        async {
+            for pc in List.ofSeq connections do
+                do! WebRtc.closePeerConnection pc
+            connections.Clear ()
+        }
     Async.FromContinuations(fun (cont, _, _) ->
-        server.listen (port, "127.0.0.1", fun () -> cont server) |> ignore)
+        server.listen (port, "127.0.0.1", fun () -> cont (server, closeConnections)) |> ignore)

@@ -71,6 +71,31 @@ let frameChannel (dc: DataChannel) : FrameChannel<string> =
                 else pending <- Some cont)
       Close = fun () -> async { dc.close () } }
 
+/// Close a peer connection and resolve once libdatachannel reports it CLOSED — the
+/// library's own signal that its threads are finished with the object. This is the
+/// deterministic teardown primitive: after it resolves, a global `Interop.cleanup ()`
+/// cannot race a callback into this connection. The waiter registers eagerly (the
+/// state callback is a single slot, and nothing else claims it on these connections —
+/// gathering uses the separate onGatheringStateChange slot).
+let closePeerConnection (pc: PeerConnection) : Async<unit> =
+    let mutable closed = false
+    let mutable waiter : (unit -> unit) option = None
+    pc.onStateChange (fun state ->
+        if state = "closed" && not closed then
+            closed <- true
+            match waiter with
+            | Some w -> waiter <- None; w ()
+            | None -> ())
+    if pc.state () = "closed" then
+        async { () }
+    else
+        async {
+            pc.close ()
+            return!
+                Async.FromContinuations (fun (cont, _, _) ->
+                    if closed then cont () else waiter <- Some cont)
+        }
+
 /// Await the data channel `open` event. Registers the callback eagerly (at call time) so
 /// the event cannot be missed between construction and awaiting.
 let private onceOpen (dc: DataChannel) : Async<unit> =
@@ -133,5 +158,15 @@ let connect (signalUrl: string) : Async<FrameChannel<string>> =
         let answer = parseSdp answerText
         pc.setRemoteDescription (answer.sdp, answer.``type``)
         do! opened
-        return frameChannel dc
+        // The client owns this side's PeerConnection: closing the channel also closes
+        // the connection and WAITS for libdatachannel to report it closed, so a caller
+        // that has awaited `Close` may safely reach `Interop.cleanup ()` with no live
+        // native objects behind it (deterministic — no sleeps).
+        let channel = frameChannel dc
+        let close () =
+            async {
+                do! channel.Close ()
+                do! closePeerConnection pc
+            }
+        return { channel with Close = close }
     }

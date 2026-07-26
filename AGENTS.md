@@ -33,39 +33,47 @@ The dev environment, tasks, and build outputs are all declared in **devenv.nix**
 On a laptop / in CI: `devenv shell` drops you in with `node`, `dotnet`, and the task scripts on
 PATH.
 
-A fresh Claude Code container: install Nix ONCE (single-user, no daemon), then enter devenv.
+A fresh Claude Code container: run `bash .claude/setup.sh` once (idempotent; minutes cold,
+cheap to re-run). It installs single-user Nix with the container-specific fixes, makes every
+later shell inherit it, writes the gitignored `devenv.local.yaml` that lets devenv resolve
+without GitHub (the sandbox proxy blocks devenv's normal `github:cachix/devenv` fetch, so the
+input is repointed at devenv's own source substituted from `cache.nixos.org`; on a laptop/CI
+the committed `devenv.yaml` with the normal github input is used), puts the `devenv` CLI on
+PATH, and warm-builds. The SessionStart hook (`.claude/settings.json`) re-runs it with
+`--hook`, which only refreshes `devenv.local.yaml`.
 
-```
-sh <(curl -L https://nixos.org/nix/install) --no-daemon      # installs /nix + ~/.nix-profile
-. ~/.nix-profile/etc/profile.d/nix.sh                          # every shell (or re-login)
-mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
-export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt https_proxy="$HTTPS_PROXY"   # trust proxy CA
-scripts/devenv-local.sh                                       # write devenv.local.yaml (see below)
-nix shell 'https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz#devenv' \
-  -c devenv shell -- build                                    # enter devenv, build everything
-```
-
-**Why devenv works here without GitHub.** devenv's generated flake normally fetches
-`github:cachix/devenv`, which this sandbox blocks (the GitHub proxy scopes fetches to attached
-repos, and `add_repo` refuses cross-owner repos). So `devenv.yaml` pins nixpkgs to a
-`nixos.org` channel tarball (allowed under the default-Trusted policy — `*.nixos.org` is, GitHub
-isn't), and `scripts/devenv-local.sh` (run automatically by the SessionStart hook in
-`.claude/settings.json`) writes a gitignored `devenv.local.yaml` that repoints the `devenv`
-input at devenv's **own source substituted from `cache.nixos.org`** — zero GitHub. On a
-laptop/CI the committed `devenv.yaml` (normal github input) is used and the hook no-ops.
-
-Then use the task scripts (inside `devenv shell`): `check` / `build` / `verify`. `restore`
+Then use the task scripts (`devenv shell -- <task>`, or bare inside the shell): `check` /
+`build` / `verify`. `restore`
 (dotnet tools; npm only when `node_modules` is absent) is called by the others — no need to run
 it by hand. Do NOT invoke `dotnet`/`fable`/`esbuild` directly to "run the suite"; go through the
 scripts so tool versions and PATH match CI. Under devenv, `node_modules` is a Nix artifact — the
 offline npm tree with the native node-datachannel addon baked in — symlinked in by `enterShell`,
-so nothing runs an npm postinstall and there's no per-file addon linking. Off-Nix, `restore`
-falls back to `npm install --ignore-scripts`.
-Every Yession build function lives in `tasks.fsx` — it's the complete, standalone build
-interface (`restore`/`build`/`start`/`dev`/`check`/`verify`/`lint`/`version`/`stage`/`package`/
-`install-smoke`/`boot-smoke`/`clean`/`clean-docker`). The devenv scripts and the GitHub Actions
-workflows are thin wrappers over it, and the Nix `outputs` call it too — throw devenv and CI
-away and `dotnet fsi tasks.fsx <verb>` still drives everything.
+so nothing runs an npm postinstall. Off-Nix, `restore` falls back to
+`npm install --ignore-scripts`.
+
+Preinstalled in this container, no action needed: Chromium at `$PLAYWRIGHT_BROWSERS_PATH`
+(`/opt/pw-browsers`) — the `Browser` cap works. The `node-datachannel` WebRTC addon is built
+from source by Nix and baked into the `nodeModules` derivation (npm cannot fetch its prebuilt
+here) — the `Native` cap works too (see Testing).
+
+## Build interface
+
+Every Yession build function lives in `tasks.fsx` — the complete, standalone build interface
+(`restore`/`build`/`start`/`dev`/`check`/`verify`/`lint`/`version`/`stage`/`package`/
+`install-smoke`/`boot-smoke`/`clean`/`clean-docker`). The devenv scripts, the GitHub Actions
+workflows, and the Nix `outputs` are thin wrappers over it — throw devenv and CI away and
+`dotnet fsi tasks.fsx <verb>` still drives everything.
+
+**No new helper scripts.** New build/dev/repo functionality is a `tasks.fsx` verb, not a shell
+script. Only glue that must run where `dotnet` cannot stays outside, and the one existing
+script is exactly that: `.claude/setup.sh` runs before Nix/devenv exist. Everything else —
+including the headless D-Bus/keyring wrapping, which `check` arranges by re-execing itself —
+is a verb. Anything that could be a verb, is a verb.
+
+**No belt-and-braces.** When two mechanisms could satisfy the same requirement (two config
+locations, a fallback beside a primary), keep ONLY the one verified working here and delete
+the other. A redundant spare hides which path is live, rots unverified, and turns the next
+failure into an archaeology dig.
 
 ## Versioning
 
@@ -83,25 +91,59 @@ A marker is read ONLY from the footer — the last blank-line-separated block of
 must be a line of its own there. So put it last. Prose discussing a marker anywhere above it
 (including this section's examples) never moves the version.
 
-A plain `feat:` does NOT bump — a tag is cut per push, so nearly every release would. `version`
-needs full history: it refuses a shallow clone rather than emitting an already-released number
-(`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the computation, which is how the
-Nix derivations (their source has no `.git`) are told what they are.
+**When to bump.** A breaking change to the Manager ↔ Session API (the protocol between the
+`yession` and `yession-session` bins — the Manager tolerates anything but a MAJOR mismatch) is
+a major bump. Otherwise standard semver: new user-facing capability → minor, bug fix → patch.
+The same policy applies once the version leaves beta. A plain `feat:` subject does NOT bump —
+a tag is cut per green master push, so nearly every release would; only the footer marker
+moves the triple.
 
-Both bins answer `--version`, a session reports its build to the Manager on the spawn readiness
-line (the Manager warns on a MAJOR mismatch only), and every process puts it on its OTel resource
-as `service.version` — so a turn's counts can be attributed to a build at the collector. That
-attribute is a CODE default and deliberately not part of the `OTEL_RESOURCE_ATTRIBUTES` the
-Manager injects into a child: env wins, so injecting it would make sessions report the Manager's
-version and hide the skew. A build that cannot know a release version says what it is instead —
-`dev` unbundled, `test` under `check`, `0.0.0-g<rev>` from Nix. Never invent a version-shaped
-placeholder.
+**Commit / PR messages.** Subjects follow conventional-commit style (`feat:`, `fix:`, `ci:`,
+`refactor:`, ...) — that is convention for readers, not the version input. PRs squash-merge:
+the PR title becomes the commit subject and the body the rest of the message, so a semver
+marker belongs on the last line of the PR body.
 
-Preinstalled, no action: Chromium at `$PLAYWRIGHT_BROWSERS_PATH` (`/opt/pw-browsers`) — the
-`Browser` cap works here. The `node-datachannel` WebRTC addon is NOT built by npm (its prebuilt
-lives on GitHub releases, which the proxy blocks); Nix builds it from source and bakes it into
-the `nodeModules` derivation the dev shell symlinks in (and into the `outputs`) — so the
-`Native` tier just works (see devenv.nix / Testing).
+`version` needs full history: it refuses a shallow clone rather than emitting an
+already-released number (`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the
+computation — how the Nix derivations (no `.git` in their source) are told what they are.
+
+**Version reporting.** Both bins answer `--version`; a session reports its build to the Manager
+on the spawn readiness line; every process puts it on its OTel resource as `service.version`.
+That attribute is a CODE default, deliberately not part of the `OTEL_RESOURCE_ATTRIBUTES` the
+Manager injects into a child — env wins, so injecting it would make sessions report the
+Manager's version and hide the skew. A build that cannot know a release version says what it
+is instead — `dev` unbundled, `test` under `check`, `0.0.0-g<rev>` from Nix. Never invent a
+version-shaped placeholder.
+
+## Finding F# symbols
+
+Never search for a bare name. F# reuses one identifier across several unrelated symbols:
+`SessionId` is a type, its companion module, a DU case constructor, and twelve record
+fields. `rg '\bSessionId\b'` returns 321 hits; only 97 are the type.
+
+Search for the **declaration form** instead — it is anchored and unambiguous:
+
+```
+rg '^type SessionId\b'                      # the type
+rg '^module SessionId\b'                    # its companion module (usually just below)
+rg '^\s*(type|module|let|and)\s+Foo\b'      # any declaration of Foo, when unsure which
+```
+
+Then scope to the owning file, because short member names repeat across sibling modules —
+`rg '^\s+let value\b' src/Yession.Domain/Identity.fs` returns nine hits, one per identity
+type, disambiguated only by their pattern (`let value (SessionId s) = s`).
+
+Two properties make this reliable:
+
+- **Compile order is explicit.** Each `.fsproj` lists `<Compile Include>` in order, and a
+  symbol is always declared in that file or an earlier one — read the `.fsproj` to bound
+  the search.
+- **Scoping is strictly top-down.** Within a file, a definition precedes every use, so
+  going down, the first match is the declaration.
+
+The one thing text search cannot recover is a type F# inferred rather than wrote: `let x =
+foo bar` has no annotation to find. Follow the right-hand side to its declaration, or write
+the type you expect and let `check` tell you if you are wrong.
 
 ## Testing
 
@@ -113,32 +155,48 @@ skip — never an error. Pass the caps THIS box has as args:
 check                        # cheap tier: pure/model/protocol on Node. Every PR. Fast.
 check Browser                # + host-free rich-editor E2E. Needs only Chromium.
 check Ports Native           # + WebRTC/host suites. Need the node-datachannel addon.
-bash scripts/with-keyring.sh check Keyring   # + the OS-credential-manager suite, headless.
+check Keyring                # + the OS-credential-manager suite. Headless, check re-execs
+                             #   itself under a private D-Bus session + gnome-keyring.
 verify                       # == check Browser Ports Native Docker LiveAgent Keyring. Release
-                             #    gate; CI wraps it in with-keyring.sh for the Keyring cap.
+                             #    gate; what CI runs on master.
 lint                         # actionlint over .github/workflows. Runs first in the PR gate.
 ```
 
-`lint` is separate from `check` because it guards a different thing: a workflow file is only
-validated by GitHub when it RUNS, and `release.yml` runs on master — after a merge. A syntax error
-there is invisible to PR CI and lands already broken (a colon-space in an unquoted step name once
-took every master release down at startup, zero jobs). The PR gate runs `lint` first, so that
-class of break is caught in seconds rather than after merging.
+`lint` is separate from `check` because it guards a different thing: GitHub only validates a
+workflow file when it RUNS, and `release.yml` runs on master — after a merge — so a syntax
+error there is invisible to PR CI and lands already broken. The PR gate runs `lint` first to
+catch that class of break in seconds.
 
 Capabilities:
 - `Browser` — Chromium via the .NET Playwright driver. Pins the .NET CLR runtime.
 - `Ports` — binds TCP ports / spawns processes.
 - `Native` — the native `node-datachannel` WebRTC addon, loaded by the real Session Process.
-  Built from source by Nix (`node-datachannel` in devenv.nix, against nixpkgs
-  libdatachannel + plog) and baked into the `nodeModules` derivation the dev shell symlinks in,
-  so `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC data-channel E2E) RUN
-  here. Outside Nix the addon is absent and they skip cleanly.
+  Present under Nix (built from source, baked into the `nodeModules` derivation the dev shell
+  symlinks in), so `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC
+  data-channel E2E) RUN here. Outside Nix the addon is absent and they skip cleanly.
 - `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
-- `Keyring` — a usable OS credential manager (Plan 06: the secrets KEK lives there). On a
-  desktop, `check Keyring` drives the genuine Keychain / Credential Manager / Secret Service;
-  headless (this container, CI), wrap the run in `scripts/with-keyring.sh` — a private D-Bus
-  session + gnome-keyring (both devenv packages) unlocked with an empty password.
+- `Keyring` — a usable OS credential manager (the secrets KEK lives there). On a desktop,
+  `check Keyring` drives the genuine Keychain / Credential Manager / Secret Service; headless
+  (this container, CI), it re-execs itself under a private D-Bus session + gnome-keyring
+  unlocked with an empty password (both from devenv).
 
 To eyeball a rich-editor change in a real browser without any of the WebRTC machinery:
 `check Browser` (drives Chromium against `tests/browser/editor-harness.html`). The full
 two-peer WebRTC E2E runs where the Nix-built `Native` addon is present (CI, `verify`).
+
+### Writing tests
+
+High signal, non-brittle. A test earns its place by failing when behavior regresses — and only
+then:
+
+- Assert observable behavior and contracts, not implementation detail (private state, call
+  order, exact log text, incidental DOM structure). A refactor that preserves behavior must
+  not break a green test.
+- Deterministic: no real-time sleeps, no ordering luck, no reliance on anything a declared
+  capability doesn't provide. A flaky test is worse than none — it trains everyone to
+  ignore red.
+- When verifying interesting behavior by hand (a bug fix, a protocol edge, a rendering
+  quirk), write the check down as a lasting test instead: the manual run proves it once, the
+  test keeps proving it. Verify-once throwaways stay out.
+- Tag suites with the MINIMUM capabilities they truly need, so they run in the cheapest tier
+  that can host them and skip (never error) everywhere else.
