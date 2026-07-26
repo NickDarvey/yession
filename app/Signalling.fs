@@ -78,7 +78,7 @@ let start
     (onConnection: FrameChannel<string> -> unit)
     (events: EventsEndpoint option)
     (auth: SessionAuth.Auth option)
-    (mintPeerToken: unit -> string)
+    (mintPeerToken: PeerAttribution -> string)
     (port: int)
     : Async<HttpServer * (unit -> Async<unit>)> =
     let bootstrapHtml = bootstrapHtml sessionId
@@ -160,9 +160,17 @@ let start
                 res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                 res.``end`` "this session has no authorization provider"
             | Some a ->
+                // The browser's stable peer id rides the bounce (docs/plans/07) so the
+                // Manager can witness which peer signed in; absent for headless logins.
+                let peer =
+                    queryOf req.url "peer_id"
+                    |> Option.bind (fun raw ->
+                        match PeerId.create raw with
+                        | Ok peerId -> Some peerId
+                        | Error _ -> None)
                 Async.StartImmediate (
                     async {
-                        match! a.BeginLogin () with
+                        match! a.BeginLogin peer with
                         | Some url ->
                             res.writeHead (302, createObj [ "location", box url; "cache-control", box "no-store" ]) |> ignore
                             res.``end`` ""
@@ -192,16 +200,19 @@ let start
         | "GET", "/me" ->
             // The browser's probe: a valid cookie (or no auth requirement at all) mints
             // a peer token for the WebRTC `PeerHello` — cookies cannot ride the data
-            // channel. 401 tells the client to renavigate to `/login`; a network error
-            // (offline) tells it to stay on the cached shell and local stores.
-            let respondMe (subject: string) =
+            // channel. The minted token CARRIES the cookie's attribution (docs/plans/07),
+            // so the Manager-verified user reaches the event log without riding any
+            // peer-controlled frame. 401 tells the client to renavigate to `/login`; a
+            // network error (offline) tells it to stay on the cached shell and stores.
+            let respondMe (subject: string) (attribution: PeerAttribution) =
+                let attributed = match attribution with AttributedUser _ -> true | UnattributedAccess -> false
                 res.writeHead (200, createObj [ "content-type", box "application/json"; "cache-control", box "no-store" ]) |> ignore
-                res.``end`` (sprintf """{"peerToken":"%s","sub":"%s"}""" (mintPeerToken ()) subject)
+                res.``end`` (sprintf """{"peerToken":"%s","sub":"%s","attributed":%b}""" (mintPeerToken attribution) subject attributed)
             match auth with
-            | None -> respondMe "local"
+            | None -> respondMe "local" UnattributedAccess
             | Some a ->
-                match a.SubjectOf req with
-                | Some subject -> respondMe subject
+                match a.IdentityOf req with
+                | Some identity -> respondMe identity.Subject identity.Attribution
                 | None ->
                     res.writeHead (401, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                     res.``end`` "unauthorized"

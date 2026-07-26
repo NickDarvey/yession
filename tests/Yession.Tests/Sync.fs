@@ -196,20 +196,20 @@ let private queueUnitTests =
             let message =
                 { MessageId = MessageId.create "msg-1" |> expect
                   QueueId = Some (qid "q-1")
-                  Author = HumanPeer ada
+                  Author = PeerRef ada
                   Body = "ship it" }
             let envelope =
                 { EventId = EventId.fresh ()
                   SessionId = SessionId.create "send-tests" |> expect
                   Offset = EventOffset.zero
-                  Actor = HumanPeer ada
+                  Actor = PeerRef ada
                   Timestamp = DateTimeOffset.UtcNow
                   Event = MessageSent message }
             let projection, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             Expect.equal
                 projection.Items
                 [ { MessageId = message.MessageId
-                    Author = HumanPeer ada
+                    Author = PeerRef ada
                     Body = "ship it"
                     Status = Complete } ]
                 "the sent message is a complete conversation item"
@@ -220,13 +220,13 @@ let private queueUnitTests =
                 { EventId = EventId.fresh ()
                   SessionId = SessionId.create "send-tests" |> expect
                   Offset = EventOffset.zero
-                  Actor = HumanPeer ada
+                  Actor = PeerRef ada
                   Timestamp = DateTimeOffset.UtcNow
                   Event =
                     MessageSent
                         { MessageId = MessageId.create "msg-1" |> expect
                           QueueId = None
-                          Author = HumanPeer ada
+                          Author = PeerRef ada
                           Body = "once only" } }
             let page : EventPage<SessionEvent> =
                 { Events = [ envelope ]; LastOffset = Some envelope.Offset; IsEnd = true }
@@ -325,7 +325,7 @@ let private e2eTests =
                 match messagesIn page.Events with
                 | [ message ] ->
                     Expect.equal message.Body "ship it" "the body is the consumption-time snapshot"
-                    Expect.equal message.Author (HumanPeer (PeerId.create "ada" |> expect)) "authored by the sender"
+                    Expect.equal message.Author (PeerRef (PeerId.create "ada" |> expect)) "authored by the sender"
                     Expect.isTrue message.QueueId.IsSome "anchored to its queue entry (the dedup key)"
                 | other -> failwithf "expected exactly one MessageSent, got %A" other
 
@@ -415,13 +415,13 @@ let private e2eTests =
                     { EventId = EventId.fresh ()
                       SessionId = sessionId
                       Offset = EventOffset.create 999L |> expect
-                      Actor = HumanPeer mallory
+                      Actor = PeerRef mallory
                       Timestamp = DateTimeOffset.UtcNow
                       Event =
                         MessageSent
                             { MessageId = MessageId.create "forged" |> expect
                               QueueId = None
-                              Author = HumanPeer mallory
+                              Author = PeerRef mallory
                               Body = "forged message" } }
                 do! channel.Send (
                         EventLog (

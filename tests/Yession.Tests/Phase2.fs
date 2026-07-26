@@ -542,7 +542,7 @@ let private acceptanceTests =
                     [ MessageSent
                         { MessageId = MessageId.create "m1" |> expect
                           QueueId = None
-                          Author = HumanPeer ada
+                          Author = PeerRef ada
                           Body = "hi" }
                       AgentTurnStarted
                         { AgentTurnId = AgentTurnId.create "t1" |> expect

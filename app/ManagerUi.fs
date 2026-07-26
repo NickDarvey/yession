@@ -11,6 +11,7 @@ module Yession.Host.ManagerUi
 
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Oidc
 open Yession.App
 open Yession.Host.Interop
 open Lit
@@ -152,7 +153,16 @@ let private html (res: ServerResponse) (body: string) = respond res 200 "text/ht
 
 /// Handle a management-UI request against the Manager. Returns false for paths that
 /// are not the UI's (the composing server falls through — e.g. to the control routes).
-let tryHandle (pm: ProcessManager.ProcessManager) (req: IncomingMessage) (res: ServerResponse) : bool =
+/// Every UI route is gated by `identify` — the Manager's authentication strategy
+/// (docs/plans/07): a denial is a 401 on every route; both attributed and unattributed
+/// outcomes are let through (under trust-localhost every loopback request is
+/// unattributed, which is exactly today's behaviour).
+let tryHandle
+    (pm: ProcessManager.ProcessManager)
+    (identify: IncomingMessage -> Async<AuthenticationOutcome>)
+    (req: IncomingMessage)
+    (res: ServerResponse)
+    : bool =
     let path = pathnameOf req.url
     let rowOf (sessionId: SessionId) =
         match pm.TryFind sessionId with
@@ -167,41 +177,52 @@ let tryHandle (pm: ProcessManager.ProcessManager) (req: IncomingMessage) (res: S
                     do! action sessionId
                     html res (rowOf sessionId)
                 })
-    match req.``method``, path with
-    | "GET", "/" ->
-        html res (page (pm.Sessions ()))
+    // Route first (pure — did the UI claim this path?), authenticate second: the gate
+    // runs once, ahead of every claimed route, and unclaimed paths fall through to the
+    // composing server untouched.
+    let route : (unit -> unit) option =
+        match req.``method``, path with
+        | "GET", "/" ->
+            Some (fun () -> html res (page (pm.Sessions ())))
+        | "GET", "/app.css" ->
+            // The same locally built stylesheet the session shell uses — shared style, no CDN.
+            Some (fun () ->
+                match readAsset "app.css" cssPath fs with
+                | Some css -> respond res 200 "text/css; charset=utf-8" css
+                | None -> respond res 404 "text/plain" "stylesheet not built (run: build)")
+        | "POST", "/sessions" ->
+            Some (fun () ->
+                readBody req (fun body ->
+                    // The human UI omits the id, so mint a Docker-safe Crockford one; a caller that
+                    // supplies an explicit id (automation, tests) keeps it.
+                    let id =
+                        match formField body "id" with
+                        | "" -> SessionId.value (SessionId.mint ())
+                        | provided -> provided
+                    match pm.CreateSession id (formField body "name") with
+                    | Ok _ -> html res (sessionsTable (pm.Sessions ()))
+                    | Error e -> respond res 400 "text/plain" e))
+        | method', path when path.StartsWith "/sessions/" ->
+            let rest = path.Substring "/sessions/".Length
+            match method', rest.Split '/' with
+            | "POST", [| id; "launch" |] ->
+                Some (fun () -> sessionAction id (fun sessionId -> pm.Launch sessionId |> Async.Ignore))
+            | "POST", [| id; "stop" |] ->
+                Some (fun () -> sessionAction id (fun sessionId -> pm.Stop sessionId |> Async.Ignore))
+            | "GET", [| id; "row" |] ->
+                Some (fun () ->
+                    match SessionId.create id with
+                    | Ok sessionId -> html res (rowOf sessionId)
+                    | Error e -> respond res 400 "text/plain" e)
+            | _ -> None
+        | _ -> None
+    match route with
+    | None -> false
+    | Some handle ->
+        Async.StartImmediate (
+            async {
+                match! identify req with
+                | Denied reason -> respond res 401 "text/plain" reason
+                | Attributed _ | Unattributed _ -> handle ()
+            })
         true
-    | "GET", "/app.css" ->
-        // The same locally built stylesheet the session shell uses — shared style, no CDN.
-        match readAsset "app.css" cssPath fs with
-        | Some css -> respond res 200 "text/css; charset=utf-8" css
-        | None -> respond res 404 "text/plain" "stylesheet not built (run: build)"
-        true
-    | "POST", "/sessions" ->
-        readBody req (fun body ->
-            // The human UI omits the id, so mint a Docker-safe Crockford one; a caller that
-            // supplies an explicit id (automation, tests) keeps it.
-            let id =
-                match formField body "id" with
-                | "" -> SessionId.value (SessionId.mint ())
-                | provided -> provided
-            match pm.CreateSession id (formField body "name") with
-            | Ok _ -> html res (sessionsTable (pm.Sessions ()))
-            | Error e -> respond res 400 "text/plain" e)
-        true
-    | method', path when path.StartsWith "/sessions/" ->
-        let rest = path.Substring "/sessions/".Length
-        match method', rest.Split '/' with
-        | "POST", [| id; "launch" |] ->
-            sessionAction id (fun sessionId -> pm.Launch sessionId |> Async.Ignore)
-            true
-        | "POST", [| id; "stop" |] ->
-            sessionAction id (fun sessionId -> pm.Stop sessionId |> Async.Ignore)
-            true
-        | "GET", [| id; "row" |] ->
-            (match SessionId.create id with
-             | Ok sessionId -> html res (rowOf sessionId)
-             | Error e -> respond res 400 "text/plain" e)
-            true
-        | _ -> false
-    | _ -> false

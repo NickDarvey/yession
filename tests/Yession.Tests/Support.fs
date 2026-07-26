@@ -111,13 +111,16 @@ module OidcHttp =
         abstract cacheControl : string
         abstract body : string
 
-    [<Fable.Core.Emit("""fetch($0, { redirect: 'manual', headers: { cookie: $1 } }).then(async r => ({
+    [<Fable.Core.Emit("""fetch($0, { redirect: 'manual', headers: { ...Object.fromEntries($2), cookie: $1 } }).then(async r => ({
       status: r.status,
       location: r.headers.get('location') || '',
       setCookies: r.headers.getSetCookie(),
       cacheControl: r.headers.get('cache-control') || '',
       body: await r.text() }))""")>]
-    let private fetchManual (url: string) (cookie: string) : Fable.Core.JS.Promise<ManualReply> = Fable.Core.Util.jsNative
+    let private fetchManualWith (url: string) (cookie: string) (headers: (string * string) []) : Fable.Core.JS.Promise<ManualReply> = Fable.Core.Util.jsNative
+
+    let private fetchManual (url: string) (cookie: string) : Fable.Core.JS.Promise<ManualReply> =
+        fetchManualWith url cookie [||]
 
     let private store (jar: Jar) (setCookies: string []) =
         for header in setCookies do
@@ -128,16 +131,22 @@ module OidcHttp =
                 | _ -> ()
             | None -> ()
 
-    /// GET with the jar, storing any cookies; no redirect following.
-    let getWithJar (jar: Jar) (url: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
+    /// GET with the jar and extra request headers (what an authenticating proxy would
+    /// assert on every hop — Plan 07), storing any cookies; no redirect following.
+    let getWithJarAs (headers: (string * string) list) (jar: Jar) (url: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
         async {
-            let! reply = fetchManual url (cookieHeader jar) |> Async.AwaitPromise
+            let! reply = fetchManualWith url (cookieHeader jar) (Array.ofList headers) |> Async.AwaitPromise
             store jar reply.setCookies
             return {| Status = reply.status; Location = reply.location; CacheControl = reply.cacheControl; Body = reply.body |}
         }
 
-    /// Follow a redirect chain (capped) with the jar, returning the final non-3xx reply.
-    let followWithJar (jar: Jar) (startUrl: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
+    /// GET with the jar, storing any cookies; no redirect following.
+    let getWithJar (jar: Jar) (url: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
+        getWithJarAs [] jar url
+
+    /// Follow a redirect chain (capped) with the jar and extra headers on every hop,
+    /// returning the final non-3xx reply.
+    let followWithJarAs (headers: (string * string) list) (jar: Jar) (startUrl: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
         let resolve (baseUrl: string) (location: string) : string =
             if location.StartsWith "http" then location
             else
@@ -146,7 +155,7 @@ module OidcHttp =
                 sprintf "%s://%s:%d%s" origin.Scheme origin.Host origin.Port location
         let rec go (url: string) (hops: int) =
             async {
-                let! reply = getWithJar jar url
+                let! reply = getWithJarAs headers jar url
                 if reply.Status >= 300 && reply.Status < 400 && hops < 10 then
                     return! go (resolve url reply.Location) (hops + 1)
                 else
@@ -154,13 +163,18 @@ module OidcHttp =
             }
         go startUrl 0
 
-    /// Log in to a session the way the browser client does — start at `/login`, ride the
-    /// hops to the manager and back — and return the jar plus a minted peer token from
-    /// `/me`. Fails loudly on any non-success step.
-    let openSession (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
+    /// Follow a redirect chain (capped) with the jar, returning the final non-3xx reply.
+    let followWithJar (jar: Jar) (startUrl: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
+        followWithJarAs [] jar startUrl
+
+    /// Log in to a session the way the browser client does — start at `loginPath`, ride
+    /// the hops to the manager and back with `headers` on every hop (what an
+    /// authenticating proxy would assert, Plan 07) — and return the jar plus a minted
+    /// peer token from `/me`. Fails loudly on any non-success step.
+    let openSessionVia (headers: (string * string) list) (loginPath: string) (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
         async {
             let jar = newJar ()
-            let! landed = followWithJar jar (sessionBaseUrl + "/login")
+            let! landed = followWithJarAs headers jar (sessionBaseUrl + loginPath)
             if landed.Status <> 200 then
                 failwithf "OIDC login chain ended with %d: %s" landed.Status landed.Body
             let! me = getWithJar jar (sessionBaseUrl + "/me")
@@ -171,6 +185,10 @@ module OidcHttp =
                 | Error e -> failwithf "malformed /me body: %s" e
             return {| Jar = jar; PeerToken = token |}
         }
+
+    /// `openSessionVia` with no extra headers from `/login` — the plain localhost bounce.
+    let openSession (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
+        openSessionVia [] "/login" sessionBaseUrl
 
 /// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.

@@ -40,12 +40,12 @@ let private eventsOf (log: EventLog<SessionEvent>) =
 let private trigger : MessageSent =
     { MessageId = humanMessageId
       QueueId = None
-      Author = HumanPeer ada
+      Author = PeerRef ada
       Body = "hi agent" }
 
 let private triggerItem : ConversationItem =
     { MessageId = humanMessageId
-      Author = HumanPeer ada
+      Author = PeerRef ada
       Body = "hi agent"
       Status = Complete }
 
@@ -227,7 +227,7 @@ let private e2eTests =
                 // completed response — all consumed as events.
                 do! a.Runner.WaitFor (fun m ->
                         (m.Conversation.Items
-                         |> List.map (fun i -> i.Author, i.Body, i.Status)) = [ (HumanPeer (peer "ada" "Ada").PeerId, "hi agent", Complete)
+                         |> List.map (fun i -> i.Author, i.Body, i.Status)) = [ (PeerRef (peer "ada" "Ada").PeerId, "hi agent", Complete)
                                                                                 (ActorRef.Agent, "You said: hi agent", Complete) ]
                         && m.Agent.ActiveTurn = None)
 

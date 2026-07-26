@@ -22,7 +22,7 @@ let private expect =
 let private port = 8099
 let private sessionId = SessionId.create "e2e-session" |> expect
 let private peerId = PeerId.create "ada" |> expect
-let private joined = PeerJoined { PeerId = peerId; DisplayName = "Ada" }
+let private joined = PeerJoined { PeerId = peerId; DisplayName = "Ada"; User = None }
 let private left = PeerLeft { PeerId = peerId }
 
 let private eventsOf (host: Host.SessionHost) : Async<SessionEvent list> =

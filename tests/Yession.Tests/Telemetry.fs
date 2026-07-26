@@ -234,7 +234,7 @@ let private auditTests =
         | _ -> None
     testList "audit (Manager in-process records)" [
         testCase "every constructor carries event.name, service.name, and its severity" <| fun () ->
-            let alice = UserSubject.create "alice" |> expect
+            let alice = UserId.create "alice" |> expect
             let cases =
                 [ SecretStore.Audit.secretSet sessionId id true, "yession.secret.set", 9
                   SecretStore.Audit.secretSet sessionId id false, "yession.secret.set", 13
