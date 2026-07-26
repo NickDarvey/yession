@@ -1,0 +1,90 @@
+Fix a use-after-free tearing down the libnice ICE transport.
+
+libnice delivers received packets and emits its signals on the shared glib main loop, with the
+IceTransport as user data. ~IceTransport() detaches the receive callback and removes the stream
+from whatever thread destroys it, which does not synchronise with a callback the loop is already
+dispatching: the in-flight receive then runs against a half-destroyed transport whose stream is
+being removed underneath it. Observed as an intermittent SIGSEGV (~2-5% of runs) on the loop
+thread:
+
+  #0 __memmove_evex_unaligned_erms ()                          libc
+  #1 rtc::make_message<std::byte*>(...)                        libdatachannel
+  #2 rtc::impl::IceTransport::RecvCallback(_NiceAgent*, ...)   libdatachannel (libnice variant)
+  #3 nice_component_emit_io_callback ()                        libnice
+  #4 component_io_cb ()                                        libnice
+  #6 g_main_context_dispatch_unlocked ()                       glib
+
+Perform the teardown ON the loop thread and wait for it. A GMainContext dispatches from one
+thread at a time, so while the detach runs the loop cannot be delivering anything, and once it
+returns nothing can reach the object again. The signal handlers are disconnected there too, for
+the same reason. g_main_context_invoke_full runs the function inline when the caller already owns
+the context, so destroying from inside a libnice callback cannot deadlock.
+
+Not upstreamed yet; libjuice (libdatachannel's default backend) does not have this race, so it
+only affects USE_NICE=ON builds such as the one nixpkgs ships.
+
+--- a/src/impl/icetransport.cpp
++++ b/src/impl/icetransport.cpp
+@@ -13,9 +13,11 @@
+ #include "utils.hpp"
+ 
+ #include <algorithm>
++#include <future>
+ #include <iostream>
+ #include <random>
+ #include <sstream>
++#include <utility>
+ 
+ #ifdef _WIN32
+ #include <winsock2.h>
+@@ -655,13 +657,44 @@
+ 
+ IceTransport::~IceTransport() {
+ 	PLOG_DEBUG << "Destroying ICE transport";
+-	nice_agent_attach_recv(mNiceAgent.get(), mStreamId, 1, g_main_loop_get_context(MainLoop->get()),
+-	                       NULL, NULL);
+-	nice_agent_remove_stream(mNiceAgent.get(), mStreamId);
+-	mNiceAgent.reset();
+ 
+-	if (mTimeoutId)
+-		g_source_remove(mTimeoutId);
++	// libnice delivers receives and emits its signals on the shared glib main loop, with `this`
++	// as user data. Detaching them from the destroying thread does not synchronise with a
++	// callback the loop is ALREADY dispatching, so an in-flight receive can run against a
++	// half-destroyed transport and a stream being removed underneath it — a use-after-free that
++	// crashes in RecvCallback, under nice_component_emit_io_callback.
++	//
++	// Perform the detach ON the loop thread instead, and wait for it. A GMainContext dispatches
++	// from one thread at a time, so while this runs the loop cannot be delivering anything, and
++	// once it returns nothing can reach this object again. g_main_context_invoke_full runs the
++	// function inline when the caller already owns the context, so destroying from within a
++	// libnice callback stays deadlock-free.
++	using Job = std::pair<IceTransport *, std::promise<void> *>;
++	std::promise<void> detached;
++	auto future = detached.get_future();
++	Job job(this, &detached);
++
++	g_main_context_invoke_full(
++	    g_main_loop_get_context(MainLoop->get()), G_PRIORITY_HIGH,
++	    [](gpointer data) -> gboolean {
++		    auto *job = static_cast<Job *>(data);
++		    IceTransport *transport = job->first;
++		    NiceAgent *agent = transport->mNiceAgent.get();
++		    g_signal_handlers_disconnect_by_data(G_OBJECT(agent), transport);
++		    nice_agent_attach_recv(agent, transport->mStreamId, 1,
++		                           g_main_loop_get_context(MainLoop->get()), NULL, NULL);
++		    nice_agent_remove_stream(agent, transport->mStreamId);
++		    if (transport->mTimeoutId) {
++			    g_source_remove(transport->mTimeoutId);
++			    transport->mTimeoutId = 0;
++		    }
++		    job->second->set_value();
++		    return G_SOURCE_REMOVE;
++	    },
++	    &job, nullptr);
++
++	future.wait();
++	mNiceAgent.reset();
+ }
+ 
+ Description::Role IceTransport::role() const { return mRole; }
