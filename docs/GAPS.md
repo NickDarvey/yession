@@ -9,28 +9,38 @@ discovers it in production. Items are roughly ordered by how much they matter.
 
 ## Security & trust
 
-- **User authorization gates ACCESS and Manager-side authority, not event identity.**
-  Sessions authorize users through the Manager's OIDC provider
-  ([plan](plans/04-session-authorization.md)); the Manager now also RECORDS which user
-  it verified into which launch at ID-token issuance and authorizes secrets through
-  that composite identity ([Plan 06](plans/06-secrets-and-abac.md)). But ID-token
-  claims are still NOT threaded into `PeerId`/`ActorRef` — display names stay
-  self-asserted and events are not attributed to authenticated users (the recorded
-  follow-up).
-- **The only authentication strategy is trust-localhost.** The provider's
-  `AuthenticationStrategy` seam exists precisely so an upstream OIDC (or any other)
-  strategy can slot in, but until one does, every loopback request IS the single
-  local user — the OIDC machinery adds structure, not secrets, over the same
-  local-dev threat model. No `nonce` in ID tokens yet (PKCE + confidential client +
-  loopback); add it with the upstream strategy.
+- **Event attribution is threaded, but presentation is thin**
+  ([Plan 07](plans/07-byo-user-authorization.md)): under a real strategy, events
+  attribute to the Manager-verified user (`ActorRef.UserRef`, riding the OIDC bounce →
+  cookie → session-minted peer token — never a peer-controlled frame). Remaining:
+  peer display names stay self-asserted, and the client UI renders a bare
+  `UserId.value` (no names/avatars from verified claims yet — `UserClaims` are
+  carried and recorded, not displayed).
+- **BYO authorization is trusted plaintext headers** ([Plan 07](plans/07-byo-user-authorization.md)):
+  `--auth trusted-headers` trusts canonical `x-yession-*` identity headers from an
+  operator-run authenticating proxy — anyone who can reach the loopback port directly
+  can forge them (the same trust boundary as `--auth localhost`). The proxy MUST strip
+  inbound `x-yession-*` headers and be the only non-local path in. A signed-JWT header
+  strategy (verify against an operator JWKS; `Fable.Jose.jwtVerify` is already bound)
+  is the recorded hardening follow-up. No `nonce` in ID tokens yet (PKCE +
+  confidential client); the Plan 04 note stands.
+- **Remote access covers the Manager only.** `YESSION_MANAGER_URL` makes the OIDC
+  issuer the proxy's origin, but session ports are OS-assigned and loopback-bound —
+  proxying *sessions* through the sidecar (and their redirect URIs) is the remaining
+  topology work for fully remote use.
+- **No user surface for user-scoped secrets yet** (deferred from Plan 07): the policy
+  rows for a session-less, user-only `AuthzSubject` (`Session = None`) and a `/secrets`
+  management-UI page are not implemented; sessions still cannot write `UserScope`, and
+  nothing else can either.
 - **No transport encryption guarantees beyond WebRTC/DTLS.** Everything binds
-  127.0.0.1; loopback HTTP is the RFC 8252 pattern, but nothing here is LAN-safe.
+  127.0.0.1; loopback HTTP is the RFC 8252 pattern, but nothing here is LAN-safe
+  without the operator's proxy in front.
 - **The Manager and Process read plaintext** (per the stated Phase 1–2 threat model);
   command-to-container encryption is designed for but not implemented.
-- **The management UI itself has no login.** It binds 127.0.0.1 and its open links are
-  now plain URLs (no embedded tokens — the session's own OIDC gate does the work), but
-  anyone with local access can manage sessions. The authentication-strategy seam is
-  where a UI login would reuse the same policy.
+- **The management UI is gated by the authentication strategy** (Plan 07): a `Denied`
+  outcome is a 401 on every UI route, and the default `--auth none` denies everything.
+  Under `--auth localhost` anyone with local access can still manage sessions — that
+  is the localhost trust rule working as stated, not an oversight.
 - **`LocalProcessBackend` provides no OS isolation.** Commands run as child processes of
   the Manager with the Manager's own user and environment. The *authority* contract
   (session scoping, handle validation) is enforced and tested, but the *engine* is not a
@@ -47,16 +57,18 @@ discovers it in production. Items are roughly ordered by how much they matter.
   AES-256-GCM per-entry ciphertext in `<DataDir>/secrets.json`, the KEK in the OS
   credential manager (`@napi-rs/keyring`, imported non-extractably each start), a
   write/list/delete-only `/control/secrets/*` surface (no value-returning route,
-  anywhere), a pure default-deny `Policy.authorize` over the composite session+user
-  identity, and store-backed `SecretRef` injection (session scope ▸ bound users'
-  scope ▸ Manager process env). Remaining, deliberate:
+  anywhere), a pure default-deny `Policy.authorize` over the composite
+  session+user+peer identity, and store-backed `SecretRef` injection (session scope ▸
+  bound users' scopes ▸ witnessed peers' scopes ▸ Manager process env — peers per
+  [Plan 07](plans/07-byo-user-authorization.md)). Remaining, deliberate:
   - **Hosts without a credential manager run in-memory only** (dev containers, CI,
     headless servers): secrets die with the Manager; loud at boot, never a plaintext
     key file. (Tests cover the real keyring via the `Keyring` capability —
     `check Keyring` self-wraps with dbus + gnome-keyring when headless.)
   - **No shared/Manager-global scope**, and **no user surface yet**: sessions cannot
     write user-scoped secrets; the Claude/GitHub sign-in strategies are the intended
-    writers. User↔launch bindings are launch-lifetime (re-login re-forms them).
+    writers. User↔launch and peer↔launch bindings are launch-lifetime (re-login
+    re-forms them).
   - **`LocalProcessBackend` still performs no env-var injection**; the process-env
     fallback remains (lowest precedence, shadowed by any store entry).
   - **No KEK rotation/recovery** (a lost credential entry orphans the store loudly;

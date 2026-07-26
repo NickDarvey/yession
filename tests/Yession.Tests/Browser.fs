@@ -57,6 +57,10 @@ let mutable private host : Process = null
 let private startHost () : unit =
     let psi = ProcessStartInfo "node"
     psi.ArgumentList.Add "app/out/Main.js"
+    // Single-machine loopback trust (the shipped default `none` denies everything and
+    // the login bounce would 401 before any page ever connects — docs/plans/07).
+    psi.ArgumentList.Add "--auth"
+    psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true   // stderr inherits → visible in the log
     psi.EnvironmentVariables.["YESSION_PORT"] <- string PORT
@@ -107,8 +111,14 @@ let tests =
                             // Headless sandboxes stall ICE gathering when host candidates hide behind mDNS.
                             Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
                 browser <- b
-                let! a = await (browser.NewPageAsync ())
-                let! bb = await (browser.NewPageAsync ())
+                // One isolated context per peer: the peer id is stable per browser
+                // PROFILE now (localStorage, docs/plans/07), so two pages in one context
+                // would be one peer — a single human in two tabs — not the two distinct
+                // collaborators this flow verifies.
+                let! contextA = await (browser.NewContextAsync ())
+                let! contextB = await (browser.NewContextAsync ())
+                let! a = await (contextA.NewPageAsync ())
+                let! bb = await (contextB.NewPageAsync ())
                 pageA <- a
                 pageB <- bb
                 let! _ = await (pageA.GotoAsync BASE)

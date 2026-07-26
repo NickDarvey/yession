@@ -148,9 +148,22 @@ module CommandId =
         normalize "CommandId" raw |> Result.map CommandId
     let value (CommandId s) = s
 
-/// Who an event or action is attributed to.
+/// A Manager-verified user identity — the OIDC `sub` claim the Manager itself issued
+/// (docs/plans/04-session-authorization.md). Under the localhost strategy this is the
+/// single "local" user; a BYO strategy (docs/plans/07) mints real subjects.
+type UserId = private UserId of string
+
+module UserId =
+    let create (raw: string) : Result<UserId, string> =
+        normalize "UserId" raw |> Result.map UserId
+    let value (UserId s) = s
+
+/// Who an event or action is attributed to. `UserRef` is a durable human identity the
+/// Manager verified; `PeerRef` is a client connection — the fallback attribution when no
+/// authentication strategy binds a user to the connection.
 type ActorRef =
-    | HumanPeer of PeerId
+    | UserRef of UserId
+    | PeerRef of PeerId
     | Agent
     | SessionProcess
     | System

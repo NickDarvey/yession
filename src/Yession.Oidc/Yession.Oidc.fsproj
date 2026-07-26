@@ -12,8 +12,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Provider.fs" />
     <Compile Include="Strategy.fs" />
+    <Compile Include="Provider.fs" />
     <Compile Include="Wire.fs" />
   </ItemGroup>
 

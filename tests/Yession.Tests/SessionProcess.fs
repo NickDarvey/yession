@@ -155,14 +155,14 @@ let private handshakeTests =
         Control (PeerHello { PeerId = peerId; DisplayName = "Ada"; Token = token })
 
     /// Run a peer session against an in-memory loopback, driving the client side with
-    /// `client`, and return the appended events once the session ends. `validateToken`
-    /// is the injected peer-token check (the composition root's minted-token set in
+    /// `client`, and return the appended events once the session ends. `attributionOf`
+    /// is the injected peer-token check (the composition root's minted-token store in
     /// the product).
-    let runSession (validateToken: string -> bool) (client: FrameChannel<unit> -> Async<unit>) : Async<SessionEvent list> =
+    let runSession (attributionOf: string -> PeerAttribution option) (client: FrameChannel<unit> -> Async<unit>) : Async<SessionEvent list> =
         async {
             let log = newLog ()
             let clientEnd, serverEnd = InMemoryChannel.createPair<unit> ()
-            let! server = Async.StartChild (PeerSession.run sessionId validateToken log PeerSession.PeerHandlers.none serverEnd)
+            let! server = Async.StartChild (PeerSession.run sessionId attributionOf log PeerSession.PeerHandlers.none serverEnd)
             do! client clientEnd
             do! server
             let! events = allEventsAfter log None
@@ -174,7 +174,7 @@ let private handshakeTests =
             async {
                 let mutable response : SessionFrame<unit> option = None
                 let! events =
-                    runSession ((=) token) (fun ch ->
+                    runSession (fun t -> if t = token then Some UnattributedAccess else None) (fun ch ->
                         async {
                             do! ch.Send hello
                             let! resp = ch.Receive ()
@@ -187,14 +187,14 @@ let private handshakeTests =
                     Expect.equal accepted.SessionId sessionId "session id"
                     Expect.equal (accepted.LatestOffset |> Option.map EventOffset.value) (Some 0L) "joined offset"
                 | other -> failwithf "expected PeerAccepted, got %A" other
-                Expect.containsAll events [ PeerJoined { PeerId = peerId; DisplayName = "Ada" } ] "PeerJoined appended"
+                Expect.containsAll events [ PeerJoined { PeerId = peerId; DisplayName = "Ada"; User = None } ] "PeerJoined appended"
             }
 
         testCaseAsync "a bad token is rejected and appends nothing" <|
             async {
                 let mutable response : SessionFrame<unit> option = None
                 let! events =
-                    runSession (fun _ -> false) (fun ch ->
+                    runSession (fun _ -> None) (fun ch ->
                         async {
                             do! ch.Send hello
                             let! resp = ch.Receive ()
@@ -206,10 +206,26 @@ let private handshakeTests =
                 Expect.isEmpty events "no events appended"
             }
 
+        testCaseAsync "an attributed token's hello records the Manager-verified user on PeerJoined" <|
+            async {
+                let user = UserId.create "nick@example.com" |> expect
+                let! events =
+                    runSession (fun t -> if t = token then Some (AttributedUser user) else None) (fun ch ->
+                        async {
+                            do! ch.Send hello
+                            let! _ = ch.Receive ()
+                            do! ch.Close ()
+                        })
+                Expect.containsAll
+                    events
+                    [ PeerJoined { PeerId = peerId; DisplayName = "Ada"; User = Some user } ]
+                    "PeerJoined carries the token's attribution, never anything the peer asserted"
+            }
+
         testCaseAsync "disconnecting after accept appends PeerLeft after PeerJoined" <|
             async {
                 let! events =
-                    runSession ((=) token) (fun ch ->
+                    runSession (fun t -> if t = token then Some UnattributedAccess else None) (fun ch ->
                         async {
                             do! ch.Send hello
                             let! _ = ch.Receive () // drain PeerAccepted
@@ -217,7 +233,7 @@ let private handshakeTests =
                         })
                 Expect.equal
                     events
-                    [ PeerJoined { PeerId = peerId; DisplayName = "Ada" }
+                    [ PeerJoined { PeerId = peerId; DisplayName = "Ada"; User = None }
                       PeerLeft { PeerId = peerId } ]
                     "PeerJoined then PeerLeft"
             }

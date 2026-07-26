@@ -48,13 +48,14 @@ let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
 
 /// What a control secret resolves to: WHICH launch is calling, the environment
 /// capabilities that launch was granted (None = environment-less session), and the
-/// users the Manager verified into the launch at ID-token issuance (empty until a
-/// login completes). Manager-verified, never self-asserted — this is the ABAC
-/// composite identity (Plan 06).
+/// users and peers the Manager verified into the launch at ID-token issuance (empty
+/// until a login completes). Manager-verified, never self-asserted — this is the ABAC
+/// composite identity (Plan 06; peers per docs/plans/07).
 type ControlCaller =
     { SessionId : SessionId
       Capabilities : SessionEnvironmentCapabilities option
-      Users : Set<UserSubject> }
+      Users : Set<UserId>
+      Peers : Set<PeerId> }
 
 /// A secrets-route failure: a policy Deny (403, with the policy's reason) or a store
 /// failure (500). Distinct so the route arms stay thin and policy-free — only the

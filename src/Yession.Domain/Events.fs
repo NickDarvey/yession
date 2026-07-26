@@ -71,7 +71,11 @@ and SessionCreated =
 
 and PeerJoined =
     { PeerId : PeerId
-      DisplayName : string }
+      DisplayName : string
+      /// The Manager-verified user behind this connection, when the authentication
+      /// strategy attributed one. None = unattributed access (trust-localhost) —
+      /// the connection is identified only by its peer.
+      User : UserId option }
 
 and PeerLeft =
     { PeerId : PeerId }

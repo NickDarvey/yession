@@ -33,6 +33,16 @@ let private dataDir = Interop.envOr "YESSION_DATA_DIR" ".yession"
 // Manager instance must choose its own port (bind conflicts fail loudly).
 let private managerPort = Interop.envOr "YESSION_MANAGER_PORT" "8321" |> int
 
+// Who the humans at this Manager are (docs/plans/07): `--auth localhost` trusts the
+// loopback interface (single-machine deployment), `--auth trusted-headers` trusts the
+// canonical x-yession-* identity headers an operator-run authenticating proxy asserts.
+// No `--auth` means nobody authenticates — choosing a trust rule is deliberate, and an
+// unknown name fails the boot loudly rather than defaulting to anything.
+let private strategy =
+    match Yession.Oidc.Strategy.ofName (Interop.argValue "auth") with
+    | Ok s -> s
+    | Error e -> failwith e
+
 [<Fable.Core.Emit("process.execPath")>]
 let private nodePath : string = Fable.Core.Util.jsNative
 
@@ -69,7 +79,11 @@ Async.StartImmediate(
                     SessionPort = (if port = 0 then None else Some port)
                     Grant = Some (Yession.Manager.Authority.grant containers backend)
                     ManagerPort = Some managerPort
+                    // Behind an authenticating proxy the issuer must be the proxy's
+                    // origin, or off-host browsers cannot follow the authorize bounce.
+                    PublicUrl = (match Interop.envOr "YESSION_MANAGER_URL" "" with "" -> None | url -> Some url)
                     OnEvent = telemetry.Log
+                    Strategy = Some strategy
                     Secrets = Some secretsBacking }
                 (Some ManagerUi.tryHandle)
 

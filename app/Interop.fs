@@ -134,6 +134,10 @@ let timingSafeEqualStr (a: string) (b: string) : bool = timingSafeEq nodeCrypto 
 [<Emit("($0.socket?.remoteAddress ?? null)")>]
 let remoteAddressOf (req: IncomingMessage) : string option = jsNative
 
+/// A query parameter of a request URL; None when absent.
+[<Emit("new URL($0, 'http://local').searchParams.get($1)")>]
+let queryParamOf (url: string) (name: string) : string option = jsNative
+
 /// POST a JSON body and resolve with the response text. Uses Node 24's global `fetch`.
 [<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 }).then(r => r.text())")>]
 let postText (url: string) (body: string) : JS.Promise<string> = jsNative
@@ -164,7 +168,11 @@ let readAsset (assetName: string) (fallbackPath: string) (fs: obj) : string opti
 [<Emit("process.exit($0)")>]
 let exit (code: int) : unit = jsNative
 
-/// Was `--version` (or `-v`) passed? The two entries are otherwise configured entirely from the
-/// environment and never look at argv.
+/// Was `--version` (or `-v`) passed? The two entries are otherwise configured from the
+/// environment; the Manager additionally reads `--auth` (see `argValue`).
 [<Emit("process.argv.slice(2).some(a => a === '--version' || a === '-v')")>]
 let versionFlag () : bool = jsNative
+
+/// The value of a `--name value` (or `--name=value`) argument; None when absent.
+[<Emit("(() => { const args = process.argv.slice(2); for (let i = 0; i < args.length; i++) { if (args[i] === '--' + $0) return args[i + 1] ?? null; if (args[i].startsWith('--' + $0 + '=')) return args[i].slice($0.length + 3); } return null })()")>]
+let argValue (name: string) : string option = jsNative

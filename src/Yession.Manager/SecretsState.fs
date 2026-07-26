@@ -84,16 +84,17 @@ module SecretsCodec =
                 | Ok v -> Decode.succeed v
                 | Error e -> Decode.fail e) }
 
-    let private userSubject : Codec<UserSubject> =
-        { Encode = UserSubject.value >> Encode.string
+    let private userSubject : Codec<UserId> =
+        { Encode = UserId.value >> Encode.string
           Decode =
             Decode.string
             |> Decode.andThen (fun raw ->
-                match UserSubject.create raw with
+                match UserId.create raw with
                 | Ok v -> Decode.succeed v
                 | Error e -> Decode.fail e) }
 
-    /// Shared with the control wire: {"kind":"session",...} | {"kind":"user",...}.
+    /// Shared with the control wire:
+    /// {"kind":"session",...} | {"kind":"user",...} | {"kind":"peer",...}.
     let secretScope : Codec<SecretScope> =
         { Encode =
             (fun scope ->
@@ -101,12 +102,15 @@ module SecretsCodec =
                 | SessionScope sessionId ->
                     Encode.object [ "kind", Encode.string "session"; "sessionId", Codec.sessionId.Encode sessionId ]
                 | UserScope user ->
-                    Encode.object [ "kind", Encode.string "user"; "sub", userSubject.Encode user ])
+                    Encode.object [ "kind", Encode.string "user"; "sub", userSubject.Encode user ]
+                | PeerScope peer ->
+                    Encode.object [ "kind", Encode.string "peer"; "peerId", Codec.peerId.Encode peer ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "session" -> Decode.field "sessionId" Codec.sessionId.Decode |> Decode.map SessionScope
                 | "user" -> Decode.field "sub" userSubject.Decode |> Decode.map UserScope
+                | "peer" -> Decode.field "peerId" Codec.peerId.Decode |> Decode.map PeerScope
                 | other -> Decode.fail (sprintf "Unknown secret scope: %s" other)) }
 
     let secretMetadata : Codec<SecretMetadata> =

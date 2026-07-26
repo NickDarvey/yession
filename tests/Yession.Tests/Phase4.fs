@@ -11,6 +11,7 @@ open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
 open Yession.Manager
+open Yession.Oidc
 open Yession.App
 open Yession.Host
 open Yession.Tests.Support
@@ -112,7 +113,9 @@ let private processTests =
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/pm-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
-                let options = ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ]
+                let options =
+                    { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                        Strategy = Some Strategy.localhost }
                 let! pm = ProcessManager.create options
 
                 // Create: durable registration, not running.
@@ -214,7 +217,7 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
         let table =
             secrets
             |> List.map (fun (secret, sessionId, capabilities) ->
-                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities; Users = Set.empty }
+                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities; Users = Set.empty; Peers = Set.empty }
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
@@ -307,6 +310,7 @@ let private controlRpcTests =
                 let! pm =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost
                             Grant = Some (Authority.grant registry backend) }
                 let record = pm.CreateSession "rpc-child" "RPC child" |> expect
 
@@ -389,7 +393,8 @@ let private uiFlowTests =
                     sprintf "tests/Yession.Tests/out/.data/ui-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
                 let! pm =
                     ProcessManager.createWithUi
-                        (ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ])
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost }
                         (Some ManagerUi.tryHandle)
                 let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
 
@@ -443,8 +448,9 @@ let private uiFlowTests =
 let private spawnRaw : obj = Fable.Core.Util.jsNative
 
 // Run the packaged manager bundle on this Node, pointing it at the packaged session
-// bundle (what the `yession` bin shim does in an install).
-[<Emit("$0(process.execPath, [$1], { env: { ...process.env, YESSION_SESSION_MAIN: $3, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
+// bundle (what the `yession` bin shim does in an install). `--auth localhost` mirrors a
+// single-machine operator's choice — the shipped default (`none`) denies everything.
+[<Emit("$0(process.execPath, [$1, '--auth', 'localhost'], { env: { ...process.env, YESSION_SESSION_MAIN: $3, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
 let private spawnBundle (spawn: obj) (managerJs: string) (env: (string * string) array) (sessionJs: string) : obj = Fable.Core.Util.jsNative
 
 [<Emit("$0.stdout.on('data', $1)")>]
@@ -612,6 +618,7 @@ let private telemetryTests =
                 let! pm =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost
                             OnEvent = fun body _ -> managerEvents.Add body }
                 let record = pm.CreateSession "tel-child" "Tel child" |> expect
 

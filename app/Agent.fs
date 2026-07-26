@@ -135,7 +135,8 @@ let private claudePath () = Interop.envOr "YESSION_CLAUDE_PATH" ""
 let private promptOf (context: AgentContextPack) : string =
     let label (author: ActorRef) =
         match author with
-        | HumanPeer p -> PeerId.value p
+        | UserRef u -> UserId.value u
+        | PeerRef p -> PeerId.value p
         | ActorRef.Agent -> "agent"
         | ActorRef.SessionProcess -> "session-process"
         | ActorRef.System -> "system"

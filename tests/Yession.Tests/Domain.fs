@@ -61,7 +61,7 @@ let private envelopeSerializationTests =
         { EventId = EventId.fresh ()
           SessionId = sessionId
           Offset = EventOffset.zero
-          Actor = HumanPeer peerId
+          Actor = PeerRef peerId
           Timestamp = DateTimeOffset(2026, 6, 14, 10, 30, 0, TimeSpan.FromHours 10.0)
           Event = SessionCreated { SessionCreated.SessionId = sessionId } }
 
@@ -74,6 +74,13 @@ let private envelopeSerializationTests =
 
         testCase "Decoding malformed JSON yields an Error" <| fun () ->
             Expect.isError (Codec.fromString Codec.sessionEventEnvelope "{ not valid json ") "malformed JSON should fail"
+
+        testCase "UserRef actor round-trips through the envelope codec" <| fun () ->
+            let user = UserId.create "nick@example.com" |> expect
+            let original = { sampleEnvelope () with Actor = UserRef user }
+            let json = Codec.toString Codec.sessionEventEnvelope original
+            let roundTripped = Codec.fromString Codec.sessionEventEnvelope json |> expect
+            Expect.equal roundTripped original "round-trip should be identical"
     ]
 
 let private conversationProjectionTests =
@@ -129,7 +136,7 @@ let private frameSerializationTests =
         { EventId = EventId.fresh ()
           SessionId = sessionId
           Offset = offset
-          Actor = HumanPeer peerId
+          Actor = PeerRef peerId
           Timestamp = DateTimeOffset(2026, 6, 14, 0, 0, 0, TimeSpan.Zero)
           Event = SessionCreated { SessionCreated.SessionId = sessionId } }
 
@@ -163,7 +170,7 @@ let private frameSerializationTests =
                 Expect.equal roundTripped frame "frame round-trip"
 
         testCase "PeerJoined and PeerLeft events round-trip through the envelope codec" <| fun () ->
-            let joined = { sampleEnvelope with Event = PeerJoined { PeerId = peerId; DisplayName = "Ada" } }
+            let joined = { sampleEnvelope with Event = PeerJoined { PeerId = peerId; DisplayName = "Ada"; User = None } }
             let left = { sampleEnvelope with Event = PeerLeft { PeerId = peerId } }
             for env in [ joined; left ] do
                 let roundTripped =
@@ -180,9 +187,9 @@ let private frameSerializationTests =
             // so keep the two in step when adding events.
             let everyCase : SessionEvent list =
                 [ SessionCreated { SessionCreated.SessionId = sessionId }
-                  PeerJoined { PeerId = peerId; DisplayName = "Ada" }
+                  PeerJoined { PeerId = peerId; DisplayName = "Ada"; User = None }
                   PeerLeft { PeerId = peerId }
-                  MessageSent { MessageId = messageId; QueueId = None; Author = HumanPeer peerId; Body = "hi" }
+                  MessageSent { MessageId = messageId; QueueId = None; Author = PeerRef peerId; Body = "hi" }
                   MessageSent { MessageId = messageId; QueueId = Some (QueueId.create "q-1" |> expect); Author = ActorRef.System; Body = "" }
                   AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = messageId }
                   AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }

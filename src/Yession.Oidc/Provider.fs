@@ -46,7 +46,12 @@ type AuthorizationCode =
       RedirectUri : string
       /// The PKCE S256 challenge; the redeeming verifier must hash to it.
       Challenge : string
-      Subject : string
+      /// The authenticated identity the code will redeem for: subject plus the verified
+      /// claims when the strategy attributed a real user.
+      Identity : GrantedIdentity
+      /// The browser peer that rode the authorize bounce (docs/plans/07), when the
+      /// client sent one — what the Manager witnesses into the launch at issuance.
+      Peer : PeerId option
       IssuedAtUnix : int64 }
 
 /// Issued authorization codes. Single-use: a code is burned on FIRST redeem attempt,
@@ -56,7 +61,7 @@ type CodeStore (mintCode: unit -> string, nowUnix: unit -> int64, sha256Base64Ur
     let lifetimeSeconds = 60L
     let mutable codes : Map<string, AuthorizationCode> = Map.empty
 
-    member _.Issue (client: RegisteredClient) (challenge: string) (subject: string) : string =
+    member _.Issue (client: RegisteredClient) (challenge: string) (identity: GrantedIdentity) (peer: PeerId option) : string =
         let code = mintCode ()
         codes <-
             Map.add
@@ -64,14 +69,16 @@ type CodeStore (mintCode: unit -> string, nowUnix: unit -> int64, sha256Base64Ur
                 { ClientId = client.ClientId
                   RedirectUri = client.RedirectUri
                   Challenge = challenge
-                  Subject = subject
+                  Identity = identity
+                  Peer = peer
                   IssuedAtUnix = nowUnix () }
                 codes
         code
 
-    /// Redeem a code for its subject. Every check failure is a distinct `invalid_grant`
-    /// description; the code is removed before any check runs.
-    member _.Redeem (code: string) (clientId: string) (redirectUri: string) (verifier: string) : Result<string, string> =
+    /// Redeem a code for its identity (and witnessed peer, when one rode the bounce).
+    /// Every check failure is a distinct `invalid_grant` description; the code is
+    /// removed before any check runs.
+    member _.Redeem (code: string) (clientId: string) (redirectUri: string) (verifier: string) : Result<GrantedIdentity * PeerId option, string> =
         match Map.tryFind code codes with
         | None -> Error "unknown or already used code"
         | Some issued ->
@@ -80,13 +87,15 @@ type CodeStore (mintCode: unit -> string, nowUnix: unit -> int64, sha256Base64Ur
             elif issued.ClientId <> clientId then Error "code was issued to another client"
             elif issued.RedirectUri <> redirectUri then Error "redirect_uri mismatch"
             elif sha256Base64Url verifier <> issued.Challenge then Error "PKCE verification failed"
-            else Ok issued.Subject
+            else Ok (issued.Identity, issued.Peer)
 
 /// A validated /authorize request, ready for user authentication + code issuance.
 type AuthorizeRequest =
     { Client : RegisteredClient
       State : string
-      Challenge : string }
+      Challenge : string
+      /// The browser's peer id, when the login carried one (docs/plans/07).
+      Peer : PeerId option }
 
 type AuthorizeError =
     /// The client or redirect_uri could not be validated — respond 400, NEVER redirect
@@ -98,7 +107,9 @@ type AuthorizeError =
 
 type TokenGrant =
     { Client : RegisteredClient
-      Subject : string }
+      Identity : GrantedIdentity
+      /// The peer witnessed at /authorize, riding through to issuance recording.
+      Peer : PeerId option }
 
 type TokenError =
     /// 401 + `{"error":"invalid_client"}` — unknown client or bad secret.
@@ -127,7 +138,15 @@ module Provider =
                 else
                     match state, query "code_challenge", query "code_challenge_method" with
                     | Some state, Some challenge, Some "S256" ->
-                        Ok { Client = client; State = state; Challenge = challenge }
+                        // Optional and self-asserted at this hop: the value only ever
+                        // scopes the asserting browser's own secrets (Plan 07 policy).
+                        let peer =
+                            query "peer_id"
+                            |> Option.bind (fun raw ->
+                                match PeerId.create raw with
+                                | Ok peer -> Some peer
+                                | Error _ -> None)
+                        Ok { Client = client; State = state; Challenge = challenge; Peer = peer }
                     | _ -> Error (RedirectableError (uri, "invalid_request", state))
             | _ -> Error (ClientError "redirect_uri mismatch")
 
@@ -150,7 +169,7 @@ module Provider =
                     match Map.tryFind "code" form, Map.tryFind "redirect_uri" form, Map.tryFind "code_verifier" form with
                     | Some code, Some redirectUri, Some verifier ->
                         codes.Redeem code client.ClientId redirectUri verifier
-                        |> Result.map (fun subject -> { Client = client; Subject = subject })
+                        |> Result.map (fun (identity, peer) -> { Client = client; Identity = identity; Peer = peer })
                         |> Result.mapError InvalidGrant
                     | _ -> Error (InvalidRequest "code, redirect_uri and code_verifier are required")
                 | _ -> Error InvalidClient

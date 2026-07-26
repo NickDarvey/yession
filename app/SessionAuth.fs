@@ -29,11 +29,14 @@ type Auth =
       Configure : string -> string -> string -> string -> Async<Result<unit, string>>
       /// Does the request carry a cookie this process minted?
       IsAuthenticated : IncomingMessage -> bool
-      /// The authenticated subject behind the request's cookie, when any.
-      SubjectOf : IncomingMessage -> string option
-      /// Start a login: mint state + PKCE verifier, return the authorize URL.
+      /// The authenticated identity behind the request's cookie, when any: the subject
+      /// plus the attribution the validated ID token carried (docs/plans/07).
+      IdentityOf : IncomingMessage -> CookieIdentity option
+      /// Start a login: mint state + PKCE verifier, return the authorize URL. The
+      /// browser's peer id (when the /login request carried one) rides along so the
+      /// Manager can witness which peer signed in (docs/plans/07).
       /// None until `Configure` has completed.
-      BeginLogin : unit -> Async<string option>
+      BeginLogin : PeerId option -> Async<string option>
       /// Handle the callback request URL. Ok = the `Set-Cookie` value to send with the
       /// redirect back to `/`; Error = (status, message).
       HandleCallback : string -> Async<Result<string, int * string>>
@@ -46,9 +49,9 @@ let create (sessionId: SessionId) : Auth =
     let cookies = CookieSessions (randomSecret)
     let mutable configuration : (Configuration * string) option = None
 
-    let subjectOf (req: IncomingMessage) : string option =
+    let identityOf (req: IncomingMessage) : CookieIdentity option =
         Cookies.tryFind cookieName (headerOf req "cookie")
-        |> Option.bind cookies.SubjectOf
+        |> Option.bind cookies.IdentityOf
 
     { Configure =
         fun issuer clientId clientSecret redirectUri ->
@@ -67,10 +70,10 @@ let create (sessionId: SessionId) : Auth =
                 with e ->
                     return Error (sprintf "OIDC discovery against %s failed: %s" issuer e.Message)
             }
-      IsAuthenticated = subjectOf >> Option.isSome
-      SubjectOf = subjectOf
+      IsAuthenticated = identityOf >> Option.isSome
+      IdentityOf = identityOf
       BeginLogin =
-        fun () ->
+        fun peer ->
             async {
                 match configuration with
                 | None -> return None
@@ -87,7 +90,10 @@ let create (sessionId: SessionId) : Auth =
                                   "scope" ==> "openid"
                                   "state" ==> state
                                   "code_challenge" ==> challenge
-                                  "code_challenge_method" ==> "S256" ])
+                                  "code_challenge_method" ==> "S256"
+                                  match peer with
+                                  | Some peerId -> "peer_id" ==> PeerId.value peerId
+                                  | None -> () ])
                     return Some (urlHref url)
             }
       HandleCallback =
@@ -112,7 +118,18 @@ let create (sessionId: SessionId) : Auth =
                                           "expectedState" ==> (queryOf requestUrl "state" |> Option.defaultValue "") ])
                                 |> Async.AwaitPromise
                             let claims = tokens.claims ()
-                            let cookieValue = cookies.Mint claims.sub
+                            // The attribution rides the validated ID token: only the
+                            // provider's own `yession_attribution = "user"` claim makes
+                            // this cookie a real user — never anything client-supplied.
+                            let attribution =
+                                match claims.yession_attribution, UserId.create claims.sub with
+                                | Some "user", Ok user -> AttributedUser user
+                                | _ -> UnattributedAccess
+                            let cookieValue =
+                                cookies.Mint
+                                    { Subject = claims.sub
+                                      DisplayName = claims.name
+                                      Attribution = attribution }
                             return Ok (Cookies.set cookieName cookieValue)
                         with e ->
                             return Error (401, sprintf "authorization failed: %s" e.Message)

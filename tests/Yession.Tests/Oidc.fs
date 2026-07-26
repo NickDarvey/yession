@@ -56,6 +56,9 @@ let private makeProvider () =
 let private verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 let private challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
+/// The unattributed identity the localhost strategy grants.
+let private localIdentity : GrantedIdentity = { Subject = "local"; Claims = None }
+
 let private queryOfList (pairs: (string * string) list) : string -> string option =
     fun name -> pairs |> List.tryPick (fun (k, v) -> if k = name then Some v else None)
 
@@ -112,13 +115,13 @@ let private providerTests =
             let registry, codes, setNow = makeProvider ()
             let client = registry.Register "s" sessionId "http://127.0.0.1:9001/callback"
             // Happy path, then replay.
-            let code = codes.Issue client challenge "local"
-            Expect.equal (codes.Redeem code client.ClientId client.RedirectUri verifier) (Ok "local") "redeems to the subject"
+            let code = codes.Issue client challenge localIdentity None
+            Expect.equal (codes.Redeem code client.ClientId client.RedirectUri verifier) (Ok (localIdentity, None)) "redeems to the identity"
             match codes.Redeem code client.ClientId client.RedirectUri verifier with
             | Error _ -> ()
             | Ok _ -> failwith "a code redeems at most once"
             // A failed check burns the code too.
-            let burned = codes.Issue client challenge "local"
+            let burned = codes.Issue client challenge localIdentity None
             match codes.Redeem burned client.ClientId client.RedirectUri "wrong-verifier" with
             | Error _ -> ()
             | Ok _ -> failwith "a bad verifier must not redeem"
@@ -126,16 +129,16 @@ let private providerTests =
             | Error _ -> ()
             | Ok _ -> failwith "a failed redeem must burn the code"
             // Binding checks.
-            let bound = codes.Issue client challenge "local"
+            let bound = codes.Issue client challenge localIdentity None
             match codes.Redeem bound "other-client" client.RedirectUri verifier with
             | Error _ -> ()
             | Ok _ -> failwith "a code is bound to its client"
-            let bound2 = codes.Issue client challenge "local"
+            let bound2 = codes.Issue client challenge localIdentity None
             match codes.Redeem bound2 client.ClientId "http://evil/" verifier with
             | Error _ -> ()
             | Ok _ -> failwith "a code is bound to its redirect_uri"
             // Expiry.
-            let stale = codes.Issue client challenge "local"
+            let stale = codes.Issue client challenge localIdentity None
             setNow 1061L
             match codes.Redeem stale client.ClientId client.RedirectUri verifier with
             | Error _ -> ()
@@ -164,31 +167,76 @@ let private providerTests =
             match Provider.token registry codes (=) (goodForm "never-issued") with
             | Error (InvalidGrant _) -> ()
             | other -> failwithf "expected invalid_grant for an unknown code, got %A" other
-            let code = codes.Issue client challenge "local"
+            let code = codes.Issue client challenge localIdentity None
             match Provider.token registry codes (=) (goodForm code) with
-            | Ok grant -> Expect.equal grant.Subject "local" "the grant carries the subject"
+            | Ok grant -> Expect.equal grant.Identity.Subject "local" "the grant carries the subject"
             | other -> failwithf "expected a grant, got %A" other
     ]
 
 // --- Pure: strategy, stores, wire, cookies/forms ------------------------------------
 
+let private contextOf (address: string option) (headers: (string * string) list) : AuthenticationContext =
+    { RemoteAddress = address
+      Query = fun _ -> None
+      Header = fun name -> headers |> List.tryPick (fun (k, v) -> if k = name then Some v else None) }
+
 let private strategyTests =
     testList "Authentication strategy" [
-        testCaseAsync "localhost authenticates loopback addresses only" <|
+        testCaseAsync "localhost grants unattributed loopback access only" <|
             async {
-                let authAt address =
-                    Strategy.localhost.Authenticate { RemoteAddress = address; Query = fun _ -> None }
+                let authAt address = Strategy.localhost.Authenticate (contextOf address [])
                 for loopback in [ "127.0.0.1"; "::1"; "::ffff:127.0.0.1" ] do
                     match! authAt (Some loopback) with
-                    | Authenticated subject -> Expect.equal subject "local" "the single local user"
-                    | Denied reason -> failwithf "loopback %s must authenticate: %s" loopback reason
+                    | Unattributed subject -> Expect.equal subject "local" "the single local user"
+                    | outcome -> failwithf "loopback %s must grant unattributed access, got %A" loopback outcome
                 match! authAt (Some "192.168.1.50") with
                 | Denied _ -> ()
-                | Authenticated _ -> failwith "a non-loopback address must be denied"
+                | outcome -> failwithf "a non-loopback address must be denied, got %A" outcome
                 match! authAt None with
                 | Denied _ -> ()
-                | Authenticated _ -> failwith "an unknown address must be denied"
+                | outcome -> failwithf "an unknown address must be denied, got %A" outcome
             }
+
+        testCaseAsync "none denies everything" <|
+            async {
+                match! Strategy.none.Authenticate (contextOf (Some "127.0.0.1") [ Strategy.SubjectHeader, "nick" ]) with
+                | Denied _ -> ()
+                | outcome -> failwithf "the none strategy must deny, got %A" outcome
+            }
+
+        testCaseAsync "trusted-headers attributes the asserted user with all claim headers mapped" <|
+            async {
+                let headers =
+                    [ Strategy.SubjectHeader, "nick@example.com"
+                      Strategy.NameHeader, "Nick"
+                      Strategy.EmailHeader, "nick@example.com"
+                      Strategy.PictureHeader, "https://example.com/nick.png"
+                      Strategy.ClaimsHeader, """{"caps":["admin"]}""" ]
+                match! Strategy.trustedHeaders.Authenticate (contextOf None headers) with
+                | Attributed claims ->
+                    Expect.equal claims.Subject "nick@example.com" "subject from x-yession-user"
+                    Expect.equal claims.DisplayName (Some "Nick") "display name mapped"
+                    Expect.equal claims.Email (Some "nick@example.com") "email mapped"
+                    Expect.equal claims.Picture (Some "https://example.com/nick.png") "picture mapped"
+                    Expect.equal claims.Extra [ Strategy.ClaimsHeader, """{"caps":["admin"]}""" ] "extra claims carried verbatim"
+                | outcome -> failwithf "expected an attributed user, got %A" outcome
+            }
+
+        testCaseAsync "trusted-headers denies without the subject header, even from loopback" <|
+            async {
+                match! Strategy.trustedHeaders.Authenticate (contextOf (Some "127.0.0.1") []) with
+                | Denied _ -> ()
+                | outcome -> failwithf "no identity header must deny, got %A" outcome
+                match! Strategy.trustedHeaders.Authenticate (contextOf None [ Strategy.SubjectHeader, "   " ]) with
+                | Denied _ -> ()
+                | outcome -> failwithf "a blank identity header must deny, got %A" outcome
+            }
+
+        testCase "strategy names resolve exactly; unknown names are errors; no name is deny-everything" <| fun () ->
+            Expect.equal (Strategy.ofName None |> Result.map (fun s -> s.Name)) (Ok "none") "no --auth is the none strategy"
+            Expect.equal (Strategy.ofName (Some "localhost") |> Result.map (fun s -> s.Name)) (Ok "localhost") "localhost"
+            Expect.equal (Strategy.ofName (Some "trusted-headers") |> Result.map (fun s -> s.Name)) (Ok "trusted-headers") "trusted-headers"
+            Expect.isError (Strategy.ofName (Some "loopback")) "unknown names fail loudly"
     ]
 
 let private storeTests =
@@ -204,17 +252,29 @@ let private storeTests =
             Expect.equal (logins.Take "state-2") None "expired logins do not take"
             Expect.equal (logins.Take "never-added") None "unknown states do not take"
 
-        testCase "cookie sessions map minted values to subjects; peer tokens validate only what was minted" <| fun () ->
+        testCase "cookie sessions map minted values to identities; peer tokens carry their minted attribution" <| fun () ->
             let mutable counter = 0
             let mint () = counter <- counter + 1; sprintf "value-%d" counter
+            let user = UserId.create "nick@example.com" |> expect
             let cookies = Yession.SessionProcess.CookieSessions (mint)
-            let value = cookies.Mint "local"
-            Expect.equal (cookies.SubjectOf value) (Some "local") "a minted cookie has its subject"
-            Expect.equal (cookies.SubjectOf "forged") None "a forged cookie has none"
+            let localIdentity : Yession.SessionProcess.CookieIdentity =
+                { Subject = "local"; DisplayName = None; Attribution = Yession.SessionProcess.UnattributedAccess }
+            let value = cookies.Mint localIdentity
+            Expect.equal (cookies.IdentityOf value) (Some localIdentity) "a minted cookie has its identity"
+            Expect.equal (cookies.SubjectOf value) (Some "local") "and its subject"
+            Expect.equal (cookies.IdentityOf "forged") None "a forged cookie has none"
             let tokens = Yession.SessionProcess.PeerTokens (mint)
-            let token = tokens.Mint ()
-            Expect.isTrue (tokens.Validate token) "a minted token validates"
-            Expect.isFalse (tokens.Validate "forged") "a forged token does not"
+            let unattributed = tokens.Mint Yession.SessionProcess.UnattributedAccess
+            Expect.equal
+                (tokens.Validate unattributed)
+                (Some Yession.SessionProcess.UnattributedAccess)
+                "a minted token validates with its attribution"
+            let attributed = tokens.Mint (Yession.SessionProcess.AttributedUser user)
+            Expect.equal
+                (tokens.Validate attributed)
+                (Some (Yession.SessionProcess.AttributedUser user))
+                "an attributed token carries its user"
+            Expect.equal (tokens.Validate "forged") None "a forged token does not validate"
     ]
 
 let private wireTests =
@@ -290,7 +350,7 @@ let private opTests =
         testCaseAsync "authorize -> token issues a jose-verifiable ID token; replay, bad verifier, and bad secret are refused per spec" <|
             async {
                 let mutable issuer = ""
-                let! provider = ManagerOidc.create (fun () -> issuer) Strategy.localhost (fun _ _ _ -> ())
+                let! provider = ManagerOidc.create (fun () -> issuer) Strategy.localhost (fun _ _ _ _ _ -> ())
                 let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                     if not (provider.TryHandle req res) then
                         res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
@@ -351,6 +411,8 @@ let private opTests =
                     |> Async.AwaitPromise
                 let subject : string = verified.payload?sub
                 Expect.equal subject "local" "the ID token's subject is the local user"
+                let attribution : string = verified.payload?yession_attribution
+                Expect.equal attribution "unattributed" "localhost access is unattributed (docs/plans/07)"
 
                 // Replay: the same code again -> invalid_grant.
                 let! replay = postFormRaw decoded.TokenEndpoint (tokenForm code client.ClientSecret verifier) |> Async.AwaitPromise
@@ -394,7 +456,10 @@ let private flowTests =
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/oidc-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
-                let! pm = ProcessManager.create (ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ])
+                let! pm =
+                    ProcessManager.create
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost }
                 let managerUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
                 let record = pm.CreateSession "oidc-child" "OIDC child" |> expect
                 let! launched = pm.Launch record.SessionId
@@ -431,7 +496,7 @@ let private flowTests =
                 // the composite identity is Manager-verified, never self-asserted.
                 Expect.equal
                     (pm.UsersOf record.SessionId)
-                    (Set.singleton (UserSubject.create "local" |> expect))
+                    (Set.singleton (UserId.create "local" |> expect))
                     "the login bound the localhost strategy's user to the launch"
 
                 // DCR with a forged control secret is refused at the door.
@@ -459,6 +524,77 @@ let private flowTests =
             }
     ]
 
+// --- BYO trusted-header authorization ([Ports], Plan 07) ----------------------------
+
+let private byoTests =
+    testList "BYO trusted-header authorization" [
+        testCaseAsync "trusted headers gate the UI, ride the bounce into ID-token claims, and bind user + peer to the launch" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/byo-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let! pm =
+                    ProcessManager.createWithUi
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.trustedHeaders }
+                        (Some ManagerUi.tryHandle)
+                let managerUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+                let nick = [ Strategy.SubjectHeader, "nick@example.com"; Strategy.NameHeader, "Nick" ]
+
+                // The management UI is gated by the strategy: header-less loopback
+                // requests are 401 (localhost trust would have let them in), asserted
+                // identity is let through.
+                let! bare = OidcHttp.getWithJar (OidcHttp.newJar ()) (managerUrl + "/")
+                Expect.equal bare.Status 401 "no identity header, no UI"
+                let! asserted = OidcHttp.getWithJarAs nick (OidcHttp.newJar ()) (managerUrl + "/")
+                Expect.equal asserted.Status 200 "the proxy-asserted user reaches the UI"
+
+                // A real child session: the login bounce only completes when the
+                // proxy-asserted headers ride the authorize hop.
+                let record = pm.CreateSession "byo-child" "BYO child" |> expect
+                let! launched = pm.Launch record.SessionId
+                let sessionUrl = sprintf "http://127.0.0.1:%d" (launched |> expect)
+
+                let probeJar = OidcHttp.newJar ()
+                let! headerless = OidcHttp.followWithJar probeJar (sessionUrl + "/login")
+                Expect.equal headerless.Status 401 "the bounce dies at /authorize without the identity header"
+
+                // The full chain with headers (and the browser's stable peer id on
+                // /login): cookie, attributed /me, and the Manager's launch bindings.
+                let! opened = OidcHttp.openSessionVia nick "/login?peer_id=browser-abc" sessionUrl
+                Expect.isTrue (opened.PeerToken.Length > 0) "a peer token is minted for the attributed user"
+                let! me = OidcHttp.getWithJar opened.Jar (sessionUrl + "/me")
+                Expect.isTrue (me.Body.Contains "\"sub\":\"nick@example.com\"") "/me carries the verified subject"
+                Expect.isTrue (me.Body.Contains "\"attributed\":true") "/me marks the identity attributable"
+                Expect.equal
+                    (pm.UsersOf record.SessionId)
+                    (Set.singleton (UserId.create "nick@example.com" |> expect))
+                    "the login bound the asserted user to the launch"
+                Expect.equal
+                    (pm.PeersOf record.SessionId)
+                    (Set.singleton (PeerId.create "browser-abc" |> expect))
+                    "the peer id that rode the bounce is witnessed into the launch"
+
+                // Bindings die with the launch, peers exactly like users (Plan 06 rule).
+                do! pm.Stop record.SessionId |> Async.Ignore
+                Expect.equal (pm.PeersOf record.SessionId) Set.empty "peer bindings die with the launch"
+                do! pm.StopAll ()
+            }
+
+        testCaseAsync "the default none strategy denies the UI and the bounce outright" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/none-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let! pm =
+                    ProcessManager.createWithUi
+                        (ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ])
+                        (Some ManagerUi.tryHandle)
+                let managerUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+                let! ui = OidcHttp.getWithJarAs [ Strategy.SubjectHeader, "nick@example.com" ] (OidcHttp.newJar ()) (managerUrl + "/")
+                Expect.equal ui.Status 401 "no strategy was chosen: even asserted identity denies"
+                do! pm.StopAll ()
+            }
+    ]
+
 let tests =
     testList "Oidc" [
         pkceTests
@@ -469,4 +605,5 @@ let tests =
         keyTests
         Tag.needs "OP endpoint over HTTP" [ Tag.Ports ] (fun () -> opTests)
         Tag.needs "Composed authorization flow" [ Tag.Ports ] (fun () -> flowTests)
+        Tag.needs "BYO trusted-header authorization" [ Tag.Ports ] (fun () -> byoTests)
     ]

@@ -62,7 +62,8 @@ module View =
 
     let private authorLabel =
         function
-        | HumanPeer p -> PeerId.value p
+        | UserRef u -> UserId.value u
+        | PeerRef p -> PeerId.value p
         | ActorRef.Agent -> Dom.Text.agent
         | ActorRef.SessionProcess -> Dom.Text.sessionProcess
         | ActorRef.System -> Dom.Text.system
@@ -93,7 +94,8 @@ module View =
 
     let private authorAvatar =
         function
-        | HumanPeer p -> Style.humanAvatar (PeerId.value p)
+        | UserRef u -> Style.humanAvatar (UserId.value u)
+        | PeerRef p -> Style.humanAvatar (PeerId.value p)
         | ActorRef.Agent -> Style.agentAvatar
         | ActorRef.SessionProcess | ActorRef.System -> Style.humanAvatar "session"
 

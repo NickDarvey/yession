@@ -37,7 +37,7 @@ let private representativeModel : ClientModel =
       Conversation =
         { Items =
             [ { MessageId = MessageId.create "msg-1" |> expect
-                Author = HumanPeer ada
+                Author = PeerRef ada
                 Body = "ship it"
                 Status = Complete }
               { MessageId = MessageId.create "msg-agent" |> expect
@@ -104,7 +104,7 @@ let private uiChecklistTests =
         testCase "a sent markdown body renders as formatted rich text in the timeline" <| fun () ->
             let richItem : ConversationItem =
                 { MessageId = MessageId.create "msg-rich" |> expect
-                  Author = HumanPeer ada
+                  Author = PeerRef ada
                   Body = "# Heading one\n\nText with **bold** and `code`.\n\n- item one\n- item two"
                   Status = Complete }
             let model =

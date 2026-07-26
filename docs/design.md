@@ -152,9 +152,15 @@ Command-to-container encryption is designed for but not implemented yet.
 
 User access to a session is authorized through the Manager as an OIDC provider
 (authorization code + PKCE; each Session Process registers as a client with its
-per-launch control secret — see docs/plans/04-session-authorization.md). The shipped
-authentication strategy trusts localhost, matching this threat model; upstream OIDC is
-a strategy swap, not a redesign.
+per-launch control secret — see docs/plans/04-session-authorization.md). Three
+authentication strategies ship (docs/plans/07-byo-user-authorization.md), selected by
+the `--auth` argument at Manager start: `none` (the default — nothing authenticates
+until the operator chooses a trust rule), `localhost` (any loopback request is the
+single unattributed `local` subject, matching this threat model), and
+`trusted-headers` (an operator-run authenticating proxy — e.g. Tailscale plus a
+header-rewriting proxy — asserts the user in canonical `x-yession-*` headers; the
+proxy must be the only non-local path in and must strip those headers from client
+requests). Further schemes are strategy swaps, not redesigns.
 
 Secrets are Manager-owned authority (docs/plans/06-secrets-and-abac.md): encrypted at
 rest under a key the OS credential manager holds (no credential manager → no
@@ -209,3 +215,17 @@ Identity and envelope types are shared across nearly every step. They are introd
 [00-foundations-and-domain-types.md](plans/00-init/00-foundations-and-domain-types.md)
 and referenced throughout. Each delivery step introduces the additional schemas it owns
 and links back here for the surrounding context.
+
+The actor glossary (docs/plans/07-byo-user-authorization.md):
+
+- **User** (`UserId`) — a durable, Manager-verified human identity: the OIDC `sub` the
+  Manager itself issued. Exists only when a real authentication strategy attributed one.
+- **Peer** (`PeerId`) — one client connection (a browser profile, stable via
+  localStorage). Connection identity, not human identity; self-minted, never verified.
+- **Actor** (`ActorRef`) — the attribution union on events:
+  `UserRef | PeerRef | Agent | SessionProcess | System`.
+- **Unattributed access** — the localhost strategy's grant: the request is allowed in
+  under the shared `local` subject, but no attributable user stands behind it, so
+  events fall back to `PeerRef` attribution. The `Attributed`/`Unattributed` split in
+  `AuthenticationOutcome` is how "real user" is distinguished — never by comparing
+  subject strings.
