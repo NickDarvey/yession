@@ -84,7 +84,9 @@ fi
 $hook_only && exit 0
 
 # The devenv CLI itself, on PATH permanently — same nixpkgs the input resolution above uses.
-command -v devenv >/dev/null 2>&1 \
+# Test the profile binary, not PATH: the wrapper written above shadows it, so `command -v`
+# would always succeed and this install would never run.
+[ -x "$HOME/.nix-profile/bin/devenv" ] \
   || nix profile add "${nixpkgs}#devenv" 2>/dev/null \
   || nix profile install "${nixpkgs}#devenv"
 
