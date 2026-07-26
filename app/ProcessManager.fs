@@ -53,7 +53,11 @@ type ProcessManager =
       /// Users the Manager verified into the session's live launch at ID-token
       /// issuance (Plan 06). Empty for a stopped session or before any login —
       /// bindings die with the launch.
-      UsersOf : SessionId -> Set<UserSubject>
+      UsersOf : SessionId -> Set<UserId>
+      /// Peers the Manager witnessed into the session's live launch at ID-token
+      /// issuance (docs/plans/07): the browser's peer id rode the authorize bounce.
+      /// Same lifetime as UsersOf.
+      PeersOf : SessionId -> Set<PeerId>
       /// Session-scoped secret resolution for environment injection (Plan 06):
       /// store-backed precedence (session scope, then bound users' scopes, then the
       /// Manager's process env) when a store is configured; bare process env otherwise.
@@ -87,15 +91,23 @@ type Options =
       /// product default is fixed — a second Manager instance must choose its own
       /// (the bind fails loudly on conflict, never a silent fallback).
       ManagerPort : int option
+      /// The public URL this Manager is reached at (docs/plans/07): the OIDC issuer and
+      /// every URL derived from it. None = the loopback endpoint URL — correct for
+      /// single-machine deployments; behind an authenticating proxy the operator sets
+      /// the proxy's origin (`YESSION_MANAGER_URL`) so off-host browsers can follow the
+      /// authorize bounce.
+      PublicUrl : string option
       /// The Manager's own telemetry sink for session-lifecycle signals (launch/exit). The
       /// Manager is a direct OTel emitter; this is its `Log`. Default = ignore. Sessions emit
       /// their own telemetry directly — the Manager does not collect from them; it only passes
       /// the standard `OTEL_*` env through to each child (Spawn merges over `process.env`) and
       /// adapts the child's identity (service.name/instance.id).
       OnEvent : string -> (string * obj) list -> unit
-      /// How the OIDC provider authenticates the human at /authorize. None = the
-      /// built-in trust-localhost strategy; an upstream OIDC integration is a
-      /// different strategy value, not a different Manager.
+      /// How the humans at this Manager's endpoint are authenticated: /authorize for
+      /// the OIDC bounce, and every management-UI request (docs/plans/07). None = the
+      /// deny-everything strategy — nothing authenticates until the operator chooses
+      /// (`Strategy.localhost` for a single-machine deployment, `Strategy.trustedHeaders`
+      /// behind an authenticating proxy).
       Strategy : AuthenticationStrategy option
       /// Secrets (Plan 06): how the Manager's secret store is keyed. None = the
       /// feature is off — the secrets routes answer 403 and injection sees only the
@@ -121,6 +133,7 @@ module Options =
           StopGraceMs = 3000
           Grant = None
           ManagerPort = None
+          PublicUrl = None
           OnEvent = (fun _ _ -> ())
           Strategy = None
           Secrets = None }
@@ -137,7 +150,7 @@ let private clock () = DateTimeOffset.UtcNow
 let secretsApiFor (audit: SecretStore.Audit.Sink) (store: SecretStore.SecretStore) : Control.SecretsApi =
     let authorize (caller: Control.ControlCaller) (action: SecretAction) (resource: AuthzResource) =
         let request =
-            { Subject = { Session = Some caller.SessionId; Users = caller.Users }
+            { Subject = { Session = Some caller.SessionId; Users = caller.Users; Peers = caller.Peers }
               Action = SecretAction action
               Resource = resource }
         match Policy.authorize request with
@@ -187,10 +200,12 @@ let secretsApiFor (audit: SecretStore.Audit.Sink) (store: SecretStore.SecretStor
             } }
 
 /// Create the Manager. `ui` is the management surface (Step 25): a route handler that
-/// closes over the Manager itself, sharing the control endpoint's server.
+/// closes over the Manager itself, sharing the control endpoint's server. It receives
+/// the Manager's per-request authenticator (the configured strategy, docs/plans/07) so
+/// every UI route is gated by the same trust rule as /authorize.
 let createWithUi
     (options: Options)
-    (ui: (ProcessManager -> Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
+    (ui: (ProcessManager -> (Interop.IncomingMessage -> Async<AuthenticationOutcome>) -> Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
     : Async<ProcessManager> =
   async {
     let statePath = sprintf "%s/manager.json" options.DataDir
@@ -213,7 +228,11 @@ let createWithUi
     // Users the Manager verified into a LAUNCH (Plan 06): recorded at ID-token issuance,
     // keyed by the per-launch control secret so the binding dies with the launch, exactly
     // like the client registration it derives from. Durable secrets, per-login access.
-    let mutable launchUsers : Map<string, Set<UserSubject>> = Map.empty
+    let mutable launchUsers : Map<string, Set<UserId>> = Map.empty
+    // Peers the Manager witnessed into a LAUNCH (docs/plans/07): the browser's peer id
+    // rides the authorize bounce and is recorded at ID-token issuance, exactly like
+    // launchUsers — keyed by the per-launch control secret, dying with the launch.
+    let mutable launchPeers : Map<string, Set<PeerId>> = Map.empty
 
     // Manager→Session notifications (the reverse leg): live subscriber sinks keyed by the
     // same per-launch secret, so a session's stream dies exactly when its launch does.
@@ -261,7 +280,10 @@ let createWithUi
     // endpoint-less mode. The port is only known once the server listens, and the
     // provider reads the issuer lazily, so the mutable slot resolves cleanly.
     let mutable endpointUrl : string option = None
-    let issuerOf () = defaultArg endpointUrl ""
+    let issuerOf () =
+        match options.PublicUrl with
+        | Some url -> url.TrimEnd '/'
+        | None -> defaultArg endpointUrl ""
     // The Manager's audit sink (Plan 06 telemetry): one greppable audit line to stdout for
     // each authority decision. (Session telemetry is emitted directly by each process now —
     // there is no Manager-side collector; forwarding audit to a collector too is a follow-up.)
@@ -294,14 +316,26 @@ let createWithUi
                 | Error e -> return failwithf "secrets store (ephemeral): %s" (SecretStore.OpenError.describe e)
         }
 
-    let recordTokenIssued (controlSecret: string) (sessionId: SessionId) (subject: UserSubject) : unit =
+    // Last-seen verified claims per user (memory-only): what the strategy asserted at
+    // the most recent token issuance. Display and audit material — never policy input.
+    let mutable userClaims : Map<UserId, UserClaims> = Map.empty
+
+    let recordTokenIssued (controlSecret: string) (sessionId: SessionId) (subject: UserId) (claims: UserClaims option) (peer: PeerId option) : unit =
         // Guarded by the live secret: a token redeemed in the same instant a launch
         // dies must not resurrect its authority.
         if Map.containsKey controlSecret secretSessions then
             let existing = Map.tryFind controlSecret launchUsers |> Option.defaultValue Set.empty
             launchUsers <- Map.add controlSecret (Set.add subject existing) launchUsers
+            claims |> Option.iter (fun c -> userClaims <- Map.add subject c userClaims)
+            peer
+            |> Option.iter (fun p ->
+                let witnessed = Map.tryFind controlSecret launchPeers |> Option.defaultValue Set.empty
+                launchPeers <- Map.add controlSecret (Set.add p witnessed) launchPeers)
             audit (SecretStore.Audit.bindingRecorded sessionId subject)
-    let! provider = ManagerOidc.create issuerOf (defaultArg options.Strategy Strategy.localhost) recordTokenIssued
+    // The strategy gates both the OIDC bounce and (below) the management UI. The default
+    // is deny-everything: authenticating anyone is an explicit operator choice.
+    let strategy = defaultArg options.Strategy Strategy.none
+    let! provider = ManagerOidc.create issuerOf strategy recordTokenIssued
 
     // What a control secret resolves to: the launch's session plus its (optional)
     // environment grant. Registration works for every launch; environment routes 403
@@ -311,12 +345,13 @@ let createWithUi
         |> Option.map (fun sessionId ->
             { Control.ControlCaller.SessionId = sessionId
               Capabilities = Map.tryFind secret secrets
-              Users = Map.tryFind secret launchUsers |> Option.defaultValue Set.empty })
+              Users = Map.tryFind secret launchUsers |> Option.defaultValue Set.empty
+              Peers = Map.tryFind secret launchPeers |> Option.defaultValue Set.empty })
 
     let secretsApi : Control.SecretsApi option = secretStore |> Option.map (secretsApiFor audit)
 
     // The union of user bindings across a session's live launches (in practice one).
-    let usersOf (sessionId: SessionId) : Set<UserSubject> =
+    let usersOf (sessionId: SessionId) : Set<UserId> =
         secretSessions
         |> Map.fold
             (fun acc secret sid ->
@@ -325,6 +360,24 @@ let createWithUi
                 else acc)
             Set.empty
 
+    // The union of witnessed-peer bindings across a session's live launches (Plan 07).
+    let peersOf (sessionId: SessionId) : Set<PeerId> =
+        secretSessions
+        |> Map.fold
+            (fun acc secret sid ->
+                if sid = sessionId then
+                    Set.union acc (Map.tryFind secret launchPeers |> Option.defaultValue Set.empty)
+                else acc)
+            Set.empty
+
+    // The per-request authenticator the UI routes gate on: the same strategy value that
+    // authenticates /authorize, applied to any Manager request.
+    let identify (req: Interop.IncomingMessage) : Async<AuthenticationOutcome> =
+        strategy.Authenticate
+            { RemoteAddress = Interop.remoteAddressOf req
+              Query = (fun name -> Interop.queryParamOf req.url name)
+              Header = fun name -> Interop.headerOf req name }
+
     let! controlServer =
         async {
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
@@ -332,7 +385,7 @@ let createWithUi
                     Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
                     || provider.TryHandle req res
                     || (match ui, self with
-                        | Some handle, Some pm -> handle pm req res
+                        | Some handle, Some pm -> handle pm identify req res
                         | Some _, None ->
                             res.writeHead (503, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                             res.``end`` "starting"
@@ -435,6 +488,7 @@ let createWithUi
                          notifications.Drop secret
                          provider.RevokeByControlSecret secret
                          launchUsers <- Map.remove secret launchUsers
+                         launchPeers <- Map.remove secret launchPeers
                      | None -> ())
                 match! Spawn.launch options.SessionCommand options.SessionArgs env options.LaunchTimeoutMs with
                 | Error reason ->
@@ -496,9 +550,10 @@ let createWithUi
           Notify = notify
           PublishMcpTools = mcp.Publish
           UsersOf = usersOf
+          PeersOf = peersOf
           ResolveSecret =
             match secretStore with
-            | Some store -> SecretStore.SecretResolution.compose (SecretStore.Audit.injectObserver audit) store usersOf SecretStore.SecretResolution.processEnv
+            | Some store -> SecretStore.SecretResolution.compose (SecretStore.Audit.injectObserver audit) store usersOf peersOf SecretStore.SecretResolution.processEnv
             | None -> SecretStore.SecretResolution.processEnv
           EndpointPort = controlServer |> Option.map Interop.serverPort
           StopAll =

@@ -205,12 +205,30 @@ let private jsRandom () : float = jsNative
 let private mintId (prefix: string) =
     sprintf "%s-%d" prefix (int (jsRandom () * 1000000000.0))
 
+// The peer id is STABLE per browser profile (docs/plans/07): minted once, kept in
+// localStorage under a browser-wide key (not per session — it names the browser, the
+// same human across sessions), so colours, draft slots, and peer-scoped secrets survive
+// reloads. Storage denied (private mode) falls back to the per-load mint.
+[<Emit("""(() => {
+  try {
+    const key = 'yession/peer-id'
+    const existing = window.localStorage.getItem(key)
+    if (existing) return existing
+    window.localStorage.setItem(key, $0)
+    return $0
+  } catch { return $0 }
+})()""")>]
+let private persistentPeerId (minted: string) : string = jsNative
+
+[<Emit("encodeURIComponent($0)")>]
+let private urlEncode (value: string) : string = jsNative
+
 // --- Entry -----------------------------------------------------------------------------
 
 let private start () =
     async {
         let peerId =
-            match PeerId.create (mintId "peer") with
+            match PeerId.create (persistentPeerId (mintId "peer")) with
             | Ok id -> id
             | Error e -> failwith e
         let displayName = PeerName.random (Random ())
@@ -401,7 +419,9 @@ let private start () =
             }
         match me with
         | Some probe when not probe.ok ->
-            navigateTo "/login"
+            // The peer id rides the login bounce so the Manager can witness which peer
+            // signed in for this session (docs/plans/07 — peer-scoped secrets).
+            navigateTo ("/login?peer_id=" + urlEncode (PeerId.value peerId))
         | Some probe ->
             let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
             let channel = frameChannel dc

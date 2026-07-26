@@ -69,11 +69,16 @@ module Codec =
                 | true, v -> Decode.succeed v
                 | false, _ -> Decode.fail (sprintf "Invalid ISO-8601 timestamp: %s" s)) }
 
+    let userId : Codec<UserId> =
+        { Encode = UserId.value >> Encode.string
+          Decode = viaSmartCtor UserId.create Decode.string }
+
     let actor : Codec<ActorRef> =
         { Encode =
             (fun a ->
                 match a with
-                | HumanPeer p -> Encode.object [ "kind", Encode.string "humanPeer"; "peerId", peerId.Encode p ]
+                | UserRef u -> Encode.object [ "kind", Encode.string "user"; "sub", userId.Encode u ]
+                | PeerRef p -> Encode.object [ "kind", Encode.string "peer"; "peerId", peerId.Encode p ]
                 | Agent -> Encode.object [ "kind", Encode.string "agent" ]
                 | SessionProcess -> Encode.object [ "kind", Encode.string "sessionProcess" ]
                 | System -> Encode.object [ "kind", Encode.string "system" ])
@@ -81,7 +86,8 @@ module Codec =
             Decode.field "kind" Decode.string
             |> Decode.andThen (fun kind ->
                 match kind with
-                | "humanPeer" -> Decode.field "peerId" peerId.Decode |> Decode.map HumanPeer
+                | "user" -> Decode.field "sub" userId.Decode |> Decode.map UserRef
+                | "peer" -> Decode.field "peerId" peerId.Decode |> Decode.map PeerRef
                 | "agent" -> Decode.succeed Agent
                 | "sessionProcess" -> Decode.succeed SessionProcess
                 | "system" -> Decode.succeed System
@@ -96,11 +102,15 @@ module Codec =
     let private peerJoined : Codec<PeerJoined> =
         { Encode =
             fun (p: PeerJoined) ->
-                Encode.object [ "peerId", peerId.Encode p.PeerId; "displayName", Encode.string p.DisplayName ]
+                Encode.object
+                    [ "peerId", peerId.Encode p.PeerId
+                      "displayName", Encode.string p.DisplayName
+                      "user", Encode.option userId.Encode p.User ]
           Decode =
             Decode.object (fun get ->
                 { PeerJoined.PeerId = get.Required.Field "peerId" peerId.Decode
-                  PeerJoined.DisplayName = get.Required.Field "displayName" Decode.string }) }
+                  PeerJoined.DisplayName = get.Required.Field "displayName" Decode.string
+                  PeerJoined.User = get.Optional.Field "user" userId.Decode }) }
 
     let private peerLeft : Codec<PeerLeft> =
         { Encode = fun (p: PeerLeft) -> Encode.object [ "peerId", peerId.Encode p.PeerId ]

@@ -190,7 +190,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
             DocSync.applyRemote shadowDoc payload)
         let sched =
             Scheduler.create sessionId processDoc log (Some runner)
-                (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId (consumedNow ())
+                (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId PeerRef (consumedNow ())
         scheduler <- sched
         let thisProcess = processDoc
         let thisShadow = shadowDoc
@@ -435,7 +435,7 @@ let tests =
             Expect.equal second first "folding the same log twice yields the identical projection"
             let humanBodies =
                 first.Items
-                |> List.filter (fun i -> match i.Author with HumanPeer _ -> true | _ -> false)
+                |> List.filter (fun i -> match i.Author with PeerRef _ -> true | _ -> false)
                 |> List.map (fun i -> i.Body)
             let consumedBodies = r.Events |> List.choose (fun e -> match e with MessageSent m -> Some m.Body | _ -> None)
             Expect.equal humanBodies consumedBodies "the timeline is the consumed messages, in log order — nothing else"

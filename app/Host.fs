@@ -11,10 +11,12 @@ open Yession.SessionProcess
 
 type SessionHost =
     { SessionId : SessionId
-      /// Mint a peer token valid for this process — what `/me` serves an authenticated
-      /// browser, and what tests/headless clients use to join (`PeerHello.Token`) and
-      /// read `/events`.
+      /// Mint an unattributed peer token valid for this process — what tests/headless
+      /// clients use to join (`PeerHello.Token`) and read `/events`.
       MintPeerToken : unit -> string
+      /// Mint a peer token carrying an explicit attribution — what `/me` does for a
+      /// browser whose cookie names a Manager-verified user (docs/plans/07).
+      MintPeerTokenAs : PeerAttribution -> string
       Port : int
       Log : EventLog<SessionEvent>
       /// The session's Yjs document. The Session Process owns it; peers hold replicas
@@ -99,6 +101,22 @@ let startFull
             |> Map.iter (fun _ channel ->
                 Async.StartImmediate (channel.Send (EventLog (EventsAvailable offset))))
 
+        // Peer→user attribution (docs/plans/07), derived from the durable log so it is
+        // restart-safe by construction: every `PeerJoined` carrying a Manager-verified
+        // user binds that peer, live joins update it through the append wrapper below,
+        // and a departed peer keeps its last-known binding — a still-queued message from
+        // a peer that left drains attributed.
+        let mutable peerUsers : Map<string, UserId> = Map.empty
+        let recordAttribution (event: SessionEvent) : unit =
+            match event with
+            | PeerJoined { PeerId = peer; User = Some user } ->
+                peerUsers <- Map.add (PeerId.value peer) user peerUsers
+            | _ -> ()
+        let actorFor (peerId: PeerId) : ActorRef =
+            match Map.tryFind (PeerId.value peerId) peerUsers with
+            | Some user -> UserRef user
+            | None -> PeerRef peerId
+
         let log =
             // Durable storage is injected (file-backed in the product); the in-memory
             // log remains the deterministic default.
@@ -110,6 +128,7 @@ let startFull
                 Append =
                     fun actor event ->
                         async {
+                            recordAttribution event
                             let! appended = inner.Append actor event
                             broadcastEventsAvailable appended.Offset
                             return appended
@@ -118,6 +137,7 @@ let startFull
         // Seed the scheduler's log-anchored dedup set from the durable log (the
         // restart case): exactly-once is anchored in the log, not the doc.
         let! replayed = log.Read None Int32.MaxValue
+        replayed.Events |> List.iter (fun e -> recordAttribution e.Event)
         let initialConsumed =
             replayed.Events |> List.choose (fun e -> QueueDrain.consumedOf e.Event) |> Set.ofList
 
@@ -161,7 +181,7 @@ let startFull
         // `Scheduler` (shared with the property harness); the Host wires it to this
         // session's doc, log, environment capabilities, and command surface.
         let scheduler =
-            Scheduler.create sessionId doc log runAgent capabilitiesFor emitUsage mintTurnId mintMessageId initialConsumed
+            Scheduler.create sessionId doc log runAgent capabilitiesFor emitUsage mintTurnId mintMessageId actorFor initialConsumed
         let drain () = scheduler.Drain ()
         let requestInterrupt = scheduler.RequestInterrupt
 
@@ -263,7 +283,7 @@ let startFull
         // offsets [n*size, (n+1)*size). Full chunks are immutable (append-only log),
         // so browsers cache them hard and cold loads replay history from disk.
         let eventsEndpoint : Signalling.EventsEndpoint =
-            { ValidateToken = peerTokens.Validate
+            { ValidateToken = peerTokens.Validate >> Option.isSome
               ReadChunk =
                 fun index ->
                     async {
@@ -303,7 +323,8 @@ let startFull
 
         return
             { SessionId = sessionId
-              MintPeerToken = peerTokens.Mint
+              MintPeerToken = fun () -> peerTokens.Mint UnattributedAccess
+              MintPeerTokenAs = peerTokens.Mint
               Port = port
               Log = log
               Doc = doc

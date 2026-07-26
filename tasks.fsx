@@ -214,13 +214,15 @@ let build () =
 
 // --- start / dev: run the Session Process locally --------------------------------------------
 
+// Local runs are single-machine, so the loopback trust rule is the right default here;
+// the shipped binary defaults to `--auth none` (deny) until the operator chooses.
 let start () =
     build ()
-    exec "node" [ "app/out/Main.js" ]
+    exec "node" [ "app/out/Main.js"; "--auth"; "localhost" ]
 
 let dev () =
     restore ()
-    exec "dotnet" [ "fable"; "watch"; "app/main/Yession.Host.Main.fsproj"; "-o"; "app/out"; "--runWatch"; "node"; "app/out/Main.js" ]
+    exec "dotnet" [ "fable"; "watch"; "app/main/Yession.Host.Main.fsproj"; "-o"; "app/out"; "--runWatch"; "node"; "app/out/Main.js"; "--auth"; "localhost" ]
 
 // --- stage: bundle the two bins (deps external) and assemble dist/npm ------------------------
 

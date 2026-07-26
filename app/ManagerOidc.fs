@@ -61,13 +61,14 @@ type Provider =
 
 /// Create the provider. `issuerOf` is read lazily per request because the Manager's
 /// endpoint port is only known once its server listens. `onTokenIssued` fires on every
-/// successful /token redeem with the launch's control secret, the client session, and
-/// the authenticated subject — the Manager's one chance to RECORD which user it
-/// verified into which launch (Plan 06: the subject↔session binding behind ABAC).
+/// successful /token redeem with the launch's control secret, the client session, the
+/// authenticated subject, the verified claims behind it (None = unattributed), and the
+/// peer that rode the bounce (docs/plans/07) — the Manager's one chance to RECORD which
+/// user (and peer) it verified into which launch (Plan 06: the bindings behind ABAC).
 let create
     (issuerOf: unit -> string)
     (strategy: AuthenticationStrategy)
-    (onTokenIssued: string -> SessionId -> UserSubject -> unit)
+    (onTokenIssued: string -> SessionId -> UserId -> UserClaims option -> PeerId option -> unit)
     : Async<Provider> =
     async {
         // Ed25519 via WebCrypto; the `false` here is the non-extractability invariant.
@@ -97,11 +98,17 @@ let create
             | Ok request ->
                 Async.StartImmediate (
                     async {
-                        let context = { RemoteAddress = remoteAddressOf req; Query = queryOf req.url }
-                        match! strategy.Authenticate context with
-                        | Denied reason -> respond res 401 "text/plain" reason
-                        | Authenticated subject ->
-                            let code = codes.Issue request.Client request.Challenge subject
+                        let context =
+                            { RemoteAddress = remoteAddressOf req
+                              Query = queryOf req.url
+                              Header = fun name -> headerOf req name }
+                        let! outcome = strategy.Authenticate context
+                        match GrantedIdentity.ofOutcome outcome with
+                        | None ->
+                            let reason = match outcome with Denied r -> r | _ -> "denied"
+                            respond res 401 "text/plain" reason
+                        | Some identity ->
+                            let code = codes.Issue request.Client request.Challenge identity request.Peer
                             redirect
                                 res
                                 (sprintf
@@ -123,16 +130,29 @@ let create
                     // ClientId is a session id by construction (only DCR from the
                     // control channel registers clients); a parse failure is a bug
                     // surfaced by the policy denying, never a crash here.
-                    (match SessionId.create grant.Client.ClientId, UserSubject.create grant.Subject with
-                     | Ok sessionId, Ok subject -> onTokenIssued grant.Client.ControlSecret sessionId subject
+                    (match SessionId.create grant.Client.ClientId, UserId.create grant.Identity.Subject with
+                     | Ok sessionId, Ok subject ->
+                         onTokenIssued grant.Client.ControlSecret sessionId subject grant.Identity.Claims grant.Peer
                      | _ -> ())
+                    // Standard profile claims when the strategy attributed a real user,
+                    // plus `yession_attribution` — the RP-side discriminator between a
+                    // durable user identity and shared unattributed access.
+                    let payload =
+                        [ yield "yession_attribution",
+                                box (match grant.Identity.Claims with Some _ -> "user" | None -> "unattributed")
+                          match grant.Identity.Claims with
+                          | Some claims ->
+                              match claims.DisplayName with Some v -> yield "name", box v | None -> ()
+                              match claims.Email with Some v -> yield "email", box v | None -> ()
+                              match claims.Picture with Some v -> yield "picture", box v | None -> ()
+                          | None -> () ]
                     Async.StartImmediate (
                         async {
                             let! idToken =
-                                (Fable.Jose.signJwt (createObj []))
+                                (Fable.Jose.signJwt (createObj payload))
                                     .setProtectedHeader(createObj [ "alg" ==> "EdDSA"; "kid" ==> kid ])
                                     .setIssuer(issuerOf ())
-                                    .setSubject(grant.Subject)
+                                    .setSubject(grant.Identity.Subject)
                                     .setAudience(grant.Client.ClientId)
                                     .setIssuedAt()
                                     .setExpirationTime("10m")

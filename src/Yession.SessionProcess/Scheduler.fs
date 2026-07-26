@@ -31,6 +31,10 @@ module Scheduler =
     /// Create the scheduler for one session. `initialConsumed` seeds the log-anchored
     /// dedup set (every QueueId already named by a `MessageSent` in the durable log —
     /// the restart case); the scheduler maintains it on its own appends thereafter.
+    /// `actorFor` resolves a connection to its attribution (docs/plans/07): the
+    /// Manager-verified user behind the peer when one exists, the peer itself otherwise
+    /// — drafts and queue entries stay keyed by `PeerId` (connection facts); attribution
+    /// is applied here, at the durable-append boundary.
     let create
         (sessionId: SessionId)
         (doc: Yjs.Y.Doc)
@@ -41,6 +45,7 @@ module Scheduler =
         (emitUsage: AgentTurnId -> AgentUsage -> unit)
         (mintTurnId: unit -> AgentTurnId)
         (mintMessageId: unit -> MessageId)
+        (actorFor: PeerId -> ActorRef)
         (initialConsumed: Set<string>)
         : SessionScheduler =
 
@@ -89,9 +94,9 @@ module Scheduler =
                                 let message =
                                     { MessageId = mintMessageId ()
                                       QueueId = Some entry.QueueId
-                                      Author = HumanPeer entry.Author
+                                      Author = actorFor entry.Author
                                       Body = SyncedStateSync.queuedBodyMarkdown doc entry.QueueId }
-                                let! _ = log.Append (HumanPeer entry.Author) (MessageSent message)
+                                let! _ = log.Append (actorFor entry.Author) (MessageSent message)
                                 consumed <- Set.add (QueueId.value entry.QueueId) consumed
                                 lastMessage <- Some message
                             // 2. Visible: one transaction under the process origin;
@@ -141,7 +146,7 @@ module Scheduler =
                     async {
                         let! _ =
                             log.Append
-                                (HumanPeer peerId)
+                                (actorFor peerId)
                                 (AgentTurnInterrupted { AgentTurnId = turnId; RequestedBy = peerId })
                         return ()
                     })

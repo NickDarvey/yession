@@ -186,15 +186,19 @@ module SecretResolution =
                 else return Ok value
             }
 
-    /// The scopes a session may draw injected values from, most specific first.
-    let scopesFor (sessionId: SessionId) (users: Set<UserSubject>) : SecretScope list =
-        SessionScope sessionId :: (users |> Set.toList |> List.map UserScope)
+    /// The scopes a session may draw injected values from, most specific first:
+    /// the session's own, then its bound users', then its witnessed peers'.
+    let scopesFor (sessionId: SessionId) (users: Set<UserId>) (peers: Set<PeerId>) : SecretScope list =
+        SessionScope sessionId
+        :: (users |> Set.toList |> List.map UserScope)
+        @ (peers |> Set.toList |> List.map PeerScope)
 
-    let compose (observe: Observe) (store: SecretStore) (usersOf: SessionId -> Set<UserSubject>) (fallback: ResolveSecret) : ResolveSecret =
+    let compose (observe: Observe) (store: SecretStore) (usersOf: SessionId -> Set<UserId>) (peersOf: SessionId -> Set<PeerId>) (fallback: ResolveSecret) : ResolveSecret =
         fun sessionId name ->
             async {
                 let users = usersOf sessionId
-                let subject : AuthzSubject = { Session = Some sessionId; Users = users }
+                let peers = peersOf sessionId
+                let subject : AuthzSubject = { Session = Some sessionId; Users = users; Peers = peers }
                 let rec walk scopes =
                     async {
                         match scopes with
@@ -225,7 +229,7 @@ module SecretResolution =
                                 | Ok None -> return! walk rest
                                 | Error e -> return Error e
                     }
-                return! walk (scopesFor sessionId users)
+                return! walk (scopesFor sessionId users peers)
             }
 
 /// The secrets/ABAC feature's audit telemetry (Plan 06). Audit is a cross-cutting concern,
@@ -277,7 +281,7 @@ module Audit =
               "yession.secret.scope_key", StringValue (SessionId.value sessionId) ]
         | UserScope user ->
             [ "yession.secret.scope", StringValue "user"
-              "yession.secret.scope_key", StringValue (UserSubject.value user) ]
+              "yession.secret.scope_key", StringValue (UserId.value user) ]
 
     let private session (sessionId: SessionId) = "yession.session.id", StringValue (SessionId.value sessionId)
     let private outcome ok = "yession.outcome", StringValue (if ok then "ok" else "failed")
@@ -352,9 +356,9 @@ module Audit =
             [ "yession.secrets.reason", StringValue kind ]
             detail
 
-    let bindingRecorded (sessionId: SessionId) (subject: UserSubject) : Record =
+    let bindingRecorded (sessionId: SessionId) (subject: UserId) : Record =
         make "yession.auth.binding_recorded" Severity.info
-            [ session sessionId; "yession.auth.sub", StringValue (UserSubject.value subject) ]
+            [ session sessionId; "yession.auth.sub", StringValue (UserId.value subject) ]
             "user verified into launch"
 
     let bindingRevoked (sessionId: SessionId) : Record =

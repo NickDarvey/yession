@@ -11,6 +11,7 @@ open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
 open Yession.Manager
+open Yession.Oidc
 open Yession.App
 open Yession.Host
 open Yession.Tests.Support
@@ -112,7 +113,9 @@ let private processTests =
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/pm-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
-                let options = ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ]
+                let options =
+                    { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                        Strategy = Some Strategy.localhost }
                 let! pm = ProcessManager.create options
 
                 // Create: durable registration, not running.
@@ -214,7 +217,7 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
         let table =
             secrets
             |> List.map (fun (secret, sessionId, capabilities) ->
-                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities; Users = Set.empty }
+                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities; Users = Set.empty; Peers = Set.empty }
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
@@ -307,6 +310,7 @@ let private controlRpcTests =
                 let! pm =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost
                             Grant = Some (Authority.grant registry backend) }
                 let record = pm.CreateSession "rpc-child" "RPC child" |> expect
 
@@ -389,7 +393,8 @@ let private uiFlowTests =
                     sprintf "tests/Yession.Tests/out/.data/ui-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
                 let! pm =
                     ProcessManager.createWithUi
-                        (ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ])
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost }
                         (Some ManagerUi.tryHandle)
                 let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
 
@@ -612,6 +617,7 @@ let private telemetryTests =
                 let! pm =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost
                             OnEvent = fun body _ -> managerEvents.Add body }
                 let record = pm.CreateSession "tel-child" "Tel child" |> expect
 

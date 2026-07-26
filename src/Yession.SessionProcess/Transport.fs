@@ -35,29 +35,35 @@ module PeerSession =
 
     /// Run a peer session over a connected channel until the peer disconnects.
     ///
-    /// - On a `PeerHello` whose token passes `validateToken` (the composition root
-    ///   injects the check — the session-minted peer-token set in the product): append
-    ///   `PeerJoined`, reply with `PeerAccepted`, run `handlers.OnAccepted`, pump frames
-    ///   until the channel closes (`State` payloads go to `handlers.OnState`), run the
-    ///   cleanup, then append `PeerLeft`.
+    /// - On a `PeerHello` whose token `attributionOf` recognises (the composition root
+    ///   injects the check — the session-minted peer-token store in the product): append
+    ///   `PeerJoined` carrying the token's attribution (the Manager-verified user, when
+    ///   one exists — never anything the peer asserted), reply with `PeerAccepted`, run
+    ///   `handlers.OnAccepted`, pump frames until the channel closes (`State` payloads
+    ///   go to `handlers.OnState`), run the cleanup, then append `PeerLeft`.
     /// - On an invalid token or an unexpected first frame: reply `PeerRejected` and close.
     ///
     /// Side effects (appends) go through the injected `EventLog`, honouring "the Session
     /// Process is the only event writer".
     let run
         (sessionId: SessionId)
-        (validateToken: string -> bool)
+        (attributionOf: string -> PeerAttribution option)
         (log: EventLog<SessionEvent>)
         (handlers: PeerHandlers<'State>)
         (channel: FrameChannel<'State>)
         : Async<unit> =
         async {
             let! first = channel.Receive ()
-            match first with
-            | Some (Control (PeerHello hello)) when validateToken hello.Token ->
-                let actor = HumanPeer hello.PeerId
+            match first |> Option.map (fun f -> f, (match f with Control (PeerHello h) -> attributionOf h.Token | _ -> None)) with
+            | Some (Control (PeerHello hello), Some attribution) ->
+                let actor = PeerRef hello.PeerId
                 let! joined =
-                    log.Append actor (PeerJoined { PeerId = hello.PeerId; DisplayName = hello.DisplayName })
+                    log.Append
+                        actor
+                        (PeerJoined
+                            { PeerId = hello.PeerId
+                              DisplayName = hello.DisplayName
+                              User = PeerAttribution.userOf attribution })
                 let accepted =
                     { SessionId = sessionId
                       AssignedDisplayName = hello.DisplayName
@@ -95,7 +101,7 @@ module PeerSession =
                 cleanup ()
                 let! _ = log.Append actor (PeerLeft { PeerId = hello.PeerId })
                 return ()
-            | Some (Control (PeerHello _)) ->
+            | Some (Control (PeerHello _), None) ->
                 do! channel.Send (Control (PeerRejected "invalid peer token"))
                 do! channel.Close ()
             | _ ->

@@ -57,7 +57,8 @@ let private endpointTests =
                             ActorRef.SessionProcess
                             (PeerJoined
                                 { PeerId = PeerId.create (sprintf "p-%d" i) |> expect
-                                  DisplayName = "filler" })
+                                  DisplayName = "filler"
+                                  User = None })
                     ()
                 let url (chunk: int) (token: string) =
                     sprintf "http://127.0.0.1:%d/events/%d?token=%s" h.Port chunk token
