@@ -8,8 +8,16 @@
 # offline and drive `dotnet fsi tasks.fsx stage`, then wrap/pack the result.
 { pkgs, lib ? pkgs.lib, rev ? null }:
 let
+  # nixpkgs builds libdatachannel `-DUSE_NICE=ON`, and that backend tears its ICE transport down
+  # from the destroying thread while libnice's shared glib loop may already be dispatching a
+  # receive for it — a use-after-free that crashed the Native-tagged suites intermittently. The
+  # patch moves the detach onto the loop thread; see the patch header for the diagnosis.
+  libdatachannel = pkgs.libdatachannel.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./libdatachannel-nice-teardown.patch ];
+  });
+
   # The native WebRTC addon, built from source (its npm prebuild is github-bound).
-  node-datachannel = pkgs.callPackage ./node-datachannel.nix { };
+  node-datachannel = pkgs.callPackage ./node-datachannel.nix { inherit libdatachannel; };
 
   # claude-code is unfree; instantiate a nixpkgs that allows just that package (the agent
   # points at it so the SDK never needs its own native binary).
@@ -220,5 +228,5 @@ let
   };
 in
 {
-  inherit node-datachannel claude-code nodeModules staged nix npm;
+  inherit libdatachannel node-datachannel claude-code nodeModules staged nix npm;
 }
