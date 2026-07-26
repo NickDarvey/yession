@@ -448,8 +448,9 @@ let private uiFlowTests =
 let private spawnRaw : obj = Fable.Core.Util.jsNative
 
 // Run the packaged manager bundle on this Node, pointing it at the packaged session
-// bundle (what the `yession` bin shim does in an install).
-[<Emit("$0(process.execPath, [$1], { env: { ...process.env, YESSION_SESSION_MAIN: $3, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
+// bundle (what the `yession` bin shim does in an install). `--auth localhost` mirrors a
+// single-machine operator's choice — the shipped default (`none`) denies everything.
+[<Emit("$0(process.execPath, [$1, '--auth', 'localhost'], { env: { ...process.env, YESSION_SESSION_MAIN: $3, ...Object.fromEntries($2) }, stdio: ['pipe', 'pipe', 'inherit'] })")>]
 let private spawnBundle (spawn: obj) (managerJs: string) (env: (string * string) array) (sessionJs: string) : obj = Fable.Core.Util.jsNative
 
 [<Emit("$0.stdout.on('data', $1)")>]
