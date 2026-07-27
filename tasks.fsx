@@ -85,10 +85,15 @@ let private footerOf (message: string) =
 /// required trailer (an attribution line, a bot signature) pushes the marker out of the last block
 /// and the bump is silently lost. That happened, and a lost bump is as wrong as a spurious one.
 ///
-/// What still holds the line is the LINE: a marker must stand alone on its own, so prose that
-/// mentions one in passing cannot move the release. The sharp edge left is quoting — a marker
-/// table reproduced verbatim in a message DOES bump, so keep examples annotated (as the table
-/// above is: the trailing `-> 2.0.0-beta.0` makes those lines inert) rather than bare.
+/// What still holds the line is the LINE: a marker must be the ONLY thing on it, whitespace aside.
+/// Anything else — a bullet, a quote marker, a trailing comment, a word before it — makes the line
+/// prose, so a message that mentions a marker in passing cannot move the release. The separator is
+/// `[ \t]*`, not `\s*`: `\s` matches a newline, which would let `+semver:` on one line pair with
+/// `fix` on the next, and then neither line carries the marker.
+///
+/// The sharp edge left is quoting — a marker table reproduced verbatim in a message DOES bump, so
+/// keep examples annotated (as the table above is: the trailing `-> 2.0.0-beta.0` makes those lines
+/// inert) rather than bare.
 ///
 /// `BREAKING CHANGE:` stays footer-only. It is a conventional-commits trailer, defined to live
 /// there, and it is the one marker that moves MAJOR — an earlier policy scanned the whole body for
@@ -99,10 +104,10 @@ let private bumpOf (message: string) =
     let body = message.Replace("\r\n", "\n")
     let has pattern =
         Regex.IsMatch (body, pattern, RegexOptions.IgnoreCase ||| RegexOptions.Multiline)
-    if has @"^[ \t]*\+semver:\s?(breaking|major)[ \t]*$"
+    if has @"^[ \t]*\+semver:[ \t]*(breaking|major)[ \t]*$"
        || Regex.IsMatch (footerOf message, @"^BREAKING[ -]CHANGE:", RegexOptions.Multiline) then Some Major
-    elif has @"^[ \t]*\+semver:\s?(feature|minor)[ \t]*$" then Some Minor
-    elif has @"^[ \t]*\+semver:\s?(fix|patch)[ \t]*$" then Some Patch
+    elif has @"^[ \t]*\+semver:[ \t]*(feature|minor)[ \t]*$" then Some Minor
+    elif has @"^[ \t]*\+semver:[ \t]*(fix|patch)[ \t]*$" then Some Patch
     else None
 
 // Run a command, returning None instead of failing when it exits non-zero. `git describe` reports
