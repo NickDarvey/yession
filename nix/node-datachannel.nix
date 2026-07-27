@@ -83,6 +83,19 @@ stdenv.mkDerivation {
     "-DCMAKE_JS_SRC="
     "-DNO_MEDIA=OFF"
     "-DNO_WEBSOCKET=OFF"
+  ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
+    # An empty CMAKE_JS_LIB is only half the story on macOS. ELF links
+    # tolerate undefined symbols in a shared object and the loader resolves
+    # the napi_* against the hosting Node; Mach-O rejects them at link time
+    # ("Undefined symbols for architecture arm64: _napi_add_finalizer, …").
+    # cmake-js passes this flag for exactly this reason; since we drive cmake
+    # ourselves, we have to pass it ourselves.
+    #
+    # `-Wl,-undefined,dynamic_lookup` and not the `-undefined dynamic_lookup`
+    # driver spelling: cmakeFlags is word-split by the setup hook, which would
+    # strand `dynamic_lookup` as its own argument and leave a bare `-undefined`
+    # to swallow the `-o` at link time.
+    "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-undefined,dynamic_lookup"
   ];
 
   installPhase = ''

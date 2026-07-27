@@ -6,6 +6,10 @@ name: pr
 # (`Native` + `Ports`). Only `Docker` (needs a daemon) and `LiveAgent` (needs real
 # credentials) stay release-only; release.yml's `verify` runs the complete gate.
 #
+# `darwin-package` is the second job and the only non-Linux one: it builds the flake package
+# on macOS so the darwin systems flake.nix advertises are actually exercised. See its own
+# comment for why Linux CI structurally cannot catch what it catches.
+#
 # The dev environment is devenv (Node 24, .NET SDK 10) so CI and local dev are identical.
 # `check` (devenv script) restores deps with `--ignore-scripts` and links the Nix-built
 # node-datachannel WebRTC addon — the same addon local dev uses, so the Native tier is
@@ -41,3 +45,35 @@ jobs:
       # for the browser E2Es, and run the gate.
       - name: Cheap tier + browser + native WebRTC/host E2E
         run: devenv shell -- check Browser Ports Native
+
+  # The installable package, built on macOS. flake.nix advertises aarch64-darwin and
+  # x86_64-darwin and nix/node-datachannel.nix claims platforms.unix, but every other job
+  # here is ubuntu-latest — so the darwin build went unexercised, and silently unbuildable:
+  # an ELF link tolerates the undefined napi_* in a shared object and resolves them against
+  # the hosting Node at load time, while Mach-O rejects them outright. No amount of Linux CI
+  # can see that. This job is the guard.
+  darwin-package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # Deliberately `nix build` and not devenv: this is the `nix profile install
+      # github:NickDarvey/yession` path a user actually takes, and it must stay pure.
+      - name: Build the installable package
+        run: nix build .#yession --print-build-logs
+      # A successful link is not a successful load. `-undefined dynamic_lookup` defers every
+      # napi_* symbol to load time, so the link above would still pass if the addon were
+      # unloadable. Require it to load and construct a peer connection for real.
+      - name: The native WebRTC addon loads
+        run: |
+          cat > "$RUNNER_TEMP/addon-smoke.cjs" <<'EOF'
+          const m = require(`${process.cwd()}/result/libexec/yession/node_modules/node-datachannel`);
+          const pc = new m.PeerConnection('ci', { iceServers: [] });
+          console.log('addon loaded; PeerConnection state:', pc.state());
+          pc.close();
+          process.exit(0);
+          EOF
+          nix shell nixpkgs#nodejs_24 --command node "$RUNNER_TEMP/addon-smoke.cjs"
