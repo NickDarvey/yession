@@ -87,21 +87,28 @@ the commit message — for a squash-merged PR, its title or body:
 +semver: fix     (or patch)                                   -> 1.0.1-beta.0
 ```
 
-A marker is read ONLY from the footer — the last blank-line-separated block of the message — and
-must be a line of its own there. So put it last. Prose discussing a marker anywhere above it
-(including this section's examples) never moves the version.
+A marker counts ANYWHERE in the message — subject, body, or footer — but must be a line of its
+own, with nothing else on it. Prose that mentions one mid-sentence never moves the version, and
+neither do the examples above (the trailing `-> 2.0.0-beta.0` keeps those lines from standing
+alone). The corollary: do NOT paste that table bare into a commit or PR body, because then it
+does bump.
+
+`BREAKING CHANGE:` is the exception — it is read only from the footer, the last
+blank-line-separated block. It is a conventional-commits trailer, and it is the one marker that
+moves MAJOR; scanning the whole body for it once cut a spurious major tag off line-wrapped prose.
 
 **When to bump.** A breaking change to the Manager ↔ Session API (the protocol between the
 `yession` and `yession-session` bins — the Manager tolerates anything but a MAJOR mismatch) is
 a major bump. Otherwise standard semver: new user-facing capability → minor, bug fix → patch.
 The same policy applies once the version leaves beta. A plain `feat:` subject does NOT bump —
-a tag is cut per green master push, so nearly every release would; only the footer marker
+a tag is cut per green master push, so nearly every release would; only an explicit marker
 moves the triple.
 
 **Commit / PR messages.** Subjects follow conventional-commit style (`feat:`, `fix:`, `ci:`,
 `refactor:`, ...) — that is convention for readers, not the version input. PRs squash-merge:
 the PR title becomes the commit subject and the body the rest of the message, so a semver
-marker belongs on the last line of the PR body.
+marker anywhere in the PR body on a line of its own is picked up — including above a trailer the
+body has to end with, such as a tool's attribution line.
 
 `version` needs full history: it refuses a shallow clone rather than emitting an
 already-released number (`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the
