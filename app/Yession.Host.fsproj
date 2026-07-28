@@ -25,11 +25,13 @@
     <Compile Include="SecretsCipher.fs" />
     <Compile Include="KeyStore.fs" />
     <Compile Include="SecretStore.fs" />
+    <Compile Include="Broker.fs" />
     <Compile Include="NotificationHub.fs" />
     <Compile Include="McpHub.fs" />
     <Compile Include="ManagerOidc.fs" />
     <Compile Include="Control.fs" />
     <Compile Include="ControlClient.fs" />
+    <Compile Include="ClaudeConnection.fs" />
     <Compile Include="Spawn.fs" />
     <Compile Include="ProcessManager.fs" />
     <Compile Include="ManagerUi.fs" />

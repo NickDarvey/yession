@@ -47,7 +47,9 @@ type SessionHost =
 /// survive restarts — and every subsequent update is durably appended. Resolves once
 /// the server is listening.
 let startFull
-    (runAgent: RunAgent option)
+    // A THUNK, read at every drain (Plan 08): agent availability is dynamic — a
+    // credential connected mid-session enables turns without a relaunch.
+    (runAgent: unit -> RunAgent option)
     (environmentCapabilities: SessionEnvironmentCapabilities option)
     // Secrets (Plan 06): the Manager-granted, session-scoped secrets surface
     // (write/list/delete — never read). None = turns see the `none` denials.
@@ -60,6 +62,8 @@ let startFull
     (emitUsage: AgentTurnId -> AgentUsage -> unit)
     (subscribeNotifications: ((SessionNotification -> unit) -> (unit -> unit)) option)
     (subscribeMcp: ((McpToolList -> unit) -> (unit -> unit)) option)
+    // Extra HTTP routes on the session's server (Plan 08: the connection surface).
+    (extraHttpRoutes: (Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
     (sessionId: SessionId)
     (auth: SessionAuth.Auth option)
     (port: int)
@@ -298,7 +302,7 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth peerTokens.Mint port
+        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -354,7 +358,7 @@ let startWithCapabilities
     (sessionId: SessionId)
     (port: int)
     : Async<SessionHost> =
-    startFull runAgent environmentCapabilities None baseLog None None (fun _ _ -> ()) None None sessionId None port
+    startFull (fun () -> runAgent) environmentCapabilities None baseLog None None (fun _ _ -> ()) None None None sessionId None port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

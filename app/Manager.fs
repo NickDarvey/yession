@@ -74,7 +74,7 @@ let createFull
                 let! host =
                     // The in-process Manager path has no control RPC, so no notification
                     // channel — the reverse leg exists only across the OS-process boundary.
-                    Host.startFull runAgent environmentCapabilities None baseLog docStore None (fun _ _ -> ()) None None request.SessionId None port
+                    Host.startFull (fun () -> runAgent) environmentCapabilities None baseLog docStore None (fun _ _ -> ()) None None None request.SessionId None port
                 let bootstrapUri = sprintf "http://127.0.0.1:%d/" host.Port
                 let managed =
                     { SessionId = request.SessionId

@@ -240,7 +240,7 @@ let private auditTests =
                   SecretStore.Audit.secretSet sessionId id false, "yession.secret.set", 13
                   SecretStore.Audit.secretDelete sessionId id true, "yession.secret.delete", 9
                   SecretStore.Audit.secretList sessionId (SessionScope sessionId) 2, "yession.secret.list", 9
-                  SecretStore.Audit.authzDeny sessionId SetSecret (SecretResource id) "why", "yession.authz.deny", 13
+                  SecretStore.Audit.authzDeny sessionId (SecretAction SetSecret) (SecretResource id) "why", "yession.authz.deny", 13
                   SecretStore.Audit.inject sessionId name "session", "yession.secret.inject", 9
                   SecretStore.Audit.injectMiss sessionId name "none left", "yession.secret.inject", 13
                   SecretStore.Audit.storeOpen "durable" "in-memory" true 0, "yession.secrets.store_open", 9
@@ -256,7 +256,7 @@ let private auditTests =
                 Expect.equal r.Severity severity (sprintf "severity of %s" expectedName)
 
         testCase "the deny record keeps the old printfn's full sentence and attributes" <| fun () ->
-            let r = SecretStore.Audit.authzDeny sessionId SetSecret (SecretResource id) "not the owning session"
+            let r = SecretStore.Audit.authzDeny sessionId (SecretAction SetSecret) (SecretResource id) "not the owning session"
             Expect.equal r.Body "secrets: DENY SetSecret for session audit-sess: not the owning session" "printfn parity"
             Expect.equal (stringAttr "yession.authz.action" r) (Some "SetSecret") "action attr"
             Expect.equal (stringAttr "yession.secret.name" r) (Some "deploy-token") "resource name attr"

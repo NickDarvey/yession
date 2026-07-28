@@ -167,6 +167,17 @@ Infrastructure delivered after Phase 4 acceptance, outside the numbered phase ta
   driving the real OS credential manager (self-wrapped with dbus + gnome-keyring when headless).
   Follow-up delivered: in-process **OTel audit records** for every secrets/ABAC
   authority decision (see the plan doc's Telemetry section).
+- **Connections + Claude sign-in (Plan 08)** — [08-connections-and-claude-auth.md](08-connections-and-claude-auth.md)
+  (Status: delivered). A service-agnostic, standards-only OAuth **connection broker** in
+  the Manager (PKCE + code exchange + lazy refresh over the encrypted store; provider
+  endpoints arrive from the session as data, so the Manager never learns "Claude"; the
+  stable public callback `GET /connections/callback` rides the Manager's fixed port), a
+  narrow `ConnectionAction` policy family (own session / bound user / witnessed peer —
+  the first writer of owner-scoped credentials), a third control reverse leg streaming
+  value-free connection statuses, and the session-side Claude module + Connections panel:
+  sign in for "this session only" or "all my sessions", paste-token fallback, and each
+  agent turn running on the TURN ACTOR's credential (session ▸ actor ▸ ambient env),
+  resolved fresh per turn. Follow-ups recorded in the plan doc + GAPS.
 
 ## Blockers log
 

@@ -67,16 +67,17 @@ type private RunOutcome =
       ]
     })
     const q = sdk.query({
-      prompt: $1,
+      prompt: $0.prompt,
       options: {
-        systemPrompt: $0,
+        systemPrompt: $0.system,
         maxTurns: 8,
         settingSources: [],
         includePartialMessages: true,
         mcpServers: { yession },
         allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret'],
         abortController: controller,
-        ...($2 ? { pathToClaudeCodeExecutable: $2 } : {})
+        ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
+        ...($1 ? { env: $1 } : {})
       }
     })
     let body = ''
@@ -113,8 +114,8 @@ type private RunOutcome =
   }
 })()""")>]
 let private runQuery
-    (systemPrompt: string)
-    (prompt: string)
+    (prompts: {| system: string; prompt: string |})
+    (credentialEnv: obj)
     (claudePath: string)
     (ensure: string -> JS.Promise<string>)
     (executeCommand: string -> string array -> JS.Promise<string>)
@@ -129,6 +130,14 @@ let private runQuery
 /// Some sandboxes disallow the SDK's own vendored executable; `YESSION_CLAUDE_PATH`
 /// points the SDK at a system Claude Code install instead. Empty = SDK default.
 let private claudePath () = Interop.envOr "YESSION_CLAUDE_PATH" ""
+
+/// The spawned CLI's full environment when a turn runs on a RESOLVED credential
+/// (Plan 08): the process env with both ambient credential variables removed — a
+/// per-turn credential must never silently lose to an inherited one — and exactly the
+/// resolved variable set. Deletion (not `undefined`) so no spawn implementation
+/// resurrects the ambient value.
+[<Emit("(() => { const e = { ...process.env }; delete e.ANTHROPIC_API_KEY; delete e.CLAUDE_CODE_OAUTH_TOKEN; e[$0] = $1; return e })()")>]
+let private credentialEnvFor (name: string) (value: string) : obj = jsNative
 
 /// One prompt per turn: the completed conversation as a transcript plus the message to
 /// answer. Built from the projection only — draft/Yjs state never appears here.
@@ -234,17 +243,23 @@ let private deleteSecretFor (capabilities: AgentCapabilities) : string -> JS.Pro
         }
         |> Async.StartAsPromise
 
-/// The Claude Agent SDK–backed `RunAgent`. Streams text deltas as chunks; the typed
-/// capabilities surface as MCP tools; failures are values, never exceptions. The abort
-/// signal maps onto the SDK's AbortController, so an interrupt cancels the live query
-/// promptly (the returned failure is then discarded by the orchestrator).
-let run : RunAgent =
+/// The Claude Agent SDK–backed `RunAgent`, parameterized by the turn's credential:
+/// `None` = the ambient process env (the documented last resort — the pre-Plan-08
+/// behaviour); `Some (envVar, value)` = the spawned CLI runs with exactly that
+/// credential, both ambient credential variables removed. Streams text deltas as
+/// chunks; the typed capabilities surface as MCP tools; failures are values, never
+/// exceptions. The abort signal maps onto the SDK's AbortController, so an interrupt
+/// cancels the live query promptly (the returned failure is then discarded by the
+/// orchestrator).
+let runWith (credential: (string * string) option) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
             let! outcome =
                 runQuery
-                    context.SystemPrompt
-                    (promptOf context)
+                    {| system = context.SystemPrompt; prompt = promptOf context |}
+                    (match credential with
+                     | Some (name, value) -> credentialEnvFor name value
+                     | None -> null)
                     (claudePath ())
                     (ensureFor capabilities)
                     (executeFor capabilities)
@@ -262,3 +277,6 @@ let run : RunAgent =
                   Model = if System.String.IsNullOrEmpty outcome.model then None else Some outcome.model }
             return if outcome.ok then AgentCompleted (outcome.body, Some usage) else AgentFailed outcome.reason
         }
+
+/// The ambient-credential runner (existing call sites and the env fallback).
+let run : RunAgent = runWith None

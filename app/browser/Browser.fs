@@ -223,6 +223,29 @@ let private persistentPeerId (minted: string) : string = jsNative
 [<Emit("encodeURIComponent($0)")>]
 let private urlEncode (value: string) : string = jsNative
 
+// --- Claude connection panel round-trips (Plan 08) --------------------------------------
+// Thin fetches against the session's /claude* routes; the same-origin auth cookie rides
+// each one. Failures land as `ok: false` with the response text — the panel shows it.
+
+[<Emit("""fetch('/claude?peer_id=' + encodeURIComponent($0), { cache: 'no-store' })
+  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine })) : Promise.resolve({ ok: false, session: null, mine: null }))
+  .catch(() => ({ ok: false, session: null, mine: null }))""")>]
+let private fetchClaudeStatus (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
+
+[<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 })
+  .then(async r => ({ ok: r.ok, body: await r.text() }))
+  .catch(e => ({ ok: false, body: String(e) }))""")>]
+let private postClaude (url: string) (body: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
+
+[<Emit("JSON.stringify({ scope: $0, peerId: $1, code: $2 || undefined, token: $3 || undefined })")>]
+let private claudeBody (scope: string) (peerId: string) (code: string) (token: string) : string = jsNative
+
+[<Emit("(() => { try { return JSON.parse($0).authorizeUrl || '' } catch { return '' } })()")>]
+let private parseAuthorizeUrl (body: string) : string = jsNative
+
+[<Emit("(document.querySelector($0)?.value || '')")>]
+let private panelInput (selector: string) : string = jsNative
+
 // --- Entry -----------------------------------------------------------------------------
 
 let private start () =
@@ -355,6 +378,56 @@ let private start () =
                     | Some a, Some h -> placeTitleCursor (PeerId.value peerId) a h
                     | _ -> ()
 
+        // The Claude connection panel's round-trips (Plan 08). Status is polled: once
+        // after connect-probe, after every action, and every few seconds while a flow
+        // awaits its callback (completion happens in the claude.ai tab, landing at the
+        // Manager — this tab learns of it only by asking).
+        let refreshClaude () =
+            Async.StartImmediate (
+                async {
+                    let! status = fetchClaudeStatus (PeerId.value peerId) |> Async.AwaitPromise
+                    if status.ok then
+                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine })
+                })
+        let rec pollClaudeWhileAwaiting () =
+            Async.StartImmediate (
+                async {
+                    do! Async.Sleep 3000
+                    match latestModel.Claude.Flow with
+                    | ClaudeAwaitingCode _ ->
+                        refreshClaude ()
+                        pollClaudeWhileAwaiting ()
+                    | _ -> ()
+                })
+        let claudeAction (run: unit -> Async<Result<string option, string>>) (scope: string) =
+            // One shape for every panel action: busy → run → error or refreshed status
+            // (and into awaiting-code when the action returned an authorize URL).
+            dispatchRef (ClaudeFlowMsg ClaudeBusy)
+            Async.StartImmediate (
+                async {
+                    match! run () with
+                    | Error reason -> dispatchRef (ClaudeFlowMsg (ClaudeError reason))
+                    | Ok (Some authorizeUrl) ->
+                        dispatchRef (ClaudeFlowMsg (ClaudeAwaitingCode (authorizeUrl, scope)))
+                        pollClaudeWhileAwaiting ()
+                    | Ok None ->
+                        dispatchRef (ClaudeFlowMsg ClaudeIdle)
+                        refreshClaude ()
+                })
+        let postClaudeAction (route: string) (scope: string) (code: string) (token: string) (expectUrl: bool) =
+            claudeAction
+                (fun () ->
+                    async {
+                        let! reply = postClaude route (claudeBody scope (PeerId.value peerId) code token) |> Async.AwaitPromise
+                        if not reply.ok then return Error reply.body
+                        elif expectUrl then
+                            match parseAuthorizeUrl reply.body with
+                            | "" -> return Error "no authorize url in the reply"
+                            | url -> return Ok (Some url)
+                        else return Ok None
+                    })
+                scope
+
         // The side effects a template can't derive from the model. Send routes to the one
         // implementation in `App.connect` (capture markdown, enqueue, seed the queue fragment).
         let actions : ViewActions =
@@ -371,7 +444,28 @@ let private start () =
                             let title = box (doc.getText "title")
                             let enc i = ProseMirror.relPosFromTypeIndex title i |> ProseMirror.encodeRel
                             { Field = Title; Pos = { Anchor = enc anchor; Head = enc head } })
-                    sendFocus focus }
+                    sendFocus focus
+              ClaudeConnect =
+                fun () ->
+                    let scope = match panelInput "[data-claude-scope]" with "" -> "mine" | s -> s
+                    postClaudeAction "/claude/begin" scope "" "" true
+              ClaudeComplete =
+                fun () ->
+                    // The scope selector is unmounted while awaiting; the flow carries it.
+                    let scope =
+                        match latestModel.Claude.Flow with
+                        | ClaudeAwaitingCode (_, scope) -> scope
+                        | _ -> "mine"
+                    match panelInput "[data-claude-code]" with
+                    | "" -> dispatchRef (ClaudeFlowMsg (ClaudeError "paste the code first"))
+                    | code -> postClaudeAction "/claude/complete" scope code "" false
+              ClaudePasteToken =
+                fun () ->
+                    match panelInput "[data-claude-token]" with
+                    | "" -> dispatchRef (ClaudeFlowMsg (ClaudeError "paste a token first"))
+                    | token -> postClaudeAction "/claude/token" (match panelInput "[data-claude-scope]" with "" -> "mine" | s -> s) "" token false
+              ClaudeDisconnect =
+                fun scope -> postClaudeAction "/claude/disconnect" scope "" "" false }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
@@ -423,6 +517,8 @@ let private start () =
             // signed in for this session (docs/plans/07 — peer-scoped secrets).
             navigateTo ("/login?peer_id=" + urlEncode (PeerId.value peerId))
         | Some probe ->
+            // Authenticated: the Claude panel's status is knowable now.
+            refreshClaude ()
             let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
             let channel = frameChannel dc
             let hello =

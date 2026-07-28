@@ -117,6 +117,47 @@ let private policyTests =
             | Permit -> failwith "expected Deny"
     ]
 
+// Connection-credential rows (Plan 08): every action — including the WRITE — is
+// permitted exactly where the caller IS the target scope's owner. This is the narrow
+// family that lets a sign-in store an owner-scoped credential; the generic secret rows
+// above (user-scope writes always deny) are unchanged.
+let private connActions = [ ConnectCredential; ReadConnectionStatus; ResolveCredential; DisconnectCredential ]
+let private onConnection subject action scope : AuthzRequest =
+    { Subject = subject; Action = ConnectionAction action; Resource = SecretResource { Scope = scope; Name = name } }
+
+let private connectionPolicyTests =
+    testList "connection policy rows" [
+        testCase "own session scope: every connection action permits; a sibling's denies" <| fun () ->
+            for action in connActions do
+                permits (sprintf "%A own" action) (onConnection callerA action (SessionScope sessionA))
+                denies (sprintf "%A sibling" action) (onConnection callerA action (SessionScope sessionB))
+
+        testCase "bound user: every connection action permits; unbound denies" <| fun () ->
+            for action in connActions do
+                permits (sprintf "%A bound" action) (onConnection callerA action (UserScope alice))
+                denies (sprintf "%A other user" action) (onConnection callerA action (UserScope bob))
+                denies (sprintf "%A before login" action) (onConnection callerANoUsers action (UserScope alice))
+
+        testCase "witnessed peer: every connection action permits; unwitnessed denies" <| fun () ->
+            for action in connActions do
+                permits (sprintf "%A witnessed" action) (onConnection callerAWithPeer action (PeerScope peer1))
+                denies (sprintf "%A other peer" action) (onConnection callerAWithPeer action (PeerScope peer2))
+
+        testCase "a session-less subject with a bound user permits (the future UI shape)" <| fun () ->
+            permits "connect without a session" (onConnection noSession ConnectCredential (UserScope alice))
+
+        testCase "a session-less subject cannot touch session scope" <| fun () ->
+            denies "no session" (onConnection noSession ConnectCredential (SessionScope sessionA))
+
+        testCase "CredentialOwner maps actors and scopes" <| fun () ->
+            Expect.equal (CredentialOwner.ofActor (UserRef alice)) (Some (UserOwner alice)) "user actor"
+            Expect.equal (CredentialOwner.ofActor (PeerRef peer1)) (Some (PeerOwner peer1)) "peer actor"
+            Expect.equal (CredentialOwner.ofActor ActorRef.Agent) None "agent owns nothing"
+            Expect.equal (CredentialOwner.ofActor ActorRef.System) None "system owns nothing"
+            Expect.equal (CredentialOwner.scope (UserOwner alice)) (UserScope alice) "user scope"
+            Expect.equal (CredentialOwner.scope (PeerOwner peer1)) (PeerScope peer1) "peer scope"
+    ]
+
 // --- Step 2: the envelope + wire codecs -------------------------------------------------
 
 open Yession.Manager
@@ -491,6 +532,36 @@ let private resolutionTests =
             }
     ]
 
+// --- Audit rendering (incl. the Plan 08 PeerScope fix) -----------------------------------
+// `Audit.scopeAttrs`/`injectObserver` predate PeerScope and threw MatchFailureException on
+// peer-scoped entries; peer-scoped connections make those paths routine.
+
+let private auditTests =
+    testList "audit records" [
+        testCase "a peer-scoped secret op renders scope=peer" <| fun () ->
+            let record = SecretStore.Audit.secretSet sessionA { Scope = PeerScope peer1; Name = name } true
+            let line = SecretStore.Audit.format record
+            Expect.isTrue (line.Contains "yession.secret.scope=peer") "peer scope named"
+            Expect.isTrue (line.Contains "yession.secret.scope_key=browser-1") "peer id named"
+
+        testCase "the injection observer handles a peer-scoped hit" <| fun () ->
+            let mutable seen : SecretStore.Audit.Record list = []
+            let observe = SecretStore.Audit.injectObserver (fun r -> seen <- r :: seen)
+            observe sessionA name (SecretStore.SecretResolution.InjectedFromScope (PeerScope peer1))
+            match seen with
+            | [ record ] -> Expect.isTrue ((SecretStore.Audit.format record).Contains "yession.inject.source=peer") "peer source"
+            | other -> failwithf "expected one record, got %d" (List.length other)
+
+        testCase "a connection-action deny renders through the shared record" <| fun () ->
+            let record =
+                SecretStore.Audit.authzDeny
+                    sessionA
+                    (ConnectionAction ConnectCredential)
+                    (SecretResource { Scope = UserScope alice; Name = name })
+                    "user is not signed in to this session"
+            Expect.isTrue ((SecretStore.Audit.format record).Contains "ConnectCredential") "names the inner action"
+    ]
+
 // --- Step 6: the secrets control routes over real HTTP ([Ports]) ------------------------
 // A bare control server (the Phase4 pattern) with a known caller table and the SAME
 // pre-authorized handlers the Manager composes (ProcessManager.secretsApiFor), driven
@@ -516,6 +587,8 @@ let private startControlServer (callers: (string * Control.ControlCaller) list) 
                         (fun _ -> fun () -> ())
                         dummyRegister
                         api
+                        None
+                        (fun _ _ -> fun () -> ())
                         onUnauthorized
                         req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
@@ -657,11 +730,13 @@ let tests =
     testList "Secrets" [
         constructorTests
         policyTests
+        connectionPolicyTests
         envelopeTests
         wireTests
         cipherTests
         storeTests
         resolutionTests
+        auditTests
         Tag.needs "OS keyring" [ Tag.Keyring ] (fun () -> keyringTests)
         Tag.needs "Secrets control routes" [ Tag.Ports ] (fun () -> routeTests)
     ]
