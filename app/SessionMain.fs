@@ -123,15 +123,77 @@ let private usageProbeAgent : RunAgent =
                           Model = Some "probe-model" })
         }
 
-// The real agent runs only when the process has credentials; without them the session
-// still works as a human-only collaborative session.
-let private runAgent =
+// Ambient credentials (the documented last resort, and how CI's LiveAgent tier feeds
+// the agent): inherited from the Manager's shell, shared by every session and actor.
+let private envCreds =
+    Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> ""
+
+// The session's live view of connected credentials (Plan 08): fed by the Manager's
+// connection-status stream, metadata only. Availability is DYNAMIC — a sign-in
+// mid-session flips the agent gate without a relaunch.
+let mutable private connectionStatus : Map<SecretId, ConnectionKind> = Map.empty
+
+let private connectionsClient =
+    controlChannel |> Option.map (fun (url, secret) -> ControlClient.connections url secret)
+
+/// Per-turn credential dispatch (Plan 08): resolve the credential the TURN ACTOR runs
+/// on — the session's own explicit credential first, then the actor's — fresh from the
+/// Manager (which lazily refreshes a due OAuth grant). Ambient env is the last resort;
+/// with neither, the turn fails gracefully with a pointer at the Connections panel.
+let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent =
+    fun context capabilities signal onChunk ->
+        async {
+            let targets =
+                ClaudeConnection.turnTargets sessionId context.CurrentMessage.Author
+                |> List.filter (fun target -> Map.containsKey target connectionStatus)
+            match connectionsClient, targets with
+            | Some client, target :: _ ->
+                match! client.Resolve target with
+                | Ok (kind, value) ->
+                    return! inner (Some (ClaudeConnection.envVarFor kind value)) context capabilities signal onChunk
+                | Error e ->
+                    if envCreds then return! inner None context capabilities signal onChunk
+                    else return AgentFailed (sprintf "could not use the connected Claude account: %s" e)
+            | _ ->
+                if envCreds then return! inner None context capabilities signal onChunk
+                else
+                    return
+                        AgentFailed (
+                            sprintf
+                                "no Claude account connected for %s — open Connections to sign in"
+                                (ClaudeConnection.actorLabel context.CurrentMessage.Author))
+        }
+
+/// A built-in probe (`YESSION_AGENT=credential-probe`): completes immediately, naming
+/// the env var the dispatcher resolved (or `env` for the ambient fallback) — the
+/// deterministic cross-process proof that per-actor credential dispatch worked, same
+/// convention as `diagnostic`/`usage-probe`.
+let private credentialProbe (credential: (string * string) option) : RunAgent =
+    fun _ _ _ onChunk ->
+        async {
+            let body =
+                match credential with
+                | Some (name, _) -> sprintf "credential: %s" name
+                | None -> "credential: env"
+            onChunk { Text = body }
+            return AgentCompleted (body, None)
+        }
+
+// The agent gate, read at every drain: built-in probes are always on; the real agent
+// (and the probe below) runs when ambient credentials exist OR a relevant connection
+// is live. Without either the session still works as a human-only collaborative
+// session — messages drain to `MessageSent` with no turn.
+let private connectedSomewhere () =
+    connectionStatus |> Map.exists (fun target _ -> target.Name = ClaudeConnection.secretName)
+
+let private runAgent () : RunAgent option =
     match Interop.envOr "YESSION_AGENT" "" with
     | "diagnostic" -> Some diagnosticAgent
     | "usage-probe" -> Some usageProbeAgent
+    | "credential-probe" ->
+        if envCreds || connectedSomewhere () then Some (dispatching credentialProbe) else None
     | _ ->
-        if Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> "" then Some Agent.run
-        else None
+        if envCreds || connectedSomewhere () then Some (dispatching Agent.runWith) else None
 
 [<Fable.Core.Emit("(process.stdin.on('close', $0), process.stdin.on('end', $0), process.stdin.resume())")>]
 let private onStdinClosed (handler: unit -> unit) : unit = Fable.Core.Util.jsNative
@@ -141,7 +203,24 @@ Async.StartImmediate (
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
-        let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp sessionId auth port
+        // The connection-status stream (Plan 08): each frame replaces the whole cache
+        // (snapshot semantics), flipping the agent gate and the /claude status as
+        // credentials connect and disconnect. Best-effort like the other reverse legs.
+        match controlChannel with
+        | Some (url, secret) ->
+            ControlClient.subscribeConnections url secret (fun list ->
+                connectionStatus <-
+                    list.Connections |> List.map (fun s -> s.Id, s.Kind) |> Map.ofList)
+            |> ignore
+        | None -> ()
+        // The browser-facing Claude connection surface: only meaningful with both a
+        // login surface (cookie identity) and a control channel to broker through.
+        let claudeRoutes =
+            match auth, connectionsClient with
+            | Some a, Some client ->
+                Some (ClaudeConnection.routes sessionId a client (fun target -> Map.tryFind target connectionStatus))
+            | _ -> None
+        let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

@@ -155,6 +155,66 @@ let secretsCapabilities (baseUrl: string) (secret: string) (sessionId: SessionId
                 (ControlWire.toString ControlWire.deleteSecretRequest { Scope = scope; Name = name })
                 (ControlWire.fromString ControlWire.deleteSecretResponse >> Result.map (fun r -> r.Deleted)) }
 
+/// The session side of the Manager's connection broker (Plan 08). Service-agnostic like
+/// the wire: callers supply targets and provider endpoints as data. `Resolve` is the one
+/// value-returning call — an agent turn fetches the credential it runs on. Failures
+/// (including policy 403s, with the Manager's reason) are values, never exceptions.
+type SessionConnections =
+    { Begin : ControlWire.ConnectionBeginRequest -> Async<Result<ControlWire.ConnectionBeginResponse, string>>
+      Complete : SecretId -> string -> Async<Result<unit, string>>
+      Put : SecretId -> string -> Async<Result<unit, string>>
+      Disconnect : SecretId -> Async<Result<bool, string>>
+      Resolve : SecretId -> Async<Result<ConnectionKind * string, string>> }
+
+let connections (baseUrl: string) (secret: string) : SessionConnections =
+    let post (route: string) (body: string) (decode: string -> Result<'a, string>) : Async<Result<'a, string>> =
+        async {
+            try
+                let! reply = postJsonReply (sprintf "%s/control/connections/%s" baseUrl route) secret body |> Async.AwaitPromise
+                if reply.status = 200 then return decode reply.body
+                else return Error (sprintf "connections %s refused (%d): %s" route reply.status reply.body)
+            with e ->
+                return Error (sprintf "control unreachable: %s" e.Message)
+        }
+    { Begin =
+        fun request ->
+            post "begin"
+                (ControlWire.toString ControlWire.connectionBeginRequest request)
+                (ControlWire.fromString ControlWire.connectionBeginResponse)
+      Complete =
+        fun target code ->
+            post "complete"
+                (ControlWire.toString ControlWire.connectionCompleteRequest { Target = target; Code = code })
+                (fun _ -> Ok ())
+      Put =
+        fun target value ->
+            post "put"
+                (ControlWire.toString ControlWire.connectionPutRequest { Target = target; Value = value })
+                (fun _ -> Ok ())
+      Disconnect =
+        fun target ->
+            post "disconnect"
+                (ControlWire.toString ControlWire.connectionDisconnectRequest { Target = target })
+                (ControlWire.fromString ControlWire.connectionDisconnectResponse >> Result.map (fun r -> r.Disconnected))
+      Resolve =
+        fun target ->
+            post "resolve"
+                (ControlWire.toString ControlWire.connectionResolveRequest { Target = target })
+                (ControlWire.fromString ControlWire.connectionResolveResponse >> Result.map (fun r -> r.Kind, r.Value)) }
+
+/// Subscribe to the Manager's connection-status stream (the third reverse leg). The
+/// caller's current readable statuses arrive immediately, then a fresh list on every
+/// change; metadata only, never values. A malformed frame is logged and skipped.
+/// Returns a cancel that stops the subscription and closes the connection.
+let subscribeConnections (baseUrl: string) (secret: string) (onList: ConnectionStatusList -> unit) : unit -> unit =
+    openEventStream
+        (sprintf "%s/control/connections" baseUrl)
+        secret
+        (fun data ->
+            match ControlWire.fromString ControlWire.connectionStatusList data with
+            | Ok list -> onList list
+            | Error e -> eprintfn "connection status decode failed: %s" e)
+
 /// Dynamic client registration: bind this launch's OAuth client to its control secret.
 /// Called after the session's server listens — the redirect URI needs the OS-assigned
 /// port. NOT best-effort: a session that cannot register cannot authorize users, so the

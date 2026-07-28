@@ -212,7 +212,7 @@ let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 /// Start a bare control server over the given secret→(session, capabilities) table, plus
 /// the real notification and MCP hubs wired to their SSE routes. Returns both hubs so a
 /// test can push down the same wires the Manager uses.
-let private startControlServer (secrets: (string * SessionId * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub * McpHub.McpHub> =
+let private startControlServer (secrets: (string * SessionId * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * McpHub.McpHub> =
     async {
         let table =
             secrets
@@ -226,7 +226,7 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
         let registerClient _ (sessionId: SessionId) _ : Yession.Oidc.RegisterClientResponse =
             { ClientId = SessionId.value sessionId; ClientSecret = "unused"; Issuer = "http://unused" }
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None ignore req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> fun () -> ()) ignore req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler

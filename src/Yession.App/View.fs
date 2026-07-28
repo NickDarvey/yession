@@ -30,7 +30,17 @@ type ViewActions =
       /// Broadcast the local selection in the title as `(anchor, head)` UTF-16 indices
       /// (`None` = caret left the title), so collaborators see the cursor. The Browser turns
       /// the indices into relative positions and relays them; ephemeral presence.
-      ReportTitleSelection : (int * int) option -> unit }
+      ReportTitleSelection : (int * int) option -> unit
+      /// Claude connection panel (Plan 08). Imperative because they read panel inputs and
+      /// drive the /claude round-trips; the reducer only folds the resulting messages.
+      /// Begin the sign-in flow for the scope in the panel's selector.
+      ClaudeConnect : unit -> unit
+      /// Complete a flow with the pasted `code#state` from the panel's code input.
+      ClaudeComplete : unit -> unit
+      /// Store the pasted setup-token/API key from the panel's token input.
+      ClaudePasteToken : unit -> unit
+      /// Disconnect the credential stored for a scope choice ("session" | "mine").
+      ClaudeDisconnect : string -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -39,7 +49,11 @@ module ViewActions =
         { SendDraft = ignore
           Interrupt = ignore
           ToggleNav = ignore
-          ReportTitleSelection = ignore }
+          ReportTitleSelection = ignore
+          ClaudeConnect = ignore
+          ClaudeComplete = ignore
+          ClaudePasteToken = ignore
+          ClaudeDisconnect = ignore }
 
 module View =
 
@@ -162,7 +176,52 @@ module View =
               {entries}
             </section>"""
 
-    let private sidebar (actions: ViewActions) (model: ClientModel) : TemplateResult =
+    /// The Claude connection panel (Plan 08): status per sign-in scope, the OAuth flow
+    /// (open claude.ai → approve → callback lands at the Manager, or paste the code),
+    /// and the paste-a-token fallback.
+    let private claudeSection (actions: ViewActions) (dispatch: ClientMsg -> unit) (claude: ClaudeViewState) : TemplateResult =
+        let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
+            match kind with
+            | Some kind ->
+                html $"""<div class="{Style.sideRow}" data-claude-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.cls [ Style.btnDanger; Style.btnIcon ]}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>✕</button></div>"""
+            | None -> html $""""""
+        let controls =
+            match claude.Flow with
+            | ClaudeBusy ->
+                html $"""<span class="{Style.statusRun}" data-claude-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
+            | ClaudeAwaitingCode (url, _) ->
+                html $"""
+                    <a class="{Style.btnPrimary}" href="{url}" target="_blank" rel="noreferrer" data-claude-authorize>Approve on claude.ai</a>
+                    <span class="{Style.label}">then return here — or paste the code:</span>
+                    <input type="text" class="{Style.titleInput}" data-claude-code placeholder="code#state" />
+                    <div class="{Style.sideRow}">
+                      <button type="button" class="{Style.btnPrimary}" data-claude-complete @click={Ev(fun _ -> actions.ClaudeComplete ())}>Complete</button>
+                      <button type="button" class="{Style.btn}" data-claude-cancel @click={Ev(fun _ -> dispatch (ClaudeFlowMsg ClaudeIdle))}>Cancel</button>
+                    </div>"""
+            | ClaudeIdle | ClaudeError _ ->
+                html $"""
+                    <select class="{Style.titleInput}" data-claude-scope aria-label="Sign-in scope">
+                      <option value="mine">All my sessions</option>
+                      <option value="session">This session only</option>
+                    </select>
+                    <button type="button" class="{Style.btnPrimary}" data-claude-connect @click={Ev(fun _ -> actions.ClaudeConnect ())}>Connect Claude</button>
+                    <span class="{Style.label}">or paste a token</span>
+                    <input type="password" class="{Style.titleInput}" data-claude-token placeholder="sk-ant-…" />
+                    <button type="button" class="{Style.btn}" data-claude-save-token @click={Ev(fun _ -> actions.ClaudePasteToken ())}>Save token</button>"""
+        let error =
+            match claude.Flow with
+            | ClaudeError reason -> html $"""<span class="{Style.statusErr}" data-claude-error>{reason}</span>"""
+            | _ -> html $""""""
+        html $"""
+            <section class="{Style.sideSection}" data-claude-panel>
+              <span class="{Style.label}">claude</span>
+              {connectedRow "all my sessions" "mine" claude.Status.MineCredential}
+              {connectedRow "this session" "session" claude.Status.SessionCredential}
+              {error}
+              {controls}
+            </section>"""
+
+    let private sidebar (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         html $"""
             <div class="{Style.scrim}" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}></div>
             <aside class="{Style.sidebar}">
@@ -170,6 +229,7 @@ module View =
               {connectionSection model}
               {peopleSection model}
               {environmentSection model.Environment}
+              {claudeSection actions dispatch model.Claude}
               {commandsSection model.Commands}
               <div class="flex-1"></div>
               <span class="{Style.label} pt-4">local first · every fact is an event</span>
@@ -334,7 +394,7 @@ module View =
     /// The client shell, rendered into `#app`.
     let view (actions: ViewActions) (model: ClientModel) (dispatch: ClientMsg -> unit) : TemplateResult =
         html $"""
-            {sidebar actions model}
+            {sidebar actions dispatch model}
             <div class="{Style.mainColumn}">
               {header actions dispatch model}
               {conversation model.Conversation}

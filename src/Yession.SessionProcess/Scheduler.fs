@@ -35,11 +35,14 @@ module Scheduler =
     /// Manager-verified user behind the peer when one exists, the peer itself otherwise
     /// — drafts and queue entries stay keyed by `PeerId` (connection facts); attribution
     /// is applied here, at the durable-append boundary.
+    /// `runAgent` is a THUNK, read at each drain (Plan 08): agent availability is
+    /// dynamic — a credential connected mid-session enables turns without a relaunch,
+    /// and `None` at drain time means messages append as `MessageSent` with no turn.
     let create
         (sessionId: SessionId)
         (doc: Yjs.Y.Doc)
         (log: EventLog<SessionEvent>)
-        (runAgent: RunAgent option)
+        (runAgent: unit -> RunAgent option)
         (capabilitiesFor: AgentTurnId -> AgentCapabilities)
         // Telemetry sink (Plan 04): passed straight to `AgentTurn.run`. Default `ignore`.
         (emitUsage: AgentTurnId -> AgentUsage -> unit)
@@ -103,7 +106,7 @@ module Scheduler =
                             //    the removal relays to every peer like any update.
                             SyncedStateSync.removeQueued doc plan.Removals
                             // 3. Run one coalesced turn, triggered by the batch tail.
-                            match runAgent, lastMessage with
+                            match runAgent (), lastMessage with
                             | Some agent, Some trigger ->
                                 generation <- generation + 1
                                 let turn =

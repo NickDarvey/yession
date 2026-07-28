@@ -189,7 +189,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
             DocSync.applyRemote processDoc payload
             DocSync.applyRemote shadowDoc payload)
         let sched =
-            Scheduler.create sessionId processDoc log (Some runner)
+            Scheduler.create sessionId processDoc log (fun () -> Some runner)
                 (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId PeerRef (consumedNow ())
         scheduler <- sched
         let thisProcess = processDoc

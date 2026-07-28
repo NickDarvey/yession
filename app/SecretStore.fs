@@ -282,6 +282,9 @@ module Audit =
         | UserScope user ->
             [ "yession.secret.scope", StringValue "user"
               "yession.secret.scope_key", StringValue (UserId.value user) ]
+        | PeerScope peer ->
+            [ "yession.secret.scope", StringValue "peer"
+              "yession.secret.scope_key", StringValue (PeerId.value peer) ]
 
     let private session (sessionId: SessionId) = "yession.session.id", StringValue (SessionId.value sessionId)
     let private outcome ok = "yession.outcome", StringValue (if ok then "ok" else "failed")
@@ -304,7 +307,14 @@ module Audit =
             ([ session sessionId; "yession.secret.count", IntValue count ] @ scopeAttrs scope)
             "secret list"
 
-    let authzDeny (sessionId: SessionId) (action: SecretAction) (resource: AuthzResource) (reason: string) : Record =
+    // Render the inner case name only, so existing secrets log lines keep their wording
+    // now that connection actions deny through the same record.
+    let private actionLabel (action: AuthzAction) : string =
+        match action with
+        | SecretAction a -> sprintf "%A" a
+        | ConnectionAction a -> sprintf "%A" a
+
+    let authzDeny (sessionId: SessionId) (action: AuthzAction) (resource: AuthzResource) (reason: string) : Record =
         let resourceAttrs =
             match resource with
             | SecretResource id ->
@@ -312,10 +322,36 @@ module Audit =
             | SecretCollection scope -> scopeAttrs scope
         make "yession.authz.deny" Severity.warn
             ([ session sessionId
-               "yession.authz.action", StringValue (sprintf "%A" action)
+               "yession.authz.action", StringValue (actionLabel action)
                "yession.authz.reason", StringValue reason ]
              @ resourceAttrs)
-            (sprintf "secrets: DENY %A for session %s: %s" action (SessionId.value sessionId) reason)
+            (sprintf "secrets: DENY %s for session %s: %s" (actionLabel action) (SessionId.value sessionId) reason)
+
+    // Connection-broker records (Plan 08): lifecycle of Manager-brokered external-service
+    // credentials. Identifiers, scopes, and kinds only — the observation type these adapt
+    // (`Broker.BrokerObservation`) cannot carry token material.
+    let private connectionAttrs (id: SecretId) : (string * LogValue) list =
+        ("yession.secret.name", StringValue (SecretName.value id.Name)) :: scopeAttrs id.Scope
+
+    let connectionConnected (id: SecretId) (kind: string) : Record =
+        make "yession.connection.connected" Severity.info
+            (("yession.connection.kind", StringValue kind) :: connectionAttrs id)
+            "connection credential stored"
+
+    let connectionDisconnected (id: SecretId) : Record =
+        make "yession.connection.disconnected" Severity.info (connectionAttrs id) "connection credential removed"
+
+    let connectionResolved (id: SecretId) (kind: string) (refreshed: bool) : Record =
+        make "yession.connection.resolved" Severity.info
+            ([ "yession.connection.kind", StringValue kind
+               "yession.connection.refreshed", StringValue (if refreshed then "true" else "false") ]
+             @ connectionAttrs id)
+            "connection credential resolved for an agent turn"
+
+    let connectionRefreshFailed (id: SecretId) (reason: string) : Record =
+        make "yession.connection.refresh_failed" Severity.warn
+            (("yession.connection.reason", StringValue reason) :: connectionAttrs id)
+            "connection credential refresh failed"
 
     let inject (sessionId: SessionId) (name: SecretName) (source: string) : Record =
         make "yession.secret.inject" Severity.info
@@ -406,5 +442,6 @@ module Audit =
             match outcome with
             | SecretResolution.InjectedFromScope (SessionScope _) -> sink (inject sessionId name "session")
             | SecretResolution.InjectedFromScope (UserScope _) -> sink (inject sessionId name "user")
+            | SecretResolution.InjectedFromScope (PeerScope _) -> sink (inject sessionId name "peer")
             | SecretResolution.InjectedFromFallback -> sink (inject sessionId name "env")
             | SecretResolution.InjectMissed reason -> sink (injectMiss sessionId name reason)

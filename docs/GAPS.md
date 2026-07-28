@@ -28,10 +28,13 @@ discovers it in production. Items are roughly ordered by how much they matter.
   issuer the proxy's origin, but session ports are OS-assigned and loopback-bound —
   proxying *sessions* through the sidecar (and their redirect URIs) is the remaining
   topology work for fully remote use.
-- **No user surface for user-scoped secrets yet** (deferred from Plan 07): the policy
-  rows for a session-less, user-only `AuthzSubject` (`Session = None`) and a `/secrets`
-  management-UI page are not implemented; sessions still cannot write `UserScope`, and
-  nothing else can either.
+- **User-scoped secrets have exactly one writer: the connection broker**
+  ([Plan 08](plans/08-connections-and-claude-auth.md)). The Claude sign-in stores an
+  owner-scoped (user/peer) credential through the narrow `ConnectionAction` policy
+  family; the GENERIC `/secrets` write surface for users is still absent — sessions
+  still cannot `SetSecret` on `UserScope`, and there is no management-UI secrets page.
+  The policy rows for a session-less, user-only `AuthzSubject` (`Session = None`) exist
+  and are pinned by tests, but nothing constructs that subject yet.
 - **No transport encryption guarantees beyond WebRTC/DTLS.** Everything binds
   127.0.0.1; loopback HTTP is the RFC 8252 pattern, but nothing here is LAN-safe
   without the operator's proxy in front.
@@ -65,10 +68,15 @@ discovers it in production. Items are roughly ordered by how much they matter.
     headless servers): secrets die with the Manager; loud at boot, never a plaintext
     key file. (Tests cover the real keyring via the `Keyring` capability —
     `check Keyring` self-wraps with dbus + gnome-keyring when headless.)
-  - **No shared/Manager-global scope**, and **no user surface yet**: sessions cannot
-    write user-scoped secrets; the Claude/GitHub sign-in strategies are the intended
-    writers. User↔launch and peer↔launch bindings are launch-lifetime (re-login
-    re-forms them).
+  - **No shared/Manager-global scope.** User-scoped GENERIC secrets still have no
+    writer (the Plan 08 connection broker writes only its own credential entries,
+    through its own policy family). User↔launch and peer↔launch bindings are
+    launch-lifetime (re-login re-forms them).
+  - **One deliberate exception to "no value-returning route"**:
+    `/control/connections/resolve` (Plan 08) returns a connection credential's current
+    value to the calling session — an agent turn needs the token in-process, unlike
+    container env injection. Policy-gated to targets whose scope the caller is bound
+    to; refresh tokens still never leave the Manager.
   - **`LocalProcessBackend` still performs no env-var injection**; the process-env
     fallback remains (lowest precedence, shadowed by any store entry).
   - **No KEK rotation/recovery** (a lost credential entry orphans the store loudly;
@@ -115,6 +123,12 @@ discovers it in production. Items are roughly ordered by how much they matter.
   child's default handler only logs the count, and no MCP client actually consumes the
   list. Discovering real MCP services and exposing their tools to agent turns is the
   follow-up; the tool set is currently Manager-global (not scoped per session).
+- **A third reverse leg — connection statuses — has a real producer**
+  ([Plan 08](plans/08-connections-and-claude-auth.md)): `GET /control/connections`
+  streams each launch its readable connection metadata (snapshot on subscribe, fresh
+  list on every credential change or new binding), and the session's agent gate and
+  `/claude` status surface consume it. The hub mechanism is now generic
+  (`NotificationHub<'n>`) and serves all three legs.
 - **Peer-to-peer is star-shaped through the Process.** Clients sync Yjs state via the
   Session Process relay, not directly with each other; y-webrtc-style meshes are not
   used.
@@ -187,8 +201,20 @@ discovers it in production. Items are roughly ordered by how much they matter.
   safely discarded, but the UX flickers).
 - **No repository integration** (`.yession.yml`, clone, commit/push) — explicitly later
   phases per the delivery plan.
+- **Per-user agent credentials landed** ([Plan 08](plans/08-connections-and-claude-auth.md)):
+  a human signs into their Claude account from the session's Connections panel — "this
+  session only" (`SessionScope`) or "all my sessions" (their user/peer scope) — the
+  Manager brokers the OAuth exchange as pure standards (it never learns the provider),
+  and each agent turn runs on the TURN ACTOR's credential (session-scoped ▸ actor's
+  own ▸ ambient env), resolved fresh per turn with Manager-side lazy refresh.
+  Remaining, deliberate: the ambient `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN`
+  process env stays as the documented last resort (it is how CI's LiveAgent tier
+  feeds the agent, and it applies to ANY actor); a refresh failure surfaces only as
+  the turn's failure (no panel-level health indicator); the panel's status is polled
+  by the browser (the SESSION learns of changes live over its control stream, the
+  open browser tab re-asks).
 - **Live-path verification is credential-gated by design.** Without
-  `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` the two live tests self-report skipped;
+  `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` the live tests self-report skipped;
   a dedicated low-privilege key in CI would exercise them on every merge
   (recommended). `YESSION_CLAUDE_PATH` matters in sandboxes that kill the SDK's
   vendored binary.

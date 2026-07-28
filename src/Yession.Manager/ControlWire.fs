@@ -344,6 +344,162 @@ module ControlWire =
             Decode.object (fun get ->
                 { DeleteSecretResponse.Deleted = get.Required.Field "deleted" Decode.bool }) }
 
+    // --- connections (Plan 08) -----------------------------------------------------------
+    // The Manager-brokered external-service credentials. The wire is service-agnostic BY
+    // DESIGN: a begin request carries the provider's endpoints as data, so the Manager
+    // never learns which service it brokered. Exactly ONE response shape can carry a
+    // credential value — `ConnectionResolveResponse`, the answer to the per-turn resolve —
+    // and NO shape can carry a refresh token (that type lives in `BrokerState`, which has
+    // no codec here).
+
+    /// Everything the standards need to begin an authorization-code + PKCE flow, as data.
+    /// `AuthorizeUrl` may already carry provider-specific query params; the broker appends
+    /// only the standard ones.
+    type ConnectionBeginRequest =
+        { Target : SecretId
+          AuthorizeUrl : string
+          TokenUrl : string
+          ClientId : string
+          Scopes : string }
+
+    type ConnectionBeginResponse = { AuthorizeUrl : string; State : string }
+
+    /// Manual completion (the paste path): the pasted payload is `code` or `code#state`.
+    /// The target names which begun flow this completes — the broker checks it matches.
+    type ConnectionCompleteRequest = { Target : SecretId; Code : string }
+
+    /// Store a pasted static token/key verbatim.
+    type ConnectionPutRequest = { Target : SecretId; Value : string }
+
+    type ConnectionDisconnectRequest = { Target : SecretId }
+    type ConnectionDisconnectResponse = { Disconnected : bool }
+
+    type ConnectionResolveRequest = { Target : SecretId }
+    type ConnectionResolveResponse = { Kind : ConnectionKind; Value : string }
+
+    let private secretId : Codec<SecretId> =
+        { Encode =
+            fun (id: SecretId) ->
+                Encode.object
+                    [ "scope", SecretsCodec.secretScope.Encode id.Scope
+                      "name", secretName.Encode id.Name ]
+          Decode =
+            Decode.object (fun get ->
+                { SecretId.Scope = get.Required.Field "scope" SecretsCodec.secretScope.Decode
+                  SecretId.Name = get.Required.Field "name" secretName.Decode }) }
+
+    let connectionKind : Codec<ConnectionKind> =
+        { Encode =
+            (fun k ->
+                match k with
+                | OAuthConnection -> Encode.string "oauth"
+                | StaticConnection -> Encode.string "static")
+          Decode =
+            Decode.string
+            |> Decode.andThen (function
+                | "oauth" -> Decode.succeed OAuthConnection
+                | "static" -> Decode.succeed StaticConnection
+                | other -> Decode.fail (sprintf "Unknown connection kind: %s" other)) }
+
+    let connectionStatus : Codec<ConnectionStatus> =
+        { Encode =
+            fun (s: ConnectionStatus) ->
+                Encode.object
+                    [ "id", secretId.Encode s.Id
+                      "kind", connectionKind.Encode s.Kind
+                      "updatedAt", Codec.timestamp.Encode s.UpdatedAt ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionStatus.Id = get.Required.Field "id" secretId.Decode
+                  ConnectionStatus.Kind = get.Required.Field "kind" connectionKind.Decode
+                  ConnectionStatus.UpdatedAt = get.Required.Field "updatedAt" Codec.timestamp.Decode }) }
+
+    /// The `/control/connections` SSE frame: every connection the receiving launch may
+    /// currently read. Metadata only — the type cannot carry a value.
+    let connectionStatusList : Codec<ConnectionStatusList> =
+        { Encode =
+            fun (l: ConnectionStatusList) ->
+                Encode.object [ "connections", l.Connections |> List.map connectionStatus.Encode |> Encode.list ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionStatusList.Connections =
+                    get.Required.Field "connections" (Decode.list connectionStatus.Decode) }) }
+
+    let connectionBeginRequest : Codec<ConnectionBeginRequest> =
+        { Encode =
+            fun (r: ConnectionBeginRequest) ->
+                Encode.object
+                    [ "target", secretId.Encode r.Target
+                      "authorizeUrl", Encode.string r.AuthorizeUrl
+                      "tokenUrl", Encode.string r.TokenUrl
+                      "clientId", Encode.string r.ClientId
+                      "scopes", Encode.string r.Scopes ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionBeginRequest.Target = get.Required.Field "target" secretId.Decode
+                  ConnectionBeginRequest.AuthorizeUrl = get.Required.Field "authorizeUrl" Decode.string
+                  ConnectionBeginRequest.TokenUrl = get.Required.Field "tokenUrl" Decode.string
+                  ConnectionBeginRequest.ClientId = get.Required.Field "clientId" Decode.string
+                  ConnectionBeginRequest.Scopes = get.Required.Field "scopes" Decode.string }) }
+
+    let connectionBeginResponse : Codec<ConnectionBeginResponse> =
+        { Encode =
+            fun (r: ConnectionBeginResponse) ->
+                Encode.object
+                    [ "authorizeUrl", Encode.string r.AuthorizeUrl
+                      "state", Encode.string r.State ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionBeginResponse.AuthorizeUrl = get.Required.Field "authorizeUrl" Decode.string
+                  ConnectionBeginResponse.State = get.Required.Field "state" Decode.string }) }
+
+    let connectionCompleteRequest : Codec<ConnectionCompleteRequest> =
+        { Encode =
+            fun (r: ConnectionCompleteRequest) ->
+                Encode.object [ "target", secretId.Encode r.Target; "code", Encode.string r.Code ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionCompleteRequest.Target = get.Required.Field "target" secretId.Decode
+                  ConnectionCompleteRequest.Code = get.Required.Field "code" Decode.string }) }
+
+    let connectionPutRequest : Codec<ConnectionPutRequest> =
+        { Encode =
+            fun (r: ConnectionPutRequest) ->
+                Encode.object [ "target", secretId.Encode r.Target; "value", Encode.string r.Value ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionPutRequest.Target = get.Required.Field "target" secretId.Decode
+                  ConnectionPutRequest.Value = get.Required.Field "value" Decode.string }) }
+
+    let connectionDisconnectRequest : Codec<ConnectionDisconnectRequest> =
+        { Encode = fun (r: ConnectionDisconnectRequest) -> Encode.object [ "target", secretId.Encode r.Target ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionDisconnectRequest.Target = get.Required.Field "target" secretId.Decode }) }
+
+    let connectionDisconnectResponse : Codec<ConnectionDisconnectResponse> =
+        { Encode = fun (r: ConnectionDisconnectResponse) -> Encode.object [ "disconnected", Encode.bool r.Disconnected ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionDisconnectResponse.Disconnected = get.Required.Field "disconnected" Decode.bool }) }
+
+    let connectionResolveRequest : Codec<ConnectionResolveRequest> =
+        { Encode = fun (r: ConnectionResolveRequest) -> Encode.object [ "target", secretId.Encode r.Target ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionResolveRequest.Target = get.Required.Field "target" secretId.Decode }) }
+
+    let connectionResolveResponse : Codec<ConnectionResolveResponse> =
+        { Encode =
+            fun (r: ConnectionResolveResponse) ->
+                Encode.object
+                    [ "kind", connectionKind.Encode r.Kind
+                      "value", Encode.string r.Value ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionResolveResponse.Kind = get.Required.Field "kind" connectionKind.Decode
+                  ConnectionResolveResponse.Value = get.Required.Field "value" Decode.string }) }
+
     let toString (codec: Codec<'a>) (value: 'a) : string = codec.Encode value |> Encode.toString 0
 
     let fromString (codec: Codec<'a>) (json: string) : Result<'a, string> = Decode.fromString codec.Decode json

@@ -10,6 +10,7 @@
     <Compile Include="EventLog.fs" />
     <Compile Include="Environment.fs" />
     <Compile Include="Secrets.fs" />
+    <Compile Include="Connections.fs" />
     <Compile Include="Authorization.fs" />
     <Compile Include="Notifications.fs" />
     <Compile Include="Mcp.fs" />

@@ -23,6 +23,27 @@ type EventConsumerState =
 
 type AgentViewState = { ActiveTurn : AgentTurnId option }
 
+/// Where the Claude sign-in flow is (Plan 08). `ClaudeAwaitingCode` = the authorize
+/// tab is open; completion may land at the Manager's callback (the panel polls status)
+/// or arrive as a pasted code.
+type ClaudeFlowState =
+    | ClaudeIdle
+    /// `scope` remembers the sign-in choice ("session" | "mine") the flow began with,
+    /// so a pasted-code completion targets the same credential slot.
+    | ClaudeAwaitingCode of authorizeUrl: string * scope: string
+    | ClaudeBusy
+    | ClaudeError of string
+
+/// What the /claude status probe reported: kind label ("oauth"/"static") per sign-in
+/// scope, when connected.
+type ClaudeStatus =
+    { SessionCredential : string option
+      MineCredential : string option }
+
+type ClaudeViewState =
+    { Status : ClaudeStatus
+      Flow : ClaudeFlowState }
+
 /// A remote peer's live caret+selection: the peer's name (for the cursor label) plus its
 /// `Focus` — which collaborative field it is in and its position there. Ephemeral presence,
 /// delivered over `Presence` frames — never synced through Yjs, never durable. The peer's
@@ -45,7 +66,9 @@ type ClientModel =
       /// The session environment's UI status, folded from lifecycle events (Step 12).
       Environment   : EnvironmentStatus
       /// The read-only command log, folded from command events (Step 13).
-      Commands      : CommandLog }
+      Commands      : CommandLog
+      /// The Claude connection panel's state (Plan 08), driven by the /claude routes.
+      Claude        : ClaudeViewState }
 
 /// Messages that drive the client model. Connection-lifecycle messages are produced by
 /// the connection driver (Connection.fs); the suffix avoids clashing with the
@@ -83,6 +106,10 @@ type ClientMsg =
     /// Delete a queued message. Until consumed, deletion wins: a deleted entry never
     /// becomes an event.
     | DeleteQueuedMsg of QueueId
+    /// A fresh /claude status probe result (Plan 08).
+    | ClaudeStatusMsg of ClaudeStatus
+    /// The Claude sign-in flow moved (begin/busy/error/reset).
+    | ClaudeFlowMsg of ClaudeFlowState
 
 module ClientModel =
 
@@ -109,7 +136,10 @@ module ClientModel =
           Agent = { ActiveTurn = None }
           Presence = Map.empty
           Environment = EnvironmentNotStarted
-          Commands = CommandLog.empty }
+          Commands = CommandLog.empty
+          Claude =
+            { Status = { SessionCredential = None; MineCredential = None }
+              Flow = ClaudeIdle } }
 
     /// Advance the latest-known offset and recompute the catch-up indicator.
     let private withLatestKnown (latest: EventOffset option) (consumer: EventConsumerState) : EventConsumerState =
@@ -226,3 +256,14 @@ module ClientModel =
             | None -> model
         | DeleteQueuedMsg queueId ->
             model |> withSynced { model.Synced with Queue = Map.remove queueId model.Synced.Queue }
+        | ClaudeStatusMsg status ->
+            // A connected credential ends an in-flight wait (the callback completed in
+            // its own tab); otherwise the flow state is untouched by a mere probe.
+            let connected = status.SessionCredential.IsSome || status.MineCredential.IsSome
+            let flow =
+                match model.Claude.Flow, connected with
+                | (ClaudeAwaitingCode _ | ClaudeBusy), true -> ClaudeIdle
+                | flow, _ -> flow
+            { model with Claude = { Status = status; Flow = flow } }
+        | ClaudeFlowMsg flow ->
+            { model with Claude = { model.Claude with Flow = flow } }

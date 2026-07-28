@@ -33,8 +33,25 @@ type AuthzResource =
     | SecretResource of SecretId
     | SecretCollection of SecretScope
 
+/// Actions on connection credentials (Plan 08) — the Manager-brokered, owner- or
+/// session-scoped external-service credentials. A separate family from `SecretAction`
+/// because its rules differ on purpose: sessions may WRITE owner-scoped connection
+/// credentials for identities bound to them (the sign-in flow is exactly that write),
+/// and `ResolveCredential` RETURNS a value to the session (an agent turn needs the
+/// token in-process, unlike container env injection). Generic secrets stay write-only
+/// and user-scope-read-only; nothing here widens their rules.
+type ConnectionAction =
+    /// Begin/complete a brokered flow or store a pasted token — the narrow write.
+    | ConnectCredential
+    /// Metadata only — kind and timestamps, never values.
+    | ReadConnectionStatus
+    /// Release the credential's current value to the caller for one agent turn.
+    | ResolveCredential
+    | DisconnectCredential
+
 type AuthzAction =
     | SecretAction of SecretAction
+    | ConnectionAction of ConnectionAction
 
 type AuthzRequest =
     { Subject : AuthzSubject
@@ -66,6 +83,17 @@ module Policy =
             if Set.contains peer request.Subject.Peers then Permit
             else Deny "peer is not signed in to this session"
         match request.Action, request.Resource with
+        // Connection credentials (Plan 08): every action — including the write — is
+        // permitted exactly where the caller IS the scope's owner: its own session
+        // scope, a user the Manager bound to it, a peer it witnessed. That makes an
+        // owner-scoped sign-in usable (and replaceable) from any session that owner is
+        // signed into, and a session-scoped one from only that session.
+        | ConnectionAction _, SecretResource { Scope = SessionScope owner } ->
+            ownSession owner
+        | ConnectionAction _, SecretResource { Scope = UserScope user } ->
+            boundUser user
+        | ConnectionAction _, SecretResource { Scope = PeerScope peer } ->
+            witnessedPeer peer
         | SecretAction (SetSecret | DeleteSecret | InjectSecret), SecretResource { Scope = SessionScope owner } ->
             ownSession owner
         | SecretAction ListSecrets, SecretCollection (SessionScope owner) ->

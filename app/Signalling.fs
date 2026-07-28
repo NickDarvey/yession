@@ -73,11 +73,15 @@ type EventsEndpoint =
 /// close every peer connection this server accepted and resolve once libdatachannel has
 /// reported each one closed — the deterministic drain a stopping Host runs before any
 /// global teardown (no live native objects may outlive it).
+/// `extraRoutes` composes additional HTTP routes onto the same server (Plan 08: the
+/// session's connection surface, defined later in compile order): tried before the
+/// final 404, `false` = not this handler's path.
 let start
     (sessionId: SessionId)
     (onConnection: FrameChannel<string> -> unit)
     (events: EventsEndpoint option)
     (auth: SessionAuth.Auth option)
+    (extraRoutes: (IncomingMessage -> ServerResponse -> bool) option)
     (mintPeerToken: PeerAttribution -> string)
     (port: int)
     : Async<HttpServer * (unit -> Async<unit>)> =
@@ -217,8 +221,13 @@ let start
                     res.writeHead (401, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                     res.``end`` "unauthorized"
         | _ ->
-            res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-            res.``end`` "not found"
+            let handledByExtra =
+                match extraRoutes with
+                | Some tryRoutes -> tryRoutes req res
+                | None -> false
+            if not handledByExtra then
+                res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "not found"
 
     let server = createServer handler
     let closeConnections () : Async<unit> =

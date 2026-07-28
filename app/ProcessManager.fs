@@ -156,7 +156,7 @@ let secretsApiFor (audit: SecretStore.Audit.Sink) (store: SecretStore.SecretStor
         match Policy.authorize request with
         | Permit -> Ok ()
         | Deny reason ->
-            audit (SecretStore.Audit.authzDeny caller.SessionId action resource reason)
+            audit (SecretStore.Audit.authzDeny caller.SessionId (SecretAction action) resource reason)
             Error (Control.SecretsDenied reason)
     { Control.SecretsApi.Set =
         fun caller request ->
@@ -198,6 +198,85 @@ let secretsApiFor (audit: SecretStore.Audit.Sink) (store: SecretStore.SecretStor
                         audit (SecretStore.Audit.secretDelete caller.SessionId id false)
                         return Error (Control.SecretsFailed e)
             } }
+
+/// The connection-broker handlers (Plan 08): same discipline as `secretsApiFor` — the
+/// verified AuthzSubject is built here and nowhere else, every deny audited, every
+/// permitted call delegated to the broker. `Status` needs no policy check: its targets
+/// are DERIVED from the caller's own bound scopes, so it can only ever list what the
+/// caller could read. Module-level so the authorization matrix is testable over a bare
+/// control server.
+let connectionsApiFor
+    (audit: SecretStore.Audit.Sink)
+    (store: SecretStore.SecretStore)
+    (broker: Broker.BrokerService)
+    : Control.ConnectionsApi =
+    let authorize (caller: Control.ControlCaller) (action: ConnectionAction) (target: SecretId) =
+        let request =
+            { Subject = { Session = Some caller.SessionId; Users = caller.Users; Peers = caller.Peers }
+              Action = ConnectionAction action
+              Resource = SecretResource target }
+        match Policy.authorize request with
+        | Permit -> Ok ()
+        | Deny reason ->
+            audit (SecretStore.Audit.authzDeny caller.SessionId (ConnectionAction action) (SecretResource target) reason)
+            Error (Control.SecretsDenied reason)
+    let run (outcome: Async<Result<'a, string>>) : Async<Result<'a, Control.SecretsError>> =
+        async {
+            match! outcome with
+            | Ok value -> return Ok value
+            | Error e -> return Error (Control.SecretsFailed e)
+        }
+    { Control.ConnectionsApi.Begin =
+        fun caller request ->
+            async {
+                match authorize caller ConnectCredential request.Target with
+                | Error e -> return Error e
+                | Ok () -> return! run (broker.Begin request)
+            }
+      Complete =
+        fun caller request ->
+            async {
+                match authorize caller ConnectCredential request.Target with
+                | Error e -> return Error e
+                | Ok () -> return! run (broker.Complete request.Target request.Code)
+            }
+      Put =
+        fun caller request ->
+            async {
+                match authorize caller ConnectCredential request.Target with
+                | Error e -> return Error e
+                | Ok () -> return! run (broker.Put request.Target request.Value)
+            }
+      Disconnect =
+        fun caller request ->
+            async {
+                match authorize caller DisconnectCredential request.Target with
+                | Error e -> return Error e
+                | Ok () ->
+                    let! outcome = run (broker.Disconnect request.Target)
+                    return outcome |> Result.map (fun existed -> { ControlWire.ConnectionDisconnectResponse.Disconnected = existed })
+            }
+      Resolve =
+        fun caller request ->
+            async {
+                match authorize caller ResolveCredential request.Target with
+                | Error e -> return Error e
+                | Ok () ->
+                    let! outcome = run (broker.Resolve request.Target)
+                    return
+                        outcome
+                        |> Result.map (fun (kind, value) ->
+                            { ControlWire.ConnectionResolveResponse.Kind = kind
+                              ControlWire.ConnectionResolveResponse.Value = value })
+            }
+      Status =
+        fun caller ->
+            // Every connection in the caller's own readable scopes (its session, its
+            // bound users, its witnessed peers) — the same walk injection uses. Entries
+            // that do not decode as broker envelopes are generic secrets and stay out.
+            SecretStore.SecretResolution.scopesFor caller.SessionId caller.Users caller.Peers
+            |> List.collect (fun scope -> store.List scope |> List.map (fun m -> m.Id))
+            |> broker.StatusOf }
 
 /// Create the Manager. `ui` is the management surface (Step 25): a route handler that
 /// closes over the Manager itself, sharing the control endpoint's server. It receives
@@ -241,6 +320,16 @@ let createWithUi
     // The MCP tool stream (the second reverse leg): a Manager-level retained list broadcast to
     // every subscribed session, so all sessions see the same available MCP services.
     let mcp = McpHub.create ()
+
+    // The connection-status stream (the third reverse leg, Plan 08): per-launch sinks,
+    // dying with the launch like notifications. Each launch receives ITS OWN readable
+    // snapshot, so the fan-out below recomputes per subscriber rather than broadcasting
+    // one shared list.
+    let connectionsHub : NotificationHub.NotificationHub<ConnectionStatusList> = NotificationHub.create ()
+    // Re-send every live launch its (recomputed) connection snapshot. Assigned below,
+    // once the caller resolution it needs exists; a ref because the broker (created
+    // before that) and `recordTokenIssued` both fire it.
+    let broadcastConnections : (unit -> unit) ref = ref ignore
 
     // Push a notification to a session: fan out over every live secret that names it
     // (in practice one — a running session has a single launch). Inert for a session
@@ -332,6 +421,9 @@ let createWithUi
                 let witnessed = Map.tryFind controlSecret launchPeers |> Option.defaultValue Set.empty
                 launchPeers <- Map.add controlSecret (Set.add p witnessed) launchPeers)
             audit (SecretStore.Audit.bindingRecorded sessionId subject)
+            // A new binding grows the launch's readable connection set — refresh its
+            // status stream so a sign-in surfaces already-connected credentials.
+            broadcastConnections.Value ()
     // The strategy gates both the OIDC bounce and (below) the management UI. The default
     // is deny-everything: authenticating anyone is an explicit operator choice.
     let strategy = defaultArg options.Strategy Strategy.none
@@ -349,6 +441,50 @@ let createWithUi
               Peers = Map.tryFind secret launchPeers |> Option.defaultValue Set.empty })
 
     let secretsApi : Control.SecretsApi option = secretStore |> Option.map (secretsApiFor audit)
+
+    // The connection broker (Plan 08): exists exactly when the secret store does — its
+    // envelopes are ordinary encrypted entries. Standards-only; its one owned constant
+    // is the Manager's public callback URL (stable because the Manager port is fixed;
+    // session ports are OS-assigned and cannot anchor a provider's redirect URI).
+    let broker : Broker.BrokerService option =
+        secretStore
+        |> Option.map (fun store ->
+            Broker.create
+                (fun () -> issuerOf () + "/connections/callback")
+                store
+                (fun observation ->
+                    match observation with
+                    | Broker.Connected (id, kind) ->
+                        audit (SecretStore.Audit.connectionConnected id (sprintf "%A" kind))
+                        broadcastConnections.Value ()
+                    | Broker.Disconnected id ->
+                        audit (SecretStore.Audit.connectionDisconnected id)
+                        broadcastConnections.Value ()
+                    | Broker.Resolved (id, kind, refreshed) ->
+                        audit (SecretStore.Audit.connectionResolved id (sprintf "%A" kind) refreshed)
+                    | Broker.RefreshFailed (id, reason) ->
+                        audit (SecretStore.Audit.connectionRefreshFailed id reason)))
+
+    let connectionsApi : Control.ConnectionsApi option =
+        match secretStore, broker with
+        | Some store, Some b -> Some (connectionsApiFor audit store b)
+        | _ -> None
+
+    broadcastConnections.Value <-
+        fun () ->
+            match connectionsApi with
+            | None -> ()
+            | Some api ->
+                secretSessions
+                |> Map.iter (fun secret _ ->
+                    match resolveCaller secret with
+                    | None -> ()
+                    | Some caller ->
+                        Async.StartImmediate (
+                            async {
+                                let! snapshot = api.Status caller
+                                connectionsHub.NotifySecret secret snapshot
+                            }))
 
     // The union of user bindings across a session's live launches (in practice one).
     let usersOf (sessionId: SessionId) : Set<UserId> =
@@ -378,11 +514,52 @@ let createWithUi
               Query = (fun name -> Interop.queryParamOf req.url name)
               Header = fun name -> Interop.headerOf req name }
 
+    // The one PUBLIC broker route (Plan 08): where a provider's redirect lands. Not
+    // under /control — a browser arrives here, and the single-use `state` (minted only
+    // for a target the policy permitted at begin) is the whole authorization. A tiny
+    // self-contained page; the session's panel picks the outcome up via its status
+    // stream, so this tab only needs to say "done".
+    let connectionsCallbackPage (title: string) (detail: string) : string =
+        sprintf
+            """<!doctype html>
+<html><head><meta charset="utf-8"><title>%s</title>
+<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}p{color:#444}</style>
+</head><body><h1>%s</h1><p>%s</p></body></html>"""
+            title title detail
+    let handleConnectionsCallback (req: Interop.IncomingMessage) (res: Interop.ServerResponse) : bool =
+        let path = req.url.Split('?').[0]
+        if not (req.``method`` = "GET" && path = "/connections/callback") then false
+        else
+            let respondHtml (status: int) (html: string) =
+                res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "text/html; charset=utf-8"; "cache-control", box "no-store" ]) |> ignore
+                res.``end`` html
+            match broker with
+            | None -> respondHtml 404 (connectionsCallbackPage "Not available" "This Manager has no secrets store, so connections are disabled.")
+            | Some b ->
+                match Interop.queryParamOf req.url "error" with
+                | Some providerError ->
+                    let detail = Interop.queryParamOf req.url "error_description" |> Option.defaultValue providerError
+                    respondHtml 400 (connectionsCallbackPage "Sign-in failed" detail)
+                | None ->
+                    match Interop.queryParamOf req.url "code", Interop.queryParamOf req.url "state" with
+                    | Some code, Some state ->
+                        Async.StartImmediate (
+                            async {
+                                match! b.CompleteCallback state code with
+                                | Ok _ ->
+                                    respondHtml 200 (connectionsCallbackPage "Connected" "You can close this tab and return to your session.")
+                                | Error e ->
+                                    respondHtml 400 (connectionsCallbackPage "Sign-in failed" e)
+                            })
+                    | _ -> respondHtml 400 (connectionsCallbackPage "Sign-in failed" "The provider's redirect is missing its code or state.")
+            true
+
     let! controlServer =
         async {
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                 let handled =
-                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
+                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi connectionsApi connectionsHub.Register (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
+                    || handleConnectionsCallback req res
                     || provider.TryHandle req res
                     || (match ui, self with
                         | Some handle, Some pm -> handle pm identify req res
@@ -486,6 +663,7 @@ let createWithUi
                          // The launch's notification subscriptions, OAuth client
                          // registration, and user bindings die with its authority.
                          notifications.Drop secret
+                         connectionsHub.Drop secret
                          provider.RevokeByControlSecret secret
                          launchUsers <- Map.remove secret launchUsers
                          launchPeers <- Map.remove secret launchPeers

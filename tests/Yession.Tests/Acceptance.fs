@@ -52,7 +52,10 @@ let private representativeModel : ClientModel =
       Agent = { ActiveTurn = Some turnId }
       Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } } } ]
       Environment = EnvironmentNotStarted
-      Commands = CommandLog.empty }
+      Commands = CommandLog.empty
+      Claude =
+        { Status = { SessionCredential = None; MineCredential = None }
+          Flow = ClaudeIdle } }
 
 let private uiChecklistTests =
     testList "UI checklist" [
