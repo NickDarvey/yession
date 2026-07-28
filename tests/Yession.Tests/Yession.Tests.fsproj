@@ -19,9 +19,9 @@
     <Compile Include="Version.fs" />
     <Compile Include="Domain.fs" />
     <Compile Include="Secrets.fs" />
-    <Compile Include="Connections.fs" />
     <Compile Include="SessionProcess.fs" />
     <Compile Include="Support.fs" />
+    <Compile Include="Connections.fs" />
     <Compile Include="OtlpStub.fs" />
     <Compile Include="Sync.fs" />
     <Compile Include="Editor.fs" />

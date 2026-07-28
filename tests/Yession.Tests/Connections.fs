@@ -500,6 +500,165 @@ let private routeTests =
             }
     ]
 
+// --- [Ports; Native]: per-actor credentials across real processes ---------------------------
+// A real Manager + real child session (YESSION_AGENT=credential-probe) + real WebRTC
+// clients. Proves the whole loop: gate off before any sign-in; a paste through the
+// session's /claude surface flips the gate WITHOUT a relaunch; each turn resolves the
+// TURN ACTOR's credential; an unconnected actor fails legibly; a session-scoped
+// credential overrides for every actor.
+
+open Yession.Oidc
+open Yession.Tests.Support
+
+[<Emit("process.env[$0] = $1")>]
+let private setEnv (name: string) (value: string) : unit = Util.jsNative
+
+[<Emit("delete process.env[$0]")>]
+let private unsetEnv (name: string) : unit = Util.jsNative
+
+[<Emit("(process.env[$0] ?? null)")>]
+let private getEnvRaw (name: string) : string option = Util.jsNative
+
+[<Emit("process.execPath")>]
+let private nodePath : string = Util.jsNative
+
+[<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json', cookie: $1 }, body: $2 })
+  .then(async r => ({ status: r.status, body: await r.text() }))""")>]
+let private postJsonWithCookie (url: string) (cookie: string) (body: string) : JS.Promise<HttpReply> = Util.jsNative
+
+[<Emit("""fetch($0, { headers: { cookie: $1 }, cache: 'no-store' }).then(async r => ({ status: r.status, body: await r.text() }))""")>]
+let private getWithCookie (url: string) (cookie: string) : JS.Promise<HttpReply> = Util.jsNative
+
+let private cookieOf (jar: OidcHttp.Jar) : string =
+    jar.Cookies |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> String.concat "; "
+
+/// Poll the session's /claude status until `predicate` holds — the session learns of
+/// credential changes over its control stream, so the flip is asynchronous by design.
+let private awaitClaudeStatus (sessionUrl: string) (cookie: string) (peerId: string) (predicate: string -> bool) : Async<unit> =
+    let rec go attempts =
+        async {
+            let! reply = getWithCookie (sprintf "%s/claude?peer_id=%s" sessionUrl peerId) cookie |> Async.AwaitPromise
+            if reply.status = 200 && predicate reply.body then return ()
+            elif attempts <= 0 then return failwithf "claude status never settled; last: %d %s" reply.status reply.body
+            else
+                do! Async.Sleep 200
+                return! go (attempts - 1)
+        }
+    go 50
+
+let private e2eTests =
+    testList "per-actor credentials across processes" [
+        testCaseAsync "late sign-in enables the agent; each turn runs on its actor's credential; session scope overrides" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/conn-e2e-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                // The child must see NO ambient credentials, whatever this test process
+                // inherited (CI's LiveAgent tier exports one): blank both for the spawn.
+                let savedKey = getEnvRaw "ANTHROPIC_API_KEY"
+                let savedToken = getEnvRaw "CLAUDE_CODE_OAUTH_TOKEN"
+                setEnv "ANTHROPIC_API_KEY" ""
+                setEnv "CLAUDE_CODE_OAUTH_TOKEN" ""
+                setEnv "YESSION_AGENT" "credential-probe"
+                let! pm =
+                    ProcessManager.create
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost
+                            Secrets = Some ProcessManager.EphemeralSecrets }
+                let record = pm.CreateSession "conn-child" "Connections child" |> expect
+                let! launched = pm.Launch record.SessionId
+                unsetEnv "YESSION_AGENT"
+                let restore name saved =
+                    match saved with
+                    | Some v -> setEnv name v
+                    | None -> unsetEnv name
+                restore "ANTHROPIC_API_KEY" savedKey
+                restore "CLAUDE_CODE_OAUTH_TOKEN" savedToken
+                let port = launched |> expect
+                let sessionUrl = sprintf "http://127.0.0.1:%d" port
+
+                // Peer A signs into the session (witnessed via the bounce), then joins.
+                let! openedA = OidcHttp.openSessionVia [] "/login?peer_id=browser-a" sessionUrl
+                let cookieA = cookieOf openedA.Jar
+                let! a = connectClient (sessionUrl + "/signal") openedA.PeerToken "browser-a" "Ada"
+
+                // 1. Before any sign-in: the message drains to the timeline, no turn.
+                do! compose a a.Hello.PeerId "hello before sign-in"
+                a.Connection.SendDraft a.Hello.PeerId
+                do! a.Runner.WaitFor (fun m ->
+                        m.Conversation.Items
+                        |> List.exists (fun i -> i.Status = Complete && i.Body.Contains "hello before sign-in"))
+
+                // 2. A pastes a setup token for "all my sessions" through the session's
+                //    /claude surface; the gate flips without a relaunch.
+                let! putMine =
+                    postJsonWithCookie
+                        (sessionUrl + "/claude/token")
+                        cookieA
+                        """{"scope":"mine","peerId":"browser-a","token":"sk-ant-oat01-fake"}"""
+                    |> Async.AwaitPromise
+                Expect.equal putMine.status 200 (sprintf "the paste stores: %s" putMine.body)
+                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body -> body.Contains "\"mine\":\"static\"")
+
+                do! compose a a.Hello.PeerId "hello after sign-in"
+                a.Connection.SendDraft a.Hello.PeerId
+                do! a.Runner.WaitFor (fun m ->
+                        m.Conversation.Items
+                        |> List.exists (fun i ->
+                            i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "credential: CLAUDE_CODE_OAUTH_TOKEN"))
+                // Exactly one agent item: the pre-sign-in message triggered no turn.
+                Expect.equal
+                    ((a.Runner.Model ()).Conversation.Items |> List.filter (fun i -> i.Author = ActorRef.Agent) |> List.length)
+                    1
+                    "the gate was off for the first message"
+
+                // 3. Peer B (never signed in a credential): its turn fails legibly,
+                //    naming the actor — no borrowing of A's credential.
+                let! openedB = OidcHttp.openSessionVia [] "/login?peer_id=browser-b" sessionUrl
+                let! b = connectClient (sessionUrl + "/signal") openedB.PeerToken "browser-b" "Bob"
+                do! compose b b.Hello.PeerId "bob without a credential"
+                b.Connection.SendDraft b.Hello.PeerId
+                // The failure reason streams as the item's body before the turn fails,
+                // so it is visible in every timeline (and assertable here).
+                do! b.Runner.WaitFor (fun m ->
+                        m.Conversation.Items
+                        |> List.exists (fun i ->
+                            i.Author = ActorRef.Agent
+                            && i.Status = ConversationItemStatus.Failed
+                            && i.Body.Contains "no Claude account connected for peer browser-b"))
+
+                // 4. A stores a SESSION-scoped api key: it overrides for every actor —
+                //    Bob's next turn now runs on it.
+                let! putSession =
+                    postJsonWithCookie
+                        (sessionUrl + "/claude/token")
+                        cookieA
+                        """{"scope":"session","peerId":"browser-a","token":"sk-ant-api03-fake"}"""
+                    |> Async.AwaitPromise
+                Expect.equal putSession.status 200 (sprintf "the session-scoped paste stores: %s" putSession.body)
+                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body -> body.Contains "\"session\":\"static\"")
+                do! compose b b.Hello.PeerId "bob under the session credential"
+                b.Connection.SendDraft b.Hello.PeerId
+                do! b.Runner.WaitFor (fun m ->
+                        m.Conversation.Items
+                        |> List.exists (fun i ->
+                            i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "credential: ANTHROPIC_API_KEY"))
+
+                // 5. Disconnect both; the status empties again.
+                let! _ =
+                    postJsonWithCookie (sessionUrl + "/claude/disconnect") cookieA """{"scope":"session","peerId":"browser-a"}"""
+                    |> Async.AwaitPromise
+                let! _ =
+                    postJsonWithCookie (sessionUrl + "/claude/disconnect") cookieA """{"scope":"mine","peerId":"browser-a"}"""
+                    |> Async.AwaitPromise
+                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body ->
+                        body.Contains "\"session\":null" && body.Contains "\"mine\":null")
+
+                do! a.Channel.Close ()
+                do! b.Channel.Close ()
+                do! pm.StopAll ()
+            }
+    ]
+
 let tests =
     testList "Connections" [
         codecTests
@@ -508,4 +667,5 @@ let tests =
         claudeTests
         Tag.needs "Broker service" [ Tag.Ports ] (fun () -> brokerTests)
         Tag.needs "Connection control routes" [ Tag.Ports ] (fun () -> routeTests)
+        Tag.needs "Per-actor credentials E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
     ]

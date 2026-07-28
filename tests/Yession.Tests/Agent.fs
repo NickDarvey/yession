@@ -288,6 +288,27 @@ let private liveTests =
                     | other -> failwithf "expected a completed agent message, got %A" other
                 }
 
+            testCaseAsync "the SDK accepts a RESOLVED credential through the env override (Plan 08 dispatch path)" <|
+                async {
+                    // Run the ambient credential through `Agent.runWith (Some ...)` — the
+                    // exact shape a broker-resolved token takes — proving the spawned
+                    // CLI honors options.env with the ambient variables displaced.
+                    let credential =
+                        match Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "" with
+                        | "" -> "ANTHROPIC_API_KEY", Interop.envOr "ANTHROPIC_API_KEY" ""
+                        | token -> "CLAUDE_CODE_OAUTH_TOKEN", token
+                    let log = newLog ()
+                    let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
+                    let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
+                    do! AgentTurn.run log (Agent.runWith (Some credential)) AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
+                    let! events = eventsOf log
+                    match List.last events with
+                    | AgentMessageCompleted completed ->
+                        Expect.isTrue (completed.Body.Length > 0) "the resolved-credential turn has a body"
+                    | AgentTurnFailed f -> failwithf "resolved-credential turn failed: %s" f.Reason
+                    | other -> failwithf "expected a completed agent message, got %A" other
+                }
+
             testCaseAsync "the live agent runs a real command through its MCP tools" <|
                 async {
                     let m =

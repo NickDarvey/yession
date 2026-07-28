@@ -143,6 +143,12 @@ let private connectionsClient =
 let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
+            // A dispatch-level failure streams its reason as the message body first:
+            // the turn's item is already open (AgentMessageStarted precedes the
+            // runner), so this is what makes the reason VISIBLE in the timeline.
+            let fail (reason: string) =
+                onChunk { Text = reason }
+                AgentFailed reason
             let targets =
                 ClaudeConnection.turnTargets sessionId context.CurrentMessage.Author
                 |> List.filter (fun target -> Map.containsKey target connectionStatus)
@@ -153,12 +159,12 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
                     return! inner (Some (ClaudeConnection.envVarFor kind value)) context capabilities signal onChunk
                 | Error e ->
                     if envCreds then return! inner None context capabilities signal onChunk
-                    else return AgentFailed (sprintf "could not use the connected Claude account: %s" e)
+                    else return fail (sprintf "could not use the connected Claude account: %s" e)
             | _ ->
                 if envCreds then return! inner None context capabilities signal onChunk
                 else
                     return
-                        AgentFailed (
+                        fail (
                             sprintf
                                 "no Claude account connected for %s — open Connections to sign in"
                                 (ClaudeConnection.actorLabel context.CurrentMessage.Author))
