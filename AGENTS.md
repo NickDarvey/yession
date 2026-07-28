@@ -105,10 +105,11 @@ a tag is cut per green master push, so nearly every release would; only an expli
 moves the triple.
 
 **Commit / PR messages.** Subjects follow conventional-commit style (`feat:`, `fix:`, `ci:`,
-`refactor:`, ...) — that is convention for readers, not the version input. PRs squash-merge:
-the PR title becomes the commit subject and the body the rest of the message, so a semver
-marker anywhere in the PR body on a line of its own is picked up — including above a trailer the
-body has to end with, such as a tool's attribution line.
+`refactor:`, ...) — that is convention for readers, not the version input. PRs squash-merge with
+the PR title as the commit subject and the CONSTITUENT COMMIT MESSAGES concatenated as the body
+— the PR DESCRIPTION is discarded, so a marker that lives only there never reaches master (how
+the Plan 08 feature shipped as beta.114 instead of 1.1.0-beta.0). Put the marker on a line of
+its own in a COMMIT body on the branch; squash concatenation preserves commit bodies verbatim.
 
 `version` needs full history: it refuses a shallow clone rather than emitting an
 already-released number (`git fetch --unshallow --tags`). `YESSION_VERSION` overrides the
