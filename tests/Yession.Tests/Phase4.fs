@@ -869,16 +869,202 @@ let private mcpStreamTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Session registry stream (docs/plans/09) — the Running set as full-snapshot
+// frames, published to whoever serves sessions (an operator's serving binding).
+// Codec, hub, and public-origin assembly are cheap tier; the SSE stream over a
+// real Manager + real children is verify tier.
+// -----------------------------------------------------------------------------
+
+let private registryEntry (id: string) (name: string) (port: int) (pid: int) : ControlWire.SessionRegistryEntry =
+    { Id = SessionId.create id |> expect
+      Name = name
+      Port = port
+      Pid = pid }
+
+let private registryTests =
+    testList "Session registry: codec, hub & public origin (Plan 09)" [
+        testCase "a registry frame round-trips through the control wire codec" <| fun () ->
+            let original : ControlWire.SessionRegistryFrame =
+                { Sessions = [ registryEntry "alpha" "Alpha work" 54321 4242; registryEntry "beta" "" 54322 1 ] }
+            let roundTripped =
+                ControlWire.toString ControlWire.sessionRegistryFrame original
+                |> ControlWire.fromString ControlWire.sessionRegistryFrame
+                |> expect
+            Expect.equal roundTripped original "frame round-trip is identity"
+
+        testCase "the hub hands a new subscriber the current frame at once, then every change" <| fun () ->
+            let hub = RegistryHub.create ()
+            let mutable received : ControlWire.SessionRegistryFrame list = []
+            let _ = hub.Register (fun f -> received <- received @ [ f ])
+            // The retained snapshot: the (empty) boot frame arrives immediately on subscribe.
+            Expect.equal received [ { Sessions = [] } ] "the subscriber gets the current (empty) frame at once"
+
+            let one : ControlWire.SessionRegistryFrame = { Sessions = [ registryEntry "alpha" "Alpha" 54321 42 ] }
+            hub.Publish one
+            Expect.equal (List.last received) one "a publish pushes the new frame"
+            Expect.equal (hub.Current ()) one "the hub retains the latest frame"
+
+            // A LATER subscriber gets the retained frame as its initial snapshot — the
+            // connect-read-disconnect poll pattern.
+            let mutable late : ControlWire.SessionRegistryFrame list = []
+            let unsubLate = hub.Register (fun f -> late <- late @ [ f ])
+            Expect.equal late [ one ] "a late subscriber gets the retained frame immediately"
+
+            unsubLate ()
+            hub.Publish { Sessions = [] }
+            Expect.equal (List.last late) one "the unsubscribed sink received nothing further"
+            Expect.equal (List.last received) { Sessions = [] } "the still-subscribed sink got the change"
+
+        testCase "the public session origin defaults to loopback and normalises a configured one" <| fun () ->
+            unsetEnv "YESSION_SESSION_URL"
+            Expect.equal (Interop.publicSessionOrigin ()) "http://127.0.0.1" "unset means loopback — today's behaviour"
+            setEnv "YESSION_SESSION_URL" "http://home.example.ts.net/"
+            Expect.equal (Interop.publicSessionOrigin ()) "http://home.example.ts.net" "a trailing slash is trimmed (each consumer appends the port)"
+            unsetEnv "YESSION_SESSION_URL"
+
+        testCase "a running row's open link carries the configured public origin" <| fun () ->
+            setEnv "YESSION_SESSION_URL" "http://home.example.ts.net"
+            let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
+            unsetEnv "YESSION_SESSION_URL"
+            Expect.isTrue (running.Contains "href=\"http://home.example.ts.net:8199/\"") "the open link is followable from a remote browser"
+    ]
+
+let private registryStreamTests =
+    testList "Session registry stream over SSE (Plan 09)" [
+        testCaseAsync "the stream snapshots on subscribe, follows launch/stop, and the public origin reaches link + redirect URI" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/reg-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let! pm =
+                    ProcessManager.createWithUi
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost }
+                        (Some ManagerUi.tryHandle)
+                let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+
+                let frames = ResizeArray<ControlWire.SessionRegistryFrame> ()
+                let cancel = ControlClient.subscribeSessions baseUrl (fun f -> frames.Add f)
+                let waitUntil (label: string) (condition: unit -> bool) =
+                    let rec go (remaining: int) =
+                        async {
+                            if condition () then return ()
+                            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
+                            else
+                                do! Async.Sleep 50
+                                return! go (remaining - 1)
+                        }
+                    go 100
+
+                // The retained snapshot arrives on connect: nothing runs yet.
+                do! waitUntil "the empty snapshot" (fun () -> frames |> Seq.exists (fun f -> List.isEmpty f.Sessions))
+
+                let record = pm.CreateSession "reg-1" "Registry One" |> expect
+                setEnv "YESSION_SESSION_URL" "http://home.example.ts.net"
+                try
+                    let! launched = pm.Launch record.SessionId
+                    let port = expect launched
+                    do! waitUntil "the launch frame" (fun () ->
+                            frames
+                            |> Seq.exists (fun f ->
+                                f.Sessions
+                                |> List.exists (fun e -> SessionId.value e.Id = "reg-1" && e.Port = port && e.Name = "Registry One")))
+
+                    // A reconnect's FIRST frame is the current snapshot — reconnecting IS
+                    // the recovery protocol, and one connect-read-disconnect is a poll.
+                    let mutable second : ControlWire.SessionRegistryFrame option = None
+                    let cancelSecond = ControlClient.subscribeSessions baseUrl (fun f -> if second.IsNone then second <- Some f)
+                    do! waitUntil "the second subscription's snapshot" (fun () -> second.IsSome)
+                    cancelSecond ()
+                    Expect.isTrue
+                        (second.Value.Sessions |> List.exists (fun e -> e.Port = port))
+                        "a fresh subscriber's first frame is the current snapshot"
+
+                    // The public origin reaches both browser-facing URLs: the open link
+                    // and the session's registered OAuth redirect URI (via the env the
+                    // child inherited at spawn).
+                    let! row = Interop.getText (baseUrl + "/sessions/reg-1/row") |> Async.AwaitPromise
+                    Expect.isTrue
+                        (row.Contains (sprintf "href=\"http://home.example.ts.net:%d/\"" port))
+                        "the open link carries the public origin"
+                    let! login = OidcHttp.getWithJar (OidcHttp.newJar ()) (sprintf "http://127.0.0.1:%d/login" port)
+                    Expect.equal login.Status 302 "/login redirects into the authorize chain"
+                    Expect.isTrue
+                        (login.Location.Contains (sprintf "home.example.ts.net%%3A%d%%2Fcallback" port))
+                        "the registered redirect URI carries the public origin"
+
+                    // A stop pushes a fresh frame without the session.
+                    let seen = frames.Count
+                    let! stopped = pm.Stop record.SessionId
+                    expect stopped
+                    do! waitUntil "the stop frame" (fun () ->
+                            frames |> Seq.skip seen |> Seq.exists (fun f -> List.isEmpty f.Sessions))
+                finally
+                    unsetEnv "YESSION_SESSION_URL"
+
+                cancel ()
+                do! pm.StopAll ()
+            }
+
+        testCaseAsync "the stream is gated by the Manager's strategy: the deny-everything default refuses it" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/reg-deny-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let! pm =
+                    ProcessManager.createWithUi
+                        (ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ])
+                        (Some ManagerUi.tryHandle)
+                let! reply = OidcHttp.getWithJar (OidcHttp.newJar ()) (sprintf "http://127.0.0.1:%d/sessions/stream" pm.EndpointPort.Value)
+                Expect.equal reply.Status 401 "no strategy, no registry — same gate as every management route"
+                do! pm.StopAll ()
+            }
+
+        testCaseAsync "under trusted-headers, only a request asserting an identity reaches the stream" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/reg-th-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let! pm =
+                    ProcessManager.createWithUi
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.trustedHeaders }
+                        (Some ManagerUi.tryHandle)
+                let url = sprintf "http://127.0.0.1:%d/sessions/stream" pm.EndpointPort.Value
+                let! bare = OidcHttp.getWithJar (OidcHttp.newJar ()) url
+                Expect.equal bare.Status 401 "a header-less request is refused (a serving binding must assert itself)"
+                // The SSE response never ends, so probe the status only: register a
+                // subscriber through the client and expect its snapshot to arrive.
+                let mutable snapshot : ControlWire.SessionRegistryFrame option = None
+                let cancel =
+                    ControlClient.subscribeSessionsAs
+                        [ Strategy.SubjectHeader, "serving-binding" ]
+                        (sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value)
+                        (fun f -> if snapshot.IsNone then snapshot <- Some f)
+                let rec waitSnapshot (remaining: int) =
+                    async {
+                        if snapshot.IsSome || remaining <= 0 then return ()
+                        else
+                            do! Async.Sleep 50
+                            return! waitSnapshot (remaining - 1)
+                    }
+                do! waitSnapshot 100
+                cancel ()
+                Expect.equal snapshot (Some { ControlWire.SessionRegistryFrame.Sessions = [] }) "an asserted identity gets the snapshot"
+                do! pm.StopAll ()
+            }
+    ]
+
 let tests =
     testList "Phase4" [
         stateTests
         uiRenderTests
         notificationTests
         mcpTests
+        registryTests
         Tag.needs "Session Process as an OS process (Step 23)" [ Tag.Ports; Tag.Native ] (fun () -> processTests)
         Tag.needs "Authority over the control RPC (Step 24)" [ Tag.Ports; Tag.Native ] (fun () -> controlRpcTests)
         Tag.needs "Manager→Session notifications over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> notificationStreamTests)
         Tag.needs "MCP tool stream over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
+        Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports; Tag.Native ] (fun () -> compositionTests)
         Tag.needs "Telemetry over the process boundary (Plan 04)" [ Tag.Ports; Tag.Native ] (fun () -> telemetryTests)

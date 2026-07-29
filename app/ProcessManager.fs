@@ -36,6 +36,10 @@ type ProcessManager =
       Stop : SessionId -> Async<Result<unit, string>>
       /// Every registered session with its runtime status.
       Sessions : unit -> SessionView list
+      /// Subscribe to the session registry stream (docs/plans/09): the sink receives
+      /// the current Running set immediately, then a fresh full frame on every launch,
+      /// exit, and display-name change. Returns an unsubscribe.
+      SubscribeSessions : (ControlWire.SessionRegistryFrame -> unit) -> (unit -> unit)
       /// Set a session's display name (the reported collaborative title); durable, and a
       /// no-op for unknown sessions or unchanged names.
       SetDisplayName : SessionId -> string -> unit
@@ -321,6 +325,24 @@ let createWithUi
     // every subscribed session, so all sessions see the same available MCP services.
     let mcp = McpHub.create ()
 
+    // The session registry stream (docs/plans/09): the Running set as full-snapshot
+    // frames, published on every launch, exit, and display-name change. The management
+    // endpoint's `/sessions/stream` subscribers — an operator's serving binding — get
+    // each frame; the frame is recomputed from the durable registry + live children.
+    let registry = RegistryHub.create ()
+    let publishRegistry () =
+        let frame : ControlWire.SessionRegistryFrame =
+            { Sessions =
+                state.Sessions
+                |> List.choose (fun r ->
+                    Map.tryFind (SessionId.value r.SessionId) children
+                    |> Option.map (fun (child, port) ->
+                        { ControlWire.SessionRegistryEntry.Id = r.SessionId
+                          Name = r.DisplayName
+                          Port = port
+                          Pid = child.Pid })) }
+        registry.Publish frame
+
     // The connection-status stream (the third reverse leg, Plan 08): per-launch sinks,
     // dying with the launch like notifications. Each launch receives ITS OWN readable
     // snapshot, so the fan-out below recomputes per subscriber rather than broadcasting
@@ -345,6 +367,7 @@ let createWithUi
         | Some record when record.DisplayName <> displayName ->
             state <- ManagerState.setDisplayName sessionId displayName state
             ManagerStore.save statePath state
+            publishRegistry ()
         | _ -> ()
 
     // The control channel's name report: the secret identifies the reporting session; a
@@ -675,11 +698,13 @@ let createWithUi
                 | Ok (child, port) ->
                     children <- Map.add key (child, port) children
                     lastExit <- Map.remove key lastExit
+                    publishRegistry ()
                     // The Manager emits its own lifecycle telemetry directly (session launched).
                     options.OnEvent "session launched"
                         [ "yession.session.id", box key; "yession.session.port", box port ]
                     child.OnExit (fun code ->
                         children <- Map.remove key children
+                        publishRegistry ()
                         // The launch's authority dies with it.
                         revokeSecret ()
                         // A stop's exit is the expected outcome, not a crash to report.
@@ -714,6 +739,7 @@ let createWithUi
           Launch = launch
           Stop = stop
           Sessions = fun () -> state.Sessions |> List.map (fun r -> { Record = r; Status = statusOf r })
+          SubscribeSessions = registry.Register
           SetDisplayName = setDisplayName
           WaitForExit =
             fun sessionId ->

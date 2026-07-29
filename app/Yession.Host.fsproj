@@ -28,6 +28,7 @@
     <Compile Include="Broker.fs" />
     <Compile Include="NotificationHub.fs" />
     <Compile Include="McpHub.fs" />
+    <Compile Include="RegistryHub.fs" />
     <Compile Include="ManagerOidc.fs" />
     <Compile Include="Control.fs" />
     <Compile Include="ControlClient.fs" />

@@ -24,10 +24,14 @@ discovers it in production. Items are roughly ordered by how much they matter.
   strategy (verify against an operator JWKS; `Fable.Jose.jwtVerify` is already bound)
   is the recorded hardening follow-up. No `nonce` in ID tokens yet (PKCE +
   confidential client); the Plan 04 note stands.
-- **Remote access covers the Manager only.** `YESSION_MANAGER_URL` makes the OIDC
-  issuer the proxy's origin, but session ports are OS-assigned and loopback-bound —
-  proxying *sessions* through the sidecar (and their redirect URIs) is the remaining
-  topology work for fully remote use.
+- **Remote WebRTC has no relay fallback** ([Plan 09](plans/09-remote-session-access.md)).
+  Sessions are remotely reachable through an operator's port-mirroring proxy — the
+  `/sessions/stream` registry drives the serving binding, `YESSION_SESSION_URL`
+  threads the public origin into open links and redirect URIs — but the data channel
+  still connects peer-to-peer on host candidates only (no STUN/TURN), so remote use
+  needs a network where the session host's addresses route directly (e.g. an overlay
+  like a tailnet, verified per deployment); an unauthenticated visitor can also hold
+  open refused-at-`PeerHello` peer connections (no `/signal` throttling).
 - **User-scoped secrets have exactly one writer: the connection broker**
   ([Plan 08](plans/08-connections-and-claude-auth.md)). The Claude sign-in stores an
   owner-scoped (user/peer) credential through the narrow `ConnectionAction` policy
