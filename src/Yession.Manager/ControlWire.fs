@@ -500,6 +500,44 @@ module ControlWire =
                 { ConnectionResolveResponse.Kind = get.Required.Field "kind" connectionKind.Decode
                   ConnectionResolveResponse.Value = get.Required.Field "value" Decode.string }) }
 
+    /// One Running session in the registry stream (docs/plans/09): what an operator's
+    /// serving binding needs to expose it — the OS-assigned port — plus identity for
+    /// display and the pid for supervision-side correlation.
+    type SessionRegistryEntry =
+        { Id : SessionId
+          Name : string
+          Port : int
+          Pid : int }
+
+    /// A `/sessions/stream` SSE frame: the FULL current set of Running sessions.
+    /// Snapshot semantics, never deltas — a consumer applies each frame wholesale, so
+    /// reconnecting (whose first frame is the current snapshot) is the recovery path.
+    type SessionRegistryFrame = { Sessions : SessionRegistryEntry list }
+
+    let private sessionRegistryEntry : Codec<SessionRegistryEntry> =
+        { Encode =
+            fun (e: SessionRegistryEntry) ->
+                Encode.object
+                    [ "id", Codec.sessionId.Encode e.Id
+                      "name", Encode.string e.Name
+                      "port", Encode.int e.Port
+                      "pid", Encode.int e.Pid ]
+          Decode =
+            Decode.object (fun get ->
+                { SessionRegistryEntry.Id = get.Required.Field "id" Codec.sessionId.Decode
+                  SessionRegistryEntry.Name = get.Required.Field "name" Decode.string
+                  SessionRegistryEntry.Port = get.Required.Field "port" Decode.int
+                  SessionRegistryEntry.Pid = get.Required.Field "pid" Decode.int }) }
+
+    let sessionRegistryFrame : Codec<SessionRegistryFrame> =
+        { Encode =
+            fun (f: SessionRegistryFrame) ->
+                Encode.object [ "sessions", f.Sessions |> List.map sessionRegistryEntry.Encode |> Encode.list ]
+          Decode =
+            Decode.object (fun get ->
+                { SessionRegistryFrame.Sessions =
+                    get.Required.Field "sessions" (Decode.list sessionRegistryEntry.Decode) }) }
+
     let toString (codec: Codec<'a>) (value: 'a) : string = codec.Encode value |> Encode.toString 0
 
     let fromString (codec: Codec<'a>) (json: string) : Result<'a, string> = Decode.fromString codec.Decode json

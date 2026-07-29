@@ -233,7 +233,10 @@ Async.StartImmediate (
         // cannot authorize users, so failure is fatal, never a half-open session.
         match controlChannel, auth with
         | Some (url, secret), Some auth ->
-            let redirectUri = sprintf "http://127.0.0.1:%d/callback" host.Port
+            // The origin is the configured public one (docs/plans/09), inherited from
+            // the Manager's env: behind a port-mirroring proxy the browser must land
+            // on a reachable callback. Loopback when unset (the RFC 8252 default).
+            let redirectUri = sprintf "%s:%d/callback" (Interop.publicSessionOrigin ()) host.Port
             match! ControlClient.registerClient url secret redirectUri with
             | Error e ->
                 eprintfn "client registration with the manager failed: %s" e

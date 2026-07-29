@@ -34,17 +34,18 @@ let private postJson (url: string) (secret: string) (body: string) : JS.Promise<
 })()""")>]
 let private postStream (url: string) (secret: string) (body: string) (onLine: string -> unit) : JS.Promise<unit> = jsNative
 
-// Subscribe to the Manager's notification SSE stream (the reverse leg). Manages the whole
-// lifecycle in one place: connect, parse `data:` frames, reconnect on drop with a fixed
-// backoff, and return a cancel that both stops reconnecting and aborts the live fetch.
-// Best-effort by design — a transport error is a dropped connection, retried, never thrown.
+// Subscribe to a Manager SSE stream. Manages the whole lifecycle in one place: connect
+// (with the given request headers — a control secret, or a strategy's identity
+// assertion), parse `data:` frames, reconnect on drop with a fixed backoff, and return
+// a cancel that both stops reconnecting and aborts the live fetch. Best-effort by
+// design — a transport error is a dropped connection, retried, never thrown.
 [<Emit("""(() => {
   const controller = new AbortController()
   let cancelled = false
   const run = async () => {
     while (!cancelled) {
       try {
-        const res = await fetch($0, { method: 'GET', headers: { 'x-yession-control': $1, 'accept': 'text/event-stream' }, signal: controller.signal })
+        const res = await fetch($0, { method: 'GET', headers: { ...Object.fromEntries($1), 'accept': 'text/event-stream' }, signal: controller.signal })
         if (!res.ok) throw new Error('notifications rpc failed: ' + res.status)
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
@@ -70,7 +71,11 @@ let private postStream (url: string) (secret: string) (body: string) (onLine: st
   run()
   return () => { cancelled = true; controller.abort() }
 })()""")>]
-let private openEventStream (url: string) (secret: string) (onData: string -> unit) : (unit -> unit) = jsNative
+let private openEventStreamAs (url: string) (headers: (string * string) []) (onData: string -> unit) : (unit -> unit) = jsNative
+
+/// The control-leg case: the per-launch secret is the whole authentication.
+let private openEventStream (url: string) (secret: string) (onData: string -> unit) : (unit -> unit) =
+    openEventStreamAs url [| "x-yession-control", secret |] onData
 
 /// Subscribe to the Manager's notification stream. Each decoded `SessionNotification` is
 /// handed to `onNotification`; a malformed frame is logged and skipped (never fatal to the
@@ -95,6 +100,26 @@ let subscribeMcp (baseUrl: string) (secret: string) (onList: McpToolList -> unit
             match ControlWire.fromString ControlWire.mcpToolList data with
             | Ok list -> onList list
             | Error e -> eprintfn "mcp list decode failed: %s" e)
+
+/// Subscribe to the Manager's session registry stream (`/sessions/stream`,
+/// docs/plans/09) — the management surface, not a control leg, so no secret rides the
+/// request; `headers` carry whatever the Manager's authentication strategy wants (none
+/// under `localhost`, an `x-yession-user` assertion under `trusted-headers`). The
+/// current Running set arrives immediately, then a fresh full frame on every change;
+/// what an operator's serving binding (and the Ports-tier tests) consume. Returns a
+/// cancel that stops the subscription and closes the connection.
+let subscribeSessionsAs (headers: (string * string) list) (baseUrl: string) (onFrame: ControlWire.SessionRegistryFrame -> unit) : unit -> unit =
+    openEventStreamAs
+        (sprintf "%s/sessions/stream" baseUrl)
+        (Array.ofList headers)
+        (fun data ->
+            match ControlWire.fromString ControlWire.sessionRegistryFrame data with
+            | Ok frame -> onFrame frame
+            | Error e -> eprintfn "session registry decode failed: %s" e)
+
+/// `subscribeSessionsAs` with no headers — the `localhost`-strategy case.
+let subscribeSessions (baseUrl: string) (onFrame: ControlWire.SessionRegistryFrame -> unit) : unit -> unit =
+    subscribeSessionsAs [] baseUrl onFrame
 
 /// Report the session's display name (its collaborative title) to the Manager, so the
 /// session list reflects it. Best-effort: a transport failure is swallowed — a title that
