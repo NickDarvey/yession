@@ -443,24 +443,27 @@ let mountedTests =
                 // its relative routes resolve under the mount.
                 let! _ = await (page.GotoAsync publicUrl)
 
+                // NOTHING may be evaluated until the page has settled. On a 401 from `me`
+                // the client RENAVIGATES through the login bounce (session -> manager ->
+                // `<mount>/callback` -> `./` -> the shell), and an `EvaluateAsync` racing
+                // that navigation dies with "Execution context was destroyed" — which is
+                // exactly how this test passed locally and broke master. `connected` is only
+                // true on the shell after the bounce, and `WaitForFunctionAsync` re-arms
+                // across navigations, so it is the one safe thing to await first.
+                let! _ = await (page.WaitForFunctionAsync connected)
+
                 let! baseHref = await (page.EvaluateAsync<string> "() => document.querySelector('base')?.getAttribute('href')")
                 Expect.equal baseHref (sprintf "/s/%s/" MOUNT_SESSION) "the shell declares its mount"
 
-                // The bundle and stylesheet were fetched from under the mount — if either
-                // had been root-anchored it would have hit the proxy's root and 404'd, and
-                // no client would be running to render this.
-                let! _ = await (page.WaitForSelectorAsync "[data-connection]")
+                // The bundle was fetched from under the mount — had it been root-anchored it
+                // would have hit the proxy's root and 404'd, and the client could not have
+                // reached `connected` above at all.
                 let! assets =
                     await (page.EvaluateAsync<string[]> """() =>
                         performance.getEntriesByType('resource').map(e => new URL(e.name).pathname)""")
                 Expect.isTrue
                     (assets |> Array.exists (fun p -> p = sprintf "/s/%s/client.js" MOUNT_SESSION))
                     "the client bundle was fetched under the mount"
-
-                // The login bounce completed at the public address: session -> manager ->
-                // back to `<mount>/callback` -> `./` -> the shell. Then a real WebRTC data
-                // channel through the same prefix.
-                let! _ = await (page.WaitForFunctionAsync connected)
 
                 // The auth cookie is scoped to this session's mount, not the whole origin.
                 let! cookies = await (context.CookiesAsync ())
