@@ -376,6 +376,55 @@ let private uiRenderTests =
             Expect.isTrue (html.Contains Dom.Manager.createSession) "the create form renders"
     ]
 
+// --- WCAG 2.0 AA floor (AGENTS.md "UI baseline"): theme contrast, pinned by test ---------
+// The tokens live in app/tailwind.css (@theme); every text colour must keep >= 4.5:1
+// against every surface it can sit on. Computed here exactly as WCAG 2.0 defines it.
+
+[<Emit("$0.readFileSync($1, 'utf8')")>]
+let private readFileSync (fs: obj) (path: string) : string = Fable.Core.Util.jsNative
+
+[<Emit("parseInt($0, 16)")>]
+let private parseHex (s: string) : float = Fable.Core.Util.jsNative
+
+let private themeColour (css: string) (name: string) : string =
+    let marker = sprintf "--color-%s:" name
+    match css.IndexOf marker with
+    | -1 -> failwithf "token --color-%s not found in app/tailwind.css" name
+    | start ->
+        let from = start + marker.Length
+        css.Substring(from, css.IndexOf (';', from) - from).Trim ()
+
+let private luminance (hex: string) : float =
+    // Tokens use both #rgb and #rrggbb — expand the short form before slicing channels.
+    let h =
+        if hex.Length = 4 then
+            sprintf "#%c%c%c%c%c%c" hex.[1] hex.[1] hex.[2] hex.[2] hex.[3] hex.[3]
+        else hex
+    let channel (i: int) =
+        let c = parseHex (h.Substring (i, 2)) / 255.0
+        if c <= 0.03928 then c / 12.92 else ((c + 0.055) / 1.055) ** 2.4
+    0.2126 * channel 1 + 0.7152 * channel 3 + 0.0722 * channel 5
+
+let private contrast (a: string) (b: string) : float =
+    let la, lb = luminance a, luminance b
+    (max la lb + 0.05) / (min la lb + 0.05)
+
+let private themeContrastTests =
+    testList "Theme contrast (WCAG 2.0 AA floor)" [
+        testCase "every text colour keeps >= 4.5:1 on every surface" <| fun () ->
+            let colour = themeColour (readFileSync nodeFs "app/tailwind.css")
+            for fg in [ "ink"; "ink-dim"; "ink-faint"; "blue"; "green"; "err" ] do
+                for bg in [ "bg"; "panel"; "surface"; "surface-2" ] do
+                    let ratio = contrast (colour fg) (colour bg)
+                    Expect.isTrue (ratio >= 4.5) (sprintf "--color-%s on --color-%s is %.2f:1 — the AA floor is 4.5:1" fg bg ratio)
+
+        testCase "inverse text on filled (active) buttons keeps >= 4.5:1" <| fun () ->
+            let colour = themeColour (readFileSync nodeFs "app/tailwind.css")
+            for fill in [ "blue"; "green"; "err"; "ink" ] do
+                let ratio = contrast (colour "bg") (colour fill)
+                Expect.isTrue (ratio >= 4.5) (sprintf "text-bg on bg-%s is %.2f:1 — the AA floor is 4.5:1" fill ratio)
+    ]
+
 [<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: $1 }).then(async r => ({ status: r.status, cacheControl: '', body: await r.text() }))")>]
 let private postForm (url: string) (body: string) : JS.Promise<obj> = Fable.Core.Util.jsNative
 
@@ -1101,6 +1150,7 @@ let tests =
     testList "Phase4" [
         stateTests
         uiRenderTests
+        themeContrastTests
         sseTests
         notificationTests
         mcpTests
