@@ -611,6 +611,8 @@ let private e2eTests =
                 do! a.Runner.WaitFor (fun m ->
                         m.Conversation.Items
                         |> List.exists (fun i -> i.Status = Complete && i.Body.Contains "hello before sign-in"))
+                // The status surface says so honestly: no agent in this session yet.
+                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body -> body.Contains "\"agent\":false")
 
                 // 2. A pastes a setup token for "all my sessions" through the session's
                 //    /claude surface; the gate flips without a relaunch.
@@ -621,7 +623,8 @@ let private e2eTests =
                         """{"scope":"mine","peerId":"browser-a","token":"sk-ant-oat01-fake"}"""
                     |> Async.AwaitPromise
                 Expect.equal putMine.status 200 (sprintf "the paste stores: %s" putMine.body)
-                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body -> body.Contains "\"mine\":\"static\"")
+                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body ->
+                        body.Contains "\"mine\":\"static\"" && body.Contains "\"agent\":true")
 
                 do! compose a a.Hello.PeerId "hello after sign-in"
                 a.Connection.SendDraft a.Hello.PeerId

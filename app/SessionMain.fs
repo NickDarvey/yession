@@ -224,7 +224,7 @@ Async.StartImmediate (
         let claudeRoutes =
             match auth, connectionsClient with
             | Some a, Some client ->
-                Some (ClaudeConnection.routes sessionId a client (fun target -> Map.tryFind target connectionStatus))
+                Some (ClaudeConnection.routes sessionId a client (fun target -> Map.tryFind target connectionStatus) (fun () -> envCreds || connectedSomewhere ()))
             | _ -> None
         let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth port
         // Register this launch's OAuth client with the Manager — HERE, after listen

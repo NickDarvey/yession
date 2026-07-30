@@ -134,13 +134,16 @@ let private ownerOf (identity: CookieIdentity) (peerIdRaw: string option) : Resu
         | None -> Error "peer id required for an unattributed connection"
 
 /// Build the /claude* route handler. `statusOf` reads the session's live status cache
-/// (fed by the Manager's connection stream); `connections` is the control-channel
-/// broker client. Composes into `Signalling.start` extra routes.
+/// (fed by the Manager's connection stream); `agentAvailable` is the agent gate's own
+/// truth (any relevant credential OR the ambient env) — served so the client can say
+/// "no agent in this session" honestly; `connections` is the control-channel broker
+/// client. Composes into `Signalling.start` extra routes.
 let routes
     (sessionId: SessionId)
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
     (statusOf: SecretId -> ConnectionKind option)
+    (agentAvailable: unit -> bool)
     : IncomingMessage -> ServerResponse -> bool =
     fun req res ->
         let path = req.url.Split('?').[0]
@@ -167,8 +170,8 @@ let routes
                                 | UserOwner _ -> "user"
                                 | PeerOwner _ -> "peer"
                             respondJson res 200
-                                (sprintf """{"session":%s,"mine":%s,"owner":"%s"}"""
-                                    (statusJson sessionTarget) (statusJson mineTarget) ownerLabel)
+                                (sprintf """{"session":%s,"mine":%s,"owner":"%s","agent":%b}"""
+                                    (statusJson sessionTarget) (statusJson mineTarget) ownerLabel (agentAvailable ()))
                         | "POST", route ->
                             match targetFor sessionId owner body.Scope with
                             | Error e -> respondText res 400 e
