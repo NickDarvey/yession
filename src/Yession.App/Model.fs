@@ -38,7 +38,11 @@ type ClaudeFlowState =
 /// scope, when connected.
 type ClaudeStatus =
     { SessionCredential : string option
-      MineCredential : string option }
+      MineCredential : string option
+      /// Whether THIS session currently has an agent at all (any connected credential
+      /// or the host's ambient one). `None` until the first probe answers — the
+      /// "no agent" prompt must never flash before the client actually knows.
+      AgentAvailable : bool option }
 
 type ClaudeViewState =
     { Status : ClaudeStatus
@@ -138,7 +142,7 @@ module ClientModel =
           Environment = EnvironmentNotStarted
           Commands = CommandLog.empty
           Claude =
-            { Status = { SessionCredential = None; MineCredential = None }
+            { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
               Flow = ClaudeIdle } }
 
     /// Advance the latest-known offset and recompute the catch-up indicator.

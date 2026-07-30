@@ -27,11 +27,14 @@ let secretName : SecretName =
     | Error e -> failwithf "claude secret name invariant violated: %s" e
 
 /// Claude Code's public OAuth client against claude.ai — the same flow `claude /login`
-/// drives. `code=true` asks the consent page to display the code for manual copy when
-/// the redirect cannot land (the paste fallback).
+/// drives. Its registered redirect URIs are Anthropic's own (this Manager's callback
+/// cannot be registered, and the client rejects unregistered URIs), so the flow
+/// redirects to Anthropic's code-display page and completion arrives as a pasted
+/// `code#state`. `code=true` asks the consent page to display the code.
 let private authorizeUrl = "https://claude.ai/oauth/authorize?code=true"
 let private tokenUrl = "https://console.anthropic.com/v1/oauth/token"
 let private clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+let private redirectUri = "https://console.anthropic.com/oauth/code/callback"
 let private scopes = "org:create_api_key user:profile user:inference"
 
 /// The broker request for one sign-in flow: Claude's endpoints as data.
@@ -40,7 +43,8 @@ let beginRequest (target: SecretId) : ControlWire.ConnectionBeginRequest =
       AuthorizeUrl = envOr "YESSION_CLAUDE_AUTHORIZE_URL" authorizeUrl
       TokenUrl = envOr "YESSION_CLAUDE_TOKEN_URL" tokenUrl
       ClientId = envOr "YESSION_CLAUDE_CLIENT_ID" clientId
-      Scopes = scopes }
+      Scopes = scopes
+      RedirectUri = Some (envOr "YESSION_CLAUDE_REDIRECT_URI" redirectUri) }
 
 /// Validate a pasted static credential: a `claude setup-token` token
 /// (`sk-ant-oat01-…`) or a Console API key (`sk-ant-…`). Anything else is a paste
@@ -130,13 +134,16 @@ let private ownerOf (identity: CookieIdentity) (peerIdRaw: string option) : Resu
         | None -> Error "peer id required for an unattributed connection"
 
 /// Build the /claude* route handler. `statusOf` reads the session's live status cache
-/// (fed by the Manager's connection stream); `connections` is the control-channel
-/// broker client. Composes into `Signalling.start` extra routes.
+/// (fed by the Manager's connection stream); `agentAvailable` is the agent gate's own
+/// truth (any relevant credential OR the ambient env) — served so the client can say
+/// "no agent in this session" honestly; `connections` is the control-channel broker
+/// client. Composes into `Signalling.start` extra routes.
 let routes
     (sessionId: SessionId)
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
     (statusOf: SecretId -> ConnectionKind option)
+    (agentAvailable: unit -> bool)
     : IncomingMessage -> ServerResponse -> bool =
     fun req res ->
         let path = req.url.Split('?').[0]
@@ -163,8 +170,8 @@ let routes
                                 | UserOwner _ -> "user"
                                 | PeerOwner _ -> "peer"
                             respondJson res 200
-                                (sprintf """{"session":%s,"mine":%s,"owner":"%s"}"""
-                                    (statusJson sessionTarget) (statusJson mineTarget) ownerLabel)
+                                (sprintf """{"session":%s,"mine":%s,"owner":"%s","agent":%b}"""
+                                    (statusJson sessionTarget) (statusJson mineTarget) ownerLabel (agentAvailable ()))
                         | "POST", route ->
                             match targetFor sessionId owner body.Scope with
                             | Error e -> respondText res 400 e

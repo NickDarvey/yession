@@ -48,14 +48,6 @@ open Yession.Manager
 open Yession.Oidc
 open Yession.Host.Interop
 
-// SSE keep-alive: a comment frame on an interval so an idle stream is not reaped by an
-// HTTP idle timeout (the child also reconnects on drop, so this is belt-and-braces).
-[<Fable.Core.Emit("setInterval($1, $0)")>]
-let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
-
-[<Fable.Core.Emit("clearInterval($0)")>]
-let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
-
 /// What a control secret resolves to: WHICH launch is calling, the environment
 /// capabilities that launch was granted (None = environment-less session), and the
 /// users and peers the Manager verified into the launch at ID-token issuance (empty
@@ -115,12 +107,12 @@ let private respond (res: ServerResponse) (status: int) (text: string) =
 let tryHandle
     (resolve: string -> ControlCaller option)
     (reportName: string -> string -> Async<Result<unit, string>>)
-    (registerNotificationSink: string -> (SessionNotification -> unit) -> (unit -> unit))
-    (registerMcpSink: (McpToolList -> unit) -> (unit -> unit))
+    (subscribeNotifications: string -> Subscribe<SessionNotification>)
+    (subscribeMcp: Subscribe<McpToolList>)
     (registerClient: string -> SessionId -> string -> RegisterClientResponse)
     (secretsApi: SecretsApi option)
     (connectionsApi: ConnectionsApi option)
-    (registerConnectionsSink: string -> (ConnectionStatusList -> unit) -> (unit -> unit))
+    (subscribeConnections: string -> Subscribe<ConnectionStatusList>)
     // Audit hook (Plan 06 telemetry): called with the request path whenever a control
     // secret fails to resolve — the one place the path and the failure meet.
     (onUnauthorized: string -> unit)
@@ -290,15 +282,12 @@ let tryHandle
                 match connectionsApi with
                 | None -> respond res 403 "no secrets store configured"
                 | Some api ->
-                    res.writeHead (200, createObj [ "content-type", box "text/event-stream"; "cache-control", box "no-store"; "connection", box "keep-alive" ]) |> ignore
-                    res.write ": subscribed\n\n" |> ignore
-                    let sink (list: ConnectionStatusList) =
-                        res.write (sprintf "data: %s\n\n" (ControlWire.toString ControlWire.connectionStatusList list)) |> ignore
-                    let unsubscribe = registerConnectionsSink (Option.defaultValue "" secret) sink
-                    let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
-                    req.on ("close", fun _ ->
-                        clearInterval heartbeat
-                        unsubscribe ()) |> ignore
+                    // The snapshot is awaited, so it cannot ride the subscription: `stream` hands
+                    // back its sink and this route writes the first frame itself.
+                    let sink =
+                        Sse.stream req res
+                            (ControlWire.toString ControlWire.connectionStatusList)
+                            (subscribeConnections (Option.defaultValue "" secret))
                     Async.StartImmediate (
                         async {
                             let! snapshot = api.Status caller
@@ -306,33 +295,17 @@ let tryHandle
                         })
             | "GET", "/control/notifications" ->
                 // The reverse leg: a long-lived SSE stream the Manager pushes notifications
-                // down. The secret already resolved to capabilities above, so it is valid —
-                // register a sink that encodes each notification as one SSE `data:` frame.
-                res.writeHead (200, createObj [ "content-type", box "text/event-stream"; "cache-control", box "no-store"; "connection", box "keep-alive" ]) |> ignore
-                // Open the stream with a comment so the client sees headers immediately.
-                res.write ": subscribed\n\n" |> ignore
-                let sink (n: SessionNotification) =
-                    res.write (sprintf "data: %s\n\n" (ControlWire.toString ControlWire.sessionNotification n)) |> ignore
-                let unsubscribe = registerNotificationSink (Option.defaultValue "" secret) sink
-                let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
-                // The subscription lives until the client disconnects: tear down both.
-                req.on ("close", fun _ ->
-                    clearInterval heartbeat
-                    unsubscribe ()) |> ignore
+                // down. The secret already resolved to capabilities above, so it is valid.
+                Sse.stream req res
+                    (ControlWire.toString ControlWire.sessionNotification)
+                    (subscribeNotifications (Option.defaultValue "" secret))
+                |> ignore
             | "GET", "/control/mcp" ->
                 // The MCP reverse leg: the standard tool list, streamed. The secret already
-                // resolved to capabilities above, so it is valid. Registering the sink
-                // immediately writes the current list (McpHub's retained snapshot); every
-                // later change writes a fresh list. Headers first, so that snapshot write lands
-                // after them.
-                res.writeHead (200, createObj [ "content-type", box "text/event-stream"; "cache-control", box "no-store"; "connection", box "keep-alive" ]) |> ignore
-                res.write ": subscribed\n\n" |> ignore
-                let sink (list: McpToolList) =
-                    res.write (sprintf "data: %s\n\n" (ControlWire.toString ControlWire.mcpToolList list)) |> ignore
-                let unsubscribe = registerMcpSink sink
-                let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
-                req.on ("close", fun _ ->
-                    clearInterval heartbeat
-                    unsubscribe ()) |> ignore
+                // resolved to capabilities above, so it is valid. Subscribing writes the current
+                // list at once (the hub's retained snapshot); every later change writes a fresh
+                // one.
+                Sse.stream req res (ControlWire.toString ControlWire.mcpToolList) subscribeMcp
+                |> ignore
             | _ -> respond res 404 "not found"
         true

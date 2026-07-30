@@ -190,6 +190,20 @@ module OidcHttp =
     let openSession (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
         openSessionVia [] "/login" sessionBaseUrl
 
+/// Poll a predicate until it holds, failing loudly with `label` if it never does. For the few
+/// signals that are not model changes (an SSE frame arriving, a hub publishing) — a model waiter
+/// is `Runner.WaitFor` and needs no polling.
+let waitUntil (label: string) (condition: unit -> bool) : Async<unit> =
+    let rec go (remaining: int) =
+        async {
+            if condition () then return ()
+            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
+            else
+                do! Async.Sleep 50
+                return! go (remaining - 1)
+        }
+    go 100
+
 /// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.
 type Client =
@@ -210,6 +224,9 @@ let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: 
         let local = peer id name
         let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
+        // The composer's publication rule, wired exactly as the browser wires it: the client's
+        // draft slot appears when its body has content and goes when the body empties.
+        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
         let connection = App.connect options doc registry hello (user >> runner.Dispatch) channel
         Async.StartImmediate connection.Run
@@ -236,6 +253,8 @@ let connectInMemoryClient (host: Host.SessionHost) (id: string) (name: string) :
         let local = peer id name
         let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
+        // As the browser wires it (see `connectClientWith`).
+        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = host.MintPeerToken () }
         let connection = App.connect App.ConnectOptions.defaults doc registry hello (user >> runner.Dispatch) clientEnd
         Async.StartImmediate connection.Run
@@ -271,9 +290,18 @@ module Body =
     type Runner = Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
 
     /// Author a peer's draft body on a bare runner: ensure the slot, then write the markdown
-    /// into its top-level body fragment.
+    /// into its top-level body fragment. A bare runner has no `DraftSlot.follow` on its doc (that
+    /// is client composition, `connectClientWith`), so the slot is dispatched here — the same slot
+    /// the rule would publish for this content.
     let author (registry: BodyRegistry) (runner: Runner) (peer: PeerId) (markdown: string) : unit =
         runner.Dispatch (user (EnsureDraftMsg peer))
+        Markdown.intoFragment markdown (registry.Fragment (BodyKey.draft peer))
+
+    /// Write a peer's draft body and NOTHING else — what typing into the composer does. The slot
+    /// is whatever the publication rule makes of the content (`DraftSlot.follow`), so this is how
+    /// a test drives that rule; `author` is the bare-runner shortcut that dispatches the slot too.
+    /// The empty string empties the composer.
+    let write (registry: BodyRegistry) (peer: PeerId) (markdown: string) : unit =
         Markdown.intoFragment markdown (registry.Fragment (BodyKey.draft peer))
 
     /// Read a peer's draft body as markdown (the empty string before any content exists).
@@ -297,14 +325,23 @@ module Body =
     let queued (doc: Y.Doc) (queueId: QueueId) : string =
         SyncedStateSync.queuedBodyMarkdown doc queueId
 
-/// Author a draft body on a full Client: ensure the peer's slot, then write the markdown into
-/// its body fragment. The write flows through the fragment CRDT and syncs like any edit.
-/// Replaces the old `editBody`/`setDraft`.
+/// Author a draft body on a full Client: write the markdown into the peer's body fragment and
+/// wait for the slot. No slot is dispatched — writing the body publishes it (`DraftSlot.follow`,
+/// wired by the connectors above as the browser wires it), which is what typing does. The write
+/// flows through the fragment CRDT and syncs like any edit. Replaces the old `editBody`/`setDraft`.
+/// Co-editing another peer's slot goes through here too: their slot already exists (they typed).
 let compose (client: Client) (peer: PeerId) (markdown: string) : Async<unit> =
     async {
-        client.Runner.Dispatch (user (EnsureDraftMsg peer))
+        Body.write client.Registry peer markdown
         do! client.Runner.WaitFor (fun m -> Map.containsKey peer m.Synced.Drafts)
-        Markdown.intoFragment markdown (client.Registry.Fragment (BodyKey.draft peer))
+    }
+
+/// Empty a peer's composer on a full Client (select-all-delete, or the ✕), and wait for the slot
+/// to go: publication follows the body, so an empty composer has no draft slot.
+let clearComposer (client: Client) (peer: PeerId) : Async<unit> =
+    async {
+        Body.write client.Registry peer ""
+        do! client.Runner.WaitFor (fun m -> not (Map.containsKey peer m.Synced.Drafts))
     }
 
 /// Read a peer's draft body as markdown (the empty string until content has synced). Replaces

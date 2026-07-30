@@ -87,9 +87,12 @@ provider redirect ──────────► GET /connections/callback (M
   same boundary as the login bounce.
 - A witnessed peer's session can also delete peer-scoped entries via the generic
   secret routes; that authority is identical to `disconnect` — acceptable.
-- The paste fallback exists because the Claude client's redirect handling to an
-  arbitrary loopback port is unverified; if RFC 8252 loopback semantics hold, the
-  Manager-callback path completes without any paste.
+- Field-verified: the Claude client REJECTS unregistered redirect URIs ("Redirect URI …
+  is not supported by client"), so the Claude flow redirects to Anthropic's own
+  code-display page (`https://console.anthropic.com/oauth/code/callback`) and completes
+  by paste — `ConnectionBeginRequest.RedirectUri` carries this per flow, standards-only.
+  The Manager's `/connections/callback` remains the anchor for connectors whose clients
+  CAN register it.
 - Anthropic's ToS restricts subscription OAuth tokens to Claude Code/claude.ai;
   using them to drive the Agent SDK is the operator's call (acknowledged when this
   plan was set). API keys via the same paste surface are the sanctioned path.

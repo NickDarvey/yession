@@ -148,6 +148,10 @@ let private clearTimeoutJs (handle: float) : unit = jsNative
 [<Emit("document.documentElement.classList.toggle('nav-alt')")>]
 let private toggleNav () : unit = jsNative
 
+// The settings drawer's open state is the same kind of bit, on the same root element.
+[<Emit("document.documentElement.classList.toggle('settings-open')")>]
+let private toggleSettings () : unit = jsNative
+
 // The auth probe: `/me` answers with a peer token when the browser's cookie (or an
 // auth-less session) allows it. Distinguishes DENIED (status) from OFFLINE (reject):
 // a 401 means renavigate to /login; a network failure means stay on the cached shell
@@ -228,9 +232,9 @@ let private urlEncode (value: string) : string = jsNative
 // each one. Failures land as `ok: false` with the response text — the panel shows it.
 
 [<Emit("""fetch('/claude?peer_id=' + encodeURIComponent($0), { cache: 'no-store' })
-  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine })) : Promise.resolve({ ok: false, session: null, mine: null }))
-  .catch(() => ({ ok: false, session: null, mine: null }))""")>]
-let private fetchClaudeStatus (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
+  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine, agent: !!s.agent })) : Promise.resolve({ ok: false, session: null, mine: null, agent: false }))
+  .catch(() => ({ ok: false, session: null, mine: null, agent: false }))""")>]
+let private fetchClaudeStatus (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; agent: bool |}> = jsNative
 
 [<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 })
   .then(async r => ({ ok: r.ok, body: await r.text() }))
@@ -305,18 +309,17 @@ let private start () =
                     focusScheduled <- false
                     connectionRef |> Option.iter (fun c -> c.ReportPresence latestFocus))
 
-        /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; ensure the
-        /// local draft slot exists (so its fragment anchors); remount when a host's fragment
-        /// identity changes; and dispose editors whose host has left the DOM. Body edits sync
-        /// through the doc, so the editor needs no change callback — but an editable body reports
-        /// its local selection (tagged with the host's field) as rAF-throttled presence.
+        /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; remount when
+        /// a host's fragment identity changes; and dispose editors whose host has left the DOM.
+        /// Body edits sync through the doc, so the editor needs no change callback — but an editable
+        /// body reports its local selection (tagged with the host's field) as rAF-throttled
+        /// presence. Mounting publishes no draft slot: the slot follows the body's content
+        /// (`DraftSlot.follow` below), so a peer that never types shows no draft box on any peer.
         let syncRichBodies () =
             let seen = System.Collections.Generic.HashSet<string> ()
             for host in richBodyHosts () do
                 let key = hostBodyKey host
                 seen.Add key |> ignore
-                if key = BodyKey.draft peerId && not (Map.containsKey peerId latestModel.Synced.Drafts) then
-                    dispatchRef (EnsureDraftMsg peerId)
                 let fragment = registry.Fragment key
                 let mount () =
                     let reportFocus (sel: (string * string) option) =
@@ -387,7 +390,7 @@ let private start () =
                 async {
                     let! status = fetchClaudeStatus (PeerId.value peerId) |> Async.AwaitPromise
                     if status.ok then
-                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine })
+                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine; AgentAvailable = Some status.agent })
                 })
         let rec pollClaudeWhileAwaiting () =
             Async.StartImmediate (
@@ -434,6 +437,12 @@ let private start () =
             { SendDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.SendDraft peer)
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
               ToggleNav = toggleNav
+              ToggleSettings =
+                fun () ->
+                    // Open (or close) the drawer AND re-probe, so it always shows the
+                    // current truth the moment it appears.
+                    toggleSettings ()
+                    refreshClaude ()
               ReportTitleSelection =
                 fun sel ->
                     // The title lives in the `title` Y.Text root; turn the input's char offsets
@@ -492,11 +501,21 @@ let private start () =
         |> Program.withSetState setState
         |> Program.run
 
+        // The local peer's draft slot follows its body: published on the first keystroke,
+        // retracted when the composer empties. Watches the body itself, so a keystroke and a
+        // merged remote edit settle it and nothing else does.
+        DraftSlot.follow doc registry peerId (fun msg -> dispatchRef msg) |> ignore
+
         // Local-first: the doc persists in IndexedDB keyed by the session's address. Cold
         // loads render local state (drafts, queued messages) before — and without — the
         // network; on reconnect the full-state exchange reconciles.
         let persistence = newPersistence indexeddbPersistence (persistenceKey ()) doc
         do! whenSynced persistence |> Async.AwaitPromise
+
+        // The replayed doc is state that did not arrive as a body change, so settle the rule
+        // against it explicitly: a doc stored before publication followed the body can hold an
+        // empty-bodied slot, and this is where it goes.
+        DraftSlot.settle doc registry peerId (fun msg -> dispatchRef msg)
 
         // Authorization by renavigation: probe `/me` for a peer token. 401 -> bounce
         // through `/login` (code + PKCE via the Manager) and land back on this shell,
