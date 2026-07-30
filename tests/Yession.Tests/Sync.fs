@@ -142,6 +142,53 @@ let private codecTests =
     ]
 
 // -----------------------------------------------------------------------------
+// Draft-slot publication — a slot exists iff its author's body has content.
+// -----------------------------------------------------------------------------
+
+let private draftSlotTests =
+    testList "Draft slot publication" [
+        testCaseAsync "the slot follows the body: published on content, retracted when it empties" <|
+            async {
+                let doc = Y.Doc.Create ()
+                let registry = BodyRegistry doc
+                let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+                DraftSlot.follow doc registry ada (user >> p.Dispatch)
+
+                // Mounting a composer is not drafting: the editor writes an empty paragraph into
+                // the body fragment, which must publish nothing (an empty draft box on every
+                // peer's composer, for everyone who ever opened the session, was the bug).
+                Body.write registry ada ""
+                Expect.isFalse (Map.containsKey ada (p.Model ()).Synced.Drafts) "no slot before any content"
+
+                Body.write registry ada "thinking out loud"
+                do! p.WaitFor (fun m -> Map.containsKey ada m.Synced.Drafts)
+                Expect.isTrue (SyncedStateSync.hasDraft doc ada) "the published slot is in the doc, for peers to render"
+
+                Body.write registry ada ""
+                do! p.WaitFor (fun m -> not (Map.containsKey ada m.Synced.Drafts))
+                Expect.isFalse (SyncedStateSync.hasDraft doc ada) "emptying the composer retracts the slot from the doc"
+            }
+
+        testCase "an empty-bodied slot is dropped from a doc at boot; a typed draft survives" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let registry = BodyRegistry doc
+            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let grace = PeerId.create "grace" |> expect
+            // The pre-rule shape, as a persisted doc carries it: ada published a slot and never
+            // typed; grace has a real draft.
+            p.Dispatch (user (EnsureDraftMsg ada))
+            Body.author registry p grace "still writing this"
+
+            Expect.equal (SyncedStateSync.removeEmptyDrafts doc) [ ada ] "only the empty slot is dropped"
+            Expect.isFalse (SyncedStateSync.hasDraft doc ada) "the empty slot left the doc"
+            Expect.equal
+                (SyncedStateSync.draftBodyMarkdown doc grace) "still writing this"
+                "the typed draft keeps its body"
+            Expect.isTrue (SyncedStateSync.hasDraft doc grace) "and keeps its slot"
+            Expect.equal (SyncedStateSync.removeEmptyDrafts doc) [] "a swept doc has nothing left to sweep"
+    ]
+
+// -----------------------------------------------------------------------------
 // Phase 3 unit tests — the queue's total order, the drain plan's pure decision
 // core, the retired send command, and the conversation projection.
 // -----------------------------------------------------------------------------
@@ -371,7 +418,11 @@ let private e2eTests =
                 // E2E-7: unsent draft content lives in the draft, never in the timeline —
                 // the conversation comes from the projection alone.
                 do! compose a ada "UNSENT thought"
-                do! b.Runner.WaitFor (fun _ -> draftBody b ada = Some "UNSENT thought")
+                // Both halves of the draft must have landed before the markup is read: the body
+                // content and the slot it publishes arrive as two updates in that order (the
+                // publication rule reacts to the content), and the composer renders per slot.
+                do! b.Runner.WaitFor (fun m ->
+                        draftBody b ada = Some "UNSENT thought" && Map.containsKey ada m.Synced.Drafts)
                 let html = Support.render (b.Runner.Model ())
                 // A section's markup runs from its data marker to its closing tag (no
                 // section nests another), so these slices are exact wherever the layout
@@ -494,6 +545,7 @@ let private titlePresenceTests =
 let tests =
     testList "Sync" [
         codecTests
+        draftSlotTests
         queueUnitTests
         titlePresenceTests
         Tag.needs "Draft sync E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)

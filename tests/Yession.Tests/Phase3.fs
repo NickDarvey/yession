@@ -487,6 +487,39 @@ let private docPersistenceTests =
                 Expect.isTrue (lineCount <= 3) (sprintf "the store is compacted at open (found %d lines)" lineCount)
             }
 
+        testCaseAsync "an empty draft slot in the persisted doc is dropped at boot; a typed draft is not" <|
+            async {
+                let logPath, docPath = freshPaths "phase3-emptydraft"
+                let sessionId = SessionId.create "phase3-emptydraft" |> expect
+                let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
+
+                let! h1 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None None sessionId None 0
+                // Two peers, exactly as a pre-`DraftSlot` build left them in the doc: one published
+                // a slot when its composer mounted and never typed (the garbage that put an empty
+                // draft box on every peer's composer for every peer that ever opened the session),
+                // one has a real unsent draft.
+                let idle = offlinePeer 24.0 "olive" "Olive"
+                let idlePeer = (idle.Runner.Model ()).Peer.PeerId
+                idle.Runner.Dispatch (user (EnsureDraftMsg idlePeer))
+                deliver idle.Doc h1.Doc
+                let writer = offlinePeer 25.0 "wilma" "Wilma"
+                let writerPeer = (writer.Runner.Model ()).Peer.PeerId
+                Body.author writer.Registry writer.Runner writerPeer "still writing this"
+                deliver writer.Doc h1.Doc
+                Expect.isTrue (SyncedStateSync.hasDraft h1.Doc idlePeer) "the empty slot reached the process"
+                do! h1.Stop ()
+
+                // Second life: the replay sweeps the empty slot, and only that.
+                let! h2 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None (fun _ _ -> ()) None None None sessionId None 0
+                let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
+                Expect.isFalse (Map.containsKey idlePeer synced.Drafts) "the empty slot is gone after the replay"
+                Expect.equal
+                    (synced.Drafts |> Map.tryFind writerPeer |> Option.map (fun _ -> SyncedStateSync.draftBodyMarkdown h2.Doc writerPeer))
+                    (Some "still writing this")
+                    "the typed draft survived the restart untouched"
+                do! h2.Stop ()
+            }
+
         testCaseAsync "a torn final line in the doc store is dropped; the acknowledged state is intact" <|
             async {
                 let logPath, docPath = freshPaths "phase3-torn"

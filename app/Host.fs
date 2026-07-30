@@ -81,6 +81,18 @@ let startFull
         // durable before anything acts on it.
         docStore |> Option.iter (fun store -> DocSync.onAnyUpdatePayload doc store.Append)
 
+        // Legacy draft garbage: builds before the slot-follows-body rule (`DraftSlot`) published a
+        // draft slot the moment a client mounted its composer, so a replayed doc carries an empty
+        // slot for every peer that ever opened the session — each one an empty draft box on
+        // everyone's composer. Drop them here: no peer is connected yet, so an empty body cannot be
+        // a draft in progress. The removal rides the tap above (durable), and every replica merges
+        // the delete on its next state exchange.
+        match SyncedStateSync.removeEmptyDrafts doc with
+        | [] -> ()
+        | dropped ->
+            eprintfn "[session %s] dropped %d empty draft slot(s) at boot"
+                (SessionId.value sessionId) (List.length dropped)
+
         // Connected peers' channels, for state relay; keyed per connection.
         let mutable connections : Map<int, FrameChannel<string>> = Map.empty
         let mutable nextConnectionId = 0

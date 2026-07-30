@@ -157,6 +157,16 @@ The change was small enough to land in one commit rather than staged steps:
 | Send-many | Send clears the slot; a peer enqueues repeatedly | The queue property suite (invariants 1–7) drives every enqueue through the author-keyed slot |
 | Invariant 4 (clean send) | send removes exactly the slot, appends one snapshotted entry, later edits never mutate it | Dedicated `property {}` — `Properties.fs` "Draft invariant 4 — clean send": generated schedules of slot edits + sends over a real client program, asserting one snapshotted queue entry per send, owner attribution, and immutability under post-send edits |
 
+**Correction (later fix).** The composer lifecycle above — "a `DraftState` enters synced state on
+the first keystroke" — is what this plan specified, but the delivered browser wiring published the
+slot when the composer *mounted*, so every peer that had ever opened the session showed an empty
+draft box on everyone's composer, and the slot stayed in the persisted doc after they left. The
+rule now lives in one place (`DraftSlot`, wired on the client's doc): a slot exists **iff** its
+author's body has content — published on the first keystroke, retracted when the body empties. The
+Session Process sweeps the empty slots older docs accumulated at boot
+(`SyncedStateSync.removeEmptyDrafts`), where no peer is connected and an empty body cannot be a
+draft in progress.
+
 **Follow-up (not done):** invariant 4 (clean send) is now pinned by its own `property {}`
 block; invariants 1/3/5 are structural (the `Map<PeerId,_>` type and Step 05's existing
 convergence coverage). Invariant 2 (participation) remains the noted follow-up — adding

@@ -240,10 +240,13 @@ module App =
                     let md = Markdown.ofFragment draftBody
                     doc.transact ((fun _ ->
                         if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
-                        dispatch (SendDraftMsg (peerId, queueId))), null)
-                    // The composer empties after send: the sender's body root is a durable
-                    // top-level root (it is not removed with the slot), so clear it explicitly.
-                    Markdown.intoFragment "" draftBody
+                        dispatch (SendDraftMsg (peerId, queueId))
+                        // The composer empties in the SAME transaction: the sender's body root is
+                        // durable (it is not removed with the slot), so it must be cleared
+                        // explicitly — and clearing it separately would publish an update where the
+                        // body still has content but the slot is gone, which `DraftSlot` answers by
+                        // republishing the very slot the send just removed.
+                        Markdown.intoFragment "" draftBody), null)
                 | Error e -> failwithf "queue id invariant violated: %s" e
           InterruptTurn =
             fun turnId ->

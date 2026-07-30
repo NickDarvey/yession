@@ -305,18 +305,17 @@ let private start () =
                     focusScheduled <- false
                     connectionRef |> Option.iter (fun c -> c.ReportPresence latestFocus))
 
-        /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; ensure the
-        /// local draft slot exists (so its fragment anchors); remount when a host's fragment
-        /// identity changes; and dispose editors whose host has left the DOM. Body edits sync
-        /// through the doc, so the editor needs no change callback — but an editable body reports
-        /// its local selection (tagged with the host's field) as rAF-throttled presence.
+        /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; remount when
+        /// a host's fragment identity changes; and dispose editors whose host has left the DOM.
+        /// Body edits sync through the doc, so the editor needs no change callback — but an editable
+        /// body reports its local selection (tagged with the host's field) as rAF-throttled
+        /// presence. Mounting publishes no draft slot: the slot follows the body's content
+        /// (`DraftSlot.follow` below), so a peer that never types shows no draft box on any peer.
         let syncRichBodies () =
             let seen = System.Collections.Generic.HashSet<string> ()
             for host in richBodyHosts () do
                 let key = hostBodyKey host
                 seen.Add key |> ignore
-                if key = BodyKey.draft peerId && not (Map.containsKey peerId latestModel.Synced.Drafts) then
-                    dispatchRef (EnsureDraftMsg peerId)
                 let fragment = registry.Fragment key
                 let mount () =
                     let reportFocus (sel: (string * string) option) =
@@ -491,6 +490,11 @@ let private start () =
         App.makeProgram doc initial
         |> Program.withSetState setState
         |> Program.run
+
+        // The local peer's draft slot follows its body: published on the first keystroke,
+        // retracted when the composer empties. Registered on the doc, so it settles the same way
+        // for a keystroke, a remote merge, and the IndexedDB replay below.
+        DraftSlot.follow doc registry peerId (fun msg -> dispatchRef msg)
 
         // Local-first: the doc persists in IndexedDB keyed by the session's address. Cold
         // loads render local state (drafts, queued messages) before — and without — the
