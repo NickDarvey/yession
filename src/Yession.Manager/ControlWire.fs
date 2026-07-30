@@ -354,13 +354,17 @@ module ControlWire =
 
     /// Everything the standards need to begin an authorization-code + PKCE flow, as data.
     /// `AuthorizeUrl` may already carry provider-specific query params; the broker appends
-    /// only the standard ones.
+    /// only the standard ones. `RedirectUri` is where the provider sends the code:
+    /// `None` = the Manager's own public callback (providers that can register it);
+    /// `Some` = a provider-hosted code-display page (e.g. a client whose registered
+    /// URIs cannot include this Manager) — completion then arrives as a paste.
     type ConnectionBeginRequest =
         { Target : SecretId
           AuthorizeUrl : string
           TokenUrl : string
           ClientId : string
-          Scopes : string }
+          Scopes : string
+          RedirectUri : string option }
 
     type ConnectionBeginResponse = { AuthorizeUrl : string; State : string }
 
@@ -433,14 +437,16 @@ module ControlWire =
                       "authorizeUrl", Encode.string r.AuthorizeUrl
                       "tokenUrl", Encode.string r.TokenUrl
                       "clientId", Encode.string r.ClientId
-                      "scopes", Encode.string r.Scopes ]
+                      "scopes", Encode.string r.Scopes
+                      "redirectUri", Encode.option Encode.string r.RedirectUri ]
           Decode =
             Decode.object (fun get ->
                 { ConnectionBeginRequest.Target = get.Required.Field "target" secretId.Decode
                   ConnectionBeginRequest.AuthorizeUrl = get.Required.Field "authorizeUrl" Decode.string
                   ConnectionBeginRequest.TokenUrl = get.Required.Field "tokenUrl" Decode.string
                   ConnectionBeginRequest.ClientId = get.Required.Field "clientId" Decode.string
-                  ConnectionBeginRequest.Scopes = get.Required.Field "scopes" Decode.string }) }
+                  ConnectionBeginRequest.Scopes = get.Required.Field "scopes" Decode.string
+                  ConnectionBeginRequest.RedirectUri = get.Optional.Field "redirectUri" Decode.string }) }
 
     let connectionBeginResponse : Codec<ConnectionBeginResponse> =
         { Encode =

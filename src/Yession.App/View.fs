@@ -192,7 +192,7 @@ module View =
             | ClaudeAwaitingCode (url, _) ->
                 html $"""
                     <a class="{Style.btnPrimary}" href="{url}" target="_blank" rel="noreferrer" data-claude-authorize>Approve on claude.ai</a>
-                    <span class="{Style.label}">then return here — or paste the code:</span>
+                    <span class="{Style.label}">copy the code it shows, paste it here:</span>
                     <input type="text" class="{Style.titleInput}" data-claude-code placeholder="code#state" />
                     <div class="{Style.sideRow}">
                       <button type="button" class="{Style.btnPrimary}" data-claude-complete @click={Ev(fun _ -> actions.ClaudeComplete ())}>Complete</button>
