@@ -8,6 +8,7 @@
     <Compile Include="Dom.fs" />
     <Compile Include="PeerColour.fs" />
     <Compile Include="Model.fs" />
+    <Compile Include="DraftSlot.fs" />
     <Compile Include="Connection.fs" />
     <Compile Include="PeerName.fs" />
     <Compile Include="Style.fs" />

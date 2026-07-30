@@ -231,6 +231,39 @@ module SyncedStateSync =
     let draftBodyMarkdown (doc: Yjs.Y.Doc) (author: PeerId) : string =
         Markdown.ofFragment (doc.getXmlFragment (BodyKey.draft author))
 
+    /// Whether the doc currently holds a draft slot for this author — read from the `drafts`
+    /// root, not from a decoded model, so a caller reacting to a doc update reads the slot and
+    /// the body at the same instant (the publication rule in `DraftSlot` needs both bits from
+    /// one state, never one of them a model refresh behind).
+    let hasDraft (doc: Yjs.Y.Doc) (author: PeerId) : bool =
+        shareHas doc "drafts" && (doc.getMap "drafts" : Yjs.Y.Map<obj>).has (PeerId.value author)
+
+    /// Remove every draft slot whose body has no content, returning the authors dropped.
+    /// A slot is published on its author's first keystroke and retracted when their body empties
+    /// (`DraftSlot`), so an empty-bodied slot is garbage: builds before that rule published a slot
+    /// the moment a client mounted its composer, leaving one behind in the persisted doc for every
+    /// peer that ever opened the session — each an empty draft box on everyone's composer forever.
+    /// Call at boot, where no peer is connected: no keystroke can race the read, so an empty body
+    /// cannot be a draft in progress. A key that is not a valid `PeerId` is left alone — the decode
+    /// already skips it, and it is not ours to interpret.
+    let removeEmptyDrafts (doc: Yjs.Y.Doc) : PeerId list =
+        materializeRoots doc
+        if not (shareHas doc "drafts") then []
+        else
+            let drafts : Yjs.Y.Map<obj> = doc.getMap "drafts"
+            let empty =
+                mapKeys drafts
+                |> Array.choose (fun key ->
+                    match PeerId.create key with
+                    | Ok author when (draftBodyMarkdown doc author).Trim () = "" -> Some author
+                    | _ -> None)
+                |> List.ofArray
+            if not (List.isEmpty empty) then
+                doc.transact (
+                    (fun _ -> empty |> List.iter (fun author -> drafts.delete (PeerId.value author))),
+                    processOrigin)
+            empty
+
 /// Moves Yjs updates over the transport's opaque `State` frame. The wire payload is a
 /// base64-encoded Yjs update; lib0 (a yjs dependency) provides base64 in both Node and
 /// browsers. Runs only under Fable — .NET builds only type-check it.
