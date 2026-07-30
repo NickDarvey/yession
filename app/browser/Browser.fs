@@ -148,6 +148,10 @@ let private clearTimeoutJs (handle: float) : unit = jsNative
 [<Emit("document.documentElement.classList.toggle('nav-alt')")>]
 let private toggleNav () : unit = jsNative
 
+// The settings drawer's open state is the same kind of bit, on the same root element.
+[<Emit("document.documentElement.classList.toggle('settings-open')")>]
+let private toggleSettings () : unit = jsNative
+
 // The auth probe: `/me` answers with a peer token when the browser's cookie (or an
 // auth-less session) allows it. Distinguishes DENIED (status) from OFFLINE (reject):
 // a 401 means renavigate to /login; a network failure means stay on the cached shell
@@ -228,9 +232,9 @@ let private urlEncode (value: string) : string = jsNative
 // each one. Failures land as `ok: false` with the response text — the panel shows it.
 
 [<Emit("""fetch('/claude?peer_id=' + encodeURIComponent($0), { cache: 'no-store' })
-  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine })) : Promise.resolve({ ok: false, session: null, mine: null }))
-  .catch(() => ({ ok: false, session: null, mine: null }))""")>]
-let private fetchClaudeStatus (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
+  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine, agent: !!s.agent })) : Promise.resolve({ ok: false, session: null, mine: null, agent: false }))
+  .catch(() => ({ ok: false, session: null, mine: null, agent: false }))""")>]
+let private fetchClaudeStatus (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; agent: bool |}> = jsNative
 
 [<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 })
   .then(async r => ({ ok: r.ok, body: await r.text() }))
@@ -386,7 +390,7 @@ let private start () =
                 async {
                     let! status = fetchClaudeStatus (PeerId.value peerId) |> Async.AwaitPromise
                     if status.ok then
-                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine })
+                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine; AgentAvailable = Some status.agent })
                 })
         let rec pollClaudeWhileAwaiting () =
             Async.StartImmediate (
@@ -433,6 +437,12 @@ let private start () =
             { SendDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.SendDraft peer)
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
               ToggleNav = toggleNav
+              ToggleSettings =
+                fun () ->
+                    // Open (or close) the drawer AND re-probe, so it always shows the
+                    // current truth the moment it appears.
+                    toggleSettings ()
+                    refreshClaude ()
               ReportTitleSelection =
                 fun sel ->
                     // The title lives in the `title` Y.Text root; turn the input's char offsets

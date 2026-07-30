@@ -70,6 +70,14 @@ module Dom =
         let discardDraft = "data-discard-draft"
         // Chrome: the sidebar drawer toggle (lives on the shell root, outside `#app`).
         let navToggle = "data-nav-toggle"
+        // Settings drawer (Plan 08 pass): its toggle, the panel, the Claude section, and
+        // the agent-presence surfaces (the sidebar row and the composer's prompt strip).
+        let settingsToggle = "data-settings-toggle"
+        let settingsPanel = "data-settings-panel"
+        let claudePanel = "data-claude-panel"
+        let agentPresence = "data-agent-presence"
+        let noAgent = "data-no-agent"
+        let noAgentConnect = "data-no-agent-connect"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
