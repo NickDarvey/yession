@@ -1,0 +1,20 @@
+<Project>
+
+  <!--
+    Warnings are errors, repo-wide.
+
+    The reason is F#'s exhaustiveness checking (FS0025). A shared contract expressed as a
+    discriminated union — a route set, a config shape, a protocol frame — only holds if
+    adding a case forces every consumer to account for it. As a warning that guarantee is
+    advisory: the build stays green and the unhandled case becomes a runtime
+    `MatchFailureException` in whichever deployment happens to hit it first. As an error the
+    compiler is the gate, which is the whole point of declaring the contract as a type.
+
+    Applies to `dotnet build Yession.slnx` (the type-check gate in `tasks.fsx compile`).
+    Fable's own compilation is separate and unaffected.
+  -->
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+</Project>
