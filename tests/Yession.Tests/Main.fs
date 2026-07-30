@@ -50,6 +50,10 @@ let all =
         // convergence/persistence E2E spawns the real Session Process, so it also needs Native.
         Tag.needs "Editor rendering (browser)" [ Tag.Browser ] (fun () -> Browser.editorTests)
         Tag.needs "Browser E2E" [ Tag.Browser; Tag.Native ] (fun () -> Browser.tests)
+        // A session served under a path, driven at its PUBLIC address through a
+        // path-preserving proxy: the only check that `<base href>` resolution works in a
+        // real browser rather than in reasoning about one (docs/plans/10).
+        Tag.needs "Path-mounted session (browser)" [ Tag.Browser; Tag.Native ] (fun () -> Browser.mountedTests)
     ]
 
 [<EntryPoint>]
