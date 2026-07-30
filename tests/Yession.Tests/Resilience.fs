@@ -525,7 +525,9 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
             async {
                 // A send needs a live session; after a drop that means the NEXT one.
                 do! runner.WaitFor (fun m -> m.Connection = Connected)
-                runner.Dispatch (user (EnsureDraftMsg local.PeerId))
+                // The draft carries the queue key it will become, so any co-editor's send writes
+                // the same one; this harness is the author, so it mints it here.
+                runner.Dispatch (user (EnsureDraftMsg (local.PeerId, QueueId.create (string (System.Guid.NewGuid ())) |> expect)))
                 do! runner.WaitFor (fun m -> Map.containsKey local.PeerId m.Synced.Drafts)
                 Markdown.intoFragment markdown (registry.Fragment (BodyKey.draft local.PeerId))
                 match live.Value with
