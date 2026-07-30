@@ -1,6 +1,7 @@
 module Yession.Tests.Resilience
 
-// The event feed's behaviour when the network fails — at the seam where it actually fails.
+// The client's two network legs when they fail — the durable history feed (HTTP) and the
+// session transport (the data channel) — at the seams where they actually fail.
 //
 // Integration, not E2E, and deliberately so: the socket is a FUNCTION here, so "the network
 // is down" is a value the test chooses rather than a server it has to kill and a race it has
@@ -19,11 +20,15 @@ module Yession.Tests.Resilience
 //     (the clock is injected, so backoff is asserted rather than slept through);
 //   * the client stays fully usable while history is stalled — writing, sending, and
 //     collaborating are local-first CRDT operations that never touch the feed;
-//   * and the feed recovers on its own, resuming from where consumption stopped.
+//   * the feed recovers on its own, resuming from where consumption stopped;
+//   * and the session lifecycle keeps the promise the model makes — a dropped session comes
+//     back and resumes, a refused one does not, and a transport that never opens settles with
+//     a reason instead of leaving the shell on "connecting" forever.
 
 open System
 open Fable.Core
 open Fable.Pyxpecto
+open Yjs
 open Ylmish
 open Yession.Domain
 open Yession.App
@@ -446,6 +451,225 @@ let private channelTests =
                 "and the strip reports the session leg, not the feed"
     ]
 
+// --- The session lifecycle ----------------------------------------------------------------
+
+/// A lifecycle wired to a real Host over in-memory channel pairs — the same rules the browser
+/// runs, with WebRTC and Lit swapped for the two things a test can hold: a channel it can cut,
+/// and a record of every attempt.
+type private Lifecycle =
+    { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
+      /// Compose a body and send it through the LIVE connection — the app's own atomic send,
+      /// so the drain sees one update and the timeline is reached the way it really is.
+      Say : string -> Async<unit>
+      /// Cut the SERVER end of the current session — a Session Process dropping its peer.
+      DropSession : unit -> Async<unit>
+      /// How many times a transport was opened.
+      Opens : unit -> int
+      /// The resume offset each served session was started with, in order.
+      Resumes : unit -> EventOffset option list
+      /// Every message the lifecycle routed, in order — the connection story as it happened.
+      /// Asserted instead of the model, because over in-memory channels a whole reconnect can
+      /// complete synchronously: a transient state like `Reconnecting` is real but is gone
+      /// before anything could wait on it.
+      Seen : unit -> ClientMsg list }
+
+/// Start a lifecycle against `host`. `token` is the peer's credential — a bad one is refused by
+/// the handshake, which is how the "never reconnect a refused peer" rule is exercised for real.
+let private startLifecycle (host: Host.SessionHost) (token: string) (id: string) (name: string) : Lifecycle =
+    let doc = Y.Doc.Create ()
+    let local = peer id name
+    let registry = BodyRegistry doc
+    let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
+    let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
+    let opens = ref 0
+    let resumes = ref []
+    let serverEnd : FrameChannel<string> option ref = ref None
+    let live : App.Connection option ref = ref None
+    let seen = ResizeArray<ClientMsg> ()
+    let record msg =
+        seen.Add msg
+        runner.Dispatch (user msg)
+    Async.StartImmediate (
+        App.SessionLifecycle.run
+            { Open =
+                fun () ->
+                    async {
+                        opens.Value <- opens.Value + 1
+                        let clientEnd, server = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                        serverEnd.Value <- Some server
+                        // The Host drives the server end exactly as it would a WebRTC connection.
+                        host.Connect server
+                        return Ok clientEnd
+                    }
+              Serve =
+                fun resumeAfter dispatch channel ->
+                    async {
+                        resumes.Value <- resumes.Value @ [ resumeAfter ]
+                        let connection =
+                            App.connect
+                                { App.ConnectOptions.defaults with ResumeAfter = resumeAfter }
+                                doc
+                                registry
+                                hello
+                                dispatch
+                                channel
+                        live.Value <- Some connection
+                        do! connection.Run
+                        live.Value <- None
+                    }
+              ReadPosition = fun () -> (runner.Model ()).EventConsumer.LastProcessedOffset
+              Dispatch = record })
+    { Runner = runner
+      Say =
+        fun markdown ->
+            async {
+                // A send needs a live session; after a drop that means the NEXT one.
+                do! runner.WaitFor (fun m -> m.Connection = Connected)
+                runner.Dispatch (user (EnsureDraftMsg local.PeerId))
+                do! runner.WaitFor (fun m -> Map.containsKey local.PeerId m.Synced.Drafts)
+                Markdown.intoFragment markdown (registry.Fragment (BodyKey.draft local.PeerId))
+                match live.Value with
+                | Some connection -> connection.SendDraft local.PeerId
+                | None -> failwith "no live connection to send through"
+            }
+      DropSession =
+        fun () ->
+            async {
+                match serverEnd.Value with
+                | Some server -> do! server.Close ()
+                | None -> ()
+            }
+      Opens = fun () -> opens.Value
+      Resumes = fun () -> resumes.Value
+      Seen = fun () -> List.ofSeq seen }
+
+let private lifecycleTests =
+    testList "The session lifecycle" [
+        testCaseAsync "a dropped session reconnects and resumes from the offset it reached" <|
+            async {
+                let! host = Host.start (SessionId.create "lifecycle-resume" |> expect) 0
+                let ada = startLifecycle host (host.MintPeerToken ()) "ada" "Ada"
+                do! ada.Runner.WaitFor (fun m -> m.Connection = Connected)
+
+                // Build history, so "resume from where it read" has something to mean.
+                do! ada.Say "before the drop"
+                do! ada.Runner.WaitFor (fun m -> bodies m = [ "before the drop" ])
+                let readTo = (ada.Runner.Model ()).EventConsumer.LastProcessedOffset
+                Expect.isTrue readTo.IsSome "the client consumed the message it sent"
+
+                // The Session Process drops the peer. The old shell set `Reconnecting` and then
+                // did nothing at all — a state that was a promise no code kept. Now the session
+                // comes back on its own, and the client is usable again without a reload.
+                do! ada.DropSession ()
+                do! ada.Say "after the drop"
+                do! ada.Runner.WaitFor (fun m -> bodies m = [ "before the drop"; "after the drop" ])
+
+                Expect.equal (ada.Opens ()) 2 "it came back — once, not in a loop"
+                Expect.equal
+                    (ada.Resumes ())
+                    [ None; readTo ]
+                    "the first session read from the start; the second resumed where the model got to"
+                Expect.equal
+                    (bodies (ada.Runner.Model ()))
+                    [ "before the drop"; "after the drop" ]
+                    "history is continuous across the reconnect — no gap, no duplicate"
+
+                // The connection story, in order: accepted, dropped (which is what puts the
+                // model in `Reconnecting`), accepted again.
+                let lifecycleStory =
+                    ada.Seen ()
+                    |> List.choose (function
+                        | ConnectedMsg _ -> Some "connected"
+                        | DisconnectedMsg -> Some "dropped"
+                        | RejectedMsg _ | ConnectFailedMsg _ -> Some "settled"
+                        | _ -> None)
+                Expect.equal lifecycleStory [ "connected"; "dropped"; "connected" ] "one clean round trip"
+                do! host.Stop ()
+            }
+
+        testCaseAsync "a refused peer is not reconnected — it is told why" <|
+            async {
+                let! host = Host.start (SessionId.create "lifecycle-refused" |> expect) 0
+                // A session that refuses the handshake will refuse it again; coming back would
+                // be a retry loop against a decision — the trap the feed's 401 also avoids.
+                let ada = startLifecycle host "not-a-minted-token" "ada" "Ada"
+                do! ada.Runner.WaitFor (fun m ->
+                        match m.Connection with
+                        | Disconnected (Some _) -> true
+                        | _ -> false)
+                Expect.equal (ada.Opens ()) 1 "the transport was opened once and never again"
+                do! host.Stop ()
+            }
+
+        testCaseAsync "a transport that cannot be opened settles, and does not retry behind the policy" <|
+            async {
+                // `Open` is already policy-guarded at the composition site, so an `Error` here is
+                // final: report it and stop. A second attempt would be a retry loop wrapped
+                // around a retry loop.
+                let opens = ref 0
+                let dispatched = ResizeArray<ClientMsg> ()
+                let model = ref (ClientModel.init (peer "ada" "Ada"))
+                do!
+                    App.SessionLifecycle.run
+                        { Open =
+                            fun () ->
+                                async {
+                                    opens.Value <- opens.Value + 1
+                                    return Error App.ChannelTimedOut
+                                }
+                          Serve = fun _ _ _ -> async { failwith "must not serve a channel it never opened" }
+                          ReadPosition = fun () -> None
+                          Dispatch =
+                            fun msg ->
+                                dispatched.Add msg
+                                model.Value <- ClientModel.update msg model.Value }
+                Expect.equal opens.Value 1 "one attempt, then settled"
+                Expect.equal
+                    (List.ofSeq dispatched)
+                    [ ConnectingMsg; ConnectFailedMsg "the session did not answer" ]
+                    "it announced the attempt, then reported the failure with its reason"
+                Expect.equal
+                    model.Value.Connection
+                    (Disconnected (Some "the session did not answer"))
+                    "and the model holds why, instead of an eternal 'connecting'"
+            }
+
+        testCaseAsync "an accepted session earns exactly one more attempt; the announcement is not repeated" <|
+            async {
+                // The loop's arithmetic, isolated from any transport: acceptance (and only
+                // acceptance) buys another pass, and `Reconnecting` is never overwritten by a
+                // second `Connecting` announcement.
+                let accepted : PeerAcceptedPayload =
+                    { SessionId = SessionId.create "lifecycle-unit" |> expect
+                      AssignedDisplayName = "Ada"
+                      LatestOffset = None }
+                let serves = ref 0
+                let dispatched = ResizeArray<ClientMsg> ()
+                do!
+                    App.SessionLifecycle.run
+                        { Open = fun () -> async { return Ok () }
+                          Serve =
+                            fun _ dispatch _ ->
+                                async {
+                                    serves.Value <- serves.Value + 1
+                                    if serves.Value = 1 then
+                                        // Accepted, then the channel closed under it.
+                                        dispatch (ConnectedMsg accepted)
+                                        dispatch DisconnectedMsg
+                                    else
+                                        // Refused this time: the loop must end here.
+                                        dispatch (RejectedMsg "peer token expired")
+                                }
+                          ReadPosition = fun () -> None
+                          Dispatch = dispatched.Add }
+                Expect.equal serves.Value 2 "the ended session earned one more attempt, and the refusal ended it"
+                Expect.equal
+                    (dispatched |> Seq.filter (fun m -> m = ConnectingMsg) |> Seq.length)
+                    1
+                    "announced once, on the first attempt — a reconnect keeps `Reconnecting`"
+            }
+    ]
+
 // --- What the failure looks like ----------------------------------------------------------
 
 let private surfaceTests =
@@ -505,11 +729,12 @@ let private surfaceTests =
     ]
 
 let tests =
-    testList "Event feed resilience" [
+    testList "Transport resilience" [
         scheduleTests
         guardTests
         classificationTests
         feedFailureTests
         channelTests
+        lifecycleTests
         surfaceTests
     ]

@@ -597,46 +597,29 @@ let private start () =
                     (App.SessionChannel.policy Resilience.Policy.sleep jsRandom)
                     (fun () -> connectChannel (signalUrl ()))
 
-            // The session leg, driven to a settled state and kept there. Each pass: open the
-            // channel under the policy, run the frame pump until it closes, then decide.
-            //
-            // A channel that closes AFTER the session accepted us is an ended session — a
-            // Process restart, a sleeping laptop, a network blip — and `Connection.run` has
-            // already put the model in `Reconnecting`, so honour that and come back, resuming
-            // consumption from the offset the model actually reached. A channel that closes
-            // without ever being accepted was REJECTED (a stale token): the model holds that
-            // reason and reconnecting would only be refused again, so stop. Those two cases
-            // are why this loop cannot spin — every pass either connected or ends here.
-            let rec runSession (resumeAfter: EventOffset option) =
-                async {
-                    // Announce the attempt — otherwise the pre-open window (a handshake plus
-                    // the policy's retries) reads as "disconnected". Never downgrade
-                    // `Reconnecting` though: "was connected, coming back" says strictly more.
-                    match latestModel.Connection with
-                    | Reconnecting -> ()
-                    | _ -> dispatchRef ConnectingMsg
-                    match! openChannel () with
-                    | Error fault ->
-                        dispatchRef (ConnectFailedMsg (App.ChannelFault.describe fault))
-                    | Ok dc ->
-                        let channel = frameChannel dc
-                        let connection =
-                            App.connect
-                                { options with ResumeAfter = resumeAfter }
-                                doc
-                                registry
-                                hello
-                                (fun msg -> dispatchRef msg)
-                                channel
-                        connectionRef <- Some connection
-                        do! connection.Run
-                        connectionRef <- None
-                        match latestModel.Connection with
-                        | Reconnecting -> return! runSession latestModel.EventConsumer.LastProcessedOffset
-                        | _ -> ()
-                }
-
-            do! runSession None
+            // The session leg. The RULES — announce, open, serve, and come back only for a
+            // session that was accepted — are `App.SessionLifecycle`; this supplies the
+            // browser's four ports and nothing else.
+            do!
+                App.SessionLifecycle.run
+                    { Open = openChannel
+                      Serve =
+                        fun resumeAfter dispatch dc ->
+                            async {
+                                let connection =
+                                    App.connect
+                                        { options with ResumeAfter = resumeAfter }
+                                        doc
+                                        registry
+                                        hello
+                                        dispatch
+                                        (frameChannel dc)
+                                connectionRef <- Some connection
+                                do! connection.Run
+                                connectionRef <- None
+                            }
+                      ReadPosition = fun () -> latestModel.EventConsumer.LastProcessedOffset
+                      Dispatch = fun msg -> dispatchRef msg }
     }
 
 Async.StartImmediate (start ())

@@ -386,3 +386,62 @@ module App =
                 // and colour the caret; the Session Process relays it to other peers.
                 Async.StartImmediate (
                     channel.Send (Presence { PeerId = hello.PeerId; DisplayName = hello.DisplayName; Focus = focus })) }
+
+    /// The session leg's lifecycle: open a transport, serve one session over it, and decide
+    /// whether to come back. The outermost layer of the client, and the last one that was only
+    /// reachable through a browser — its rules are extracted here so the browser supplies
+    /// WebRTC and Lit, tests supply in-memory channels, and the RULES live in one place either
+    /// can drive.
+    module SessionLifecycle =
+
+        /// Everything the lifecycle needs from outside itself. Four functions and no state of
+        /// its own — deliberately NOT the model: reading `Connection` the instant `Serve`
+        /// returns races the driver's own `DisconnectedMsg`, so the lifecycle watches the
+        /// messages it routes instead of the state they will eventually produce.
+        type Ports<'channel> =
+            { /// Acquire a transport. Already wrapped in a resilience policy at the composition
+              /// site, so an `Error` here is SETTLED — the lifecycle's job is to report it,
+              /// never to try again in a little while.
+              Open : unit -> Async<Result<'channel, ChannelFault>>
+              /// Run one session to completion over the channel, resuming event consumption
+              /// after the given offset and routing every message through the supplied
+              /// dispatch. Returns when the channel closes.
+              Serve : EventOffset option -> (ClientMsg -> unit) -> 'channel -> Async<unit>
+              /// How far event consumption has got — where a reconnect resumes from.
+              ReadPosition : unit -> EventOffset option
+              /// The lifecycle's own reporting.
+              Dispatch : ClientMsg -> unit }
+
+        /// Drive the session leg to a settled state and keep it there.
+        ///
+        /// A channel that closes after the session was ACCEPTED is an ended session — a
+        /// Process restart, a sleeping laptop, a network blip — so come back, resuming
+        /// consumption from where the read position got to. A channel that closes without ever
+        /// being accepted was refused (a stale token); the model holds that reason and
+        /// reconnecting would only be refused again, so stop.
+        ///
+        /// Those two cases are the whole design, and why this cannot spin: only an accepted
+        /// session earns another attempt, and every other outcome ends here.
+        let run (ports: Ports<'channel>) : Async<unit> =
+            let rec attempt (isFirst: bool) (resumeAfter: EventOffset option) =
+                async {
+                    // Announce the FIRST attempt: until a channel exists the model would read
+                    // `Disconnected`, and opening one costs a handshake plus whatever retries
+                    // the policy spends. A reconnect needs no announcement — `Reconnecting` is
+                    // already the truer word, and the connection driver says `Connecting`
+                    // itself the moment a channel is up.
+                    if isFirst then ports.Dispatch ConnectingMsg
+                    match! ports.Open () with
+                    | Error fault -> ports.Dispatch (ConnectFailedMsg (ChannelFault.describe fault))
+                    | Ok channel ->
+                        // Acceptance is learned from the message that carries it, as it passes.
+                        let mutable accepted = false
+                        let observing msg =
+                            match msg with
+                            | ConnectedMsg _ -> accepted <- true
+                            | _ -> ()
+                            ports.Dispatch msg
+                        do! ports.Serve resumeAfter observing channel
+                        if accepted then return! attempt false (ports.ReadPosition ())
+                }
+            attempt true None
