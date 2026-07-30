@@ -42,9 +42,14 @@ let private actions (view: ProcessManager.SessionView) : TemplateResult =
         // (docs/plans/09) so a remote browser gets a link it can follow; loopback when
         // unset.
         let openUrl = sprintf "%s:%d/" (publicSessionOrigin ()) port
+        // Open is THE action on a running session, so it is first in the DOM (first in
+        // focus order) and wears the primary button; Stop is secondary — its border
+        // stays dim until hovered (btnDanger's affordance). The row-reverse container
+        // puts the primary on the right rail (the column Launch holds on stopped rows)
+        // and, when the pair wraps on a narrow screen, on the top line.
         html $"""
-            <a class="{Style.statusRun}" href="{openUrl}" target="_blank" data-open>open ↗</a>
-            <button type="button" class="{Style.btnDanger} min-w-[88px]" data-stop="{id}">Stop</button>"""
+            <a class="{Style.btnPrimary} min-w-[88px] inline-block text-center no-underline" href="{openUrl}" target="_blank" data-open>Open ↗</a>
+            <button type="button" class="{Style.btnDanger}" data-stop="{id}">Stop</button>"""
     | ProcessManager.NotRunning
     | ProcessManager.Exited _ ->
         html $"""<button type="button" class="{Style.btnPrimary} min-w-[88px]" data-launch="{id}">Launch</button>"""
@@ -61,7 +66,7 @@ let private rowTemplate (view: ProcessManager.SessionView) : TemplateResult =
           <td class="py-3 pr-4 align-middle font-mono text-[12px] leading-4 text-ink-faint max-md:hidden">{id}</td>
           <td class="py-3 pr-4 align-middle whitespace-nowrap">{statusView view.Status}</td>
           <td class="py-3 pl-4 align-middle">
-            <div class="flex flex-wrap items-center justify-end gap-x-4 gap-y-2">{actions view}</div>
+            <div class="flex flex-row-reverse flex-wrap items-center gap-x-4 gap-y-2">{actions view}</div>
           </td>
         </tr>"""
 
