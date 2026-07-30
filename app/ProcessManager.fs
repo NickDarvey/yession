@@ -704,13 +704,17 @@ let createWithUi
                         [ "yession.session.id", box key; "yession.session.port", box port ]
                     child.OnExit (fun code ->
                         children <- Map.remove key children
-                        publishRegistry ()
                         // The launch's authority dies with it.
                         revokeSecret ()
                         // A stop's exit is the expected outcome, not a crash to report.
                         let stopped = Set.contains key stopping
                         if stopped then stopping <- Set.remove key stopping
                         else lastExit <- Map.add key code lastExit
+                        // Published only once the exit is RECORDED: a subscriber renders the
+                        // session's status when the frame arrives (the management page's rows
+                        // stream does exactly that), so announcing before `lastExit` was set
+                        // would show a crashed session as merely stopped until the next change.
+                        publishRegistry ()
                         options.OnEvent "session exited"
                             [ "yession.session.id", box key
                               "yession.session.exit_code", box (defaultArg code -1)

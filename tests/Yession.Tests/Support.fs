@@ -190,6 +190,40 @@ module OidcHttp =
     let openSession (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
         openSessionVia [] "/login" sessionBaseUrl
 
+/// Read a Manager SSE stream whose frames are MULTI-LINE (the management page's rows stream,
+/// which carries rendered markup): each complete frame's `data:` lines are rejoined and handed
+/// to `onFrame` — exactly what a browser `EventSource` delivers as one message. Comment frames
+/// (`: subscribed`, `: ping`) carry no data and are skipped. Returns a cancel.
+module Sse =
+
+    [<Fable.Core.Emit("""(() => {
+      const controller = new AbortController()
+      ;(async () => {
+        const res = await fetch($0, { headers: { accept: 'text/event-stream' }, signal: controller.signal })
+        if (!res.ok) throw new Error('sse subscribe failed: ' + res.status)
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let idx
+          while ((idx = buffer.indexOf('\n\n')) >= 0) {
+            const frame = buffer.slice(0, idx)
+            buffer = buffer.slice(idx + 2)
+            const data = frame.split('\n')
+              .filter(l => l.startsWith('data:'))
+              .map(l => l.slice(5).replace(/^ /, ''))
+              .join('\n')
+            if (data.length > 0) $1(data)
+          }
+        }
+      })().catch(() => {})
+      return () => controller.abort()
+    })()""")>]
+    let subscribe (url: string) (onFrame: string -> unit) : (unit -> unit) = Fable.Core.Util.jsNative
+
 /// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.
 type Client =

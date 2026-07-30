@@ -4,7 +4,8 @@ module Yession.Host.ManagerUi
 // — list sessions with live status, create, launch/resume, stop, open. Pure F# render
 // functions produce full pages and FRAGMENTS from Fable.Lit templates (rendered to strings
 // by our own `Ssr` wrapper — no client bundle, no Elmish, no Yjs); a tiny inline vanilla
-// script swaps the fragments on create/launch/stop and refreshes rows by polling. It
+// script swaps the fragments on create/launch/stop and takes live status from an SSE stream
+// of rendered tables (`GET /sessions/rows`) — the server pushes, the page never polls. It
 // shares the session client's `Style` (the same locally served /app.css), and — being
 // online-only — is the natural home for server-side Lit SSR. This is not the collaborative
 // client; it shares the Manager's 127.0.0.1 endpoint with the control RPC.
@@ -45,8 +46,9 @@ let private actions (view: ProcessManager.SessionView) : TemplateResult =
     | ProcessManager.Exited _ ->
         html $"""<button type="button" class="{Style.btnPrimary}" data-launch="{id}">Launch</button>"""
 
-/// One session row — the swap unit: every action and the status poll replace it wholesale,
-/// so the markup is always a pure function of the Manager's current view.
+/// One session row — an action's swap unit: launch/stop replace it wholesale, so the markup is
+/// always a pure function of the Manager's current view. (Live status replaces the whole table
+/// instead; see the rows stream.)
 let private rowTemplate (view: ProcessManager.SessionView) : TemplateResult =
     let id = SessionId.value view.Record.SessionId
     html $"""
@@ -71,15 +73,15 @@ let private tableTemplate (views: ProcessManager.SessionView list) : TemplateRes
           <tbody>{views |> List.map rowTemplate}</tbody>
         </table>"""
 
-/// A rendered fragment (a single row), served to the poll/action swaps.
+/// A rendered fragment (a single row), served as an action's answer.
 let sessionRow (view: ProcessManager.SessionView) : string = Ssr.render (rowTemplate view)
 
-/// A rendered fragment (the whole table), served after a create.
+/// A rendered fragment (the whole table), served after a create and pushed on the rows stream.
 let sessionsTable (views: ProcessManager.SessionView list) : string = Ssr.render (tableTemplate views)
 
 // The interactivity, without htmx: a tiny vanilla script that swaps fragments on
-// create/launch/stop and refreshes rows by polling. Inline (no external src) so the page
-// is self-contained — local first, no CDN.
+// create/launch/stop and takes live status from the rows stream. Inline (no external src) so
+// the page is self-contained — local first, no CDN.
 let private script =
     """
     const swap = (el, htmlText) => { const t = document.createElement('template'); t.innerHTML = htmlText.trim(); const n = t.content.firstElementChild; if (n && el) el.replaceWith(n) }
@@ -97,12 +99,8 @@ let private script =
       const r = await fetch('/sessions', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(new FormData(f)) })
       if (r.ok) { swap(document.querySelector('[data-sessions]'), await r.text()); f.reset() }
     })
-    setInterval(async () => {
-      for (const row of document.querySelectorAll('[data-session]')) {
-        const id = row.getAttribute('data-session')
-        try { const r = await fetch('/sessions/' + id + '/row'); if (r.ok) swap(row, await r.text()) } catch {}
-      }
-    }, 2000)
+    const rows = new EventSource('/sessions/rows')
+    rows.onmessage = (e) => { if (e.data) swap(document.querySelector('[data-sessions]'), e.data) }
     """
 
 let private bodyTemplate (views: ProcessManager.SessionView list) : TemplateResult =
@@ -142,6 +140,16 @@ let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Ut
 
 [<Fable.Core.Emit("clearInterval($0)")>]
 let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
+
+/// One SSE event carrying a MULTI-LINE payload: every line becomes its own `data:` line, which
+/// an SSE client (the browser's `EventSource` included) rejoins with newlines. Rendered markup
+/// is multi-line, so this is how the rows stream frames it; the registry stream's single-line
+/// JSON needs no such treatment.
+let private sseData (payload: string) : string =
+    let lines =
+        payload.Replace("\r\n", "\n").Split '\n'
+        |> Array.map (fun line -> "data: " + line)
+    String.concat "\n" lines + "\n\n"
 
 [<Fable.Core.Emit("Object.fromEntries(new URLSearchParams($0))[$1] ?? ''")>]
 let private formField (body: string) (name: string) : string = Fable.Core.Util.jsNative
@@ -232,15 +240,31 @@ let tryHandle
                     req.on ("close", fun _ ->
                         clearInterval heartbeat
                         unsubscribe ()) |> ignore)
+            | "GET", [| "rows" |] ->
+                // The management page's live status, pushed rather than polled. Every frame is
+                // the WHOLE table, rendered by the same `tableTemplate` the page and the action
+                // swaps use — snapshots, never deltas, so an `EventSource` reconnect is the
+                // entire recovery protocol, and the browser keeps no reconciliation logic.
+                //
+                // The registry hub is what makes it live: the Manager publishes on every launch,
+                // exit, and rename. Its FRAME is the Running set (what a serving binding wants),
+                // so the page ignores it and re-renders from `pm.Sessions ()` — the current
+                // views, stopped and exited rows included.
+                Some (fun () ->
+                    res.writeHead (200, createObj [ "content-type", box "text/event-stream"; "cache-control", box "no-store"; "connection", box "keep-alive" ]) |> ignore
+                    res.write ": subscribed\n\n" |> ignore
+                    // The hub hands a new subscriber the retained frame at once, so the first
+                    // event is the current table — a page that just loaded is immediately live.
+                    let unsubscribe =
+                        pm.SubscribeSessions (fun _ -> res.write (sseData (sessionsTable (pm.Sessions ()))) |> ignore)
+                    let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
+                    req.on ("close", fun _ ->
+                        clearInterval heartbeat
+                        unsubscribe ()) |> ignore)
             | "POST", [| id; "launch" |] ->
                 Some (fun () -> sessionAction id (fun sessionId -> pm.Launch sessionId |> Async.Ignore))
             | "POST", [| id; "stop" |] ->
                 Some (fun () -> sessionAction id (fun sessionId -> pm.Stop sessionId |> Async.Ignore))
-            | "GET", [| id; "row" |] ->
-                Some (fun () ->
-                    match SessionId.create id with
-                    | Ok sessionId -> html res (rowOf sessionId)
-                    | Error e -> respond res 400 "text/plain" e)
             | _ -> None
         | _ -> None
     match route with

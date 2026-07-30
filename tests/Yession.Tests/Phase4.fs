@@ -387,7 +387,7 @@ let private bodyOfReply (reply: obj) : string = Fable.Core.Util.jsNative
 
 let private uiFlowTests =
     testList "Management UI flow (Step 25)" [
-        testCaseAsync "create -> launch -> open -> stop -> resume, all over the management endpoint" <|
+        testCaseAsync "create -> launch -> open -> stop -> resume -> crash, all over the management endpoint, with live status pushed on the rows stream" <|
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/ui-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
@@ -423,13 +423,57 @@ let private uiFlowTests =
                 let! shell = Interop.getText (sprintf "http://127.0.0.1:%d/" sessionPort) |> Async.AwaitPromise
                 Expect.isTrue (shell.Contains (Dom.sessionMetaName + "\" " + Dom.attr "content" "ui-1")) "the opened session serves its shell"
 
-                // Poll, stop, resume.
-                let! polled = Interop.getText (baseUrl + "/sessions/ui-1/row") |> Async.AwaitPromise
-                Expect.isTrue (polled.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "the poll fragment agrees"
+                // Live status, pushed: the rows stream's first frame is the current table (the
+                // hub's retained snapshot), so a page that just loaded agrees without polling.
+                let tables = ResizeArray<string> ()
+                let cancelRows = Sse.subscribe (baseUrl + "/sessions/rows") tables.Add
+                let waitUntil (label: string) (condition: unit -> bool) =
+                    let rec go (remaining: int) =
+                        async {
+                            if condition () then return ()
+                            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
+                            else
+                                do! Async.Sleep 50
+                                return! go (remaining - 1)
+                        }
+                    go 100
+                do! waitUntil "the rows snapshot" (fun () -> tables.Count > 0)
+                Expect.isTrue
+                    (tables.[0].Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning))
+                    "the snapshot table shows the running session"
+
+                // Stop, resume — each transition pushes a fresh table on the open stream.
+                let beforeStop = tables.Count
                 let! stopped = postForm (baseUrl + "/sessions/ui-1/stop") "" |> Async.AwaitPromise
                 Expect.isTrue ((bodyOfReply stopped).Contains (Dom.attr Dom.Manager.status Dom.Manager.statusStopped)) "stopped from the UI"
+                do! waitUntil "the stop frame" (fun () ->
+                        tables
+                        |> Seq.skip beforeStop
+                        |> Seq.exists (fun t -> t.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusStopped)))
+                let beforeResume = tables.Count
                 let! resumed = postForm (baseUrl + "/sessions/ui-1/launch") "" |> Async.AwaitPromise
                 Expect.isTrue ((bodyOfReply resumed).Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "resume is just launch"
+                do! waitUntil "the resume frame" (fun () ->
+                        tables
+                        |> Seq.skip beforeResume
+                        |> Seq.exists (fun t -> t.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)))
+
+                // A crash reaches the page as EXITED, in the frame the exit itself pushes: the
+                // Manager records the exit code before announcing it, so a subscriber that
+                // renders on the frame never shows a crash as a plain stop.
+                let crashPid =
+                    match (pm.TryFind (SessionId.create "ui-1" |> expect)).Value.Status with
+                    | ProcessManager.Running (_, pid) -> pid
+                    | other -> failwithf "expected Running before the crash, got %A" other
+                let beforeCrash = tables.Count
+                let exited = pm.WaitForExit (SessionId.create "ui-1" |> expect)
+                sigkill crashPid
+                do! exited
+                do! waitUntil "the crash frame" (fun () ->
+                        tables
+                        |> Seq.skip beforeCrash
+                        |> Seq.exists (fun t -> t.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)))
+                cancelRows ()
 
                 do! pm.StopAll ()
             }
@@ -983,9 +1027,9 @@ let private registryStreamTests =
                     // The public origin reaches both browser-facing URLs: the open link
                     // and the session's registered OAuth redirect URI (via the env the
                     // child inherited at spawn).
-                    let! row = Interop.getText (baseUrl + "/sessions/reg-1/row") |> Async.AwaitPromise
+                    let! rendered = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
                     Expect.isTrue
-                        (row.Contains (sprintf "href=\"http://home.example.ts.net:%d/\"" port))
+                        (rendered.Contains (sprintf "href=\"http://home.example.ts.net:%d/\"" port))
                         "the open link carries the public origin"
                     let! login = OidcHttp.getWithJar (OidcHttp.newJar ()) (sprintf "http://127.0.0.1:%d/login" port)
                     Expect.equal login.Status 302 "/login redirects into the authorize chain"
