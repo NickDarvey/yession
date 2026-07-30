@@ -114,12 +114,9 @@ as `outputs.{staged,nix,npm}`. To pin it in a system, add the flake as an input 
 
 ### Serving remotely
 
-A Manager and its sessions are loopback-bound by default. Reaching them from another
-device is operator-supplied serving plus two environment variables — Yession ships no
-networking. [docs/serving-over-tailscale.md](docs/serving-over-tailscale.md) is a worked
-end-to-end setup for Tailscale, split into **addressing** (making sessions reachable)
-and **authorizing** (deciding who gets in), including the data-channel precondition to
-prove before building anything.
+A Manager and its sessions bind loopback; the serving in front of them is yours to supply.
+[docs/serving-over-tailscale.md](docs/serving-over-tailscale.md) is the worked setup for
+Tailscale — **addressing** (reaching sessions off-host) then **authorizing** (who gets in).
 
 ### Cloud sessions (Claude Code on the web)
 
