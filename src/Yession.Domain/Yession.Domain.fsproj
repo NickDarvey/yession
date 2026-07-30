@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Push.fs" />
     <Compile Include="Identity.fs" />
     <Compile Include="Events.fs" />
     <Compile Include="EventLog.fs" />
