@@ -103,6 +103,6 @@ let page (sessionId: SessionId) (model: ClientModel) : string =
         Style.headTags
         "</head><body>"
         sprintf "<main id=\"%s\" class=\"%s\">%s</main>" Dom.appId Style.app (renderModel model)
-        "<script type=\"module\" src=\"/client.js\"></script>"
+        sprintf "<script type=\"module\" src=\"%s\"></script>" (SessionRoute.relative ClientBundle)
         "</body></html>"
     ]

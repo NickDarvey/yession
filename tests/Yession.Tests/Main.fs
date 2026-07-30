@@ -24,6 +24,7 @@ open Fable.Core.JsInterop
 let all =
     testList "Yession" [
         Tag.needs "Domain" [] (fun () -> Domain.tests)
+        Tag.needs "Routes" [] (fun () -> Routes.tests)
         Tag.needs "Secrets" [] (fun () -> Secrets.tests)
         Tag.needs "Connections" [] (fun () -> Connections.tests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
