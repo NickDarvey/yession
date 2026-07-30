@@ -190,6 +190,20 @@ module OidcHttp =
     let openSession (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
         openSessionVia [] "/login" sessionBaseUrl
 
+/// Poll a predicate until it holds, failing loudly with `label` if it never does. For the few
+/// signals that are not model changes (an SSE frame arriving, a hub publishing) — a model waiter
+/// is `Runner.WaitFor` and needs no polling.
+let waitUntil (label: string) (condition: unit -> bool) : Async<unit> =
+    let rec go (remaining: int) =
+        async {
+            if condition () then return ()
+            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
+            else
+                do! Async.Sleep 50
+                return! go (remaining - 1)
+        }
+    go 100
+
 /// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.
 type Client =
@@ -212,7 +226,7 @@ let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: 
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         // The composer's publication rule, wired exactly as the browser wires it: the client's
         // draft slot appears when its body has content and goes when the body empties.
-        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch)
+        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
         let connection = App.connect options doc registry hello (user >> runner.Dispatch) channel
         Async.StartImmediate connection.Run
@@ -240,7 +254,7 @@ let connectInMemoryClient (host: Host.SessionHost) (id: string) (name: string) :
         let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         // As the browser wires it (see `connectClientWith`).
-        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch)
+        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = host.MintPeerToken () }
         let connection = App.connect App.ConnectOptions.defaults doc registry hello (user >> runner.Dispatch) clientEnd
         Async.StartImmediate connection.Run

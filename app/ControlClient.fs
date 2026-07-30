@@ -34,72 +34,36 @@ let private postJson (url: string) (secret: string) (body: string) : JS.Promise<
 })()""")>]
 let private postStream (url: string) (secret: string) (body: string) (onLine: string -> unit) : JS.Promise<unit> = jsNative
 
-// Subscribe to a Manager SSE stream. Manages the whole lifecycle in one place: connect
-// (with the given request headers — a control secret, or a strategy's identity
-// assertion), parse `data:` frames, reconnect on drop with a fixed backoff, and return
-// a cancel that both stops reconnecting and aborts the live fetch. Best-effort by
-// design — a transport error is a dropped connection, retried, never thrown.
-[<Emit("""(() => {
-  const controller = new AbortController()
-  let cancelled = false
-  const run = async () => {
-    while (!cancelled) {
-      try {
-        const res = await fetch($0, { method: 'GET', headers: { ...Object.fromEntries($1), 'accept': 'text/event-stream' }, signal: controller.signal })
-        if (!res.ok) throw new Error('notifications rpc failed: ' + res.status)
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          let idx
-          while ((idx = buffer.indexOf('\n\n')) >= 0) {
-            const frame = buffer.slice(0, idx)
-            buffer = buffer.slice(idx + 2)
-            for (const line of frame.split('\n')) {
-              if (line.startsWith('data:')) $2(line.slice(5).trim())
-            }
-          }
-        }
-      } catch (e) { if (cancelled) return }
-      if (cancelled) return
-      await new Promise(r => setTimeout(r, 1000))
-    }
-  }
-  run()
-  return () => { cancelled = true; controller.abort() }
-})()""")>]
-let private openEventStreamAs (url: string) (headers: (string * string) []) (onData: string -> unit) : (unit -> unit) = jsNative
+/// The control-leg case of `Sse.subscribe`: the per-launch secret is the whole authentication.
+let private openEventStream (url: string) (secret: string) (onData: Sink<string>) : Subscription =
+    Sse.subscribe url [ "x-yession-control", secret ] onData
 
-/// The control-leg case: the per-launch secret is the whole authentication.
-let private openEventStream (url: string) (secret: string) (onData: string -> unit) : (unit -> unit) =
-    openEventStreamAs url [| "x-yession-control", secret |] onData
+/// Turn a typed sink into a frame sink: decode each frame with `codec`, and log-and-skip a
+/// malformed one — a bad frame is never fatal to the stream, because the next one may be fine and
+/// the stream is the only way the Manager can reach us. `what` names the stream in that log line.
+let private decoding (what: string) (codec: Codec<'a>) (sink: Sink<'a>) : Sink<string> =
+    fun data ->
+        match ControlWire.fromString codec data with
+        | Ok value -> sink value
+        | Error e -> eprintfn "%s decode failed: %s" what e
 
 /// Subscribe to the Manager's notification stream. Each decoded `SessionNotification` is
 /// handed to `onNotification`; a malformed frame is logged and skipped (never fatal to the
 /// stream). Returns a cancel that stops the subscription and closes the connection.
-let subscribeNotifications (baseUrl: string) (secret: string) (onNotification: SessionNotification -> unit) : unit -> unit =
+let subscribeNotifications (baseUrl: string) (secret: string) (onNotification: Sink<SessionNotification>) : Subscription =
     openEventStream
         (sprintf "%s/control/notifications" baseUrl)
         secret
-        (fun data ->
-            match ControlWire.fromString ControlWire.sessionNotification data with
-            | Ok notification -> onNotification notification
-            | Error e -> eprintfn "notification decode failed: %s" e)
+        (decoding "notification" ControlWire.sessionNotification onNotification)
 
 /// Subscribe to the Manager's MCP tool stream. The current list arrives immediately, then a
 /// fresh `McpToolList` on every change; each is handed to `onList`. A malformed frame is
 /// logged and skipped. Returns a cancel that stops the subscription and closes the connection.
-let subscribeMcp (baseUrl: string) (secret: string) (onList: McpToolList -> unit) : unit -> unit =
+let subscribeMcp (baseUrl: string) (secret: string) (onList: Sink<McpToolList>) : Subscription =
     openEventStream
         (sprintf "%s/control/mcp" baseUrl)
         secret
-        (fun data ->
-            match ControlWire.fromString ControlWire.mcpToolList data with
-            | Ok list -> onList list
-            | Error e -> eprintfn "mcp list decode failed: %s" e)
+        (decoding "mcp list" ControlWire.mcpToolList onList)
 
 /// Subscribe to the Manager's session registry stream (`/sessions/stream`,
 /// docs/plans/09) — the management surface, not a control leg, so no secret rides the
@@ -108,17 +72,14 @@ let subscribeMcp (baseUrl: string) (secret: string) (onList: McpToolList -> unit
 /// current Running set arrives immediately, then a fresh full frame on every change;
 /// what an operator's serving binding (and the Ports-tier tests) consume. Returns a
 /// cancel that stops the subscription and closes the connection.
-let subscribeSessionsAs (headers: (string * string) list) (baseUrl: string) (onFrame: ControlWire.SessionRegistryFrame -> unit) : unit -> unit =
-    openEventStreamAs
+let subscribeSessionsAs (headers: (string * string) list) (baseUrl: string) (onFrame: Sink<ControlWire.SessionRegistryFrame>) : Subscription =
+    Sse.subscribe
         (sprintf "%s/sessions/stream" baseUrl)
-        (Array.ofList headers)
-        (fun data ->
-            match ControlWire.fromString ControlWire.sessionRegistryFrame data with
-            | Ok frame -> onFrame frame
-            | Error e -> eprintfn "session registry decode failed: %s" e)
+        headers
+        (decoding "session registry" ControlWire.sessionRegistryFrame onFrame)
 
 /// `subscribeSessionsAs` with no headers — the `localhost`-strategy case.
-let subscribeSessions (baseUrl: string) (onFrame: ControlWire.SessionRegistryFrame -> unit) : unit -> unit =
+let subscribeSessions (baseUrl: string) (onFrame: Sink<ControlWire.SessionRegistryFrame>) : Subscription =
     subscribeSessionsAs [] baseUrl onFrame
 
 /// Report the session's display name (its collaborative title) to the Manager, so the
@@ -231,14 +192,11 @@ let connections (baseUrl: string) (secret: string) : SessionConnections =
 /// caller's current readable statuses arrive immediately, then a fresh list on every
 /// change; metadata only, never values. A malformed frame is logged and skipped.
 /// Returns a cancel that stops the subscription and closes the connection.
-let subscribeConnections (baseUrl: string) (secret: string) (onList: ConnectionStatusList -> unit) : unit -> unit =
+let subscribeConnections (baseUrl: string) (secret: string) (onList: Sink<ConnectionStatusList>) : Subscription =
     openEventStream
         (sprintf "%s/control/connections" baseUrl)
         secret
-        (fun data ->
-            match ControlWire.fromString ControlWire.connectionStatusList data with
-            | Ok list -> onList list
-            | Error e -> eprintfn "connection status decode failed: %s" e)
+        (decoding "connection status" ControlWire.connectionStatusList onList)
 
 /// Dynamic client registration: bind this launch's OAuth client to its control secret.
 /// Called after the session's server listens — the redirect URI needs the OS-assigned
