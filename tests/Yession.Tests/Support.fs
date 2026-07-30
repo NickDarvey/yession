@@ -190,39 +190,19 @@ module OidcHttp =
     let openSession (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
         openSessionVia [] "/login" sessionBaseUrl
 
-/// Read a Manager SSE stream whose frames are MULTI-LINE (the management page's rows stream,
-/// which carries rendered markup): each complete frame's `data:` lines are rejoined and handed
-/// to `onFrame` — exactly what a browser `EventSource` delivers as one message. Comment frames
-/// (`: subscribed`, `: ping`) carry no data and are skipped. Returns a cancel.
-module Sse =
-
-    [<Fable.Core.Emit("""(() => {
-      const controller = new AbortController()
-      ;(async () => {
-        const res = await fetch($0, { headers: { accept: 'text/event-stream' }, signal: controller.signal })
-        if (!res.ok) throw new Error('sse subscribe failed: ' + res.status)
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          let idx
-          while ((idx = buffer.indexOf('\n\n')) >= 0) {
-            const frame = buffer.slice(0, idx)
-            buffer = buffer.slice(idx + 2)
-            const data = frame.split('\n')
-              .filter(l => l.startsWith('data:'))
-              .map(l => l.slice(5).replace(/^ /, ''))
-              .join('\n')
-            if (data.length > 0) $1(data)
-          }
+/// Poll a predicate until it holds, failing loudly with `label` if it never does. For the few
+/// signals that are not model changes (an SSE frame arriving, a hub publishing) — a model waiter
+/// is `Runner.WaitFor` and needs no polling.
+let waitUntil (label: string) (condition: unit -> bool) : Async<unit> =
+    let rec go (remaining: int) =
+        async {
+            if condition () then return ()
+            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
+            else
+                do! Async.Sleep 50
+                return! go (remaining - 1)
         }
-      })().catch(() => {})
-      return () => controller.abort()
-    })()""")>]
-    let subscribe (url: string) (onFrame: string -> unit) : (unit -> unit) = Fable.Core.Util.jsNative
+    go 100
 
 /// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.
@@ -246,7 +226,7 @@ let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: 
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         // The composer's publication rule, wired exactly as the browser wires it: the client's
         // draft slot appears when its body has content and goes when the body empties.
-        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch)
+        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
         let connection = App.connect options doc registry hello (user >> runner.Dispatch) channel
         Async.StartImmediate connection.Run
@@ -274,7 +254,7 @@ let connectInMemoryClient (host: Host.SessionHost) (id: string) (name: string) :
         let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         // As the browser wires it (see `connectClientWith`).
-        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch)
+        DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = host.MintPeerToken () }
         let connection = App.connect App.ConnectOptions.defaults doc registry hello (user >> runner.Dispatch) clientEnd
         Async.StartImmediate connection.Run

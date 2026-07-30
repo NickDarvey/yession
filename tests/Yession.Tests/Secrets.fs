@@ -583,12 +583,12 @@ let private startControlServer (callers: (string * Control.ControlCaller) list) 
             if not (Control.tryHandle
                         (fun secret -> Map.tryFind secret table)
                         (fun _ _ -> async { return Ok () })
-                        (fun _ _ -> fun () -> ())
-                        (fun _ -> fun () -> ())
+                        (fun _ _ -> Subscription.none)
+                        (fun _ -> Subscription.none)
                         dummyRegister
                         api
                         None
-                        (fun _ _ -> fun () -> ())
+                        (fun _ _ -> Subscription.none)
                         onUnauthorized
                         req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore

@@ -133,24 +133,6 @@ let page (views: ProcessManager.SessionView list) : string =
 [<Fable.Core.Emit("new URL($0, 'http://local').pathname")>]
 let private pathnameOf (url: string) : string = Fable.Core.Util.jsNative
 
-// SSE keep-alive for the registry stream, so an idle subscription is not reaped by an
-// HTTP idle timeout (the consumer also reconnects on drop — snapshots make that cheap).
-[<Fable.Core.Emit("setInterval($1, $0)")>]
-let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
-
-[<Fable.Core.Emit("clearInterval($0)")>]
-let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
-
-/// One SSE event carrying a MULTI-LINE payload: every line becomes its own `data:` line, which
-/// an SSE client (the browser's `EventSource` included) rejoins with newlines. Rendered markup
-/// is multi-line, so this is how the rows stream frames it; the registry stream's single-line
-/// JSON needs no such treatment.
-let private sseData (payload: string) : string =
-    let lines =
-        payload.Replace("\r\n", "\n").Split '\n'
-        |> Array.map (fun line -> "data: " + line)
-    String.concat "\n" lines + "\n\n"
-
 [<Fable.Core.Emit("Object.fromEntries(new URLSearchParams($0))[$1] ?? ''")>]
 let private formField (body: string) (name: string) : string = Fable.Core.Util.jsNative
 
@@ -224,43 +206,24 @@ let tryHandle
         | method', path when path.StartsWith "/sessions/" ->
             let rest = path.Substring "/sessions/".Length
             match method', rest.Split '/' with
+            // Both streams are the same subscription projected differently — one publish per
+            // launch, exit, and rename; snapshots, never deltas, so a reconnect is the whole
+            // recovery protocol and a consumer that connects, reads one frame, and disconnects
+            // has done a poll.
             | "GET", [| "stream" |] ->
-                // The session registry stream (docs/plans/09): the Running set as
-                // full-snapshot SSE frames — the current state on subscribe, then a
-                // fresh frame on every launch, exit, and rename. An operator's serving
-                // binding holds this open to reconcile its proxy; a consumer that
-                // connects, reads the first frame, and disconnects has done a poll.
+                // The session registry (docs/plans/09): the Running set as wire frames. An
+                // operator's serving binding holds this open to reconcile its proxy.
                 Some (fun () ->
-                    res.writeHead (200, createObj [ "content-type", box "text/event-stream"; "cache-control", box "no-store"; "connection", box "keep-alive" ]) |> ignore
-                    res.write ": subscribed\n\n" |> ignore
-                    let sink (frame: ControlWire.SessionRegistryFrame) =
-                        res.write (sprintf "data: %s\n\n" (ControlWire.toString ControlWire.sessionRegistryFrame frame)) |> ignore
-                    let unsubscribe = pm.SubscribeSessions sink
-                    let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
-                    req.on ("close", fun _ ->
-                        clearInterval heartbeat
-                        unsubscribe ()) |> ignore)
+                    Sse.stream req res
+                        (ProcessManager.registryFrameOf >> ControlWire.toString ControlWire.sessionRegistryFrame)
+                        pm.SubscribeSessions
+                    |> ignore)
             | "GET", [| "rows" |] ->
-                // The management page's live status, pushed rather than polled. Every frame is
-                // the WHOLE table, rendered by the same `tableTemplate` the page and the action
-                // swaps use — snapshots, never deltas, so an `EventSource` reconnect is the
-                // entire recovery protocol, and the browser keeps no reconciliation logic.
-                //
-                // The registry hub is what makes it live: the Manager publishes on every launch,
-                // exit, and rename. Its FRAME is the Running set (what a serving binding wants),
-                // so the page ignores it and re-renders from `pm.Sessions ()` — the current
-                // views, stopped and exited rows included.
-                Some (fun () ->
-                    res.writeHead (200, createObj [ "content-type", box "text/event-stream"; "cache-control", box "no-store"; "connection", box "keep-alive" ]) |> ignore
-                    res.write ": subscribed\n\n" |> ignore
-                    // The hub hands a new subscriber the retained frame at once, so the first
-                    // event is the current table — a page that just loaded is immediately live.
-                    let unsubscribe =
-                        pm.SubscribeSessions (fun _ -> res.write (sseData (sessionsTable (pm.Sessions ()))) |> ignore)
-                    let heartbeat = setInterval 15000 (fun () -> res.write ": ping\n\n" |> ignore)
-                    req.on ("close", fun _ ->
-                        clearInterval heartbeat
-                        unsubscribe ()) |> ignore)
+                // The management page's live status, pushed rather than polled: the WHOLE table,
+                // rendered by the same `tableTemplate` the page and the action swaps use, so the
+                // browser keeps no reconciliation logic. Stopped and exited rows are in the
+                // published views, which is why the page renders them and the registry does not.
+                Some (fun () -> Sse.stream req res sessionsTable pm.SubscribeSessions |> ignore)
             | "POST", [| id; "launch" |] ->
                 Some (fun () -> sessionAction id (fun sessionId -> pm.Launch sessionId |> Async.Ignore))
             | "POST", [| id; "stop" |] ->

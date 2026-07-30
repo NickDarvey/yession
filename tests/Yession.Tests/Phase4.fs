@@ -212,7 +212,7 @@ let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 /// Start a bare control server over the given secret→(session, capabilities) table, plus
 /// the real notification and MCP hubs wired to their SSE routes. Returns both hubs so a
 /// test can push down the same wires the Manager uses.
-let private startControlServer (secrets: (string * SessionId * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * McpHub.McpHub> =
+let private startControlServer (secrets: (string * SessionId * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * RetainedHub.RetainedHub<McpToolList>> =
     async {
         let table =
             secrets
@@ -221,12 +221,12 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
-        let mcp = McpHub.create ()
+        let mcp = RetainedHub.create McpToolList.empty
         // This bare control server has no OIDC provider; the DCR route is not under test.
         let registerClient _ (sessionId: SessionId) _ : Yession.Oidc.RegisterClientResponse =
             { ClientId = SessionId.value sessionId; ClientSecret = "unused"; Issuer = "http://unused" }
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> fun () -> ()) ignore req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> Subscription.none) ignore req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
@@ -426,17 +426,7 @@ let private uiFlowTests =
                 // Live status, pushed: the rows stream's first frame is the current table (the
                 // hub's retained snapshot), so a page that just loaded agrees without polling.
                 let tables = ResizeArray<string> ()
-                let cancelRows = Sse.subscribe (baseUrl + "/sessions/rows") tables.Add
-                let waitUntil (label: string) (condition: unit -> bool) =
-                    let rec go (remaining: int) =
-                        async {
-                            if condition () then return ()
-                            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
-                            else
-                                do! Async.Sleep 50
-                                return! go (remaining - 1)
-                        }
-                    go 100
+                let cancelRows = Sse.subscribe (baseUrl + "/sessions/rows") [] tables.Add
                 do! waitUntil "the rows snapshot" (fun () -> tables.Count > 0)
                 Expect.isTrue
                     (tables.[0].Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning))
@@ -473,7 +463,7 @@ let private uiFlowTests =
                         tables
                         |> Seq.skip beforeCrash
                         |> Seq.exists (fun t -> t.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)))
-                cancelRows ()
+                cancelRows.Stop ()
 
                 do! pm.StopAll ()
             }
@@ -715,6 +705,32 @@ let private telemetryTests =
     ]
 
 // -----------------------------------------------------------------------------
+// SSE framing — the wire format every push stream in the Manager shares. Pure
+// string functions, so the cheap tier pins them; the routes that use them are
+// exercised over real sockets in the tiers below.
+// -----------------------------------------------------------------------------
+
+let private sseTests =
+    testList "SSE framing" [
+        testCase "a single-line payload is one data line, terminated by a blank line" <| fun () ->
+            Expect.equal (Sse.frame """{"sessions":[]}""") "data: {\"sessions\":[]}\n\n" "the control legs' JSON shape"
+
+        testCase "a multi-line payload becomes one data line per line, and parses back whole" <| fun () ->
+            // Rendered markup (the management page's table) is multi-line, and blank lines inside
+            // it must NOT end the event — that is the bug a naive `data: %s\n\n` would ship.
+            let markup = "<table>\n  <tr>\n\n    <td>ada</td>\n  </tr>\n</table>"
+            let framed = Sse.frame markup
+            Expect.equal (framed.Split '\n' |> Array.filter (fun l -> l.StartsWith "data:") |> Array.length) 6
+                "every line of the payload carries its own data prefix"
+            Expect.isTrue (framed.EndsWith "\n\n") "the event ends with the blank line that dispatches it"
+            Expect.equal (Sse.dataOf (framed.TrimEnd '\n')) (Some markup) "and it parses back to exactly the payload"
+
+        testCase "a comment-only event carries no data" <| fun () ->
+            Expect.equal (Sse.dataOf ": ping") None "a keep-alive is not a message"
+            Expect.equal (Sse.dataOf ": subscribed") None "neither is the stream's opening comment"
+    ]
+
+// -----------------------------------------------------------------------------
 // Manager→Session notifications — the reverse leg of the control RPC. The wire
 // codec and the subscriber hub's fan-out are cheap-tier; the SSE stream end to
 // end (real sockets, real client parser) is verify-tier.
@@ -748,7 +764,7 @@ let private notificationTests =
             Expect.equal (a1, a2, b) (1, 1, 0) "both A sinks fired; B's did not (per-secret scoping)"
 
             // Unsubscribe removes exactly one sink; the sibling keeps receiving.
-            unsubA2 ()
+            unsubA2.Stop ()
             hub.NotifySecret "secret-a" (EnvironmentChanged ())
             Expect.equal (a1, a2, b) (2, 1, 0) "the unsubscribed sink stopped; the other continued"
 
@@ -800,14 +816,14 @@ let private notificationStreamTests =
 
                 // Cancel closes the stream; the server unsubscribes the sink, so further
                 // pushes never arrive.
-                cancelA ()
+                cancelA.Stop ()
                 do! Async.Sleep 200
                 let settled = List.length receivedA
                 hub.NotifySecret "secret-a" (EnvironmentChanged ())
                 do! Async.Sleep 200
                 Expect.equal (List.length receivedA) settled "after cancel, no further notifications arrive"
 
-                cancelB ()
+                cancelB.Stop ()
                 server.close ignore
             }
     ]
@@ -842,7 +858,7 @@ let private mcpTests =
             Expect.isTrue (json.Contains "\"inputSchema\":{") "the schema serialises as an embedded object"
 
         testCase "the hub hands a new subscriber the current list at once, then every change" <| fun () ->
-            let hub = McpHub.create ()
+            let hub = RetainedHub.create McpToolList.empty
             let mutable received : McpToolList list = []
             let _ = hub.Register (fun l -> received <- received @ [ l ])
             // The retained snapshot: an empty list arrives immediately on subscribe.
@@ -858,7 +874,7 @@ let private mcpTests =
             Expect.equal late [ { Tools = [ searchTool ] } ] "a late subscriber gets the retained list immediately"
 
             // Unsubscribe stops delivery to that sink only.
-            unsubLate ()
+            unsubLate.Stop ()
             hub.Publish McpToolList.empty
             Expect.equal (List.last late) { Tools = [ searchTool ] } "the unsubscribed sink received nothing further"
             Expect.equal (List.last received) McpToolList.empty "the still-subscribed sink got the change"
@@ -902,7 +918,7 @@ let private mcpStreamTests =
                 Expect.equal (List.last received |> fun l -> List.length l.Tools) 2 "the change was pushed to the live subscriber"
 
                 // Cancel closes the stream; later changes never arrive.
-                cancel ()
+                cancel.Stop ()
                 do! Async.Sleep 200
                 let settled = List.length received
                 mcp.Publish McpToolList.empty
@@ -927,7 +943,7 @@ let private registryEntry (id: string) (name: string) (port: int) (pid: int) : C
       Pid = pid }
 
 let private registryTests =
-    testList "Session registry: codec, hub & public origin (Plan 09)" [
+    testList "Session registry: codec, projection & public origin (Plan 09)" [
         testCase "a registry frame round-trips through the control wire codec" <| fun () ->
             let original : ControlWire.SessionRegistryFrame =
                 { Sessions = [ registryEntry "alpha" "Alpha work" 54321 4242; registryEntry "beta" "" 54322 1 ] }
@@ -937,28 +953,22 @@ let private registryTests =
                 |> expect
             Expect.equal roundTripped original "frame round-trip is identity"
 
-        testCase "the hub hands a new subscriber the current frame at once, then every change" <| fun () ->
-            let hub = RegistryHub.create ()
-            let mutable received : ControlWire.SessionRegistryFrame list = []
-            let _ = hub.Register (fun f -> received <- received @ [ f ])
-            // The retained snapshot: the (empty) boot frame arrives immediately on subscribe.
-            Expect.equal received [ { Sessions = [] } ] "the subscriber gets the current (empty) frame at once"
-
-            let one : ControlWire.SessionRegistryFrame = { Sessions = [ registryEntry "alpha" "Alpha" 54321 42 ] }
-            hub.Publish one
-            Expect.equal (List.last received) one "a publish pushes the new frame"
-            Expect.equal (hub.Current ()) one "the hub retains the latest frame"
-
-            // A LATER subscriber gets the retained frame as its initial snapshot — the
-            // connect-read-disconnect poll pattern.
-            let mutable late : ControlWire.SessionRegistryFrame list = []
-            let unsubLate = hub.Register (fun f -> late <- late @ [ f ])
-            Expect.equal late [ one ] "a late subscriber gets the retained frame immediately"
-
-            unsubLate ()
-            hub.Publish { Sessions = [] }
-            Expect.equal (List.last late) one "the unsubscribed sink received nothing further"
-            Expect.equal (List.last received) { Sessions = [] } "the still-subscribed sink got the change"
+        // The Manager publishes session VIEWS once; each consumer projects them. The registry's
+        // projection is what a serving binding reconciles against, so it is pinned here — the
+        // retained-hub mechanics it rides on are pinned once, with the MCP list.
+        testCase "the registry frame is the Running sessions only, with the port and pid to reach them" <| fun () ->
+            let views : ProcessManager.SessionView list =
+                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242) }
+                  { Record = record "beta" "Beta work"; Status = ProcessManager.NotRunning }
+                  { Record = record "gamma" "Gamma work"; Status = ProcessManager.Exited (Some 1) } ]
+            Expect.equal
+                (ProcessManager.registryFrameOf views)
+                { Sessions = [ registryEntry "alpha" "Alpha work" 54321 4242 ] }
+                "only what is running is reachable, so only that is announced"
+            Expect.equal
+                (ProcessManager.registryFrameOf [])
+                { Sessions = [] }
+                "no sessions is the empty frame, which is the boot state a subscriber starts from"
 
         testCase "the public session origin defaults to loopback and normalises a configured one" <| fun () ->
             unsetEnv "YESSION_SESSION_URL"
@@ -989,16 +999,6 @@ let private registryStreamTests =
 
                 let frames = ResizeArray<ControlWire.SessionRegistryFrame> ()
                 let cancel = ControlClient.subscribeSessions baseUrl (fun f -> frames.Add f)
-                let waitUntil (label: string) (condition: unit -> bool) =
-                    let rec go (remaining: int) =
-                        async {
-                            if condition () then return ()
-                            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
-                            else
-                                do! Async.Sleep 50
-                                return! go (remaining - 1)
-                        }
-                    go 100
 
                 // The retained snapshot arrives on connect: nothing runs yet.
                 do! waitUntil "the empty snapshot" (fun () -> frames |> Seq.exists (fun f -> List.isEmpty f.Sessions))
@@ -1019,7 +1019,7 @@ let private registryStreamTests =
                     let mutable second : ControlWire.SessionRegistryFrame option = None
                     let cancelSecond = ControlClient.subscribeSessions baseUrl (fun f -> if second.IsNone then second <- Some f)
                     do! waitUntil "the second subscription's snapshot" (fun () -> second.IsSome)
-                    cancelSecond ()
+                    cancelSecond.Stop ()
                     Expect.isTrue
                         (second.Value.Sessions |> List.exists (fun e -> e.Port = port))
                         "a fresh subscriber's first frame is the current snapshot"
@@ -1046,7 +1046,7 @@ let private registryStreamTests =
                 finally
                     unsetEnv "YESSION_SESSION_URL"
 
-                cancel ()
+                cancel.Stop ()
                 do! pm.StopAll ()
             }
 
@@ -1091,7 +1091,7 @@ let private registryStreamTests =
                             return! waitSnapshot (remaining - 1)
                     }
                 do! waitSnapshot 100
-                cancel ()
+                cancel.Stop ()
                 Expect.equal snapshot (Some { ControlWire.SessionRegistryFrame.Sessions = [] }) "an asserted identity gets the snapshot"
                 do! pm.StopAll ()
             }
@@ -1101,6 +1101,7 @@ let tests =
     testList "Phase4" [
         stateTests
         uiRenderTests
+        sseTests
         notificationTests
         mcpTests
         registryTests

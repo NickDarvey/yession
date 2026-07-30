@@ -492,15 +492,20 @@ let private start () =
         |> Program.run
 
         // The local peer's draft slot follows its body: published on the first keystroke,
-        // retracted when the composer empties. Registered on the doc, so it settles the same way
-        // for a keystroke, a remote merge, and the IndexedDB replay below.
-        DraftSlot.follow doc registry peerId (fun msg -> dispatchRef msg)
+        // retracted when the composer empties. Watches the body itself, so a keystroke and a
+        // merged remote edit settle it and nothing else does.
+        DraftSlot.follow doc registry peerId (fun msg -> dispatchRef msg) |> ignore
 
         // Local-first: the doc persists in IndexedDB keyed by the session's address. Cold
         // loads render local state (drafts, queued messages) before — and without — the
         // network; on reconnect the full-state exchange reconciles.
         let persistence = newPersistence indexeddbPersistence (persistenceKey ()) doc
         do! whenSynced persistence |> Async.AwaitPromise
+
+        // The replayed doc is state that did not arrive as a body change, so settle the rule
+        // against it explicitly: a doc stored before publication followed the body can hold an
+        // empty-bodied slot, and this is where it goes.
+        DraftSlot.settle doc registry peerId (fun msg -> dispatchRef msg)
 
         // Authorization by renavigation: probe `/me` for a peer token. 401 -> bounce
         // through `/login` (code + PKCE via the Manager) and land back on this shell,

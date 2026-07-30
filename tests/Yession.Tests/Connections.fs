@@ -431,8 +431,8 @@ let private startConnectionsServer (callers: (string * Control.ControlCaller) li
             if not (Control.tryHandle
                         (fun secret -> Map.tryFind secret table)
                         (fun _ _ -> async { return Ok () })
-                        (fun _ _ -> fun () -> ())
-                        (fun _ -> fun () -> ())
+                        (fun _ _ -> Subscription.none)
+                        (fun _ -> Subscription.none)
                         dummyRegister
                         None
                         (Some api)
@@ -520,7 +520,7 @@ let private routeTests =
                 // Disconnect shrinks it again.
                 let! _ = clientA.Disconnect (target (SessionScope sessionA))
                 do! expectFrame (fun f -> frames.Count >= 3 && f.Connections |> List.length = 1)
-                cancel ()
+                cancel.Stop ()
             }
     ]
 

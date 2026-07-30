@@ -147,12 +147,21 @@ let private codecTests =
 
 let private draftSlotTests =
     testList "Draft slot publication" [
+        testCase "the rule answers every state of (body, slot)" <| fun () ->
+            let answer body slot = DraftSlot.reconcile ada body slot
+            Expect.equal (answer DraftSlot.HasContent DraftSlot.Unpublished) (Some (EnsureDraftMsg ada))
+                "content with no slot publishes one"
+            Expect.equal (answer DraftSlot.Empty DraftSlot.Published) (Some (DiscardDraftMsg ada))
+                "a slot with no content is retracted"
+            Expect.equal (answer DraftSlot.HasContent DraftSlot.Published) None "a published draft is left alone"
+            Expect.equal (answer DraftSlot.Empty DraftSlot.Unpublished) None "an untouched composer says nothing"
+
         testCaseAsync "the slot follows the body: published on content, retracted when it empties" <|
             async {
                 let doc = Y.Doc.Create ()
                 let registry = BodyRegistry doc
                 let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
-                DraftSlot.follow doc registry ada (user >> p.Dispatch)
+                DraftSlot.follow doc registry ada (user >> p.Dispatch) |> ignore
 
                 // Mounting a composer is not drafting: the editor writes an empty paragraph into
                 // the body fragment, which must publish nothing (an empty draft box on every

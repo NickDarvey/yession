@@ -60,8 +60,8 @@ let startFull
     // Telemetry sink (Plan 04): the completed-turn usage emitter, threaded to the
     // scheduler. `ignore` in the layered helpers below and whenever telemetry is off.
     (emitUsage: AgentTurnId -> AgentUsage -> unit)
-    (subscribeNotifications: ((SessionNotification -> unit) -> (unit -> unit)) option)
-    (subscribeMcp: ((McpToolList -> unit) -> (unit -> unit)) option)
+    (subscribeNotifications: Subscribe<SessionNotification> option)
+    (subscribeMcp: Subscribe<McpToolList> option)
     // Extra HTTP routes on the session's server (Plan 08: the connection surface).
     (extraHttpRoutes: (Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
     (sessionId: SessionId)
@@ -234,26 +234,26 @@ let startFull
         // a notification into a durable `SessionEvent` (via `log.Append`), or re-draining,
         // is left to whatever handler a later composition wants. A notification is a signal
         // the session MAY act on, never a fact it is obliged to persist.
-        let mutable unsubscribeNotifications : (unit -> unit) option = None
+        let mutable notifications : Subscription option = None
         match subscribeNotifications with
         | Some subscribe ->
             let handle (notification: SessionNotification) : unit =
                 match notification with
                 | EnvironmentChanged () ->
                     eprintfn "[session %s] notification: environment changed" (SessionId.value sessionId)
-            unsubscribeNotifications <- Some (subscribe handle)
+            notifications <- Some (subscribe handle)
         | None -> ()
 
         // The MCP tool stream (the second reverse leg): subscribe when the launch handed us a
         // channel. The current list arrives immediately, then a fresh list on every change. The
         // DEFAULT handler just logs the count — making the tools available to agent turns is
         // left to whatever handler a later composition wants.
-        let mutable unsubscribeMcp : (unit -> unit) option = None
+        let mutable mcpTools : Subscription option = None
         match subscribeMcp with
         | Some subscribe ->
             let handle (list: McpToolList) : unit =
                 eprintfn "[session %s] mcp tools available: %d" (SessionId.value sessionId) (List.length list.Tools)
-            unsubscribeMcp <- Some (subscribe handle)
+            mcpTools <- Some (subscribe handle)
         | None -> ()
 
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
@@ -350,8 +350,8 @@ let startFull
               Stop =
                 fun () ->
                     async {
-                        unsubscribeNotifications |> Option.iter (fun cancel -> cancel ())
-                        unsubscribeMcp |> Option.iter (fun cancel -> cancel ())
+                        notifications |> Option.iter (fun s -> s.Stop ())
+                        mcpTools |> Option.iter (fun s -> s.Stop ())
                         server.close ignore
                         // Drain every accepted peer connection: Stop resolves only once
                         // libdatachannel has reported each one closed, so a caller may
