@@ -192,6 +192,10 @@ To eyeball a rich-editor change in a real browser without any of the WebRTC mach
 `check Browser` (drives Chromium against `tests/browser/editor-harness.html`). The full
 two-peer WebRTC E2E runs where the Nix-built `Native` addon is present (CI, `verify`).
 
+To inspect or iterate on a server-rendered surface (the manager page) with real
+screenshots, read `.agents/skills/ui-exploration/SKILL.md` first — headless Chromium's
+window-size clamp makes naive mobile screenshots lie; the skill's CDP driver does not.
+
 ### Writing tests
 
 High signal, non-brittle. A test earns its place by failing when behavior regresses — and only
