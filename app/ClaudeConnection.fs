@@ -138,12 +138,16 @@ let routes
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
     (statusOf: SecretId -> ConnectionKind option)
+    /// The path this session is served under (`""` at an origin root), stripped off the
+    /// request the same way the rest of the session's surface strips it.
+    (mount: string)
     : IncomingMessage -> ServerResponse -> bool =
     fun req res ->
+        let routeOf () = SessionRoute.parseUnder mount req.``method`` (req.url.Split('?').[0])
         // The session's Claude routes, claimed through the same `SessionRoute` contract the
         // rest of its surface uses — so a route added there is unhandled here until this
         // match accounts for it.
-        match SessionRoute.parse req.``method`` (req.url.Split('?').[0]) with
+        match routeOf () with
         | Some ClaudeStatus
         | Some (Claude _) ->
             match auth.IdentityOf req with
@@ -154,7 +158,7 @@ let routes
                     | Error e -> respondText res 400 e
                     | Ok owner ->
                         let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
-                        match SessionRoute.parse req.``method`` (req.url.Split('?').[0]) with
+                        match routeOf () with
                         | Some ClaudeStatus ->
                             let statusJson (target: SecretId) =
                                 match statusOf target with

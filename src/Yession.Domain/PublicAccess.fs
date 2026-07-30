@@ -100,19 +100,30 @@ module SessionTemplate =
                 | Error e -> Error e
                 | Ok _ when not (known |> List.exists trimmed.Contains) ->
                     Error "has no {id} or {port} placeholder, so every session would share one address"
+                // A session must know the path it is mounted under BEFORE it binds a port
+                // — the shell's `<base href>`, its cookie's `Path`, and the prefix it
+                // strips off requests are all fixed at boot. So the mount may depend on
+                // the session's id but not on its port. `{port}` in the authority is
+                // untouched: that is port mirroring, where the mount is empty anyway.
+                | Ok (_, _, path) when path.Contains "{port}" ->
+                    Error
+                        "puts {port} in its path — a path-mounted session is addressed by \
+                         {id}, because it must know its mount before it has a port"
                 | Ok _ -> Ok (SessionTemplate trimmed)
 
-    /// Resolve a session's address. `Mount` is the path component of the resolved URL,
-    /// taken here rather than by any caller, so the address a browser is given and the
-    /// prefix the session serves under are always the same string.
-    let address (sessionId: SessionId) (port: int) (SessionTemplate template) : SessionAddress =
-        let url =
-            template.Replace("{id}", SessionId.value sessionId).Replace("{port}", string port)
-        let mount =
-            match UrlShape.split url with
-            | Ok (_, _, path) -> path
-            | Error _ -> ""
-        { Url = url; Mount = mount }
+    /// The path a session is served under: `/s/01hx…` path-mounted, `""` at an origin
+    /// root. Needs no port (see `create`), so a session can know it at boot.
+    let mount (sessionId: SessionId) (SessionTemplate template) : string =
+        match UrlShape.split (template.Replace("{id}", SessionId.value sessionId)) with
+        | Ok (_, _, path) -> path
+        | Error _ -> ""
+
+    /// Resolve a session's address. `Mount` comes from the same template as `Url`, so the
+    /// address a browser is given and the prefix the session serves under cannot disagree.
+    let address (sessionId: SessionId) (port: int) (template: SessionTemplate) : SessionAddress =
+        let (SessionTemplate raw) = template
+        { Url = raw.Replace("{id}", SessionId.value sessionId).Replace("{port}", string port)
+          Mount = mount sessionId template }
 
 /// How this deployment is reached. Constructed only by `create`.
 type PublicAccess =
@@ -188,3 +199,9 @@ module PublicAccess =
     /// A session's public address under this deployment.
     let sessionAddress (sessionId: SessionId) (port: int) (access: PublicAccess) : SessionAddress =
         sessions access |> SessionTemplate.address sessionId port
+
+    /// The path a session is served under, known at boot — before it binds a port — so it
+    /// can set its shell's `<base href>`, scope its cookie, and strip the prefix off
+    /// incoming requests. `""` unless the deployment path-mounts its sessions.
+    let sessionMount (sessionId: SessionId) (access: PublicAccess) : string =
+        sessions access |> SessionTemplate.mount sessionId

@@ -104,3 +104,14 @@ module SessionRoute =
         | "POST", [ "claude"; "token" ] -> Some (Claude ClaudeAction.Token)
         | "POST", [ "claude"; "disconnect" ] -> Some (Claude ClaudeAction.Disconnect)
         | _ -> None
+
+    /// The route a request is for when this session is served under `mount` (`""` at an
+    /// origin root). The operator's proxy forwards the PUBLIC path unchanged, so a
+    /// path-mounted session sees its own prefix and strips it here — one place, the same
+    /// string the shell's `<base href>` and the cookie's `Path` are built from. A request
+    /// that does not carry the prefix is not this session's and gets the ordinary 404.
+    let parseUnder (mount: string) (method: string) (path: string) : SessionRoute option =
+        if mount = "" then parse method path
+        elif path = mount then parse method "/"
+        elif path.StartsWith (mount + "/") then parse method (path.Substring mount.Length)
+        else None

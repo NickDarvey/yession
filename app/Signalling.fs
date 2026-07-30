@@ -21,14 +21,14 @@ open Yession.App
 /// randomly in the browser, so the server-rendered placeholder is left blank. The page
 /// embeds the serving session's id, so the browser can key its local doc store by
 /// session before (and without) any connection.
-let private bootstrapHtml (sessionId: SessionId) =
+let private bootstrapHtml (sessionId: SessionId) (mount: string) =
     let placeholderPeer =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
         | Error e -> failwith e
     // Seed the serving session id so the secondary identifier renders on first paint (the
     // browser re-learns it from `PeerAccepted` once connected).
-    Ssr.page sessionId { ClientModel.init placeholderPeer with Session = Some sessionId }
+    Ssr.page sessionId mount { ClientModel.init placeholderPeer with Session = Some sessionId }
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
 let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
@@ -83,13 +83,19 @@ let start
     (auth: SessionAuth.Auth option)
     (extraRoutes: (IncomingMessage -> ServerResponse -> bool) option)
     (mintPeerToken: PeerAttribution -> string)
+    // The path this session is served under (`""` at an origin root, docs/plans/09).
+    // The proxy forwards the PUBLIC path unchanged and the session strips its own prefix
+    // — the opposite contract (proxy strips, session serves at root) would make
+    // correctness depend on per-proxy rewriting behaviour that cannot be tested here.
+    (mount: string)
     (port: int)
     : Async<HttpServer * (unit -> Async<unit>)> =
-    let bootstrapHtml = bootstrapHtml sessionId
+    let bootstrapHtml = bootstrapHtml sessionId mount
     // Every accepted peer connection, so a stopping Host can drain them. Never pruned
     // mid-life (closePeerConnection resolves immediately for already-closed ones, and a
     // session hosts a bounded handful of peers).
     let connections = ResizeArray<PeerConnection> ()
+    let routeOf (req: IncomingMessage) = SessionRoute.parseUnder mount req.``method`` (pathnameOf req.url)
     let authorized (req: IncomingMessage) (url: string) (validateToken: string -> bool) =
         (match auth with
          | Some a -> a.IsAuthenticated req
@@ -126,7 +132,7 @@ let start
             if not handledByExtra then
                 res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
-        match SessionRoute.parse req.``method`` (pathnameOf req.url) with
+        match routeOf req with
         | Some Signal ->
             readBody req (fun body ->
                 let offerSdp = sdpField body

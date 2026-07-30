@@ -52,11 +52,6 @@ let private reportName =
 let private secretsCapabilitiesFor (sessionId: SessionId) =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.secretsCapabilities url secret sessionId)
 
-// User authorization: with a Manager, this session is an OIDC client of it; the RP
-// configuration completes after listen (the redirect URI needs the bound port).
-let private auth =
-    controlChannel |> Option.map (fun _ -> SessionAuth.create sessionId)
-
 // Where this session is reachable from outside (docs/plans/09), from the same two
 // variables the Manager parsed, inherited by plain env. Fails the boot on a combination
 // that cannot work, rather than registering a redirect URI no browser can reach.
@@ -64,6 +59,18 @@ let private publicAccess =
     match Interop.publicAccess () with
     | Ok access -> access
     | Error e -> failwith e
+
+/// The path this session is served under: `""` unless the deployment path-mounts its
+/// sessions. Known HERE, before the port is bound, because everything fixed at boot
+/// depends on it — the shell's `<base href>`, the auth cookie's `Path`, and the prefix
+/// stripped off every incoming request. (That is why a template may not put `{port}` in
+/// its path.)
+let private sessionMount = PublicAccess.sessionMount sessionId publicAccess
+
+// User authorization: with a Manager, this session is an OIDC client of it; the RP
+// configuration completes after listen (the redirect URI needs the bound port).
+let private auth =
+    controlChannel |> Option.map (fun _ -> SessionAuth.create sessionId sessionMount)
 
 // Telemetry: this session is a direct OTel emitter — one OTel log record per completed turn.
 // Destination (stdout / a collector / both / off) comes from the standard OTEL_* env the
@@ -232,9 +239,9 @@ Async.StartImmediate (
         let claudeRoutes =
             match auth, connectionsClient with
             | Some a, Some client ->
-                Some (ClaudeConnection.routes sessionId a client (fun target -> Map.tryFind target connectionStatus))
+                Some (ClaudeConnection.routes sessionId a client (fun target -> Map.tryFind target connectionStatus) sessionMount)
             | _ -> None
-        let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth port
+        let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

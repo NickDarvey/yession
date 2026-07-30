@@ -93,4 +93,40 @@ let private routeTests =
                 "the shell is the address itself"
     ]
 
-let tests = testList "Routes" [ routeTests ]
+let private mountTests =
+    // A session mounted under a path. The operator's proxy forwards the public path
+    // unchanged; the session strips its own prefix. The alternative contract — proxy
+    // strips, session serves at root — would make correctness depend on per-proxy
+    // rewriting behaviour, which cannot be verified here.
+    let mount = "/s/01hx"
+    testList "A path-mounted session" [
+        testCase "claims its own prefix and nothing outside it" <| fun () ->
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/client.js") (Some ClientBundle) "its bundle"
+            Expect.equal (SessionRoute.parseUnder mount "POST" "/s/01hx/signal") (Some Signal) "its signalling"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/events/4") (Some (Events 4)) "its event chunks"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/client.js") None "the origin root is not its own"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/other/client.js") None "a sibling's prefix is not its own"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hxtra/client.js") None "a prefix it merely starts with is not its own"
+
+        testCase "is reached at its mount with or without a trailing slash" <| fun () ->
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/") (Some Shell) "the usual form"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx") (Some Shell) "and the bare mount"
+
+        testCase "an unmounted session is unchanged" <| fun () ->
+            Expect.equal (SessionRoute.parseUnder "" "GET" "/client.js") (Some ClientBundle) "byte-identical to today"
+            Expect.equal (SessionRoute.parseUnder "" "GET" "/") (Some Shell) "including its shell"
+
+        testCase "what the browser asks for is what the session claims" <| fun () ->
+            // The round trip that matters end to end: `<base href="<mount>/">` makes the
+            // browser resolve each relative route to `<mount>/<relative>`, and that is
+            // exactly what `parseUnder` accepts back. If either side changed alone, this
+            // would fail.
+            for route in every do
+                let asked = mount + "/" + SessionRoute.relative route
+                Expect.equal
+                    (SessionRoute.parseUnder mount (methodOf route) asked)
+                    (Some route)
+                    (sprintf "%A resolves to %s and comes back" route asked)
+    ]
+
+let tests = testList "Routes" [ routeTests; mountTests ]

@@ -993,6 +993,28 @@ let private publicAccessTests =
                 (Ok { Url = "https://example.com/s/ui-render"; Mount = "/s/ui-render" })
                 "a trailing slash is normalised away, so callers append their own path"
 
+        testCase "a session knows its mount before it has a port" <| fun () ->
+            // Everything a session fixes at boot depends on the mount — the shell's
+            // `<base href>`, the cookie's `Path`, the prefix stripped off requests — and
+            // its port is only assigned when it binds. So the mount derives from the id
+            // alone, and a template that puts {port} in its PATH is refused.
+            let mountOf sessionUrl =
+                PublicAccess.create "https://example.com" sessionUrl
+                |> Result.map (PublicAccess.sessionMount sessionId)
+            Expect.equal (mountOf "https://example.com/s/{id}") (Ok "/s/ui-render") "path-mounted"
+            Expect.equal (mountOf "https://{id}.example.com") (Ok "") "a subdomain is an origin root"
+            Expect.equal (mountOf "https://example.com:{port}") (Ok "") "so is a port mirror"
+            Expect.equal (PublicAccess.sessionMount sessionId Loopback) "" "and so is loopback"
+            Expect.isTrue
+                ((errorOf "https://example.com" "https://example.com/p/{port}").Contains "{port} in its path")
+                "a mount that needed the port would not be knowable at boot"
+
+        testCase "the auth cookie is scoped to the path the session is served under" <| fun () ->
+            // A real narrowing where sessions share a host: a path-mounted session's
+            // cookie is no longer sent to its siblings. At an origin root, unchanged.
+            Expect.isTrue ((Cookies.set "yession_auth_x" "/s/ui-render" "v").Contains "Path=/s/ui-render/") "scoped to the mount"
+            Expect.isTrue ((Cookies.set "yession_auth_x" "" "v").Contains "Path=/") "root-mounted is unchanged"
+
         testCase "a session template without a placeholder is refused" <| fun () ->
             // Before this type the port was appended implicitly, so a bare origin was the
             // documented spelling and `http://host:8443` silently produced
