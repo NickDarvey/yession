@@ -27,6 +27,24 @@ type SessionView =
     { Record : SessionRecord
       Status : SessionStatus }
 
+/// The session registry's wire view (docs/plans/09): the RUNNING sessions only, each with the
+/// port and pid a serving binding needs to reach it. A pure projection of the published views, so
+/// `/sessions/stream` and its tests share one definition of what the registry announces — and the
+/// Manager publishes the views once, whatever shape a given consumer wants.
+let registryFrameOf (views: SessionView list) : ControlWire.SessionRegistryFrame =
+    { Sessions =
+        views
+        |> List.choose (fun view ->
+            match view.Status with
+            | Running (port, pid) ->
+                Some
+                    { ControlWire.SessionRegistryEntry.Id = view.Record.SessionId
+                      Name = view.Record.DisplayName
+                      Port = port
+                      Pid = pid }
+            | NotRunning
+            | Exited _ -> None) }
+
 type ProcessManager =
     { /// Register a new session (durable): id, display name. Does not launch.
       CreateSession : string -> string -> Result<SessionRecord, string>
@@ -36,10 +54,12 @@ type ProcessManager =
       Stop : SessionId -> Async<Result<unit, string>>
       /// Every registered session with its runtime status.
       Sessions : unit -> SessionView list
-      /// Subscribe to the session registry stream (docs/plans/09): the sink receives
-      /// the current Running set immediately, then a fresh full frame on every launch,
-      /// exit, and display-name change. Returns an unsubscribe.
-      SubscribeSessions : (ControlWire.SessionRegistryFrame -> unit) -> (unit -> unit)
+      /// Subscribe to session changes: the sink receives every session with its status
+      /// immediately, then a fresh full list on every launch, exit, and display-name change.
+      /// The VIEWS, not a wire frame — `/sessions/stream` projects them to the registry's
+      /// Running set (`registryFrameOf`), the management page renders them as its table, and
+      /// one publish serves both. Returns an unsubscribe.
+      SubscribeSessions : Subscribe<SessionView list>
       /// Set a session's display name (the reported collaborative title); durable, and a
       /// no-op for unknown sessions or unchanged names.
       SetDisplayName : SessionId -> string -> unit
@@ -49,11 +69,11 @@ type ProcessManager =
       /// Push a notification down to a running session (the reverse leg of the control
       /// RPC): fans out over that session's live `/control/notifications` subscriptions.
       /// A no-op for a session that is not running or has no control channel.
-      Notify : SessionId -> SessionNotification -> unit
+      Notify : SessionId -> Sink<SessionNotification>
       /// Announce the current MCP tool list to every session (the `/control/mcp` reverse
       /// leg): replaces the retained list and pushes it to all live subscribers, and every
       /// session that subscribes later receives it as its initial snapshot.
-      PublishMcpTools : McpToolList -> unit
+      PublishMcpTools : Sink<McpToolList>
       /// Users the Manager verified into the session's live launch at ID-token
       /// issuance (Plan 06). Empty for a stopped session or before any login —
       /// bindings die with the launch.
@@ -70,6 +90,10 @@ type ProcessManager =
       ResolveSecret : SecretStore.ResolveSecret
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
+      /// How this deployment is reached from outside (docs/plans/09). The management UI
+      /// reads it to render each session's open link, so the address a human clicks and
+      /// the redirect URI that session registered come from one declaration.
+      Public : PublicAccess
       /// Stop every running child and the Manager endpoint (Manager shutdown).
       StopAll : unit -> Async<unit> }
 
@@ -95,12 +119,12 @@ type Options =
       /// product default is fixed — a second Manager instance must choose its own
       /// (the bind fails loudly on conflict, never a silent fallback).
       ManagerPort : int option
-      /// The public URL this Manager is reached at (docs/plans/07): the OIDC issuer and
-      /// every URL derived from it. None = the loopback endpoint URL — correct for
-      /// single-machine deployments; behind an authenticating proxy the operator sets
-      /// the proxy's origin (`YESSION_MANAGER_URL`) so off-host browsers can follow the
-      /// authorize bounce.
-      PublicUrl : string option
+      /// How this deployment is reached from outside (docs/plans/07, docs/plans/09): the
+      /// Manager's public origin — its OIDC issuer and every URL derived from it — and
+      /// where each session's port is reachable. `Loopback` is the single-machine
+      /// default: the Manager is its own loopback endpoint URL and sessions answer at
+      /// their loopback ports.
+      Public : PublicAccess
       /// The Manager's own telemetry sink for session-lifecycle signals (launch/exit). The
       /// Manager is a direct OTel emitter; this is its `Log`. Default = ignore. Sessions emit
       /// their own telemetry directly — the Manager does not collect from them; it only passes
@@ -137,7 +161,7 @@ module Options =
           StopGraceMs = 3000
           Grant = None
           ManagerPort = None
-          PublicUrl = None
+          Public = Loopback
           OnEvent = (fun _ _ -> ())
           Strategy = None
           Secrets = None }
@@ -323,25 +347,31 @@ let createWithUi
 
     // The MCP tool stream (the second reverse leg): a Manager-level retained list broadcast to
     // every subscribed session, so all sessions see the same available MCP services.
-    let mcp = McpHub.create ()
+    let mcp = RetainedHub.create McpToolList.empty
 
-    // The session registry stream (docs/plans/09): the Running set as full-snapshot
-    // frames, published on every launch, exit, and display-name change. The management
-    // endpoint's `/sessions/stream` subscribers — an operator's serving binding — get
-    // each frame; the frame is recomputed from the durable registry + live children.
-    let registry = RegistryHub.create ()
-    let publishRegistry () =
-        let frame : ControlWire.SessionRegistryFrame =
-            { Sessions =
-                state.Sessions
-                |> List.choose (fun r ->
-                    Map.tryFind (SessionId.value r.SessionId) children
-                    |> Option.map (fun (child, port) ->
-                        { ControlWire.SessionRegistryEntry.Id = r.SessionId
-                          Name = r.DisplayName
-                          Port = port
-                          Pid = child.Pid })) }
-        registry.Publish frame
+    // Session changes (docs/plans/09), published on every launch, exit, and display-name
+    // change: the full session list with each status, retained so a new subscriber is current
+    // at once. Consumers project it — `/sessions/stream` to the registry's Running set for an
+    // operator's serving binding, the management page to its rendered table.
+    let sessions = RetainedHub.create ([] : SessionView list)
+
+    let statusOf (record: SessionRecord) : SessionStatus =
+        let key = SessionId.value record.SessionId
+        match Map.tryFind key children with
+        | Some (child, port) -> Running (port, child.Pid)
+        | None ->
+            match Map.tryFind key lastExit with
+            | Some code -> Exited code
+            | None -> NotRunning
+
+    let viewsNow () : SessionView list =
+        state.Sessions |> List.map (fun r -> { Record = r; Status = statusOf r })
+
+    /// Publish the current session list. Call AFTER the runtime bookkeeping a change implies
+    /// (`children`, `lastExit`): the value is computed here, so what a subscriber renders is
+    /// whatever was true at this instant — announcing an exit before recording its code would
+    /// show a crashed session as merely stopped.
+    let publishSessions () = sessions.Publish (viewsNow ())
 
     // The connection-status stream (the third reverse leg, Plan 08): per-launch sinks,
     // dying with the launch like notifications. Each launch receives ITS OWN readable
@@ -367,7 +397,7 @@ let createWithUi
         | Some record when record.DisplayName <> displayName ->
             state <- ManagerState.setDisplayName sessionId displayName state
             ManagerStore.save statePath state
-            publishRegistry ()
+            publishSessions ()
         | _ -> ()
 
     // The control channel's name report: the secret identifies the reporting session; a
@@ -393,8 +423,8 @@ let createWithUi
     // provider reads the issuer lazily, so the mutable slot resolves cleanly.
     let mutable endpointUrl : string option = None
     let issuerOf () =
-        match options.PublicUrl with
-        | Some url -> url.TrimEnd '/'
+        match PublicAccess.managerUrl options.Public with
+        | Some url -> url
         | None -> defaultArg endpointUrl ""
     // The Manager's audit sink (Plan 06 telemetry): one greppable audit line to stdout for
     // each authority decision. (Session telemetry is emitted directly by each process now —
@@ -603,15 +633,6 @@ let createWithUi
         }
     let controlUrl () = endpointUrl
 
-    let statusOf (record: SessionRecord) : SessionStatus =
-        let key = SessionId.value record.SessionId
-        match Map.tryFind key children with
-        | Some (child, port) -> Running (port, child.Pid)
-        | None ->
-            match Map.tryFind key lastExit with
-            | Some code -> Exited code
-            | None -> NotRunning
-
     let createSession (sessionId: string) (displayName: string) : Result<SessionRecord, string> =
         match SessionId.create sessionId with
         | Error e -> Error e
@@ -698,19 +719,23 @@ let createWithUi
                 | Ok (child, port) ->
                     children <- Map.add key (child, port) children
                     lastExit <- Map.remove key lastExit
-                    publishRegistry ()
+                    publishSessions ()
                     // The Manager emits its own lifecycle telemetry directly (session launched).
                     options.OnEvent "session launched"
                         [ "yession.session.id", box key; "yession.session.port", box port ]
                     child.OnExit (fun code ->
                         children <- Map.remove key children
-                        publishRegistry ()
                         // The launch's authority dies with it.
                         revokeSecret ()
                         // A stop's exit is the expected outcome, not a crash to report.
                         let stopped = Set.contains key stopping
                         if stopped then stopping <- Set.remove key stopping
                         else lastExit <- Map.add key code lastExit
+                        // Published only once the exit is RECORDED: a subscriber renders the
+                        // session's status when the frame arrives (the management page's rows
+                        // stream does exactly that), so announcing before `lastExit` was set
+                        // would show a crashed session as merely stopped until the next change.
+                        publishSessions ()
                         options.OnEvent "session exited"
                             [ "yession.session.id", box key
                               "yession.session.exit_code", box (defaultArg code -1)
@@ -738,8 +763,8 @@ let createWithUi
         { CreateSession = createSession
           Launch = launch
           Stop = stop
-          Sessions = fun () -> state.Sessions |> List.map (fun r -> { Record = r; Status = statusOf r })
-          SubscribeSessions = registry.Register
+          Sessions = viewsNow
+          SubscribeSessions = sessions.Register
           SetDisplayName = setDisplayName
           WaitForExit =
             fun sessionId ->
@@ -760,6 +785,7 @@ let createWithUi
             | Some store -> SecretStore.SecretResolution.compose (SecretStore.Audit.injectObserver audit) store usersOf peersOf SecretStore.SecretResolution.processEnv
             | None -> SecretStore.SecretResolution.processEnv
           EndpointPort = controlServer |> Option.map Interop.serverPort
+          Public = options.Public
           StopAll =
             fun () ->
                 async {

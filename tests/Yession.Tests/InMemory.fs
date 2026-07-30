@@ -55,6 +55,34 @@ let tests =
                 do! host.Stop ()
             }
 
+        testCaseAsync "a draft box appears only for a peer that has typed, and goes when its composer empties" <|
+            async {
+                let! host = Host.start (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                let! b = connectInMemoryClient host "bob" "Bob"
+                let ada = a.Hello.PeerId
+                // Ada types: her slot publishes and reaches Bob through the Host relay. Bob's
+                // composer renders one box per slot, so his slot map IS what he shows.
+                do! compose a ada "thinking out loud"
+                do! b.Runner.WaitFor (fun m -> Map.containsKey ada m.Synced.Drafts)
+                // Bob has been connected the whole time and never typed. Before publication
+                // followed the body, merely mounting a composer published a slot — so every peer
+                // that had ever opened the session showed an empty draft box on everyone's
+                // composer, forever.
+                Expect.equal
+                    ((b.Runner.Model ()).Synced.Drafts |> Map.toList |> List.map fst)
+                    [ ada ]
+                    "the idle peer contributes no draft box"
+                Expect.equal
+                    ((a.Runner.Model ()).Synced.Drafts |> Map.toList |> List.map fst)
+                    [ ada ]
+                    "and none for itself on its own replica"
+                // Ada empties her composer: the box goes away on Bob too.
+                do! clearComposer a ada
+                do! b.Runner.WaitFor (fun m -> not (Map.containsKey ada m.Synced.Drafts))
+                do! host.Stop ()
+            }
+
         testCaseAsync "a peer's cursor presence relays to others in any field and clears on disconnect" <|
             async {
                 let! host = Host.start (sid ()) 0
@@ -92,7 +120,7 @@ let tests =
                 let awaitReport = Async.FromContinuations (fun (cont, _, _) -> reportCont <- Some cont)
                 let report (name: string) = async { match reportCont with Some c -> reportCont <- None; c name | None -> () }
 
-                let! host = Host.startFull (fun () -> None) None None None None (Some report) (fun _ _ -> ()) None None None (sid ()) None 0
+                let! host = Host.startFull (fun () -> None) None None None None (Some report) (fun _ _ -> ()) None None None (sid ()) None "" 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 let! reportWaiter = Async.StartChild awaitReport
                 a.Runner.Dispatch (user (EditTitleMsg (Text.insert 0 "ship it" (a.Runner.Model ()).Synced.Title)))

@@ -173,7 +173,7 @@ let private classificationTests =
         testCaseAsync "a transport failure is an unreachable feed, not an empty log" <|
             async {
                 let get : App.HttpGet = fun _ -> async { return Error (App.HttpUnreachable "ECONNREFUSED") }
-                let! result = App.EventFetch.overHttp get "" None None
+                let! result = App.EventFetch.overHttp get SessionRoute.relative None None
                 Expect.equal
                     result
                     (Error (App.FeedUnreachable "ECONNREFUSED"))
@@ -186,8 +186,8 @@ let private classificationTests =
         testCaseAsync "a refusal keeps its status, so authorization and overload differ" <|
             async {
                 let refusing (status: int) : App.HttpGet = fun _ -> async { return Error (App.HttpStatus status) }
-                let! unauthorized = App.EventFetch.overHttp (refusing 401) "" None None
-                let! overloaded = App.EventFetch.overHttp (refusing 503) "" None None
+                let! unauthorized = App.EventFetch.overHttp (refusing 401) SessionRoute.relative None None
+                let! overloaded = App.EventFetch.overHttp (refusing 503) SessionRoute.relative None None
                 Expect.equal unauthorized (Error (App.FeedRefused 401)) "401 survives as 401"
                 Expect.equal overloaded (Error (App.FeedRefused 503)) "503 survives as 503"
                 Expect.isFalse (App.FeedFault.isTransient (App.FeedRefused 401)) "retrying cannot fix a 401"
@@ -198,7 +198,7 @@ let private classificationTests =
         testCaseAsync "a chunk that will not decode is corruption — a value, not a thrown page" <|
             async {
                 let get : App.HttpGet = fun _ -> async { return Ok "{\"not\":\"an envelope\"}" }
-                match! App.EventFetch.overHttp get "" None None with
+                match! App.EventFetch.overHttp get SessionRoute.relative None None with
                 | Error (App.FeedCorrupt _) -> ()
                 | other -> failwithf "expected FeedCorrupt, got %A" other
                 Expect.isFalse
@@ -211,7 +211,7 @@ let private classificationTests =
                 // The one thing a fake `HttpGet` cannot prove: that a genuine `fetch` rejection
                 // maps to `FeedUnreachable`. Port 1 has no listener, so this is a real
                 // connection failure, with no server to start or stop.
-                match! App.EventFetch.overHttp realHttpGet "http://127.0.0.1:1" None None with
+                match! App.EventFetch.overHttp realHttpGet (SessionRoute.at "http://127.0.0.1:1") None None with
                 | Error (App.FeedUnreachable _) -> ()
                 | other -> failwithf "a dead port must be an unreachable feed, got %A" other
             }
@@ -268,7 +268,7 @@ let private fakeSocket (host: Host.SessionHost) : Socket =
 let private connectOverFeed (get: App.HttpGet) (retries: ResizeArray<FeedHealth>) =
     connectInMemoryClientVia (fun dispatch ->
         let feed =
-            App.EventFetch.overHttp get "" None
+            App.EventFetch.overHttp get SessionRoute.relative None
             |> Resilience.Policy.guard
                 (App.EventFetch.policy (recordingSleep (ResizeArray ())) noJitter (fun attempt ->
                     App.EventFetch.retrying attempt

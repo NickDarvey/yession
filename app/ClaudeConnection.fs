@@ -11,6 +11,7 @@ open Fable.Core.JsInterop
 open Yession.Domain
 open Yession.Manager
 open Yession.SessionProcess
+open Yession.App
 open Yession.Host.Interop
 
 #if FABLE_COMPILER
@@ -27,11 +28,14 @@ let secretName : SecretName =
     | Error e -> failwithf "claude secret name invariant violated: %s" e
 
 /// Claude Code's public OAuth client against claude.ai — the same flow `claude /login`
-/// drives. `code=true` asks the consent page to display the code for manual copy when
-/// the redirect cannot land (the paste fallback).
+/// drives. Its registered redirect URIs are Anthropic's own (this Manager's callback
+/// cannot be registered, and the client rejects unregistered URIs), so the flow
+/// redirects to Anthropic's code-display page and completion arrives as a pasted
+/// `code#state`. `code=true` asks the consent page to display the code.
 let private authorizeUrl = "https://claude.ai/oauth/authorize?code=true"
 let private tokenUrl = "https://console.anthropic.com/v1/oauth/token"
 let private clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+let private redirectUri = "https://console.anthropic.com/oauth/code/callback"
 let private scopes = "org:create_api_key user:profile user:inference"
 
 /// The broker request for one sign-in flow: Claude's endpoints as data.
@@ -40,7 +44,8 @@ let beginRequest (target: SecretId) : ControlWire.ConnectionBeginRequest =
       AuthorizeUrl = envOr "YESSION_CLAUDE_AUTHORIZE_URL" authorizeUrl
       TokenUrl = envOr "YESSION_CLAUDE_TOKEN_URL" tokenUrl
       ClientId = envOr "YESSION_CLAUDE_CLIENT_ID" clientId
-      Scopes = scopes }
+      Scopes = scopes
+      RedirectUri = Some (envOr "YESSION_CLAUDE_REDIRECT_URI" redirectUri) }
 
 /// Validate a pasted static credential: a `claude setup-token` token
 /// (`sk-ant-oat01-…`) or a Console API key (`sk-ant-…`). Anything else is a paste
@@ -130,18 +135,28 @@ let private ownerOf (identity: CookieIdentity) (peerIdRaw: string option) : Resu
         | None -> Error "peer id required for an unattributed connection"
 
 /// Build the /claude* route handler. `statusOf` reads the session's live status cache
-/// (fed by the Manager's connection stream); `connections` is the control-channel
-/// broker client. Composes into `Signalling.start` extra routes.
+/// (fed by the Manager's connection stream); `agentAvailable` is the agent gate's own
+/// truth (any relevant credential OR the ambient env) — served so the client can say
+/// "no agent in this session" honestly; `connections` is the control-channel broker
+/// client. Composes into `Signalling.start` extra routes.
 let routes
     (sessionId: SessionId)
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
     (statusOf: SecretId -> ConnectionKind option)
+    (agentAvailable: unit -> bool)
+    /// The path this session is served under (`""` at an origin root), stripped off the
+    /// request the same way the rest of the session's surface strips it.
+    (mount: string)
     : IncomingMessage -> ServerResponse -> bool =
     fun req res ->
-        let path = req.url.Split('?').[0]
-        if not (path = "/claude" || path.StartsWith "/claude/") then false
-        else
+        let routeOf () = SessionRoute.parseUnder mount req.``method`` (req.url.Split('?').[0])
+        // The session's Claude routes, claimed through the same `SessionRoute` contract the
+        // rest of its surface uses — so a route added there is unhandled here until this
+        // match accounts for it.
+        match routeOf () with
+        | Some ClaudeStatus
+        | Some (Claude _) ->
             match auth.IdentityOf req with
             | None -> respondText res 401 "unauthorized"
             | Some identity ->
@@ -150,8 +165,8 @@ let routes
                     | Error e -> respondText res 400 e
                     | Ok owner ->
                         let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
-                        match req.``method``, path with
-                        | "GET", "/claude" ->
+                        match routeOf () with
+                        | Some ClaudeStatus ->
                             let statusJson (target: SecretId) =
                                 match statusOf target with
                                 | Some kind -> jsonString (kindLabel kind)
@@ -163,9 +178,9 @@ let routes
                                 | UserOwner _ -> "user"
                                 | PeerOwner _ -> "peer"
                             respondJson res 200
-                                (sprintf """{"session":%s,"mine":%s,"owner":"%s"}"""
-                                    (statusJson sessionTarget) (statusJson mineTarget) ownerLabel)
-                        | "POST", route ->
+                                (sprintf """{"session":%s,"mine":%s,"owner":"%s","agent":%b}"""
+                                    (statusJson sessionTarget) (statusJson mineTarget) ownerLabel (agentAvailable ()))
+                        | Some (Claude action) ->
                             match targetFor sessionId owner body.Scope with
                             | Error e -> respondText res 400 e
                             | Ok target ->
@@ -175,36 +190,37 @@ let routes
                                     | Error e -> respondText res 400 e
                                 Async.StartImmediate (
                                     async {
-                                        match route with
-                                        | "/claude/begin" ->
+                                        match action with
+                                        | ClaudeAction.Begin ->
                                             let! outcome = connections.Begin (beginRequest target)
                                             respondOutcome (
                                                 outcome
                                                 |> Result.map (fun r ->
                                                     sprintf """{"authorizeUrl":%s,"state":%s}"""
                                                         (jsonString r.AuthorizeUrl) (jsonString r.State)))
-                                        | "/claude/complete" ->
+                                        | ClaudeAction.Complete ->
                                             match body.Code with
                                             | None -> respondText res 400 "missing code"
                                             | Some code ->
                                                 let! outcome = connections.Complete target code
                                                 respondOutcome (outcome |> Result.map (fun () -> """{"ok":true}"""))
-                                        | "/claude/token" ->
+                                        | ClaudeAction.Token ->
                                             match body.Token |> Option.map classifyPasted with
                                             | None -> respondText res 400 "missing token"
                                             | Some (Error e) -> respondText res 400 e
                                             | Some (Ok token) ->
                                                 let! outcome = connections.Put target token
                                                 respondOutcome (outcome |> Result.map (fun () -> """{"ok":true}"""))
-                                        | "/claude/disconnect" ->
+                                        | ClaudeAction.Disconnect ->
                                             let! outcome = connections.Disconnect target
                                             respondOutcome (
                                                 outcome
                                                 |> Result.map (fun existed ->
                                                     sprintf """{"disconnected":%b}""" existed))
-                                        | _ -> respondText res 404 "not found"
                                     })
-                        | _ -> respondText res 404 "not found"
+                        // Unreachable: this handler only runs for the two cases above.
+                        | Some _
+                        | None -> respondText res 404 "not found"
                 match req.``method`` with
                 | "GET" ->
                     handle
@@ -218,3 +234,6 @@ let routes
                         | Ok body -> handle body
                         | Error e -> respondText res 400 (sprintf "malformed request: %s" e))
             true
+        // Not this handler's path: the composing server falls through (to its 404).
+        | Some _
+        | None -> false

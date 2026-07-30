@@ -182,22 +182,31 @@ let private clearTimeoutJs (handle: float) : unit = jsNative
 [<Emit("document.documentElement.classList.toggle('nav-alt')")>]
 let private toggleNav () : unit = jsNative
 
-// The auth probe: `/me` answers with a peer token when the browser's cookie (or an
-// auth-less session) allows it. Distinguishes DENIED (status) from OFFLINE (reject):
-// a 401 means renavigate to /login; a network failure means stay on the cached shell
-// and local stores — offline-first, the connection simply doesn't happen.
-// The `/me` probe, total in BOTH axes it can fail on, because the two need opposite
-// remedies: `authorized = false` means log in (the shell renavigates), while
-// `reachable = false` means the session is not there at all (the shell stays local-first and
-// says so). Collapsing them — which a thrown fetch did — turns "offline" into "log in", and a
-// login bounce against an unreachable session goes nowhere.
-[<Emit("""fetch('/me', { cache: 'no-store' }).then(
+// The settings drawer's open state is the same kind of bit, on the same root element.
+[<Emit("document.documentElement.classList.toggle('settings-open')")>]
+let private toggleSettings () : unit = jsNative
+
+// The auth probe: `me` answers with a peer token when the browser's cookie (or an
+// auth-less session) allows it — total in BOTH axes it can fail on, because the two need
+// opposite remedies: `authorized = false` means log in (the shell renavigates), while
+// `reachable = false` means the session is not there at all (the shell stays local-first
+// on its cached stores and says so). Collapsing them — which a thrown fetch did — turns
+// "offline" into "log in", and a login bounce against an unreachable session goes nowhere.
+//
+// The URL is a PARAMETER, not baked into the Emit: a string literal inside an Emit is
+// outside F#'s reach, so a path embedded here could not be checked against
+// `SessionRoute`. Every fetch below takes its URL from `SessionRoute.relative`, and the
+// browser resolves it against the shell's `<base href>`.
+[<Emit("""fetch($0, { cache: 'no-store' }).then(
   r => r.ok ? r.json().then(me => ({ reachable: true, authorized: true, token: me.peerToken, detail: '' }))
             : { reachable: true, authorized: false, token: '', detail: 'HTTP ' + r.status },
   e => ({ reachable: false, authorized: false, token: '', detail: String(e) }))""")>]
-let private fetchMe () : JS.Promise<{| reachable: bool; authorized: bool; token: string; detail: string |}> = jsNative
+let private fetchMe (url: string) : JS.Promise<{| reachable: bool; authorized: bool; token: string; detail: string |}> = jsNative
 
-[<Emit("window.location.assign($0)")>]
+// `location.assign` resolves against the DOCUMENT's URL, not `<base href>` — the one
+// place relative resolution does not follow the base — so resolve explicitly against
+// `document.baseURI` here, once, rather than at each call site.
+[<Emit("window.location.assign(new URL($0, document.baseURI).href)")>]
 let private navigateTo (url: string) : unit = jsNative
 
 // --- Rich-text editor mount ------------------------------------------------------------
@@ -235,8 +244,10 @@ let private whenSynced (persistence: obj) : JS.Promise<unit> = jsNative
 })()""")>]
 let private persistenceKey () : string = jsNative
 
-[<Emit("String(window.location.origin) + '/signal'")>]
-let private signalUrl () : string = jsNative
+// Resolved against the shell's `<base href>`, so a session mounted under a path signals
+// to its own prefix rather than the origin root.
+[<Emit("new URL($0, document.baseURI).href")>]
+let private absolute (relative: string) : string = jsNative
 
 // The event-chunk GET as a TOTAL function: the body, the status it refused with, or the
 // transport error it never got past (`status: 0` — offline, refused, DNS, TLS). It never
@@ -285,10 +296,13 @@ let private urlEncode (value: string) : string = jsNative
 // Thin fetches against the session's /claude* routes; the same-origin auth cookie rides
 // each one. Failures land as `ok: false` with the response text — the panel shows it.
 
-[<Emit("""fetch('/claude?peer_id=' + encodeURIComponent($0), { cache: 'no-store' })
-  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine })) : Promise.resolve({ ok: false, session: null, mine: null }))
-  .catch(() => ({ ok: false, session: null, mine: null }))""")>]
-let private fetchClaudeStatus (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
+[<Emit("""fetch($0 + '?peer_id=' + encodeURIComponent($1), { cache: 'no-store' })
+  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine, agent: !!s.agent })) : Promise.resolve({ ok: false, session: null, mine: null, agent: false }))
+  .catch(() => ({ ok: false, session: null, mine: null, agent: false }))""")>]
+let private fetchClaudeStatusAt (url: string) (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; agent: bool |}> = jsNative
+
+let private fetchClaudeStatus (peerId: string) =
+    fetchClaudeStatusAt (SessionRoute.relative ClaudeStatus) peerId
 
 [<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 })
   .then(async r => ({ ok: r.ok, body: await r.text() }))
@@ -363,18 +377,17 @@ let private start () =
                     focusScheduled <- false
                     connectionRef |> Option.iter (fun c -> c.ReportPresence latestFocus))
 
-        /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; ensure the
-        /// local draft slot exists (so its fragment anchors); remount when a host's fragment
-        /// identity changes; and dispose editors whose host has left the DOM. Body edits sync
-        /// through the doc, so the editor needs no change callback — but an editable body reports
-        /// its local selection (tagged with the host's field) as rAF-throttled presence.
+        /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; remount when
+        /// a host's fragment identity changes; and dispose editors whose host has left the DOM.
+        /// Body edits sync through the doc, so the editor needs no change callback — but an editable
+        /// body reports its local selection (tagged with the host's field) as rAF-throttled
+        /// presence. Mounting publishes no draft slot: the slot follows the body's content
+        /// (`DraftSlot.follow` below), so a peer that never types shows no draft box on any peer.
         let syncRichBodies () =
             let seen = System.Collections.Generic.HashSet<string> ()
             for host in richBodyHosts () do
                 let key = hostBodyKey host
                 seen.Add key |> ignore
-                if key = BodyKey.draft peerId && not (Map.containsKey peerId latestModel.Synced.Drafts) then
-                    dispatchRef (EnsureDraftMsg peerId)
                 let fragment = registry.Fragment key
                 let mount () =
                     let reportFocus (sel: (string * string) option) =
@@ -445,7 +458,7 @@ let private start () =
                 async {
                     let! status = fetchClaudeStatus (PeerId.value peerId) |> Async.AwaitPromise
                     if status.ok then
-                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine })
+                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine; AgentAvailable = Some status.agent })
                 })
         let rec pollClaudeWhileAwaiting () =
             Async.StartImmediate (
@@ -492,6 +505,12 @@ let private start () =
             { SendDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.SendDraft peer)
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
               ToggleNav = toggleNav
+              ToggleSettings =
+                fun () ->
+                    // Open (or close) the drawer AND re-probe, so it always shows the
+                    // current truth the moment it appears.
+                    toggleSettings ()
+                    refreshClaude ()
               ReportTitleSelection =
                 fun sel ->
                     // The title lives in the `title` Y.Text root; turn the input's char offsets
@@ -506,7 +525,7 @@ let private start () =
               ClaudeConnect =
                 fun () ->
                     let scope = match panelInput "[data-claude-scope]" with "" -> "mine" | s -> s
-                    postClaudeAction "/claude/begin" scope "" "" true
+                    postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Begin)) scope "" "" true
               ClaudeComplete =
                 fun () ->
                     // The scope selector is unmounted while awaiting; the flow carries it.
@@ -516,14 +535,20 @@ let private start () =
                         | _ -> "mine"
                     match panelInput "[data-claude-code]" with
                     | "" -> dispatchRef (ClaudeFlowMsg (ClaudeError "paste the code first"))
-                    | code -> postClaudeAction "/claude/complete" scope code "" false
+                    | code -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Complete)) scope code "" false
               ClaudePasteToken =
                 fun () ->
                     match panelInput "[data-claude-token]" with
                     | "" -> dispatchRef (ClaudeFlowMsg (ClaudeError "paste a token first"))
-                    | token -> postClaudeAction "/claude/token" (match panelInput "[data-claude-scope]" with "" -> "mine" | s -> s) "" token false
+                    | token ->
+                        postClaudeAction
+                            (SessionRoute.relative (Claude ClaudeAction.Token))
+                            (match panelInput "[data-claude-scope]" with "" -> "mine" | s -> s)
+                            ""
+                            token
+                            false
               ClaudeDisconnect =
-                fun scope -> postClaudeAction "/claude/disconnect" scope "" "" false }
+                fun scope -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Disconnect)) scope "" "" false }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
@@ -550,24 +575,34 @@ let private start () =
         |> Program.withSetState setState
         |> Program.run
 
+        // The local peer's draft slot follows its body: published on the first keystroke,
+        // retracted when the composer empties. Watches the body itself, so a keystroke and a
+        // merged remote edit settle it and nothing else does.
+        DraftSlot.follow doc registry peerId (fun msg -> dispatchRef msg) |> ignore
+
         // Local-first: the doc persists in IndexedDB keyed by the session's address. Cold
         // loads render local state (drafts, queued messages) before — and without — the
         // network; on reconnect the full-state exchange reconciles.
         let persistence = newPersistence indexeddbPersistence (persistenceKey ()) doc
         do! whenSynced persistence |> Async.AwaitPromise
 
+        // The replayed doc is state that did not arrive as a body change, so settle the rule
+        // against it explicitly: a doc stored before publication followed the body can hold an
+        // empty-bodied slot, and this is where it goes.
+        DraftSlot.settle doc registry peerId (fun msg -> dispatchRef msg)
+
         // Authorization by renavigation: probe `/me` for a peer token. 401 -> bounce
         // through `/login` (code + PKCE via the Manager) and land back on this shell,
         // where the probe succeeds. A NETWORK failure (offline, session down) is a
         // `Disconnected` with its reason, not silence: the local-first shell — IndexedDB doc
         // plus cached event chunks — stays fully usable, and the model says why it is alone.
-        let! probe = fetchMe () |> Async.AwaitPromise
+        let! probe = fetchMe (SessionRoute.relative Me) |> Async.AwaitPromise
         if not probe.reachable then
             dispatchRef (ConnectFailedMsg (App.ChannelFault.describe (App.ChannelUnreachable probe.detail)))
         elif not probe.authorized then
             // The peer id rides the login bounce so the Manager can witness which peer
             // signed in for this session (docs/plans/07 — peer-scoped secrets).
-            navigateTo ("/login?peer_id=" + urlEncode (PeerId.value peerId))
+            navigateTo (SessionRoute.relative Login + "?peer_id=" + urlEncode (PeerId.value peerId))
         else
             // Authenticated: the Claude panel's status is knowable now.
             refreshClaude ()
@@ -586,7 +621,7 @@ let private start () =
             // retrying, backoff, or attempt counts. Interim progress is the policy's to report,
             // which is the one thing a settled outcome cannot carry.
             let feed =
-                App.EventFetch.overHttp httpGet "" None
+                App.EventFetch.overHttp httpGet SessionRoute.relative None
                 |> Resilience.Policy.guard
                     (App.EventFetch.policy Resilience.Policy.sleep jsRandom (fun attempt ->
                         App.EventFetch.retrying attempt
@@ -595,7 +630,7 @@ let private start () =
             let openChannel =
                 Resilience.Policy.guard
                     (App.SessionChannel.policy Resilience.Policy.sleep jsRandom)
-                    (fun () -> connectChannel (signalUrl ()))
+                    (fun () -> connectChannel (absolute (SessionRoute.relative Signal)))
 
             // The session leg. The RULES — announce, open, serve, and come back only for a
             // session that was accepted — are `App.SessionLifecycle`; this supplies the

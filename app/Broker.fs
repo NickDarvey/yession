@@ -87,7 +87,9 @@ let create
 
     let exchange (flow: PendingFlow) (code: string) : Async<Result<unit, string>> =
         async {
-            let body = BrokerFlow.exchangeBody flow.ClientId (redirectUri ()) flow.Verifier code
+            // RFC 6749 §4.1.3: the exchange repeats EXACTLY the redirect_uri the
+            // authorize URL carried — the flow's pended one, never re-derived.
+            let body = BrokerFlow.exchangeBody flow.ClientId flow.RedirectUri flow.Verifier code
             match! grantAt flow.TokenUrl body with
             | Error e -> return Error e
             | Ok json ->
@@ -113,17 +115,23 @@ let create
                 let verifier = randomVerifier ()
                 let state = randomVerifier ()
                 let! challenge = s256Challenge verifier |> Async.AwaitPromise
+                // Where the provider sends the code: the Manager's own public callback
+                // by default; a session-supplied URI when the provider's registered
+                // redirect set cannot include this Manager (completion arrives as a
+                // paste then — e.g. a provider-hosted code-display page).
+                let flowRedirect = defaultArg request.RedirectUri (redirectUri ())
                 pending.Add
                     state
                     { Verifier = verifier
                       Target = request.Target
                       TokenUrl = request.TokenUrl
                       ClientId = request.ClientId
-                      Scopes = request.Scopes }
+                      Scopes = request.Scopes
+                      RedirectUri = flowRedirect }
                 return
                     Ok
                         { ControlWire.ConnectionBeginResponse.AuthorizeUrl =
-                            BrokerFlow.authorizeUrl request.AuthorizeUrl request.ClientId (redirectUri ()) request.Scopes state challenge
+                            BrokerFlow.authorizeUrl request.AuthorizeUrl request.ClientId flowRedirect request.Scopes state challenge
                           ControlWire.ConnectionBeginResponse.State = state }
             }
       CompleteCallback =

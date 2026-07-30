@@ -31,6 +31,9 @@ type ViewActions =
       /// (`None` = caret left the title), so collaborators see the cursor. The Browser turns
       /// the indices into relative positions and relays them; ephemeral presence.
       ReportTitleSelection : (int * int) option -> unit
+      /// Toggle the settings drawer (a presentation bit on the shell root, like the nav);
+      /// the browser also re-probes the Claude status on toggle so the drawer opens fresh.
+      ToggleSettings : unit -> unit
       /// Claude connection panel (Plan 08). Imperative because they read panel inputs and
       /// drive the /claude round-trips; the reducer only folds the resulting messages.
       /// Begin the sign-in flow for the scope in the panel's selector.
@@ -50,6 +53,7 @@ module ViewActions =
           Interrupt = ignore
           ToggleNav = ignore
           ReportTitleSelection = ignore
+          ToggleSettings = ignore
           ClaudeConnect = ignore
           ClaudeComplete = ignore
           ClaudePasteToken = ignore
@@ -149,12 +153,22 @@ module View =
               <span class="{Style.label} tabular-nums">processed <b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> · latest <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>
             </section>"""
 
-    let private peopleSection (model: ClientModel) : TemplateResult =
+    let private peopleSection (actions: ViewActions) (model: ClientModel) : TemplateResult =
+        // The agent's row tells the truth about its presence: live (green), absent (a
+        // quiet prompt into settings), or unknown until the first probe answers.
+        let agentRow =
+            match model.Claude.Status.AgentAvailable with
+            | Some true ->
+                html $"""<div class="{Style.person}" data-agent-presence="live"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]}"></span>agent<span class="{Style.statusOk} ml-auto"><span class="{Style.statusDot}"></span>ready</span></div>"""
+            | Some false ->
+                html $"""<div class="{Style.person}" data-agent-presence="absent"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">no agent</span><button type="button" class="{Style.navChevron} ml-auto" data-settings-toggle @click={Ev(fun _ -> actions.ToggleSettings ())}>connect ›</button></div>"""
+            | None ->
+                html $"""<div class="{Style.person}" data-agent-presence="unknown"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span></div>"""
         html $"""
             <section class="{Style.sideSection}">
               <span class="{Style.label}">people</span>
               <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value model.Peer.PeerId) ]}"></span><span class="truncate" data-display-name>{model.Peer.DisplayName}</span><span class="{Style.label}">you</span></div>
-              <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]}"></span>agent</div>
+              {agentRow}
             </section>"""
 
     let private environmentStatus =
@@ -200,9 +214,9 @@ module View =
               {entries}
             </section>"""
 
-    /// The Claude connection panel (Plan 08): status per sign-in scope, the OAuth flow
-    /// (open claude.ai → approve → callback lands at the Manager, or paste the code),
-    /// and the paste-a-token fallback.
+    /// The Claude connection panel (Plan 08), living in the settings drawer: status per
+    /// sign-in scope, the OAuth flow (approve on claude.ai → paste the shown code), and
+    /// the paste-a-token fallback.
     let private claudeSection (actions: ViewActions) (dispatch: ClientMsg -> unit) (claude: ClaudeViewState) : TemplateResult =
         let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
             match kind with
@@ -215,22 +229,23 @@ module View =
                 html $"""<span class="{Style.statusRun}" data-claude-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
             | ClaudeAwaitingCode (url, _) ->
                 html $"""
-                    <a class="{Style.btnPrimary}" href="{url}" target="_blank" rel="noreferrer" data-claude-authorize>Approve on claude.ai</a>
-                    <span class="{Style.label}">then return here — or paste the code:</span>
-                    <input type="text" class="{Style.titleInput}" data-claude-code placeholder="code#state" />
-                    <div class="{Style.sideRow}">
+                    <a class="{Style.btnPrimary} text-center" href="{url}" target="_blank" rel="noreferrer" data-claude-authorize>Approve on claude.ai</a>
+                    <span class="{Style.small}">a code appears after you approve — paste it here</span>
+                    <input type="text" class="{Style.field}" data-claude-code placeholder="code#state" />
+                    <div class="flex gap-2">
                       <button type="button" class="{Style.btnPrimary}" data-claude-complete @click={Ev(fun _ -> actions.ClaudeComplete ())}>Complete</button>
                       <button type="button" class="{Style.btn}" data-claude-cancel @click={Ev(fun _ -> dispatch (ClaudeFlowMsg ClaudeIdle))}>Cancel</button>
                     </div>"""
             | ClaudeIdle | ClaudeError _ ->
                 html $"""
-                    <select class="{Style.titleInput}" data-claude-scope aria-label="Sign-in scope">
+                    <label class="{Style.label}" for="claude-scope">sign in for</label>
+                    <select id="claude-scope" class="{Style.field}" data-claude-scope aria-label="Sign-in scope">
                       <option value="mine">All my sessions</option>
                       <option value="session">This session only</option>
                     </select>
                     <button type="button" class="{Style.btnPrimary}" data-claude-connect @click={Ev(fun _ -> actions.ClaudeConnect ())}>Connect Claude</button>
-                    <span class="{Style.label}">or paste a token</span>
-                    <input type="password" class="{Style.titleInput}" data-claude-token placeholder="sk-ant-…" />
+                    <span class="{Style.small} pt-2">or paste a setup token / API key</span>
+                    <input type="password" class="{Style.field}" data-claude-token placeholder="sk-ant-…" />
                     <button type="button" class="{Style.btn}" data-claude-save-token @click={Ev(fun _ -> actions.ClaudePasteToken ())}>Save token</button>"""
         let error =
             match claude.Flow with
@@ -239,21 +254,46 @@ module View =
         html $"""
             <section class="{Style.sideSection}" data-claude-panel>
               <span class="{Style.label}">claude</span>
+              <span class="{Style.small}">the agent answers with whoever sent the message — connect your account here</span>
               {connectedRow "all my sessions" "mine" claude.Status.MineCredential}
               {connectedRow "this session" "session" claude.Status.SessionCredential}
               {error}
               {controls}
             </section>"""
 
-    let private sidebar (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+    /// The settings drawer: a right-hand Metro panel over a scrim, holding everything
+    /// that is configuration rather than conversation. Open state is the root element's
+    /// `settings-open` class — presentation, not model — so it survives re-renders.
+    let private settingsDrawer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        html $"""
+            <div class="{Style.settingsScrim}" data-settings-toggle @click={Ev(fun _ -> actions.ToggleSettings ())}></div>
+            <aside class="{Style.settingsDrawer}" data-settings-panel>
+              <div class="{Style.settingsHead}"><span class="{Style.settingsTitle}">settings</span><button type="button" class="{Style.navChevron}" aria-label="Close settings" data-settings-toggle @click={Ev(fun _ -> actions.ToggleSettings ())}>✕</button></div>
+              {claudeSection actions dispatch model.Claude}
+            </aside>"""
+
+    /// The one place the product ASKS for a connection: shown above the composer only
+    /// when the session verifiably has no agent (never while that is still unknown).
+    let private noAgentStrip (actions: ViewActions) (claude: ClaudeViewState) : TemplateResult =
+        match claude.Status.AgentAvailable with
+        | Some false ->
+            html $"""
+                <section class="{Style.noAgent}" data-no-agent>
+                  <span class="{Style.noAgentMark}"></span>
+                  <span class="{Style.statusRun}">no agent in this session</span>
+                  <span class="{Style.small}">messages will wait until a Claude account is connected</span>
+                  <button type="button" class="{Style.btnPrimary} ml-auto" data-settings-toggle data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
+                </section>"""
+        | _ -> html $"""<section class="hidden" data-no-agent></section>"""
+
+    let private sidebar (actions: ViewActions) (model: ClientModel) : TemplateResult =
         html $"""
             <div class="{Style.scrim}" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}></div>
             <aside class="{Style.sidebar}">
-              <div class="{Style.sideHead}"><span class="{Style.wordmark}">yession<span class="text-green">.</span></span><button type="button" class="{Style.navChevron}" aria-label="Hide sidebar" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}>‹</button></div>
+              <div class="{Style.sideHead}"><span class="{Style.wordmark}">yession<span class="text-green">.</span></span><div class="flex items-end gap-1"><button type="button" class="{Style.navChevron}" aria-label="Settings" data-settings-toggle @click={Ev(fun _ -> actions.ToggleSettings ())}>settings</button><button type="button" class="{Style.navChevron}" aria-label="Hide sidebar" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}>‹</button></div></div>
               {connectionSection model}
-              {peopleSection model}
+              {peopleSection actions model}
               {environmentSection model.Environment}
-              {claudeSection actions dispatch model.Claude}
               {commandsSection model.Commands}
               <div class="flex-1"></div>
               <span class="{Style.label} pt-4">local first · every fact is an event</span>
@@ -459,12 +499,14 @@ module View =
     /// The client shell, rendered into `#app`.
     let view (actions: ViewActions) (model: ClientModel) (dispatch: ClientMsg -> unit) : TemplateResult =
         html $"""
-            {sidebar actions dispatch model}
+            {sidebar actions model}
             <div class="{Style.mainColumn}">
               {header actions dispatch model}
               {degradedBanner model}
               {conversation model.Conversation}
               {agentStrip actions model.Agent}
+              {noAgentStrip actions model.Claude}
               {queue dispatch model.Synced}
               {drafts actions dispatch model}
-            </div>"""
+            </div>
+            {settingsDrawer actions dispatch model}"""

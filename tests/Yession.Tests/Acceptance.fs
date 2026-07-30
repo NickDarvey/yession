@@ -55,7 +55,7 @@ let private representativeModel : ClientModel =
       Environment = EnvironmentNotStarted
       Commands = CommandLog.empty
       Claude =
-        { Status = { SessionCredential = None; MineCredential = None }
+        { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
           Flow = ClaudeIdle } }
 
 let private uiChecklistTests =
@@ -90,7 +90,16 @@ let private uiChecklistTests =
                   "queued message editor", Dom.attr Dom.Hooks.queueInput "queue-ui"
                   "queue reorder up", Dom.attr Dom.Hooks.queueUp "queue-ui"
                   "queue reorder down", Dom.attr Dom.Hooks.queueDown "queue-ui"
-                  "queue delete", Dom.attr Dom.Hooks.queueDelete "queue-ui" ]
+                  "queue delete", Dom.attr Dom.Hooks.queueDelete "queue-ui"
+                  // Settings + agent presence (Plan 08 pass): the model has no agent, so
+                  // the sidebar row says absent, the prompt strip renders with its
+                  // connect call-to-action, and the drawer holds the Claude panel.
+                  "settings drawer toggle", Dom.Hooks.settingsToggle
+                  "settings drawer panel", Dom.Hooks.settingsPanel
+                  "claude panel in settings", Dom.Hooks.claudePanel
+                  "agent presence row (absent)", Dom.attr Dom.Hooks.agentPresence "absent"
+                  "no-agent prompt strip", Dom.Hooks.noAgent
+                  "no-agent connect call-to-action", Dom.Hooks.noAgentConnect ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
 

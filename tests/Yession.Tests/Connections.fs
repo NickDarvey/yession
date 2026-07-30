@@ -108,7 +108,7 @@ let private flowTests =
         testCase "pending flows are single-use and expire" <| fun () ->
             let mutable clock = 0L
             let pending = PendingFlows (fun () -> clock)
-            let flow = { Verifier = "v"; Target = target (UserScope alice); TokenUrl = "t"; ClientId = "c"; Scopes = "s" }
+            let flow = { Verifier = "v"; Target = target (UserScope alice); TokenUrl = "t"; ClientId = "c"; Scopes = "s"; RedirectUri = "r" }
             pending.Add "st" flow
             Expect.equal (pending.Take "st") (Some flow) "first take"
             Expect.equal (pending.Take "st") None "single-use"
@@ -125,12 +125,15 @@ let private beginRequest : ControlWire.ConnectionBeginRequest =
       AuthorizeUrl = "https://p.example/authorize?code=true"
       TokenUrl = "https://p.example/token"
       ClientId = "cid"
-      Scopes = "a b" }
+      Scopes = "a b"
+      RedirectUri = None }
 
 let private wireTests =
     testList "connection wire codecs" [
         testCase "begin request/response round-trip" <| fun () ->
             Expect.equal (ControlWire.toString ControlWire.connectionBeginRequest beginRequest |> ControlWire.fromString ControlWire.connectionBeginRequest |> expect) beginRequest "request"
+            let withRedirect = { beginRequest with RedirectUri = Some "https://provider.example/code" }
+            Expect.equal (ControlWire.toString ControlWire.connectionBeginRequest withRedirect |> ControlWire.fromString ControlWire.connectionBeginRequest |> expect) withRedirect "request with a provider redirect"
             let resp : ControlWire.ConnectionBeginResponse = { AuthorizeUrl = "https://u"; State = "st" }
             Expect.equal (ControlWire.toString ControlWire.connectionBeginResponse resp |> ControlWire.fromString ControlWire.connectionBeginResponse |> expect) resp "response"
 
@@ -251,6 +254,27 @@ let private brokerTests =
                 Expect.equal (expect resolved) (OAuthConnection, "at-1") "resolves the access token"
                 let! replayed = broker.CompleteCallback began.State "another-code"
                 Expect.isError replayed "single-use state"
+            }
+
+        testCaseAsync "a session-supplied redirect URI rides the authorize URL and the exchange (the provider-hosted code page path)" <|
+            async {
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://manager.local/connections/callback") store ignore
+                let request =
+                    { beginRequest with
+                        TokenUrl = endpoint.Url
+                        RedirectUri = Some "https://provider.example/oauth/code/callback" }
+                let! began = broker.Begin request
+                let began = expect began
+                Expect.isTrue
+                    (began.AuthorizeUrl.Contains "redirect_uri=https%3A%2F%2Fprovider.example%2Foauth%2Fcode%2Fcallback")
+                    "the provider's code page, not the Manager callback"
+                let! completed = broker.Complete request.Target (sprintf "the-code#%s" began.State)
+                expect completed
+                Expect.isTrue
+                    ((endpoint.Requests.[0]).Contains "redirect_uri=https%3A%2F%2Fprovider.example%2Foauth%2Fcode%2Fcallback")
+                    "the exchange repeats the flow's redirect_uri exactly"
             }
 
         testCaseAsync "unknown state, provider refusal, and malformed responses are legible errors" <|
@@ -407,8 +431,8 @@ let private startConnectionsServer (callers: (string * Control.ControlCaller) li
             if not (Control.tryHandle
                         (fun secret -> Map.tryFind secret table)
                         (fun _ _ -> async { return Ok () })
-                        (fun _ _ -> fun () -> ())
-                        (fun _ -> fun () -> ())
+                        (fun _ _ -> Subscription.none)
+                        (fun _ -> Subscription.none)
                         dummyRegister
                         None
                         (Some api)
@@ -496,7 +520,7 @@ let private routeTests =
                 // Disconnect shrinks it again.
                 let! _ = clientA.Disconnect (target (SessionScope sessionA))
                 do! expectFrame (fun f -> frames.Count >= 3 && f.Connections |> List.length = 1)
-                cancel ()
+                cancel.Stop ()
             }
     ]
 
@@ -587,6 +611,8 @@ let private e2eTests =
                 do! a.Runner.WaitFor (fun m ->
                         m.Conversation.Items
                         |> List.exists (fun i -> i.Status = Complete && i.Body.Contains "hello before sign-in"))
+                // The status surface says so honestly: no agent in this session yet.
+                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body -> body.Contains "\"agent\":false")
 
                 // 2. A pastes a setup token for "all my sessions" through the session's
                 //    /claude surface; the gate flips without a relaunch.
@@ -597,7 +623,8 @@ let private e2eTests =
                         """{"scope":"mine","peerId":"browser-a","token":"sk-ant-oat01-fake"}"""
                     |> Async.AwaitPromise
                 Expect.equal putMine.status 200 (sprintf "the paste stores: %s" putMine.body)
-                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body -> body.Contains "\"mine\":\"static\"")
+                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body ->
+                        body.Contains "\"mine\":\"static\"" && body.Contains "\"agent\":true")
 
                 do! compose a a.Hello.PeerId "hello after sign-in"
                 a.Connection.SendDraft a.Hello.PeerId

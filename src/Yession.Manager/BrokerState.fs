@@ -171,13 +171,16 @@ module BrokerFlow =
         | BrokeredOAuth grant -> grant.AccessToken
         | BrokeredStatic value -> value
 
-/// One begun-but-uncompleted flow, keyed by its single-use `state`.
+/// One begun-but-uncompleted flow, keyed by its single-use `state`. `RedirectUri` is
+/// the one the authorize URL carried — the exchange must repeat it exactly (RFC 6749
+/// §4.1.3), so it is pended with the flow, not re-derived.
 type PendingFlow =
     { Verifier : string
       Target : SecretId
       TokenUrl : string
       ClientId : string
-      Scopes : string }
+      Scopes : string
+      RedirectUri : string }
 
 /// Flows redirected to a provider and not yet called back. Single-use and short-lived
 /// (10 minutes — the human is clicking through a consent screen, not parking a tab);

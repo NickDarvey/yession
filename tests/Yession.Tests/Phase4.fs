@@ -209,10 +209,25 @@ let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNat
 [<Emit("delete process.env[$0]")>]
 let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
+/// A port nothing is listening on, taken by binding :0 and releasing it. Needed where a
+/// Manager's PUBLIC origin has to be known BEFORE it starts: that origin is its OIDC
+/// issuer, and a launched session fetches discovery against it, so — exactly as in a real
+/// fronted deployment — it has to be a URL that resolves from this host. A collision after
+/// release fails the Manager's bind loudly; it can never produce a passing-but-wrong run.
+let private freePort () : Async<int> =
+    async {
+        let server = Interop.createServer (fun _ res -> res.``end`` "")
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        let port = Interop.serverPort listening
+        do! Async.FromContinuations (fun (cont, _, _) -> listening.close (fun _ -> cont ()))
+        return port
+    }
+
 /// Start a bare control server over the given secret→(session, capabilities) table, plus
 /// the real notification and MCP hubs wired to their SSE routes. Returns both hubs so a
 /// test can push down the same wires the Manager uses.
-let private startControlServer (secrets: (string * SessionId * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * McpHub.McpHub> =
+let private startControlServer (secrets: (string * SessionId * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * RetainedHub.RetainedHub<McpToolList>> =
     async {
         let table =
             secrets
@@ -221,12 +236,12 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
-        let mcp = McpHub.create ()
+        let mcp = RetainedHub.create McpToolList.empty
         // This bare control server has no OIDC provider; the DCR route is not under test.
         let registerClient _ (sessionId: SessionId) _ : Yession.Oidc.RegisterClientResponse =
             { ClientId = SessionId.value sessionId; ClientSecret = "unused"; Issuer = "http://unused" }
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> fun () -> ()) ignore req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> Subscription.none) ignore req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
@@ -357,23 +372,72 @@ let private uiRecord : SessionRecord =
 let private uiRenderTests =
     testList "Management UI rendering (Step 25)" [
         testCase "a stopped session's row offers Launch; a running one offers Stop and the open link" <| fun () ->
-            let stopped = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.NotRunning }
+            let stopped = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.NotRunning }
             Expect.isTrue (stopped.Contains (Dom.attr Dom.Manager.launch "ui-render")) "stopped rows can launch (button carries the session id)"
             Expect.isTrue (stopped.Contains "UI &lt;Render&gt;") "display names are escaped"
-            let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
+            let running = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.stop "ui-render")) "running rows can stop"
             Expect.isTrue (running.Contains "href=\"http://127.0.0.1:8199/\"") "the open link is a plain URL to the child's port (no token — access is the OIDC bounce)"
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.session "ui-render")) "the row is a poll unit keyed by session id"
-            let crashed = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
+            let crashed = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)) "a crash is visible"
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
         testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
-            let html = ManagerUi.page [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            let html = ManagerUi.page PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
             Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
             Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
             Expect.isFalse (html.Contains "src=\"http") "no external/CDN scripts (local-first)"
             Expect.isTrue (html.Contains Dom.Manager.createSession) "the create form renders"
+    ]
+
+// --- WCAG 2.0 AA floor (AGENTS.md "UI baseline"): theme contrast, pinned by test ---------
+// The tokens live in app/tailwind.css (@theme); every text colour must keep >= 4.5:1
+// against every surface it can sit on. Computed here exactly as WCAG 2.0 defines it.
+
+[<Emit("$0.readFileSync($1, 'utf8')")>]
+let private readFileSync (fs: obj) (path: string) : string = Fable.Core.Util.jsNative
+
+[<Emit("parseInt($0, 16)")>]
+let private parseHex (s: string) : float = Fable.Core.Util.jsNative
+
+let private themeColour (css: string) (name: string) : string =
+    let marker = sprintf "--color-%s:" name
+    match css.IndexOf marker with
+    | -1 -> failwithf "token --color-%s not found in app/tailwind.css" name
+    | start ->
+        let from = start + marker.Length
+        css.Substring(from, css.IndexOf (';', from) - from).Trim ()
+
+let private luminance (hex: string) : float =
+    // Tokens use both #rgb and #rrggbb — expand the short form before slicing channels.
+    let h =
+        if hex.Length = 4 then
+            sprintf "#%c%c%c%c%c%c" hex.[1] hex.[1] hex.[2] hex.[2] hex.[3] hex.[3]
+        else hex
+    let channel (i: int) =
+        let c = parseHex (h.Substring (i, 2)) / 255.0
+        if c <= 0.03928 then c / 12.92 else ((c + 0.055) / 1.055) ** 2.4
+    0.2126 * channel 1 + 0.7152 * channel 3 + 0.0722 * channel 5
+
+let private contrast (a: string) (b: string) : float =
+    let la, lb = luminance a, luminance b
+    (max la lb + 0.05) / (min la lb + 0.05)
+
+let private themeContrastTests =
+    testList "Theme contrast (WCAG 2.0 AA floor)" [
+        testCase "every text colour keeps >= 4.5:1 on every surface" <| fun () ->
+            let colour = themeColour (readFileSync nodeFs "app/tailwind.css")
+            for fg in [ "ink"; "ink-dim"; "ink-faint"; "blue"; "green"; "err" ] do
+                for bg in [ "bg"; "panel"; "surface"; "surface-2" ] do
+                    let ratio = contrast (colour fg) (colour bg)
+                    Expect.isTrue (ratio >= 4.5) (sprintf "--color-%s on --color-%s is %.2f:1 — the AA floor is 4.5:1" fg bg ratio)
+
+        testCase "inverse text on filled (active) buttons keeps >= 4.5:1" <| fun () ->
+            let colour = themeColour (readFileSync nodeFs "app/tailwind.css")
+            for fill in [ "blue"; "green"; "err"; "ink" ] do
+                let ratio = contrast (colour "bg") (colour fill)
+                Expect.isTrue (ratio >= 4.5) (sprintf "text-bg on bg-%s is %.2f:1 — the AA floor is 4.5:1" fill ratio)
     ]
 
 [<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: $1 }).then(async r => ({ status: r.status, cacheControl: '', body: await r.text() }))")>]
@@ -387,7 +451,7 @@ let private bodyOfReply (reply: obj) : string = Fable.Core.Util.jsNative
 
 let private uiFlowTests =
     testList "Management UI flow (Step 25)" [
-        testCaseAsync "create -> launch -> open -> stop -> resume, all over the management endpoint" <|
+        testCaseAsync "create -> launch -> open -> stop -> resume -> crash, all over the management endpoint, with live status pushed on the rows stream" <|
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/ui-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
@@ -423,13 +487,47 @@ let private uiFlowTests =
                 let! shell = Interop.getText (sprintf "http://127.0.0.1:%d/" sessionPort) |> Async.AwaitPromise
                 Expect.isTrue (shell.Contains (Dom.sessionMetaName + "\" " + Dom.attr "content" "ui-1")) "the opened session serves its shell"
 
-                // Poll, stop, resume.
-                let! polled = Interop.getText (baseUrl + "/sessions/ui-1/row") |> Async.AwaitPromise
-                Expect.isTrue (polled.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "the poll fragment agrees"
+                // Live status, pushed: the rows stream's first frame is the current table (the
+                // hub's retained snapshot), so a page that just loaded agrees without polling.
+                let tables = ResizeArray<string> ()
+                let cancelRows = Sse.subscribe (baseUrl + "/sessions/rows") [] tables.Add
+                do! waitUntil "the rows snapshot" (fun () -> tables.Count > 0)
+                Expect.isTrue
+                    (tables.[0].Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning))
+                    "the snapshot table shows the running session"
+
+                // Stop, resume — each transition pushes a fresh table on the open stream.
+                let beforeStop = tables.Count
                 let! stopped = postForm (baseUrl + "/sessions/ui-1/stop") "" |> Async.AwaitPromise
                 Expect.isTrue ((bodyOfReply stopped).Contains (Dom.attr Dom.Manager.status Dom.Manager.statusStopped)) "stopped from the UI"
+                do! waitUntil "the stop frame" (fun () ->
+                        tables
+                        |> Seq.skip beforeStop
+                        |> Seq.exists (fun t -> t.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusStopped)))
+                let beforeResume = tables.Count
                 let! resumed = postForm (baseUrl + "/sessions/ui-1/launch") "" |> Async.AwaitPromise
                 Expect.isTrue ((bodyOfReply resumed).Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "resume is just launch"
+                do! waitUntil "the resume frame" (fun () ->
+                        tables
+                        |> Seq.skip beforeResume
+                        |> Seq.exists (fun t -> t.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)))
+
+                // A crash reaches the page as EXITED, in the frame the exit itself pushes: the
+                // Manager records the exit code before announcing it, so a subscriber that
+                // renders on the frame never shows a crash as a plain stop.
+                let crashPid =
+                    match (pm.TryFind (SessionId.create "ui-1" |> expect)).Value.Status with
+                    | ProcessManager.Running (_, pid) -> pid
+                    | other -> failwithf "expected Running before the crash, got %A" other
+                let beforeCrash = tables.Count
+                let exited = pm.WaitForExit (SessionId.create "ui-1" |> expect)
+                sigkill crashPid
+                do! exited
+                do! waitUntil "the crash frame" (fun () ->
+                        tables
+                        |> Seq.skip beforeCrash
+                        |> Seq.exists (fun t -> t.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)))
+                cancelRows.Stop ()
 
                 do! pm.StopAll ()
             }
@@ -671,6 +769,32 @@ let private telemetryTests =
     ]
 
 // -----------------------------------------------------------------------------
+// SSE framing — the wire format every push stream in the Manager shares. Pure
+// string functions, so the cheap tier pins them; the routes that use them are
+// exercised over real sockets in the tiers below.
+// -----------------------------------------------------------------------------
+
+let private sseTests =
+    testList "SSE framing" [
+        testCase "a single-line payload is one data line, terminated by a blank line" <| fun () ->
+            Expect.equal (Sse.frame """{"sessions":[]}""") "data: {\"sessions\":[]}\n\n" "the control legs' JSON shape"
+
+        testCase "a multi-line payload becomes one data line per line, and parses back whole" <| fun () ->
+            // Rendered markup (the management page's table) is multi-line, and blank lines inside
+            // it must NOT end the event — that is the bug a naive `data: %s\n\n` would ship.
+            let markup = "<table>\n  <tr>\n\n    <td>ada</td>\n  </tr>\n</table>"
+            let framed = Sse.frame markup
+            Expect.equal (framed.Split '\n' |> Array.filter (fun l -> l.StartsWith "data:") |> Array.length) 6
+                "every line of the payload carries its own data prefix"
+            Expect.isTrue (framed.EndsWith "\n\n") "the event ends with the blank line that dispatches it"
+            Expect.equal (Sse.dataOf (framed.TrimEnd '\n')) (Some markup) "and it parses back to exactly the payload"
+
+        testCase "a comment-only event carries no data" <| fun () ->
+            Expect.equal (Sse.dataOf ": ping") None "a keep-alive is not a message"
+            Expect.equal (Sse.dataOf ": subscribed") None "neither is the stream's opening comment"
+    ]
+
+// -----------------------------------------------------------------------------
 // Manager→Session notifications — the reverse leg of the control RPC. The wire
 // codec and the subscriber hub's fan-out are cheap-tier; the SSE stream end to
 // end (real sockets, real client parser) is verify-tier.
@@ -704,7 +828,7 @@ let private notificationTests =
             Expect.equal (a1, a2, b) (1, 1, 0) "both A sinks fired; B's did not (per-secret scoping)"
 
             // Unsubscribe removes exactly one sink; the sibling keeps receiving.
-            unsubA2 ()
+            unsubA2.Stop ()
             hub.NotifySecret "secret-a" (EnvironmentChanged ())
             Expect.equal (a1, a2, b) (2, 1, 0) "the unsubscribed sink stopped; the other continued"
 
@@ -756,14 +880,14 @@ let private notificationStreamTests =
 
                 // Cancel closes the stream; the server unsubscribes the sink, so further
                 // pushes never arrive.
-                cancelA ()
+                cancelA.Stop ()
                 do! Async.Sleep 200
                 let settled = List.length receivedA
                 hub.NotifySecret "secret-a" (EnvironmentChanged ())
                 do! Async.Sleep 200
                 Expect.equal (List.length receivedA) settled "after cancel, no further notifications arrive"
 
-                cancelB ()
+                cancelB.Stop ()
                 server.close ignore
             }
     ]
@@ -798,7 +922,7 @@ let private mcpTests =
             Expect.isTrue (json.Contains "\"inputSchema\":{") "the schema serialises as an embedded object"
 
         testCase "the hub hands a new subscriber the current list at once, then every change" <| fun () ->
-            let hub = McpHub.create ()
+            let hub = RetainedHub.create McpToolList.empty
             let mutable received : McpToolList list = []
             let _ = hub.Register (fun l -> received <- received @ [ l ])
             // The retained snapshot: an empty list arrives immediately on subscribe.
@@ -814,7 +938,7 @@ let private mcpTests =
             Expect.equal late [ { Tools = [ searchTool ] } ] "a late subscriber gets the retained list immediately"
 
             // Unsubscribe stops delivery to that sink only.
-            unsubLate ()
+            unsubLate.Stop ()
             hub.Publish McpToolList.empty
             Expect.equal (List.last late) { Tools = [ searchTool ] } "the unsubscribed sink received nothing further"
             Expect.equal (List.last received) McpToolList.empty "the still-subscribed sink got the change"
@@ -858,7 +982,7 @@ let private mcpStreamTests =
                 Expect.equal (List.last received |> fun l -> List.length l.Tools) 2 "the change was pushed to the live subscriber"
 
                 // Cancel closes the stream; later changes never arrive.
-                cancel ()
+                cancel.Stop ()
                 do! Async.Sleep 200
                 let settled = List.length received
                 mcp.Publish McpToolList.empty
@@ -883,7 +1007,7 @@ let private registryEntry (id: string) (name: string) (port: int) (pid: int) : C
       Pid = pid }
 
 let private registryTests =
-    testList "Session registry: codec, hub & public origin (Plan 09)" [
+    testList "Session registry: codec, projection & public origin (Plan 09)" [
         testCase "a registry frame round-trips through the control wire codec" <| fun () ->
             let original : ControlWire.SessionRegistryFrame =
                 { Sessions = [ registryEntry "alpha" "Alpha work" 54321 4242; registryEntry "beta" "" 54322 1 ] }
@@ -893,41 +1017,131 @@ let private registryTests =
                 |> expect
             Expect.equal roundTripped original "frame round-trip is identity"
 
-        testCase "the hub hands a new subscriber the current frame at once, then every change" <| fun () ->
-            let hub = RegistryHub.create ()
-            let mutable received : ControlWire.SessionRegistryFrame list = []
-            let _ = hub.Register (fun f -> received <- received @ [ f ])
-            // The retained snapshot: the (empty) boot frame arrives immediately on subscribe.
-            Expect.equal received [ { Sessions = [] } ] "the subscriber gets the current (empty) frame at once"
+        // The Manager publishes session VIEWS once; each consumer projects them. The registry's
+        // projection is what a serving binding reconciles against, so it is pinned here — the
+        // retained-hub mechanics it rides on are pinned once, with the MCP list.
+        testCase "the registry frame is the Running sessions only, with the port and pid to reach them" <| fun () ->
+            let views : ProcessManager.SessionView list =
+                [ { Record = record "alpha" "Alpha work"; Status = ProcessManager.Running (54321, 4242) }
+                  { Record = record "beta" "Beta work"; Status = ProcessManager.NotRunning }
+                  { Record = record "gamma" "Gamma work"; Status = ProcessManager.Exited (Some 1) } ]
+            Expect.equal
+                (ProcessManager.registryFrameOf views)
+                { Sessions = [ registryEntry "alpha" "Alpha work" 54321 4242 ] }
+                "only what is running is reachable, so only that is announced"
+            Expect.equal
+                (ProcessManager.registryFrameOf [])
+                { Sessions = [] }
+                "no sessions is the empty frame, which is the boot state a subscriber starts from"
 
-            let one : ControlWire.SessionRegistryFrame = { Sessions = [ registryEntry "alpha" "Alpha" 54321 42 ] }
-            hub.Publish one
-            Expect.equal (List.last received) one "a publish pushes the new frame"
-            Expect.equal (hub.Current ()) one "the hub retains the latest frame"
-
-            // A LATER subscriber gets the retained frame as its initial snapshot — the
-            // connect-read-disconnect poll pattern.
-            let mutable late : ControlWire.SessionRegistryFrame list = []
-            let unsubLate = hub.Register (fun f -> late <- late @ [ f ])
-            Expect.equal late [ one ] "a late subscriber gets the retained frame immediately"
-
-            unsubLate ()
-            hub.Publish { Sessions = [] }
-            Expect.equal (List.last late) one "the unsubscribed sink received nothing further"
-            Expect.equal (List.last received) { Sessions = [] } "the still-subscribed sink got the change"
-
-        testCase "the public session origin defaults to loopback and normalises a configured one" <| fun () ->
-            unsetEnv "YESSION_SESSION_URL"
-            Expect.equal (Interop.publicSessionOrigin ()) "http://127.0.0.1" "unset means loopback — today's behaviour"
-            setEnv "YESSION_SESSION_URL" "http://home.example.ts.net/"
-            Expect.equal (Interop.publicSessionOrigin ()) "http://home.example.ts.net" "a trailing slash is trimmed (each consumer appends the port)"
-            unsetEnv "YESSION_SESSION_URL"
-
-        testCase "a running row's open link carries the configured public origin" <| fun () ->
-            setEnv "YESSION_SESSION_URL" "http://home.example.ts.net"
-            let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
-            unsetEnv "YESSION_SESSION_URL"
+        testCase "a running row's open link carries the configured public address" <| fun () ->
+            let access = PublicAccess.create "https://home.example.ts.net" "http://home.example.ts.net:{port}" |> expect
+            let running = ManagerUi.sessionRow access { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
             Expect.isTrue (running.Contains "href=\"http://home.example.ts.net:8199/\"") "the open link is followable from a remote browser"
+    ]
+
+// --- Public access: the deployment's two addresses as one value (docs/plans/09) ------------
+
+let private publicAccessTests =
+    let sessionId = SessionId.create "ui-render" |> expect
+    let addressOf managerUrl sessionUrl =
+        PublicAccess.create managerUrl sessionUrl
+        |> Result.map (PublicAccess.sessionAddress sessionId 54321)
+    let errorOf managerUrl sessionUrl =
+        match PublicAccess.create managerUrl sessionUrl with
+        | Error e -> e
+        | Ok _ -> "expected an error, got Ok"
+    testList "Public access (Plan 09)" [
+        testCase "unset means loopback: the Manager is its own endpoint, sessions their own ports" <| fun () ->
+            let access = PublicAccess.create "" "" |> expect
+            Expect.equal access Loopback "neither variable set"
+            Expect.equal (PublicAccess.managerUrl access) None "the caller substitutes its own endpoint URL"
+            Expect.equal
+                (PublicAccess.sessionAddress sessionId 54321 access)
+                { Url = "http://127.0.0.1:54321"; Mount = "" }
+                "the pre-Plan-09 loopback address, at an origin root"
+
+        testCase "a fronted Manager with loopback sessions is a legal deployment" <| fun () ->
+            let access = PublicAccess.create "https://yession.example.com/" "" |> expect
+            Expect.equal (PublicAccess.managerUrl access) (Some "https://yession.example.com") "trailing slash normalised"
+            Expect.equal
+                (PublicAccess.sessionAddress sessionId 54321 access)
+                { Url = "http://127.0.0.1:54321"; Mount = "" }
+                "manage remotely, use sessions on the host — sessions stay loopback"
+
+        testCase "sessions fronted without the Manager is refused, not warned about" <| fun () ->
+            // Always broken: the session bounces its users to the Manager to log in, so a
+            // remote browser would be sent to 127.0.0.1. The one combination with no
+            // constructor.
+            let message = errorOf "" "https://home.example.ts.net:{port}"
+            Expect.isTrue (message.Contains "YESSION_MANAGER_URL") "the message names the missing variable"
+            Expect.isTrue (message.Contains "127.0.0.1") "and why it cannot work"
+
+        testCase "a template describes whichever topology the operator's proxy implements" <| fun () ->
+            let manager = "https://example.com"
+            Expect.equal
+                (addressOf manager "https://home.example.ts.net:{port}")
+                (Ok { Url = "https://home.example.ts.net:54321"; Mount = "" })
+                "port mirroring: a shared host, a port per session, at an origin root"
+            Expect.equal
+                (addressOf manager "https://{id}.sessions.example.com")
+                (Ok { Url = "https://ui-render.sessions.example.com"; Mount = "" })
+                "a subdomain per session: still an origin root, so no prefix"
+            Expect.equal
+                (addressOf manager "https://example.com/s/{id}")
+                (Ok { Url = "https://example.com/s/ui-render"; Mount = "/s/ui-render" })
+                "a path per session: the mount is the path component, derived from the same string"
+            Expect.equal
+                (addressOf manager "https://example.com/s/{id}/")
+                (Ok { Url = "https://example.com/s/ui-render"; Mount = "/s/ui-render" })
+                "a trailing slash is normalised away, so callers append their own path"
+
+        testCase "a session knows its mount before it has a port" <| fun () ->
+            // Everything a session fixes at boot depends on the mount — the shell's
+            // `<base href>`, the cookie's `Path`, the prefix stripped off requests — and
+            // its port is only assigned when it binds. So the mount derives from the id
+            // alone, and a template that puts {port} in its PATH is refused.
+            let mountOf sessionUrl =
+                PublicAccess.create "https://example.com" sessionUrl
+                |> Result.map (PublicAccess.sessionMount sessionId)
+            Expect.equal (mountOf "https://example.com/s/{id}") (Ok "/s/ui-render") "path-mounted"
+            Expect.equal (mountOf "https://{id}.example.com") (Ok "") "a subdomain is an origin root"
+            Expect.equal (mountOf "https://example.com:{port}") (Ok "") "so is a port mirror"
+            Expect.equal (PublicAccess.sessionMount sessionId Loopback) "" "and so is loopback"
+            Expect.isTrue
+                ((errorOf "https://example.com" "https://example.com/p/{port}").Contains "{port} in its path")
+                "a mount that needed the port would not be knowable at boot"
+
+        testCase "the auth cookie is scoped to the path the session is served under" <| fun () ->
+            // A real narrowing where sessions share a host: a path-mounted session's
+            // cookie is no longer sent to its siblings. At an origin root, unchanged.
+            Expect.isTrue ((Cookies.set "yession_auth_x" "/s/ui-render" "v").Contains "Path=/s/ui-render/") "scoped to the mount"
+            Expect.isTrue ((Cookies.set "yession_auth_x" "" "v").Contains "Path=/") "root-mounted is unchanged"
+
+        testCase "a session template without a placeholder is refused" <| fun () ->
+            // Before this type the port was appended implicitly, so a bare origin was the
+            // documented spelling and `http://host:8443` silently produced
+            // `http://host:8443:54321`. Now the template says where the port goes.
+            let message = errorOf "https://example.com" "http://home.example.ts.net:8443"
+            Expect.isTrue (message.Contains "{id} or {port}") "the message names the placeholders"
+
+        testCase "an unknown placeholder is refused rather than passed through literally" <| fun () ->
+            let message = errorOf "https://example.com" "https://example.com/s/{name}"
+            Expect.isTrue (message.Contains "{name}") "the message quotes the offending token"
+
+        testCase "a Manager origin is scheme + host, never a path or a placeholder" <| fun () ->
+            // Its routes are origin-anchored and its issuer is a concatenation base, so a
+            // path would work only if the proxy stripped it again — refused rather than
+            // shipped as an unverified maybe.
+            Expect.isTrue
+                ((errorOf "https://example.com/yession" "").Contains "origin root")
+                "a path prefix on the Manager is refused"
+            Expect.isTrue
+                ((errorOf "https://{id}.example.com" "").Contains "placeholder")
+                "the Manager is one address, so a placeholder means nothing"
+            Expect.isTrue
+                ((errorOf "example.com" "").Contains "http://")
+                "a scheme is required"
     ]
 
 let private registryStreamTests =
@@ -936,31 +1150,37 @@ let private registryStreamTests =
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/reg-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                // The two mechanisms a real deployment uses, both driven by the same
+                // declaration: the Manager holds the parsed value (its open links), and a
+                // spawned session parses the same variables from the env it inherits (its
+                // redirect URI).
+                //
+                // The Manager's public origin is a loopback one HERE because it is also the
+                // OIDC issuer the launched session fetches discovery against — the standing
+                // requirement that a fronted Manager's URL resolve from its own host, which
+                // a made-up hostname would not.
+                let! managerPort = freePort ()
+                let managerUrl = sprintf "http://127.0.0.1:%d" managerPort
+                let sessionUrl = "http://home.example.ts.net:{port}"
+                let access = PublicAccess.create managerUrl sessionUrl |> expect
                 let! pm =
                     ProcessManager.createWithUi
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
-                            Strategy = Some Strategy.localhost }
+                            Strategy = Some Strategy.localhost
+                            ManagerPort = Some managerPort
+                            Public = access }
                         (Some ManagerUi.tryHandle)
                 let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
 
                 let frames = ResizeArray<ControlWire.SessionRegistryFrame> ()
                 let cancel = ControlClient.subscribeSessions baseUrl (fun f -> frames.Add f)
-                let waitUntil (label: string) (condition: unit -> bool) =
-                    let rec go (remaining: int) =
-                        async {
-                            if condition () then return ()
-                            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
-                            else
-                                do! Async.Sleep 50
-                                return! go (remaining - 1)
-                        }
-                    go 100
 
                 // The retained snapshot arrives on connect: nothing runs yet.
                 do! waitUntil "the empty snapshot" (fun () -> frames |> Seq.exists (fun f -> List.isEmpty f.Sessions))
 
                 let record = pm.CreateSession "reg-1" "Registry One" |> expect
-                setEnv "YESSION_SESSION_URL" "http://home.example.ts.net"
+                setEnv "YESSION_MANAGER_URL" managerUrl
+                setEnv "YESSION_SESSION_URL" sessionUrl
                 try
                     let! launched = pm.Launch record.SessionId
                     let port = expect launched
@@ -975,17 +1195,17 @@ let private registryStreamTests =
                     let mutable second : ControlWire.SessionRegistryFrame option = None
                     let cancelSecond = ControlClient.subscribeSessions baseUrl (fun f -> if second.IsNone then second <- Some f)
                     do! waitUntil "the second subscription's snapshot" (fun () -> second.IsSome)
-                    cancelSecond ()
+                    cancelSecond.Stop ()
                     Expect.isTrue
                         (second.Value.Sessions |> List.exists (fun e -> e.Port = port))
                         "a fresh subscriber's first frame is the current snapshot"
 
-                    // The public origin reaches both browser-facing URLs: the open link
+                    // The public address reaches both browser-facing URLs: the open link
                     // and the session's registered OAuth redirect URI (via the env the
                     // child inherited at spawn).
-                    let! row = Interop.getText (baseUrl + "/sessions/reg-1/row") |> Async.AwaitPromise
+                    let! rendered = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
                     Expect.isTrue
-                        (row.Contains (sprintf "href=\"http://home.example.ts.net:%d/\"" port))
+                        (rendered.Contains (sprintf "href=\"http://home.example.ts.net:%d/\"" port))
                         "the open link carries the public origin"
                     let! login = OidcHttp.getWithJar (OidcHttp.newJar ()) (sprintf "http://127.0.0.1:%d/login" port)
                     Expect.equal login.Status 302 "/login redirects into the authorize chain"
@@ -1000,9 +1220,10 @@ let private registryStreamTests =
                     do! waitUntil "the stop frame" (fun () ->
                             frames |> Seq.skip seen |> Seq.exists (fun f -> List.isEmpty f.Sessions))
                 finally
+                    unsetEnv "YESSION_MANAGER_URL"
                     unsetEnv "YESSION_SESSION_URL"
 
-                cancel ()
+                cancel.Stop ()
                 do! pm.StopAll ()
             }
 
@@ -1047,7 +1268,7 @@ let private registryStreamTests =
                             return! waitSnapshot (remaining - 1)
                     }
                 do! waitSnapshot 100
-                cancel ()
+                cancel.Stop ()
                 Expect.equal snapshot (Some { ControlWire.SessionRegistryFrame.Sessions = [] }) "an asserted identity gets the snapshot"
                 do! pm.StopAll ()
             }
@@ -1057,6 +1278,9 @@ let tests =
     testList "Phase4" [
         stateTests
         uiRenderTests
+        publicAccessTests
+        themeContrastTests
+        sseTests
         notificationTests
         mcpTests
         registryTests

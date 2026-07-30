@@ -127,15 +127,17 @@ module App =
     /// same policy that ships.
     module EventFetch =
 
-        /// Build a feed over the platform's HTTP GET. `token` = a session-minted peer token
-        /// appended as `?token=` — the cookie-less path (Node clients); the browser passes
-        /// None and rides its same-origin auth cookie.
+        /// Build a feed over the platform's HTTP GET. `urlOf` resolves a route for this
+        /// platform: a browser passes `SessionRoute.relative` and lets `<base href>` do the
+        /// rest, a Node client prefixes the session's absolute address. `token` = a
+        /// session-minted peer token appended as `?token=` — the cookie-less path (Node
+        /// clients); the browser passes None and rides its same-origin auth cookie.
         ///
         /// Every failure is a `FeedFault`, never a fabricated page and never an exception:
         /// a transport error is `FeedUnreachable`, a refusal keeps its status (so 401 and
         /// 503 can be told apart), and a line that will not decode is `FeedCorrupt`. This
         /// function does not retry — `Resilience.Policy.guard` does, wrapped around it.
-        let overHttp (get: HttpGet) (baseUrl: string) (token: string option) : EventFeed =
+        let overHttp (get: HttpGet) (urlOf: SessionRoute -> string) (token: string option) : EventFeed =
             fun after ->
                 async {
                     let nextOffset =
@@ -146,8 +148,7 @@ module App =
                         token
                         |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
                         |> Option.defaultValue ""
-                    let url =
-                        sprintf "%s/events/%d%s" baseUrl (EventChunk.indexOf nextOffset) tokenSuffix
+                    let url = urlOf (Events (EventChunk.indexOf nextOffset)) + tokenSuffix
                     match! get url with
                     | Error (HttpUnreachable detail) -> return Error (FeedUnreachable detail)
                     | Error (HttpStatus status) -> return Error (FeedRefused status)
@@ -371,10 +372,13 @@ module App =
                     let md = Markdown.ofFragment draftBody
                     doc.transact ((fun _ ->
                         if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
-                        dispatch (SendDraftMsg (peerId, queueId))), null)
-                    // The composer empties after send: the sender's body root is a durable
-                    // top-level root (it is not removed with the slot), so clear it explicitly.
-                    Markdown.intoFragment "" draftBody
+                        dispatch (SendDraftMsg (peerId, queueId))
+                        // The composer empties in the SAME transaction: the sender's body root is
+                        // durable (it is not removed with the slot), so it must be cleared
+                        // explicitly — and clearing it separately would publish an update where the
+                        // body still has content but the slot is gone, which `DraftSlot` answers by
+                        // republishing the very slot the send just removed.
+                        Markdown.intoFragment "" draftBody), null)
                 | Error e -> failwithf "queue id invariant violated: %s" e
           InterruptTurn =
             fun turnId ->

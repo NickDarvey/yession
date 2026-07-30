@@ -13,14 +13,17 @@ module Yession.Host.NotificationHub
 // HTTP: the sink is `'n -> unit` (the control route supplies one that encodes + writes
 // SSE), so this module is unit-testable without a socket.
 
+open Yession.Domain
+
 /// The subscriber registry. `Register`/`Drop` mutate it; `NotifySecret` fans a payload
 /// out to a secret's current sinks (a no-op for an unknown/dropped secret).
 type NotificationHub<'n> =
-    { /// Register a sink under a secret; returns an unsubscribe that removes exactly this
-      /// sink (idempotent — safe to call after the secret was dropped).
-      Register : string -> ('n -> unit) -> (unit -> unit)
+    { /// Subscribe under a secret; the returned unsubscribe removes exactly this sink
+      /// (idempotent — safe to call after the secret was dropped). Unlike a retained hub, a
+      /// sink is not handed a current value: there is nothing to retain, only future pushes.
+      Register : string -> Subscribe<'n>
       /// Push a payload to every sink currently registered under a secret.
-      NotifySecret : string -> 'n -> unit
+      NotifySecret : string -> Sink<'n>
       /// Drop every sink under a secret (its launch ended); further notifies are no-ops.
       Drop : string -> unit }
 
@@ -28,22 +31,22 @@ type NotificationHub<'n> =
 /// synchronisation; ids make removal exact even when a secret has several subscribers.
 let create<'n> () : NotificationHub<'n> =
     // secret -> (sink id -> sink). Nested so drop-by-secret and unsubscribe-by-id are both O(log n).
-    let mutable sinks : Map<string, Map<int, 'n -> unit>> = Map.empty
+    let mutable sinks : Map<string, Map<int, Sink<'n>>> = Map.empty
     let mutable nextId = 0
 
-    let register (secret: string) (sink: 'n -> unit) : (unit -> unit) =
+    let register (secret: string) (sink: Sink<'n>) : Subscription =
         let id = nextId
         nextId <- nextId + 1
         let forSecret = Map.tryFind secret sinks |> Option.defaultValue Map.empty
         sinks <- Map.add secret (Map.add id sink forSecret) sinks
-        fun () ->
+        Subscription.ofStop (fun () ->
             match Map.tryFind secret sinks with
             | Some forSecret ->
                 let remaining = Map.remove id forSecret
                 sinks <-
                     if Map.isEmpty remaining then Map.remove secret sinks
                     else Map.add secret remaining sinks
-            | None -> ()
+            | None -> ())
 
     let notifySecret (secret: string) (payload: 'n) : unit =
         match Map.tryFind secret sinks with

@@ -23,6 +23,7 @@ open Fable.Pyxpecto
 open System
 open System.IO
 open System.Net
+open System.Net.Http
 open System.Diagnostics
 open System.Threading.Tasks
 open Microsoft.Playwright
@@ -325,6 +326,158 @@ let editorTests =
             }
     ]
 
+// --- A path-mounted session in a real browser (docs/plans/10) ---------------------------
+
+let private MOUNT_PROXY_PORT = 8186
+let private MOUNT_SESSION_PORT = 8187
+let private MOUNT_MANAGER_PORT = 8188
+let private MOUNT_SESSION = "mounted"
+let private mountDataDir = "tests/browser/.data-mounted"
+
+/// The operator's proxy in miniature: whatever arrives at the public port is forwarded to
+/// the session's loopback port with the PATH UNCHANGED, so the session sees — and strips —
+/// its own `/s/<id>` prefix. That is exactly the contract Plan 10 states, and the reason
+/// this test can exist without depending on any proxy's rewriting behaviour.
+let private startMountProxy (publicPort: int) (sessionPort: int) : HttpListener =
+    let listener = new HttpListener ()
+    listener.Prefixes.Add (sprintf "http://127.0.0.1:%d/" publicPort)
+    listener.Start ()
+    // No auto-redirect: a `Location` must reach the browser untouched, which is the
+    // half of the flow that proves the session's redirects resolve against its mount.
+    let client = new HttpClient (new HttpClientHandler (AllowAutoRedirect = false, UseCookies = false))
+    let copyHeader (reply: HttpResponseMessage) (ctx: HttpListenerContext) (name: string) =
+        let values =
+            match reply.Headers.TryGetValues name with
+            | true, vs -> List.ofSeq vs
+            | _ ->
+                match reply.Content.Headers.TryGetValues name with
+                | true, vs -> List.ofSeq vs
+                | _ -> []
+        for v in values do ctx.Response.Headers.Add (name, v)
+    let rec loop () =
+        async {
+            match! Async.Catch (listener.GetContextAsync () |> Async.AwaitTask) with
+            | Choice1Of2 ctx ->
+                Async.Start (
+                    async {
+                        try
+                            let target = sprintf "http://127.0.0.1:%d%s" sessionPort ctx.Request.RawUrl
+                            use request = new HttpRequestMessage (HttpMethod ctx.Request.HttpMethod, target)
+                            if ctx.Request.HasEntityBody then
+                                use buffer = new MemoryStream ()
+                                ctx.Request.InputStream.CopyTo buffer
+                                let content = new ByteArrayContent (buffer.ToArray ())
+                                match ctx.Request.ContentType with
+                                | null | "" -> ()
+                                | contentType -> content.Headers.TryAddWithoutValidation ("content-type", contentType) |> ignore
+                                request.Content <- content
+                            match ctx.Request.Headers.["Cookie"] with
+                            | null | "" -> ()
+                            | cookie -> request.Headers.TryAddWithoutValidation ("cookie", cookie) |> ignore
+                            let! reply = client.SendAsync request |> Async.AwaitTask
+                            ctx.Response.StatusCode <- int reply.StatusCode
+                            copyHeader reply ctx "Location"
+                            copyHeader reply ctx "Set-Cookie"
+                            copyHeader reply ctx "Cache-Control"
+                            match reply.Content.Headers.ContentType with
+                            | null -> ()
+                            | contentType -> ctx.Response.ContentType <- string contentType
+                            let! bytes = reply.Content.ReadAsByteArrayAsync () |> Async.AwaitTask
+                            ctx.Response.OutputStream.Write (bytes, 0, bytes.Length)
+                        with _ -> ctx.Response.StatusCode <- 502
+                        ctx.Response.Close ()
+                    })
+                return! loop ()
+            | Choice2Of2 _ -> ()   // listener stopped
+        }
+    Async.Start (loop ())
+    listener
+
+let mutable private mountedHost : Process = null
+
+/// The product entry, told it is fronted: the Manager at a loopback origin (which is also
+/// the OIDC issuer a session fetches discovery against, so it must resolve HERE), and
+/// sessions mounted under a path at the proxy's port.
+let private startMountedHost () : unit =
+    let psi = ProcessStartInfo "node"
+    psi.ArgumentList.Add "app/out/Main.js"
+    psi.ArgumentList.Add "--auth"
+    psi.ArgumentList.Add "localhost"
+    psi.UseShellExecute <- false
+    psi.RedirectStandardOutput <- true
+    psi.EnvironmentVariables.["YESSION_PORT"] <- string MOUNT_SESSION_PORT
+    psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- string MOUNT_MANAGER_PORT
+    psi.EnvironmentVariables.["YESSION_SESSION"] <- MOUNT_SESSION
+    psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- mountDataDir
+    psi.EnvironmentVariables.["YESSION_MANAGER_URL"] <- sprintf "http://127.0.0.1:%d" MOUNT_MANAGER_PORT
+    psi.EnvironmentVariables.["YESSION_SESSION_URL"] <- sprintf "http://127.0.0.1:%d/s/{id}" MOUNT_PROXY_PORT
+    let p = new Process (StartInfo = psi)
+    let ready = TaskCompletionSource<bool> ()
+    p.OutputDataReceived.Add (fun e ->
+        if e.Data <> null && e.Data.Contains "launched at" then ready.TrySetResult true |> ignore)
+    p.Start () |> ignore
+    p.BeginOutputReadLine ()
+    mountedHost <- p
+    if not (ready.Task.Wait 30000) then failwith "mounted host never reported readiness"
+
+let mountedTests =
+    testList "Path-mounted session (browser)" [
+        testCaseAsync "a session served under a path boots, signs in, and connects over WebRTC" <|
+            async {
+                if Directory.Exists mountDataDir then Directory.Delete (mountDataDir, true)
+                startMountedHost ()
+                let proxy = startMountProxy MOUNT_PROXY_PORT MOUNT_SESSION_PORT
+                let publicUrl = sprintf "http://127.0.0.1:%d/s/%s/" MOUNT_PROXY_PORT MOUNT_SESSION
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (
+                            ExecutablePath = chromiumPath (),
+                            Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
+                let! context = await (br.NewContextAsync ())
+                let! page = await (context.NewPageAsync ())
+                page.SetDefaultTimeout 20000.0f
+
+                // Everything below happens at the PUBLIC path. Nothing in the browser was
+                // told about a prefix: the shell's `<base href>` is the only thing making
+                // its relative routes resolve under the mount.
+                let! _ = await (page.GotoAsync publicUrl)
+
+                let! baseHref = await (page.EvaluateAsync<string> "() => document.querySelector('base')?.getAttribute('href')")
+                Expect.equal baseHref (sprintf "/s/%s/" MOUNT_SESSION) "the shell declares its mount"
+
+                // The bundle and stylesheet were fetched from under the mount — if either
+                // had been root-anchored it would have hit the proxy's root and 404'd, and
+                // no client would be running to render this.
+                let! _ = await (page.WaitForSelectorAsync "[data-connection]")
+                let! assets =
+                    await (page.EvaluateAsync<string[]> """() =>
+                        performance.getEntriesByType('resource').map(e => new URL(e.name).pathname)""")
+                Expect.isTrue
+                    (assets |> Array.exists (fun p -> p = sprintf "/s/%s/client.js" MOUNT_SESSION))
+                    "the client bundle was fetched under the mount"
+
+                // The login bounce completed at the public address: session -> manager ->
+                // back to `<mount>/callback` -> `./` -> the shell. Then a real WebRTC data
+                // channel through the same prefix.
+                let! _ = await (page.WaitForFunctionAsync connected)
+
+                // The auth cookie is scoped to this session's mount, not the whole origin.
+                let! cookies = await (context.CookiesAsync ())
+                let sessionCookie =
+                    cookies |> Seq.tryFind (fun c -> c.Name.StartsWith "yession_auth_")
+                match sessionCookie with
+                | None -> failwith "no session auth cookie was set"
+                | Some cookie ->
+                    Expect.equal cookie.Path (sprintf "/s/%s/" MOUNT_SESSION) "scoped to the mount, not shared with siblings"
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                proxy.Stop ()
+                try mountedHost.Kill true with _ -> ()
+            }
+    ]
+
 #else
 
 // Fable (JS on Node): Playwright is a .NET driver and does not exist here, so the flows above
@@ -332,5 +485,6 @@ let editorTests =
 // forced — the `[Browser]` need fails on Node and reports the skip itself.
 let tests : Fable.Pyxpecto.Model.TestCase = testList "Browser E2E" []
 let editorTests : Fable.Pyxpecto.Model.TestCase = testList "Editor rendering (browser)" []
+let mountedTests : Fable.Pyxpecto.Model.TestCase = testList "Path-mounted session (browser)" []
 
 #endif

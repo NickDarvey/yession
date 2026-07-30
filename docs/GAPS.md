@@ -25,9 +25,11 @@ discovers it in production. Items are roughly ordered by how much they matter.
   is the recorded hardening follow-up. No `nonce` in ID tokens yet (PKCE +
   confidential client); the Plan 04 note stands.
 - **Remote WebRTC has no relay fallback** ([Plan 09](plans/09-remote-session-access.md)).
-  Sessions are remotely reachable through an operator's port-mirroring proxy — the
-  `/sessions/stream` registry drives the serving binding, `YESSION_SESSION_URL`
-  threads the public origin into open links and redirect URIs — but the data channel
+  Sessions are remotely reachable through an operator's proxy — the `/sessions/stream`
+  registry drives the serving binding, and `YESSION_SESSION_URL` is a template over
+  `{id}`/`{port}` ([Plan 10](plans/10-mounted-sessions.md)) that threads the public
+  address into open links and redirect URIs, whether the operator mirrors ports, gives
+  each session a subdomain, or mounts each under a path — but the data channel
   still connects peer-to-peer on host candidates only (no STUN/TURN), so remote use
   needs a network where the session host's addresses route directly (e.g. an overlay
   like a tailnet, verified per deployment); an unauthenticated visitor can also hold

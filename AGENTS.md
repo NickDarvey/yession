@@ -75,6 +75,19 @@ locations, a fallback beside a primary), keep ONLY the one verified working here
 the other. A redundant spare hides which path is live, rots unverified, and turns the next
 failure into an archaeology dig.
 
+## UI baseline
+
+WCAG 2.0 AA is the floor for every surface, not a follow-up:
+
+- **Contrast**: text ≥ 4.5:1 against the surface it actually sits on (3:1 only ≥ 24px, or
+  ≥ 19px bold). Check every surface a token touches, not just black — the cheap-tier
+  theme-contrast test (Phase4) pins the tokens in `app/tailwind.css`.
+- **Keyboard**: every action is a real `<a>`/`<button>`/`<input>` (no click-only
+  elements), operable by Tab/Enter/Space, with a visible focus state. A DOM swap that
+  replaces the focused element must refocus its replacement, never strand focus.
+- **Structure**: inputs get `<label>`s, tables get `th scope`, icon-only controls get an
+  accessible name, pages declare `lang` and a title.
+
 ## Versioning
 
 The version is computed from the commit history (policy at the top of `tasks.fsx`), never stored
@@ -191,6 +204,10 @@ Capabilities:
 To eyeball a rich-editor change in a real browser without any of the WebRTC machinery:
 `check Browser` (drives Chromium against `tests/browser/editor-harness.html`). The full
 two-peer WebRTC E2E runs where the Nix-built `Native` addon is present (CI, `verify`).
+
+To inspect or iterate on a server-rendered surface (the manager page) with real
+screenshots, read `.agents/skills/ui-exploration/SKILL.md` first — headless Chromium's
+window-size clamp makes naive mobile screenshots lie; the skill's CDP driver does not.
 
 ### Writing tests
 

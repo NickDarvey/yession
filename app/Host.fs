@@ -60,12 +60,14 @@ let startFull
     // Telemetry sink (Plan 04): the completed-turn usage emitter, threaded to the
     // scheduler. `ignore` in the layered helpers below and whenever telemetry is off.
     (emitUsage: AgentTurnId -> AgentUsage -> unit)
-    (subscribeNotifications: ((SessionNotification -> unit) -> (unit -> unit)) option)
-    (subscribeMcp: ((McpToolList -> unit) -> (unit -> unit)) option)
+    (subscribeNotifications: Subscribe<SessionNotification> option)
+    (subscribeMcp: Subscribe<McpToolList> option)
     // Extra HTTP routes on the session's server (Plan 08: the connection surface).
     (extraHttpRoutes: (Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
     (sessionId: SessionId)
     (auth: SessionAuth.Auth option)
+    // The path this session is served under (`""` at an origin root, docs/plans/09).
+    (mount: string)
     (port: int)
     : Async<SessionHost> =
     async {
@@ -80,6 +82,18 @@ let startFull
         // The persistence tap registers before every other observer, so an update is
         // durable before anything acts on it.
         docStore |> Option.iter (fun store -> DocSync.onAnyUpdatePayload doc store.Append)
+
+        // Legacy draft garbage: builds before the slot-follows-body rule (`DraftSlot`) published a
+        // draft slot the moment a client mounted its composer, so a replayed doc carries an empty
+        // slot for every peer that ever opened the session — each one an empty draft box on
+        // everyone's composer. Drop them here: no peer is connected yet, so an empty body cannot be
+        // a draft in progress. The removal rides the tap above (durable), and every replica merges
+        // the delete on its next state exchange.
+        match SyncedStateSync.removeEmptyDrafts doc with
+        | [] -> ()
+        | dropped ->
+            eprintfn "[session %s] dropped %d empty draft slot(s) at boot"
+                (SessionId.value sessionId) (List.length dropped)
 
         // Connected peers' channels, for state relay; keyed per connection.
         let mutable connections : Map<int, FrameChannel<string>> = Map.empty
@@ -222,26 +236,26 @@ let startFull
         // a notification into a durable `SessionEvent` (via `log.Append`), or re-draining,
         // is left to whatever handler a later composition wants. A notification is a signal
         // the session MAY act on, never a fact it is obliged to persist.
-        let mutable unsubscribeNotifications : (unit -> unit) option = None
+        let mutable notifications : Subscription option = None
         match subscribeNotifications with
         | Some subscribe ->
             let handle (notification: SessionNotification) : unit =
                 match notification with
                 | EnvironmentChanged () ->
                     eprintfn "[session %s] notification: environment changed" (SessionId.value sessionId)
-            unsubscribeNotifications <- Some (subscribe handle)
+            notifications <- Some (subscribe handle)
         | None -> ()
 
         // The MCP tool stream (the second reverse leg): subscribe when the launch handed us a
         // channel. The current list arrives immediately, then a fresh list on every change. The
         // DEFAULT handler just logs the count — making the tools available to agent turns is
         // left to whatever handler a later composition wants.
-        let mutable unsubscribeMcp : (unit -> unit) option = None
+        let mutable mcpTools : Subscription option = None
         match subscribeMcp with
         | Some subscribe ->
             let handle (list: McpToolList) : unit =
                 eprintfn "[session %s] mcp tools available: %d" (SessionId.value sessionId) (List.length list.Tools)
-            unsubscribeMcp <- Some (subscribe handle)
+            mcpTools <- Some (subscribe handle)
         | None -> ()
 
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
@@ -302,7 +316,7 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint port
+        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint mount port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -338,8 +352,8 @@ let startFull
               Stop =
                 fun () ->
                     async {
-                        unsubscribeNotifications |> Option.iter (fun cancel -> cancel ())
-                        unsubscribeMcp |> Option.iter (fun cancel -> cancel ())
+                        notifications |> Option.iter (fun s -> s.Stop ())
+                        mcpTools |> Option.iter (fun s -> s.Stop ())
                         server.close ignore
                         // Drain every accepted peer connection: Stop resolves only once
                         // libdatachannel has reported each one closed, so a caller may
@@ -358,7 +372,8 @@ let startWithCapabilities
     (sessionId: SessionId)
     (port: int)
     : Async<SessionHost> =
-    startFull (fun () -> runAgent) environmentCapabilities None baseLog None None (fun _ _ -> ()) None None None sessionId None port
+    // No mount: these helpers serve an unfronted, origin-root session.
+    startFull (fun () -> runAgent) environmentCapabilities None baseLog None None (fun _ _ -> ()) None None None sessionId None "" port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

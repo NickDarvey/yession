@@ -247,6 +247,38 @@ module Style =
     let draftActions = "flex items-center gap-2 pl-4 pr-2 pb-2"
     let draftAuthor = "ml-auto pr-2 font-semibold text-[10px] leading-4 tracking-[0.14em] uppercase text-ink-faint"
 
+    // --- Settings drawer ---------------------------------------------------------------------
+    // Like the sidebar, the drawer's open state is one bit on the root <html> element
+    // (`settings-open`, toggled by [data-settings-toggle]), so it survives re-renders and
+    // stays out of the model. A right-hand Metro panel over a scrim; content is ordinary
+    // side-section rhythm.
+
+    let settingsDrawer =
+        "hidden [.settings-open_&]:flex fixed inset-y-0 right-0 w-[min(400px,92vw)] "
+        + "bg-panel border-l border-hair z-50 flex-col px-6 pb-6 overflow-y-auto"
+
+    /// Backdrop behind the open drawer; clicking it closes (data-settings-toggle).
+    let settingsScrim = "hidden [.settings-open_&]:block fixed inset-0 z-40 bg-black/60"
+
+    /// The drawer's header band: same 88px rhythm as the sidebar and main header.
+    let settingsHead = "h-[88px] shrink-0 flex items-end justify-between pb-5"
+    let settingsTitle = "font-extralight text-[28px] leading-8 tracking-[-0.01em] lowercase text-ink"
+
+    /// A settings field (input/select): a quiet Metro rectangle on the surface tone,
+    /// border brightening to blue on focus — the body scale, never the title's.
+    let field =
+        "w-full bg-surface border border-hair focus:border-blue outline-none appearance-none "
+        + "px-3 py-2 font-light text-[13px] leading-5 text-ink placeholder:text-ink-faint"
+
+    // --- The no-agent prompt strip -------------------------------------------------------------
+    // Shown above the composer when the session has no agent at all: the one place the
+    // product ASKS for a connection. Same anatomy as the activity strip, blue accent —
+    // blue is the agent's voice, and this is the agent's absence.
+
+    let noAgent =
+        "shrink-0 flex items-center gap-3 px-8 py-3 border-t border-hair bg-surface max-md:px-4 max-md:flex-wrap"
+    let noAgentMark = "w-2 h-2 border border-blue"
+
     // --- Document shell ------------------------------------------------------------------------
 
     /// Classes for the `#app` wrapper (served once in `View.page`; the browser only ever
@@ -257,4 +289,4 @@ module Style =
     /// `/app.css` — never a CDN (local first; the app works offline). The utilities and the
     /// theme (colours, fonts, keyframes) come from the CLI build configured in
     /// `tailwind.config.js`, which scans the F# sources for the composed class names.
-    let headTags = "<link rel=\"stylesheet\" href=\"/app.css\">"
+    let headTags = sprintf "<link rel=\"stylesheet\" href=\"%s\">" (SessionRoute.relative AppCss)

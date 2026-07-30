@@ -310,11 +310,20 @@ let private wireTests =
             Expect.equal (Cookies.tryFind "b" None) None "no header, no cookie"
             let name = Cookies.sessionCookieName sessionId
             Expect.equal name "yession_auth_op-session" "namespaced by session id (127.0.0.1 cookies are not port-scoped)"
-            Expect.isTrue ((Cookies.set name "v").Contains "HttpOnly") "cookies are HttpOnly"
+            Expect.isTrue ((Cookies.set name "" "v").Contains "HttpOnly") "cookies are HttpOnly"
             Expect.equal (Form.parse "a=1&b=hello+world&c=%2Fpath&broken") (Map.ofList [ "a", "1"; "b", "hello world"; "c", "/path" ]) "urlencoded decode"
     ]
 
 // --- Key non-extractability (the mechanism the provider relies on) ------------------
+
+// jose's `exportJWK` rejects a non-extractable key by THROWING SYNCHRONOUSLY, and a synchronous
+// throw while a Fable async computation is being built escapes the surrounding `try/with` — the
+// trampoline only re-enters the protected continuation at bind boundaries, so whether it is caught
+// depends on how many binds ran before, i.e. on which other tests exist. Deciding it in JS instead
+// makes the assertion deterministic: the thunk is invoked inside the promise, so a sync throw and a
+// rejection are the same observable outcome.
+[<Emit("(async () => { try { await $0(); return false } catch { return true } })()")>]
+let private refuses (attempt: unit -> JS.Promise<'a>) : JS.Promise<bool> = Fable.Core.Util.jsNative
 
 let private keyTests =
     testList "Signing key non-extractability" [
@@ -322,14 +331,10 @@ let private keyTests =
             async {
                 let! keys = Fable.Jose.generateKeyPair "EdDSA" (createObj [ "extractable" ==> false ]) |> Async.AwaitPromise
                 Expect.isFalse keys.privateKey.extractable "the private key is non-extractable"
-                // The public half must export (JWKS depends on it).
-                let! _ = Fable.Jose.exportJWK keys.publicKey |> Async.AwaitPromise
-                let mutable threw = false
-                try
-                    let! _ = Fable.Jose.exportJWK keys.privateKey |> Async.AwaitPromise
-                    ()
-                with _ -> threw <- true
-                Expect.isTrue threw "exporting the private key must throw"
+                let! publicRefused = refuses (fun () -> Fable.Jose.exportJWK keys.publicKey) |> Async.AwaitPromise
+                Expect.isFalse publicRefused "the public half exports (JWKS depends on it)"
+                let! privateRefused = refuses (fun () -> Fable.Jose.exportJWK keys.privateKey) |> Async.AwaitPromise
+                Expect.isTrue privateRefused "exporting the private key must throw"
             }
     ]
 
