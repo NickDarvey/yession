@@ -85,14 +85,16 @@ module App =
     module EventFetch =
 
         /// Build a fetcher over the platform's HTTP GET (`getText` must fail on
-        /// non-success statuses). `token` = a session-minted peer token appended as
-        /// `?token=` — the cookie-less path (Node clients); the browser passes None
-        /// and rides its same-origin auth cookie. A transport failure yields an empty
-        /// final page so the read loop re-arms on the next availability hint instead
-        /// of wedging; a malformed line is real corruption and fails loudly.
+        /// non-success statuses). `urlOf` resolves a route for this platform: a browser
+        /// passes `SessionRoute.relative` and lets `<base href>` do the rest, a Node
+        /// client prefixes the session's absolute address. `token` = a session-minted peer
+        /// token appended as `?token=` — the cookie-less path (Node clients); the browser
+        /// passes None and rides its same-origin auth cookie. A transport failure yields
+        /// an empty final page so the read loop re-arms on the next availability hint
+        /// instead of wedging; a malformed line is real corruption and fails loudly.
         let overHttp
             (getText: string -> Async<string>)
-            (baseUrl: string)
+            (urlOf: SessionRoute -> string)
             (token: string option)
             : EventOffset option -> Async<EventPage<SessionEvent>> =
             fun after ->
@@ -105,8 +107,7 @@ module App =
                         token
                         |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
                         |> Option.defaultValue ""
-                    let url =
-                        sprintf "%s/events/%d%s" baseUrl (EventChunk.indexOf nextOffset) tokenSuffix
+                    let url = urlOf (Events (EventChunk.indexOf nextOffset)) + tokenSuffix
                     let! fetched =
                         async {
                             try

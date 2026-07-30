@@ -152,14 +152,22 @@ let private toggleNav () : unit = jsNative
 [<Emit("document.documentElement.classList.toggle('settings-open')")>]
 let private toggleSettings () : unit = jsNative
 
-// The auth probe: `/me` answers with a peer token when the browser's cookie (or an
+// The auth probe: `me` answers with a peer token when the browser's cookie (or an
 // auth-less session) allows it. Distinguishes DENIED (status) from OFFLINE (reject):
-// a 401 means renavigate to /login; a network failure means stay on the cached shell
-// and local stores — offline-first, the connection simply doesn't happen.
-[<Emit("""fetch('/me', { cache: 'no-store' }).then(r => r.ok ? r.json().then(me => ({ ok: true, token: me.peerToken })) : { ok: false, token: '' })""")>]
-let private fetchMe () : JS.Promise<{| ok: bool; token: string |}> = jsNative
+// a 401 means renavigate to the login route; a network failure means stay on the cached
+// shell and local stores — offline-first, the connection simply doesn't happen.
+//
+// The URL is a PARAMETER, not baked into the Emit: a string literal inside an Emit is
+// outside F#'s reach, so a path embedded here could not be checked against
+// `SessionRoute`. Every fetch below takes its URL from `SessionRoute.relative`, and the
+// browser resolves it against the shell's `<base href>`.
+[<Emit("""fetch($0, { cache: 'no-store' }).then(r => r.ok ? r.json().then(me => ({ ok: true, token: me.peerToken })) : { ok: false, token: '' })""")>]
+let private fetchMe (url: string) : JS.Promise<{| ok: bool; token: string |}> = jsNative
 
-[<Emit("window.location.assign($0)")>]
+// `location.assign` resolves against the DOCUMENT's URL, not `<base href>` — the one
+// place relative resolution does not follow the base — so resolve explicitly against
+// `document.baseURI` here, once, rather than at each call site.
+[<Emit("window.location.assign(new URL($0, document.baseURI).href)")>]
 let private navigateTo (url: string) : unit = jsNative
 
 // --- Rich-text editor mount ------------------------------------------------------------
@@ -197,8 +205,10 @@ let private whenSynced (persistence: obj) : JS.Promise<unit> = jsNative
 })()""")>]
 let private persistenceKey () : string = jsNative
 
-[<Emit("String(window.location.origin) + '/signal'")>]
-let private signalUrl () : string = jsNative
+// Resolved against the shell's `<base href>`, so a session mounted under a path signals
+// to its own prefix rather than the origin root.
+[<Emit("new URL($0, document.baseURI).href")>]
+let private absolute (relative: string) : string = jsNative
 
 [<Emit("fetch($0).then(r => { if (!r.ok) throw new Error('events fetch failed: ' + r.status); return r.text() })")>]
 let private fetchText (url: string) : JS.Promise<string> = jsNative
@@ -231,10 +241,13 @@ let private urlEncode (value: string) : string = jsNative
 // Thin fetches against the session's /claude* routes; the same-origin auth cookie rides
 // each one. Failures land as `ok: false` with the response text — the panel shows it.
 
-[<Emit("""fetch('/claude?peer_id=' + encodeURIComponent($0), { cache: 'no-store' })
+[<Emit("""fetch($0 + '?peer_id=' + encodeURIComponent($1), { cache: 'no-store' })
   .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine, agent: !!s.agent })) : Promise.resolve({ ok: false, session: null, mine: null, agent: false }))
   .catch(() => ({ ok: false, session: null, mine: null, agent: false }))""")>]
-let private fetchClaudeStatus (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; agent: bool |}> = jsNative
+let private fetchClaudeStatusAt (url: string) (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; agent: bool |}> = jsNative
+
+let private fetchClaudeStatus (peerId: string) =
+    fetchClaudeStatusAt (SessionRoute.relative ClaudeStatus) peerId
 
 [<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 })
   .then(async r => ({ ok: r.ok, body: await r.text() }))
@@ -457,7 +470,7 @@ let private start () =
               ClaudeConnect =
                 fun () ->
                     let scope = match panelInput "[data-claude-scope]" with "" -> "mine" | s -> s
-                    postClaudeAction "/claude/begin" scope "" "" true
+                    postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Begin)) scope "" "" true
               ClaudeComplete =
                 fun () ->
                     // The scope selector is unmounted while awaiting; the flow carries it.
@@ -467,14 +480,20 @@ let private start () =
                         | _ -> "mine"
                     match panelInput "[data-claude-code]" with
                     | "" -> dispatchRef (ClaudeFlowMsg (ClaudeError "paste the code first"))
-                    | code -> postClaudeAction "/claude/complete" scope code "" false
+                    | code -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Complete)) scope code "" false
               ClaudePasteToken =
                 fun () ->
                     match panelInput "[data-claude-token]" with
                     | "" -> dispatchRef (ClaudeFlowMsg (ClaudeError "paste a token first"))
-                    | token -> postClaudeAction "/claude/token" (match panelInput "[data-claude-scope]" with "" -> "mine" | s -> s) "" token false
+                    | token ->
+                        postClaudeAction
+                            (SessionRoute.relative (Claude ClaudeAction.Token))
+                            (match panelInput "[data-claude-scope]" with "" -> "mine" | s -> s)
+                            ""
+                            token
+                            false
               ClaudeDisconnect =
-                fun scope -> postClaudeAction "/claude/disconnect" scope "" "" false }
+                fun scope -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Disconnect)) scope "" "" false }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
@@ -525,7 +544,7 @@ let private start () =
         let! me =
             async {
                 try
-                    let! result = fetchMe () |> Async.AwaitPromise
+                    let! result = fetchMe (SessionRoute.relative Me) |> Async.AwaitPromise
                     return Some result
                 with _ ->
                     return None
@@ -534,11 +553,11 @@ let private start () =
         | Some probe when not probe.ok ->
             // The peer id rides the login bounce so the Manager can witness which peer
             // signed in for this session (docs/plans/07 — peer-scoped secrets).
-            navigateTo ("/login?peer_id=" + urlEncode (PeerId.value peerId))
+            navigateTo (SessionRoute.relative Login + "?peer_id=" + urlEncode (PeerId.value peerId))
         | Some probe ->
             // Authenticated: the Claude panel's status is knowable now.
             refreshClaude ()
-            let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
+            let! dc = openDataChannel (absolute (SessionRoute.relative Signal)) |> Async.AwaitPromise
             let channel = frameChannel dc
             let hello =
                 { PeerId = peerId
@@ -550,7 +569,8 @@ let private start () =
             // fetch, so no token in the URL (history/cache stay clean).
             let options =
                 { App.ConnectOptions.defaults with
-                    FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" None) }
+                    FetchEvents =
+                        Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) SessionRoute.relative None) }
             let connection = App.connect options doc registry hello (fun msg -> dispatchRef msg) channel
             connectionRef <- Some connection
 

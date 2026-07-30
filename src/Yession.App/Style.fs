@@ -284,4 +284,4 @@ module Style =
     /// `/app.css` — never a CDN (local first; the app works offline). The utilities and the
     /// theme (colours, fonts, keyframes) come from the CLI build configured in
     /// `tailwind.config.js`, which scans the F# sources for the composed class names.
-    let headTags = "<link rel=\"stylesheet\" href=\"/app.css\">"
+    let headTags = sprintf "<link rel=\"stylesheet\" href=\"%s\">" (SessionRoute.relative AppCss)

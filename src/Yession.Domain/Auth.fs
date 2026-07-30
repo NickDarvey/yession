@@ -25,11 +25,18 @@ module Cookies =
         header
         |> Option.bind (fun h -> parse h |> List.tryPick (fun (k, v) -> if k = name then Some v else None))
 
-    /// A `Set-Cookie:` value for an HttpOnly session cookie. No `Max-Age`/`Expires`: the
-    /// cookie lives with the browser session, matching the server side (auth state is
+    /// A `Set-Cookie:` value for an HttpOnly session cookie, scoped to the path the
+    /// session is served under (`""` at an origin root ⇒ `Path=/`). No `Max-Age`/`Expires`:
+    /// the cookie lives with the browser session, matching the server side (auth state is
     /// in-memory and dies with the process).
-    let set (name: string) (value: string) : string =
-        sprintf "%s=%s; Path=/; HttpOnly; SameSite=Lax" name value
+    ///
+    /// Scoping is a real narrowing where sessions share a host: a path-mounted session's
+    /// cookie is no longer sent to its siblings. At an origin root the behaviour is
+    /// unchanged, and the id in the cookie's NAME still carries the separation cookies
+    /// cannot get from a port.
+    let set (name: string) (mount: string) (value: string) : string =
+        let path = if mount = "" then "/" else mount + "/"
+        sprintf "%s=%s; Path=%s; HttpOnly; SameSite=Lax" name value path
 
     /// The session's auth-cookie name. Cookies on 127.0.0.1 are NOT port-scoped — the
     /// Manager and every Session Process share one browser cookie jar — so each session's

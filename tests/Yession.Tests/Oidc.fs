@@ -310,7 +310,7 @@ let private wireTests =
             Expect.equal (Cookies.tryFind "b" None) None "no header, no cookie"
             let name = Cookies.sessionCookieName sessionId
             Expect.equal name "yession_auth_op-session" "namespaced by session id (127.0.0.1 cookies are not port-scoped)"
-            Expect.isTrue ((Cookies.set name "v").Contains "HttpOnly") "cookies are HttpOnly"
+            Expect.isTrue ((Cookies.set name "" "v").Contains "HttpOnly") "cookies are HttpOnly"
             Expect.equal (Form.parse "a=1&b=hello+world&c=%2Fpath&broken") (Map.ofList [ "a", "1"; "b", "hello world"; "c", "/path" ]) "urlencoded decode"
     ]
 

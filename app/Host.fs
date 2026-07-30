@@ -66,6 +66,8 @@ let startFull
     (extraHttpRoutes: (Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
     (sessionId: SessionId)
     (auth: SessionAuth.Auth option)
+    // The path this session is served under (`""` at an origin root, docs/plans/09).
+    (mount: string)
     (port: int)
     : Async<SessionHost> =
     async {
@@ -314,7 +316,7 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint port
+        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint mount port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -370,7 +372,8 @@ let startWithCapabilities
     (sessionId: SessionId)
     (port: int)
     : Async<SessionHost> =
-    startFull (fun () -> runAgent) environmentCapabilities None baseLog None None (fun _ _ -> ()) None None None sessionId None port
+    // No mount: these helpers serve an unfronted, origin-root session.
+    startFull (fun () -> runAgent) environmentCapabilities None baseLog None None (fun _ _ -> ()) None None None sessionId None "" port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

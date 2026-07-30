@@ -34,7 +34,7 @@ let private statusView (status: ProcessManager.SessionStatus) : TemplateResult =
         let reason = code |> Option.map string |> Option.defaultValue "signal"
         html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""
 
-let private actions (view: ProcessManager.SessionView) : TemplateResult =
+let private actions (access: PublicAccess) (view: ProcessManager.SessionView) : TemplateResult =
     let id = SessionId.value view.Record.SessionId
     match view.Status with
     | ProcessManager.Running (port, _) ->
@@ -42,7 +42,9 @@ let private actions (view: ProcessManager.SessionView) : TemplateResult =
         // back), not by a token in the link. The origin is the configured public one
         // (docs/plans/09) so a remote browser gets a link it can follow; loopback when
         // unset.
-        let openUrl = sprintf "%s:%d/" (publicSessionOrigin ()) port
+        // The address comes from the deployment's session template (docs/plans/10), the
+        // same declaration the session itself used to register its redirect URI.
+        let openUrl = sprintf "%s/" (PublicAccess.sessionAddress view.Record.SessionId port access).Url
         // Open is THE action on a running session, so it is first in the DOM (first in
         // focus order) and wears the primary button; Stop is secondary — its border
         // stays dim until hovered (btnDanger's affordance). The row-reverse container
@@ -60,7 +62,7 @@ let private actions (view: ProcessManager.SessionView) : TemplateResult =
 /// instead; see the rows stream.) The human name leads (content is the interface); the minted
 /// id is plumbing, faint mono, and yields on narrow screens. Actions anchor the right edge so
 /// the row reads name → state → verb.
-let private rowTemplate (view: ProcessManager.SessionView) : TemplateResult =
+let private rowTemplate (access: PublicAccess) (view: ProcessManager.SessionView) : TemplateResult =
     let id = SessionId.value view.Record.SessionId
     html $"""
         <tr class="border-b border-hair hover:bg-surface transition-colors" data-session="{id}">
@@ -68,13 +70,13 @@ let private rowTemplate (view: ProcessManager.SessionView) : TemplateResult =
           <td class="py-3 pr-4 align-middle font-mono text-[12px] leading-4 text-ink-faint max-md:hidden">{id}</td>
           <td class="py-3 pr-4 align-middle whitespace-nowrap">{statusView view.Status}</td>
           <td class="py-3 pl-4 align-middle">
-            <div class="flex flex-row-reverse flex-wrap items-center gap-x-4 gap-y-2">{actions view}</div>
+            <div class="flex flex-row-reverse flex-wrap items-center gap-x-4 gap-y-2">{actions access view}</div>
           </td>
         </tr>"""
 
 // The swap unit for a create is the whole section (label, count, table), so the count
 // and the empty state can never go stale against the rows they describe.
-let private tableTemplate (views: ProcessManager.SessionView list) : TemplateResult =
+let private tableTemplate (access: PublicAccess) (views: ProcessManager.SessionView list) : TemplateResult =
     let rows =
         match views with
         | [] ->
@@ -82,7 +84,7 @@ let private tableTemplate (views: ProcessManager.SessionView list) : TemplateRes
                 <tr>
                   <td colspan="4" class="py-10 text-center {Style.small}">no sessions yet — name one above and create it</td>
                 </tr>""" ]
-        | views -> views |> List.map rowTemplate
+        | views -> views |> List.map (rowTemplate access)
     html $"""
         <section class="flex flex-col gap-3" data-sessions>
           <div class="flex items-baseline gap-2.5">
@@ -103,10 +105,12 @@ let private tableTemplate (views: ProcessManager.SessionView list) : TemplateRes
         </section>"""
 
 /// A rendered fragment (a single row), served as an action's answer.
-let sessionRow (view: ProcessManager.SessionView) : string = Ssr.render (rowTemplate view)
+let sessionRow (access: PublicAccess) (view: ProcessManager.SessionView) : string =
+    Ssr.render (rowTemplate access view)
 
 /// A rendered fragment (the whole table), served after a create and pushed on the rows stream.
-let sessionsTable (views: ProcessManager.SessionView list) : string = Ssr.render (tableTemplate views)
+let sessionsTable (access: PublicAccess) (views: ProcessManager.SessionView list) : string =
+    Ssr.render (tableTemplate access views)
 
 // The interactivity, without htmx: a tiny vanilla script that swaps fragments on
 // create/launch/stop and takes live status from the rows stream. Inline (no external src) so
@@ -145,7 +149,7 @@ let private script =
 // common baseline, hairline below), then labelled sections on one left rail. The body
 // shell is `Style.app` (h-screen, overflow-hidden), so <main> owns the scrolling — a
 // long registry scrolls under a fixed viewport instead of clipping.
-let private bodyTemplate (views: ProcessManager.SessionView list) : TemplateResult =
+let private bodyTemplate (access: PublicAccess) (views: ProcessManager.SessionView list) : TemplateResult =
     html $"""
         <main class="flex-1 min-w-0 overflow-y-auto">
           <div class="max-w-4xl w-full mx-auto flex flex-col px-8 max-md:px-4">
@@ -162,11 +166,11 @@ let private bodyTemplate (views: ProcessManager.SessionView list) : TemplateResu
                 <button type="submit" class="{Style.btnPrimary}">Create</button>
               </div>
             </form>
-            <div class="pb-10">{tableTemplate views}</div>
+            <div class="pb-10">{tableTemplate access views}</div>
           </div>
         </main>"""
 
-let page (views: ProcessManager.SessionView list) : string =
+let page (access: PublicAccess) (views: ProcessManager.SessionView list) : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -174,7 +178,7 @@ let page (views: ProcessManager.SessionView list) : string =
         "<title>Yession Manager</title>"
         Style.headTags
         sprintf "</head><body class=\"%s\">" Style.app
-        Ssr.render (bodyTemplate views)
+        Ssr.render (bodyTemplate access views)
         sprintf "<script>%s</script>" script
         "</body></html>"
     ]
@@ -218,7 +222,7 @@ let tryHandle
     let path = pathnameOf req.url
     let rowOf (sessionId: SessionId) =
         match pm.TryFind sessionId with
-        | Some view -> sessionRow view
+        | Some view -> sessionRow pm.Public view
         | None -> ""
     let sessionAction (id: string) (action: SessionId -> Async<unit>) =
         match SessionId.create id with
@@ -235,7 +239,7 @@ let tryHandle
     let route : (unit -> unit) option =
         match req.``method``, path with
         | "GET", "/" ->
-            Some (fun () -> html res (page (pm.Sessions ())))
+            Some (fun () -> html res (page pm.Public (pm.Sessions ())))
         | "GET", "/app.css" ->
             // The same locally built stylesheet the session shell uses — shared style, no CDN.
             Some (fun () ->
@@ -252,7 +256,7 @@ let tryHandle
                         | "" -> SessionId.value (SessionId.mint ())
                         | provided -> provided
                     match pm.CreateSession id (formField body "name") with
-                    | Ok _ -> html res (sessionsTable (pm.Sessions ()))
+                    | Ok _ -> html res (sessionsTable pm.Public (pm.Sessions ()))
                     | Error e -> respond res 400 "text/plain" e))
         | method', path when path.StartsWith "/sessions/" ->
             let rest = path.Substring "/sessions/".Length
@@ -274,7 +278,7 @@ let tryHandle
                 // rendered by the same `tableTemplate` the page and the action swaps use, so the
                 // browser keeps no reconciliation logic. Stopped and exited rows are in the
                 // published views, which is why the page renders them and the registry does not.
-                Some (fun () -> Sse.stream req res sessionsTable pm.SubscribeSessions |> ignore)
+                Some (fun () -> Sse.stream req res (sessionsTable pm.Public) pm.SubscribeSessions |> ignore)
             | "POST", [| id; "launch" |] ->
                 Some (fun () -> sessionAction id (fun sessionId -> pm.Launch sessionId |> Async.Ignore))
             | "POST", [| id; "stop" |] ->

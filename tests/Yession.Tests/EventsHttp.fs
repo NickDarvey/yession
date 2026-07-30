@@ -99,11 +99,12 @@ let private endpointTests =
             async {
                 let! h = Host.start (SessionId.create "events-http-client" |> expect) 0
                 let mintedToken = h.MintPeerToken ()
-                let signalUrl = sprintf "http://127.0.0.1:%d/signal" h.Port
                 let baseUrl = sprintf "http://127.0.0.1:%d" h.Port
+                let signalUrl = SessionRoute.at baseUrl Signal
                 let options =
                     { App.ConnectOptions.defaults with
-                        FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) baseUrl (Some mintedToken)) }
+                        FetchEvents =
+                            Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) (SessionRoute.at baseUrl) (Some mintedToken)) }
                 let! a = connectClientWith options signalUrl mintedToken "ada" "Ada"
 
                 do! compose a a.Hello.PeerId "fetched over http"

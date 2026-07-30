@@ -43,6 +43,15 @@ let private strategy =
     | Ok s -> s
     | Error e -> failwith e
 
+// How this deployment is reached from outside (docs/plans/09). Parsed once, HERE, so a
+// combination that cannot work is a refused boot rather than links and redirect URIs that
+// point somewhere unreachable. Sessions inherit the same variables by env and parse them
+// the same way.
+let private publicAccess =
+    match Interop.publicAccess () with
+    | Ok access -> access
+    | Error e -> failwith e
+
 [<Fable.Core.Emit("process.execPath")>]
 let private nodePath : string = Fable.Core.Util.jsNative
 
@@ -81,7 +90,7 @@ Async.StartImmediate(
                     ManagerPort = Some managerPort
                     // Behind an authenticating proxy the issuer must be the proxy's
                     // origin, or off-host browsers cannot follow the authorize bounce.
-                    PublicUrl = (match Interop.envOr "YESSION_MANAGER_URL" "" with "" -> None | url -> Some url)
+                    Public = publicAccess
                     OnEvent = telemetry.Log
                     Strategy = Some strategy
                     Secrets = Some secretsBacking }

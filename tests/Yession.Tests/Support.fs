@@ -111,6 +111,11 @@ module OidcHttp =
         abstract cacheControl : string
         abstract body : string
 
+    /// Resolve a (possibly relative) URL against a base, exactly as a browser resolves a
+    /// `Location` header against the request URI.
+    [<Fable.Core.Emit("new URL($0, $1).href")>]
+    let private resolveUrl (location: string) (baseUrl: string) : string = Fable.Core.Util.jsNative
+
     [<Fable.Core.Emit("""fetch($0, { redirect: 'manual', headers: { ...Object.fromEntries($2), cookie: $1 } }).then(async r => ({
       status: r.status,
       location: r.headers.get('location') || '',
@@ -147,17 +152,16 @@ module OidcHttp =
     /// Follow a redirect chain (capped) with the jar and extra headers on every hop,
     /// returning the final non-3xx reply.
     let followWithJarAs (headers: (string * string) list) (jar: Jar) (startUrl: string) : Async<{| Status: int; Location: string; CacheControl: string; Body: string |}> =
-        let resolve (baseUrl: string) (location: string) : string =
-            if location.StartsWith "http" then location
-            else
-                // Relative redirect (the callback's `/`): resolve against the base.
-                let origin = System.Uri baseUrl
-                sprintf "%s://%s:%d%s" origin.Scheme origin.Host origin.Port location
+        // Resolve a `Location` against the request URI the way RFC 3986 (and every
+        // browser) does. It used to graft the location onto `scheme://host:port`, which
+        // only handles a location that is already absolute or root-anchored — so the
+        // callback's `./`, and every redirect a session mounted under a path emits,
+        // resolved to nonsense.
         let rec go (url: string) (hops: int) =
             async {
                 let! reply = getWithJarAs headers jar url
                 if reply.Status >= 300 && reply.Status < 400 && hops < 10 then
-                    return! go (resolve url reply.Location) (hops + 1)
+                    return! go (resolveUrl reply.Location url) (hops + 1)
                 else
                     return reply
             }

@@ -154,16 +154,16 @@ let sdpField (json: string) : string = jsNative
 [<Emit("process.env[$0] || $1")>]
 let envOr (name: string) (fallback: string) : string = jsNative
 
-/// The public origin — scheme + host, NO port — at which every session's OS-assigned
-/// port is reachable (docs/plans/09): `YESSION_SESSION_URL`, e.g.
-/// `http://home.example.ts.net` behind a port-mirroring proxy. Each consumer appends
-/// the session's own port; unset means loopback — the single-machine default. Read
-/// per use, in whichever process needs it (the Manager renders open links with it;
-/// a session builds its OAuth redirect URI with it, inheriting the value by env).
-let publicSessionOrigin () : string =
-    match (envOr "YESSION_SESSION_URL" "").Trim().TrimEnd '/' with
-    | "" -> "http://127.0.0.1"
-    | origin -> origin
+/// How this deployment is reached from outside (docs/plans/09): the two operator
+/// variables, parsed into the one value that decides both the Manager's public origin
+/// and where sessions live. Error = a combination that cannot be deployed; every caller
+/// fails its boot loudly rather than starting a half-reachable process.
+///
+/// Read once per process at boot. The Manager parses it to render open links and to be
+/// its own OIDC issuer; a session parses the same variables, inherited by plain env, to
+/// build its OAuth redirect URI and to know the path it is mounted under.
+let publicAccess () : Result<Yession.Domain.PublicAccess, string> =
+    Yession.Domain.PublicAccess.create (envOr "YESSION_MANAGER_URL" "") (envOr "YESSION_SESSION_URL" "")
 
 /// Read a bundled asset: from the npm package's `assets/` directory (next to the
 /// bundled entry — the packaged case), else from the dev filesystem fallback path.

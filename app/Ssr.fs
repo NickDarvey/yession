@@ -94,15 +94,23 @@ let renderModel (model: ClientModel) : string =
 /// The full bootstrap document: the served page IS the client shell. Embeds the serving
 /// session id (so the browser keys its local doc store before any connection), the local
 /// stylesheet, and the `#app` mount whose classes persist across the browser's re-renders.
-let page (sessionId: SessionId) (model: ClientModel) : string =
+///
+/// `mount` is the path this session is served under (`""` at an origin root) and it is a
+/// REQUIRED parameter for a reason: it becomes the `<base href>` every relative URL in
+/// the page and in the client bundle resolves against (`SessionRoute.relative` emits
+/// nothing else), so a page rendered without one would ask the origin root for its own
+/// assets. There is no way to render this document and forget it.
+let page (sessionId: SessionId) (mount: string) (model: ClientModel) : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        // Before the stylesheet and the bundle, because it governs how both resolve.
+        sprintf "<base href=\"%s/\">" (escapeAttr mount)
         sprintf "<meta name=\"%s\" content=\"%s\">" Dom.sessionMetaName (escapeAttr (SessionId.value sessionId))
         "<title>Yession</title>"
         Style.headTags
         "</head><body>"
         sprintf "<main id=\"%s\" class=\"%s\">%s</main>" Dom.appId Style.app (renderModel model)
-        "<script type=\"module\" src=\"/client.js\"></script>"
+        sprintf "<script type=\"module\" src=\"%s\"></script>" (SessionRoute.relative ClientBundle)
         "</body></html>"
     ]

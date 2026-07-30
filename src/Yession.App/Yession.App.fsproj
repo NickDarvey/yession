@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <Compile Include="Dom.fs" />
+    <Compile Include="Routes.fs" />
     <Compile Include="PeerColour.fs" />
     <Compile Include="Model.fs" />
     <Compile Include="DraftSlot.fs" />

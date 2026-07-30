@@ -21,14 +21,14 @@ open Yession.App
 /// randomly in the browser, so the server-rendered placeholder is left blank. The page
 /// embeds the serving session's id, so the browser can key its local doc store by
 /// session before (and without) any connection.
-let private bootstrapHtml (sessionId: SessionId) =
+let private bootstrapHtml (sessionId: SessionId) (mount: string) =
     let placeholderPeer =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
         | Error e -> failwith e
     // Seed the serving session id so the secondary identifier renders on first paint (the
     // browser re-learns it from `PeerAccepted` once connected).
-    Ssr.page sessionId { ClientModel.init placeholderPeer with Session = Some sessionId }
+    Ssr.page sessionId mount { ClientModel.init placeholderPeer with Session = Some sessionId }
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
 let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
@@ -83,13 +83,19 @@ let start
     (auth: SessionAuth.Auth option)
     (extraRoutes: (IncomingMessage -> ServerResponse -> bool) option)
     (mintPeerToken: PeerAttribution -> string)
+    // The path this session is served under (`""` at an origin root, docs/plans/09).
+    // The proxy forwards the PUBLIC path unchanged and the session strips its own prefix
+    // — the opposite contract (proxy strips, session serves at root) would make
+    // correctness depend on per-proxy rewriting behaviour that cannot be tested here.
+    (mount: string)
     (port: int)
     : Async<HttpServer * (unit -> Async<unit>)> =
-    let bootstrapHtml = bootstrapHtml sessionId
+    let bootstrapHtml = bootstrapHtml sessionId mount
     // Every accepted peer connection, so a stopping Host can drain them. Never pruned
     // mid-life (closePeerConnection resolves immediately for already-closed ones, and a
     // session hosts a bounded handful of peers).
     let connections = ResizeArray<PeerConnection> ()
+    let routeOf (req: IncomingMessage) = SessionRoute.parseUnder mount req.``method`` (pathnameOf req.url)
     let authorized (req: IncomingMessage) (url: string) (validateToken: string -> bool) =
         (match auth with
          | Some a -> a.IsAuthenticated req
@@ -112,9 +118,22 @@ let start
                     res.``end`` (lines |> List.map (fun l -> l + "\n") |> String.concat "")
                 })
 
+    // The routes this server owns, dispatched by one match over `SessionRoute` — so the
+    // paths it serves, the paths the shell emits, and the paths the browser fetches are
+    // one declaration, and a route added there fails this build until it is handled here.
+    // `ClaudeStatus`/`Claude` are the session's too but live in `extraRoutes` (defined
+    // later in compile order), so they fall through to it exactly as an unknown path does.
     let handler (req: IncomingMessage) (res: ServerResponse) =
-        match req.``method``, pathnameOf req.url with
-        | "POST", "/signal" ->
+        let handleWithExtraRoutes () =
+            let handledByExtra =
+                match extraRoutes with
+                | Some tryRoutes -> tryRoutes req res
+                | None -> false
+            if not handledByExtra then
+                res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "not found"
+        match routeOf req with
+        | Some Signal ->
             readBody req (fun body ->
                 let offerSdp = sdpField body
                 let pc = createPeerConnection "yession-process"
@@ -126,12 +145,12 @@ let start
                         res.writeHead (200, createObj [ "content-type", box "application/json" ]) |> ignore
                         res.``end`` answer
                     }))
-        | "GET", "/" ->
+        | Some Shell ->
             // A one-day cache window: the browser can reopen the app offline for up to a
             // day before it must fetch a fresh shell (local-first, tight back-compat window).
             res.writeHead (200, createObj [ "content-type", box "text/html; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
             res.``end`` bootstrapHtml
-        | "GET", "/client.js" ->
+        | Some ClientBundle ->
             // The browser client bundle, built by `build` (esbuild output).
             match readBundle () with
             | Some js ->
@@ -140,7 +159,7 @@ let start
             | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "client bundle not built (run: build)"
-        | "GET", "/app.css" ->
+        | Some AppCss ->
             // The locally built Tailwind stylesheet (no CDN); same one-day offline window.
             match readCss () with
             | Some css ->
@@ -149,13 +168,13 @@ let start
             | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "stylesheet not built (run: build)"
-        | "GET", path when path.StartsWith "/events/" ->
-            match events, System.Int32.TryParse (path.Substring "/events/".Length) with
-            | Some endpoint, (true, index) when index >= 0 -> serveChunk endpoint req req.url index res
-            | _ ->
+        | Some (Events index) ->
+            match events with
+            | Some endpoint -> serveChunk endpoint req req.url index res
+            | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                 res.``end`` "not found"
-        | "GET", "/login" ->
+        | Some Login ->
             // Begin the authorization-code + PKCE dance: 302 to the Manager's authorize
             // endpoint. The BROWSER navigates here (renavigation on a 401 from `/me`) —
             // the cached shell itself never redirects, preserving offline reopen.
@@ -182,7 +201,7 @@ let start
                             res.writeHead (503, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                             res.``end`` "session is still registering with its manager"
                     })
-        | "GET", "/callback" ->
+        | Some Callback ->
             match auth with
             | None ->
                 res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
@@ -192,16 +211,18 @@ let start
                     async {
                         match! a.HandleCallback req.url with
                         | Ok setCookie ->
+                            // `./` relative to `<mount>/callback` is `<mount>/` — the shell,
+                            // wherever this session is mounted, with no prefix to know.
                             res.writeHead (
                                 302,
-                                createObj [ "location", box "/"; "set-cookie", box setCookie; "cache-control", box "no-store" ])
+                                createObj [ "location", box "./"; "set-cookie", box setCookie; "cache-control", box "no-store" ])
                             |> ignore
                             res.``end`` ""
                         | Error (status, message) ->
                             res.writeHead (status, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                             res.``end`` message
                     })
-        | "GET", "/me" ->
+        | Some Me ->
             // The browser's probe: a valid cookie (or no auth requirement at all) mints
             // a peer token for the WebRTC `PeerHello` — cookies cannot ride the data
             // channel. The minted token CARRIES the cookie's attribution (docs/plans/07),
@@ -220,14 +241,9 @@ let start
                 | None ->
                     res.writeHead (401, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
                     res.``end`` "unauthorized"
-        | _ ->
-            let handledByExtra =
-                match extraRoutes with
-                | Some tryRoutes -> tryRoutes req res
-                | None -> false
-            if not handledByExtra then
-                res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-                res.``end`` "not found"
+        | Some ClaudeStatus
+        | Some (Claude _)
+        | None -> handleWithExtraRoutes ()
 
     let server = createServer handler
     let closeConnections () : Async<unit> =
