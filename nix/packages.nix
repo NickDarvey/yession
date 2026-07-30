@@ -108,8 +108,21 @@ let
     outputHash = "sha256-OmjxQe1sPUf2WS4Sq53pyQScARhQszVvjX80u/EgYX8=";
   };
 
+  # The npm manifests, alone. What `node_modules` IS depends on these two files and the addon —
+  # not on the F# sources and not on the version. Handing the full `src` to the derivations below
+  # made every source edit a cache miss on a multi-gigabyte tree: `nix eval` on `nodeModules.drvPath`
+  # changed when a comment was appended to app/Version.fs, so a dev shell rebuilt the whole tree
+  # after every edit (and, in a dev container, exhausted the disk). The version was the same trap
+  # one level up: with `rev` passed (flake, CI) the derivation NAME moved every commit, so CI could
+  # never reuse it either.
+  npmManifests = pkgs.runCommand "yession-npm-manifests" { } ''
+    mkdir -p "$out"
+    cp ${../package.json} "$out/package.json"
+    cp ${../package-lock.json} "$out/package-lock.json"
+  '';
+
   npmDeps = pkgs.fetchNpmDeps {
-    inherit src;
+    src = npmManifests;
     name = "yession-npm-deps";
     hash = "sha256-b9zc6a1ep1xBo3uZ3UAeqmXVZ2mLEkm7V9VfcaseFMo=";
   };
@@ -119,8 +132,11 @@ let
   # dev shell gets a COMPLETE node_modules — the native WebRTC addon included — with no npm
   # postinstall, no GitHub, and no per-file addon linking. enterShell symlinks it into place.
   nodeModules = pkgs.stdenv.mkDerivation {
-    pname = "yession-node-modules";
-    inherit version src npmDeps;
+    # No `version` and no source beyond the manifests: both would move on every commit without
+    # changing a byte of what this builds, and this is the derivation the dev shell depends on.
+    name = "yession-node-modules";
+    src = npmManifests;
+    inherit npmDeps;
     nativeBuildInputs = [ pkgs.nodejs_24 pkgs.npmHooks.npmConfigHook ];
     npmFlags = [ "--ignore-scripts" ];
     dontBuild = true;
