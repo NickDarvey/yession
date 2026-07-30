@@ -164,12 +164,18 @@ let
   # the assembled package dir and a prod-pruned node_modules for the installable to reuse.
   staged = pkgs.stdenv.mkDerivation {
     pname = "yession-staged";
-    inherit version src npmDeps;
-    nativeBuildInputs = [ pkgs.dotnet-sdk_10 pkgs.nodejs_24 pkgs.npmHooks.npmConfigHook ];
-    npmFlags = [ "--ignore-scripts" ];
+    inherit version src;
+    nativeBuildInputs = [ pkgs.dotnet-sdk_10 pkgs.nodejs_24 ];
+    # Reuse the cached tree rather than installing a second one. `src` here is the whole
+    # source — correct, because this derivation COMPILES it — but npm's tree does not depend
+    # on a line of F#, so running npmConfigHook here re-did a multi-gigabyte install on every
+    # source change. A COPY, not a symlink: the install phase prunes it with `npm prune`, and
+    # the Nix store is read-only.
     buildPhase = ''
       runHook preBuild
       ${dotnetEnv}
+      cp -a ${nodeModules}/node_modules ./node_modules
+      chmod -R u+w node_modules
       export PATH="$PWD/node_modules/.bin:$PATH"
       # NUGET_PACKAGES must be writable (restore writes lock/temp files); copy the read-only FOD.
       export NUGET_PACKAGES="$TMPDIR/nuget-packages"
