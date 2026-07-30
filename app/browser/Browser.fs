@@ -18,29 +18,63 @@ open Lit
 
 // --- Native WebRTC (non-trickle, mirroring app/WebRtc.fs) -----------------------------
 
+// Opening the data channel, as a TOTAL function: it settles with the channel, or with why it
+// could not be had. It used to resolve only on `dc.onopen`, so a signalling POST that failed
+// — or a session that simply was not there — left this promise pending forever and the shell
+// stuck on "connecting" with nothing to say and nothing to do.
+//
+// `timeoutMs` bounds the whole handshake (offer, gathering, answer, channel open); it is the
+// difference between "not connected, the session did not answer" and an eternal wait.
 [<Emit("""new Promise((resolve) => {
   const pc = new RTCPeerConnection({ iceServers: [] })
   const dc = pc.createDataChannel('session')
+  let settled = false
+  const succeed = () => { if (!settled) { settled = true; resolve({ ok: true, channel: dc, timedOut: false, detail: '' }) } }
+  const fail = (timedOut, detail) => {
+    if (settled) return
+    settled = true
+    try { pc.close() } catch {}
+    resolve({ ok: false, channel: null, timedOut, detail: String(detail) })
+  }
   let sent = false
   const send = async () => {
-    if (sent) return
+    if (sent || settled) return
     sent = true
-    const answer = await fetch($0, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: pc.localDescription.type, sdp: pc.localDescription.sdp })
-    }).then(r => r.json())
-    await pc.setRemoteDescription(answer)
+    try {
+      const reply = await fetch($0, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type: pc.localDescription.type, sdp: pc.localDescription.sdp })
+      })
+      if (!reply.ok) return fail(false, 'signalling refused: ' + reply.status)
+      await pc.setRemoteDescription(await reply.json())
+    } catch (e) { fail(false, e) }
   }
   // Non-trickle: send once gathering completes — with a settle fallback, because some
   // browsers/sandboxes never report 'complete' (mDNS candidate obfuscation can stall).
   pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') send() }
   pc.onicecandidate = (e) => { if (e.candidate === null) send() }
   setTimeout(send, 1500)
-  dc.onopen = () => resolve(dc)
-  pc.createOffer().then(o => pc.setLocalDescription(o))
+  setTimeout(() => fail(true, ''), $1)
+  dc.onopen = succeed
+  pc.createOffer().then(o => pc.setLocalDescription(o), e => fail(false, e))
 })""")>]
-let private openDataChannel (signalUrl: string) : JS.Promise<obj> = jsNative
+let private openDataChannel (signalUrl: string) (timeoutMs: int) : JS.Promise<{| ok: bool; channel: obj; timedOut: bool; detail: string |}> = jsNative
+
+/// How long a whole handshake gets before it counts as "the session did not answer". Long
+/// enough for ICE gathering on a slow machine, short enough that a dead session is reported
+/// rather than waited on.
+let private channelOpenTimeoutMs = 10000
+
+/// One attempt at the transport, shaped as the resilience policy consumes it.
+let private connectChannel (signalUrl: string) : Async<Result<obj, App.ChannelFault>> =
+    async {
+        let! reply = openDataChannel signalUrl channelOpenTimeoutMs |> Async.AwaitPromise
+        return
+            if reply.ok then Ok reply.channel
+            elif reply.timedOut then Error App.ChannelTimedOut
+            else Error (App.ChannelUnreachable reply.detail)
+    }
 
 [<Emit("$0.onmessage = (e) => $1(String(e.data))")>]
 let private onMessage (dc: obj) (handler: string -> unit) : unit = jsNative
@@ -152,8 +186,16 @@ let private toggleNav () : unit = jsNative
 // auth-less session) allows it. Distinguishes DENIED (status) from OFFLINE (reject):
 // a 401 means renavigate to /login; a network failure means stay on the cached shell
 // and local stores — offline-first, the connection simply doesn't happen.
-[<Emit("""fetch('/me', { cache: 'no-store' }).then(r => r.ok ? r.json().then(me => ({ ok: true, token: me.peerToken })) : { ok: false, token: '' })""")>]
-let private fetchMe () : JS.Promise<{| ok: bool; token: string |}> = jsNative
+// The `/me` probe, total in BOTH axes it can fail on, because the two need opposite
+// remedies: `authorized = false` means log in (the shell renavigates), while
+// `reachable = false` means the session is not there at all (the shell stays local-first and
+// says so). Collapsing them — which a thrown fetch did — turns "offline" into "log in", and a
+// login bounce against an unreachable session goes nowhere.
+[<Emit("""fetch('/me', { cache: 'no-store' }).then(
+  r => r.ok ? r.json().then(me => ({ reachable: true, authorized: true, token: me.peerToken, detail: '' }))
+            : { reachable: true, authorized: false, token: '', detail: 'HTTP ' + r.status },
+  e => ({ reachable: false, authorized: false, token: '', detail: String(e) }))""")>]
+let private fetchMe () : JS.Promise<{| reachable: bool; authorized: bool; token: string; detail: string |}> = jsNative
 
 [<Emit("window.location.assign($0)")>]
 let private navigateTo (url: string) : unit = jsNative
@@ -196,8 +238,24 @@ let private persistenceKey () : string = jsNative
 [<Emit("String(window.location.origin) + '/signal'")>]
 let private signalUrl () : string = jsNative
 
-[<Emit("fetch($0).then(r => { if (!r.ok) throw new Error('events fetch failed: ' + r.status); return r.text() })")>]
-let private fetchText (url: string) : JS.Promise<string> = jsNative
+// The event-chunk GET as a TOTAL function: the body, the status it refused with, or the
+// transport error it never got past (`status: 0` — offline, refused, DNS, TLS). It never
+// rejects, because the information a rejection destroys is exactly the information the
+// resilience policy needs to decide whether retrying could help.
+[<Emit("""fetch($0).then(
+  async r => r.ok ? { ok: true, status: r.status, detail: await r.text() } : { ok: false, status: r.status, detail: '' },
+  e => ({ ok: false, status: 0, detail: String(e) }))""")>]
+let private fetchChunk (url: string) : JS.Promise<{| ok: bool; status: int; detail: string |}> = jsNative
+
+let private httpGet : App.HttpGet =
+    fun url ->
+        async {
+            let! reply = fetchChunk url |> Async.AwaitPromise
+            return
+                if reply.ok then Ok reply.detail
+                elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
+                else Error (App.HttpStatus reply.status)
+        }
 
 [<Emit("Math.random()")>]
 let private jsRandom () : float = jsNative
@@ -500,27 +558,19 @@ let private start () =
 
         // Authorization by renavigation: probe `/me` for a peer token. 401 -> bounce
         // through `/login` (code + PKCE via the Manager) and land back on this shell,
-        // where the probe succeeds. A NETWORK failure (offline, session down) rejects
-        // the promise instead: skip connecting entirely and keep the local-first shell
-        // — IndexedDB doc + cached event chunks — read-only until a reload reconnects.
-        let! me =
-            async {
-                try
-                    let! result = fetchMe () |> Async.AwaitPromise
-                    return Some result
-                with _ ->
-                    return None
-            }
-        match me with
-        | Some probe when not probe.ok ->
+        // where the probe succeeds. A NETWORK failure (offline, session down) is a
+        // `Disconnected` with its reason, not silence: the local-first shell — IndexedDB doc
+        // plus cached event chunks — stays fully usable, and the model says why it is alone.
+        let! probe = fetchMe () |> Async.AwaitPromise
+        if not probe.reachable then
+            dispatchRef (ConnectFailedMsg (App.ChannelFault.describe (App.ChannelUnreachable probe.detail)))
+        elif not probe.authorized then
             // The peer id rides the login bounce so the Manager can witness which peer
             // signed in for this session (docs/plans/07 — peer-scoped secrets).
             navigateTo ("/login?peer_id=" + urlEncode (PeerId.value peerId))
-        | Some probe ->
+        else
             // Authenticated: the Claude panel's status is knowable now.
             refreshClaude ()
-            let! dc = openDataChannel (signalUrl ()) |> Async.AwaitPromise
-            let channel = frameChannel dc
             let hello =
                 { PeerId = peerId
                   DisplayName = displayName
@@ -529,16 +579,64 @@ let private start () =
             // history; only the growing tail chunk hits the Session Process. Availability hints
             // still arrive over the data channel. The same-origin auth cookie rides each
             // fetch, so no token in the URL (history/cache stay clean).
-            let options =
-                { App.ConnectOptions.defaults with
-                    FetchEvents = Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) "" None) }
-            let connection = App.connect options doc registry hello (fun msg -> dispatchRef msg) channel
-            connectionRef <- Some connection
+            //
+            // Both resilience policies are composed HERE, at the transport, and nowhere else:
+            // `App.connect` is handed a feed that has already spent its retries, so the read
+            // loop only ever sees a settled outcome and the application code holds no notion of
+            // retrying, backoff, or attempt counts. Interim progress is the policy's to report,
+            // which is the one thing a settled outcome cannot carry.
+            let feed =
+                App.EventFetch.overHttp httpGet "" None
+                |> Resilience.Policy.guard
+                    (App.EventFetch.policy Resilience.Policy.sleep jsRandom (fun attempt ->
+                        App.EventFetch.retrying attempt
+                        |> Option.iter (fun health -> dispatchRef (EventFeedMsg health))))
+            let options = { App.ConnectOptions.defaults with FetchEvents = Some feed }
+            let openChannel =
+                Resilience.Policy.guard
+                    (App.SessionChannel.policy Resilience.Policy.sleep jsRandom)
+                    (fun () -> connectChannel (signalUrl ()))
 
-            do! connection.Run
-        | None ->
-            // Offline: local state already rendered; nothing to connect.
-            ()
+            // The session leg, driven to a settled state and kept there. Each pass: open the
+            // channel under the policy, run the frame pump until it closes, then decide.
+            //
+            // A channel that closes AFTER the session accepted us is an ended session — a
+            // Process restart, a sleeping laptop, a network blip — and `Connection.run` has
+            // already put the model in `Reconnecting`, so honour that and come back, resuming
+            // consumption from the offset the model actually reached. A channel that closes
+            // without ever being accepted was REJECTED (a stale token): the model holds that
+            // reason and reconnecting would only be refused again, so stop. Those two cases
+            // are why this loop cannot spin — every pass either connected or ends here.
+            let rec runSession (resumeAfter: EventOffset option) =
+                async {
+                    // Announce the attempt — otherwise the pre-open window (a handshake plus
+                    // the policy's retries) reads as "disconnected". Never downgrade
+                    // `Reconnecting` though: "was connected, coming back" says strictly more.
+                    match latestModel.Connection with
+                    | Reconnecting -> ()
+                    | _ -> dispatchRef ConnectingMsg
+                    match! openChannel () with
+                    | Error fault ->
+                        dispatchRef (ConnectFailedMsg (App.ChannelFault.describe fault))
+                    | Ok dc ->
+                        let channel = frameChannel dc
+                        let connection =
+                            App.connect
+                                { options with ResumeAfter = resumeAfter }
+                                doc
+                                registry
+                                hello
+                                (fun msg -> dispatchRef msg)
+                                channel
+                        connectionRef <- Some connection
+                        do! connection.Run
+                        connectionRef <- None
+                        match latestModel.Connection with
+                        | Reconnecting -> return! runSession latestModel.EventConsumer.LastProcessedOffset
+                        | _ -> ()
+                }
+
+            do! runSession None
     }
 
 Async.StartImmediate (start ())

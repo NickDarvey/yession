@@ -224,10 +224,19 @@ let connectClient (signalUrl: string) (token: string) (id: string) (name: string
 /// Connect one full client to a host over an IN-MEMORY channel pair — the same drivers as
 /// the WebRTC path (`App.makeProgram` + `App.connect` on one end, the Host's real per-peer
 /// pump on the other via `host.Connect`), but with no WebRTC, HTTP, or native addon, so it
-/// runs in the cheap tier. Events come over frames (`FetchEvents = None`). The peer token
-/// is minted from the host — what `/me` would serve an authorized browser. Resolves once
-/// the model reaches `Connected`.
-let connectInMemoryClient (host: Host.SessionHost) (id: string) (name: string) : Async<Client> =
+/// runs in the cheap tier. The peer token is minted from the host — what `/me` would serve
+/// an authorized browser. Resolves once the model reaches `Connected`.
+///
+/// The options are built FROM the client's dispatch, mirroring the browser's `dispatchRef`:
+/// a transport composed against dispatch (the event feed's resilience policy reports its
+/// interim health that way) is therefore wired before the first frame moves, with no window
+/// in which reports are dropped.
+let connectInMemoryClientVia
+    (makeOptions: (ClientMsg -> unit) -> App.ConnectOptions)
+    (host: Host.SessionHost)
+    (id: string)
+    (name: string)
+    : Async<Client> =
     async {
         let clientEnd, serverEnd = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
         // The Host drives the server end exactly as it would a WebRTC connection.
@@ -237,11 +246,20 @@ let connectInMemoryClient (host: Host.SessionHost) (id: string) (name: string) :
         let registry = BodyRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = host.MintPeerToken () }
-        let connection = App.connect App.ConnectOptions.defaults doc registry hello (user >> runner.Dispatch) clientEnd
+        let dispatch = user >> runner.Dispatch
+        let connection = App.connect (makeOptions dispatch) doc registry hello dispatch clientEnd
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
         return { Runner = runner; Connection = connection; Registry = registry; Channel = clientEnd; Doc = doc; Hello = hello }
     }
+
+/// `connectInMemoryClientVia` with options that do not depend on dispatch.
+let connectInMemoryClientWith (options: App.ConnectOptions) : Host.SessionHost -> string -> string -> Async<Client> =
+    connectInMemoryClientVia (fun _ -> options)
+
+/// `connectInMemoryClientWith` under the default options (events over frames).
+let connectInMemoryClient : Host.SessionHost -> string -> string -> Async<Client> =
+    connectInMemoryClientWith App.ConnectOptions.defaults
 
 /// Reconnect an existing client on a fresh channel, resuming event consumption from its
 /// model's processed offset (E2E-4's catch-up path). Small pages force multi-page reads.

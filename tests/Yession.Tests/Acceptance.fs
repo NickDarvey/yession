@@ -48,7 +48,8 @@ let private representativeModel : ClientModel =
       EventConsumer =
         { LastProcessedOffset = Some (EventOffset.create 5L |> expect)
           LatestKnownOffset = Some (EventOffset.create 7L |> expect)
-          IsCatchingUp = true }
+          IsCatchingUp = true
+          Feed = FeedLive }
       Agent = { ActiveTurn = Some turnId }
       Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } } } ]
       Environment = EnvironmentNotStarted

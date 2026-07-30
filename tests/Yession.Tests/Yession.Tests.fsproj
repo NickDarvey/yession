@@ -35,6 +35,7 @@
     <Compile Include="DockerIntegration.fs" />
     <Compile Include="Phase3.fs" />
     <Compile Include="EventsHttp.fs" />
+    <Compile Include="Resilience.fs" />
     <Compile Include="Oidc.fs" />
     <Compile Include="Phase4.fs" />
     <Compile Include="Hedgehog.fs" />

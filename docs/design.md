@@ -125,6 +125,23 @@ agent progress notifications (hints only)
 HTTP is allowed only for: serving the web app, initial local bootstrap, and temporary
 signalling. **HTTP is not the session API.**
 
+One read path is the exception the rule permits, and it is read-only: the event log is
+also served as immutable fixed-size chunks (`GET /events/{n}`) so the browser's own HTTP
+cache becomes the client-side event store. That makes the durable history feed a second,
+independently failing leg, and it is treated as one:
+
+- a read is `EventOffset option -> Async<Result<EventPage, FeedFault>>`, so a dead feed is
+  distinguishable from an empty one — never an empty page standing in for a failure;
+- transient-fault handling is a `Resilience.Policy` (`Yession.Domain/Resilience.fs`) —
+  retry, backoff, and jitter as values, with the clock injected — composed *with the
+  transport* at the application boundary (`app/browser/Browser.fs`), per "composition at
+  the top". `App.connect` receives a feed that has already settled, so no application code
+  holds a notion of retrying;
+- the feed's health (`FeedHealth`) is model state, rendered as a status and a banner. A
+  stalled feed disables nothing: collaborative state is CRDT state in the local doc, so
+  reading, writing, and sending continue — per "local first", a lost history feed costs
+  history and nothing else.
+
 ---
 
 ## 3. Authority model (Phase 2)

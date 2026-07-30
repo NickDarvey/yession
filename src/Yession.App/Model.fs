@@ -8,18 +8,40 @@ open Yession.Domain
 /// and the agent view state. See docs/design.md §2.1, §2.3 and docs/plans/00-init/04-*.
 
 type ConnectionState =
-    | Disconnected
+    /// Not connected and not trying. Carries WHY whenever the client knows — a rejected
+    /// token, a session that never answered — because a bare "disconnected" is the same
+    /// dead end the event feed used to be: a true statement that helps nobody.
+    | Disconnected of reason: string option
     | Connecting
     | Connected
     | Reconnecting
 
 type PeerState = { PeerId : PeerId; DisplayName : string }
 
+/// The durable event feed's health — the leg that carries HISTORY, which in the browser is
+/// HTTP (immutable chunks) rather than the data channel. Deliberately separate from
+/// `ConnectionState`: either leg can be down while the other works, and neither takes the
+/// client with it. Collaborative state is CRDT state in a local doc, so a dead feed costs
+/// history, not the ability to read, write, or send (docs/design.md §1, local-first).
+type FeedHealth =
+    /// The last read succeeded — history is current.
+    | FeedLive
+    /// A read failed and the resilience policy is still trying. `attempt` is how many have
+    /// failed so far; `reason` is the fault, for the degraded banner.
+    | FeedRetrying of attempt: int * reason: string
+    /// The policy gave up. History is whatever is already local, and stays that way until
+    /// the next availability hint or reconnect re-arms the read — editing keeps working.
+    | FeedStalled of reason: string
+
 /// How far the client has consumed the event log versus what it knows exists.
 type EventConsumerState =
     { LastProcessedOffset : EventOffset option
       LatestKnownOffset   : EventOffset option
-      IsCatchingUp        : bool }
+      IsCatchingUp        : bool
+      /// Whether reads are getting through at all. `IsCatchingUp` says there is more to
+      /// read; this says whether reading is possible — the distinction the old design had
+      /// no way to express, because a failed fetch was reported as an empty final page.
+      Feed                : FeedHealth }
 
 type AgentViewState = { ActiveTurn : AgentTurnId option }
 
@@ -79,10 +101,19 @@ type ClientMsg =
     | ConnectingMsg
     | ConnectedMsg of PeerAcceptedPayload
     | RejectedMsg of reason: string
+    /// The transport could not be opened at all — the session never answered, after the
+    /// connect policy spent its retries. Distinct from `RejectedMsg` (which is the session
+    /// refusing a peer it did hear from) because the remedy differs: wait, versus re-auth.
+    | ConnectFailedMsg of reason: string
     | EventsAvailableMsg of latestOffset: EventOffset
     /// A read-only event page from the Session Process (Step 07): the conversation is
     /// built by folding pages through the shared projection; offsets track progress.
     | EventsPageMsg of EventPage<SessionEvent>
+    /// The event feed's health changed: a read failed and is being retried (reported by the
+    /// resilience policy composed with the transport), or it failed for good (reported by
+    /// the read loop, which is the one place that knows a read is over). A successful page
+    /// needs no message — `EventsPageMsg` itself proves the feed is live.
+    | EventFeedMsg of FeedHealth
     | DisconnectedMsg
     /// Edit the session title (collaborative text, merges like a draft body). A pure CRDT
     /// write; the Session Process reports the settled title to the Manager for the list.
@@ -125,14 +156,16 @@ module ClientModel =
     /// The model for a freshly loaded client: disconnected, nothing consumed, idle.
     let init (peer: PeerState) : ClientModel =
         { Peer = peer
-          Connection = Disconnected
+          Connection = Disconnected None
           Session = None
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
           EventConsumer =
             { LastProcessedOffset = None
               LatestKnownOffset = None
-              IsCatchingUp = false }
+              IsCatchingUp = false
+              // Nothing has failed yet; the first read decides.
+              Feed = FeedLive }
           Agent = { ActiveTurn = None }
           Presence = Map.empty
           Environment = EnvironmentNotStarted
@@ -161,8 +194,10 @@ module ClientModel =
                 Session = Some accepted.SessionId
                 Peer = { model.Peer with DisplayName = accepted.AssignedDisplayName }
                 EventConsumer = withLatestKnown accepted.LatestOffset model.EventConsumer }
-        | RejectedMsg _ ->
-            { model with Connection = Disconnected }
+        | RejectedMsg reason ->
+            { model with Connection = Disconnected (Some reason) }
+        | ConnectFailedMsg reason ->
+            { model with Connection = Disconnected (Some reason) }
         | EventsAvailableMsg latest ->
             { model with EventConsumer = withLatestKnown (Some latest) model.EventConsumer }
         | EventsPageMsg page ->
@@ -205,7 +240,12 @@ module ClientModel =
                 EventConsumer =
                     { LastProcessedOffset = highWater
                       LatestKnownOffset = latestKnown
-                      IsCatchingUp = isBehind highWater latestKnown } }
+                      IsCatchingUp = isBehind highWater latestKnown
+                      // A page arrived, so the feed is live by construction — recovery from
+                      // a stall needs no separate signal.
+                      Feed = FeedLive } }
+        | EventFeedMsg health ->
+            { model with EventConsumer = { model.EventConsumer with Feed = health } }
         | DisconnectedMsg ->
             { model with Connection = Reconnecting }
         | EditTitleMsg title ->
