@@ -159,6 +159,21 @@ discovers it in production. Items are roughly ordered by how much they matter.
 - **A session served offline has no app shell**: IndexedDB restores state instantly
   once the page loads, but the page itself still needs the Session Process (no
   service worker).
+- **The history feed degrades explicitly, and only history degrades.** The event feed is
+  the one leg that is HTTP rather than the data channel, so it fails on its own — and it
+  used to fail silently: a rejected fetch became an empty final page, which the read loop
+  read as "nothing new yet" and re-requested immediately, forever, with nothing in the
+  model to show it. Drafts, title, and presence kept syncing over WebRTC throughout, so
+  the only symptom was a timeline that never filled. Now a read returns
+  `Result<EventPage, FeedFault>`; a resilience policy (`Yession.Domain.Resilience`,
+  composed with the transport in `app/browser/Browser.fs`) retries only transient faults
+  — five times, exponentially backed off from 250ms to a 10s ceiling, jittered so a
+  Process restart does not bring every peer back in lockstep — and a settled failure
+  parks the loop and surfaces as `FeedHealth`: a sidebar line, a banner, and a header
+  status. Nothing is disabled while it is down, because writing is CRDT state in the
+  local doc. What is still missing is a *manual* retry affordance: recovery waits for the
+  next availability hint or reconnect, which a peer with a permanently rejected token
+  (401) will never get, so that peer must reload to re-authorize.
 
 ## Browser client
 

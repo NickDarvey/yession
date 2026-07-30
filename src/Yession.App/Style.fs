@@ -127,6 +127,11 @@ module Style =
     let headerTitle = "ml-8"
     let headerStatus = "ml-auto shrink-0 pb-1"
 
+    /// The degradation strip between the header and the timeline: a hairline notice, never a
+    /// modal and never a blocker — the client below it stays fully usable.
+    let degradedBanner =
+        "shrink-0 flex items-baseline gap-3 px-8 py-2 border-b border-hair bg-surface max-md:px-4"
+
     // --- Editable session title ------------------------------------------------------------
 
     /// The title block: the editable heading over its dim secondary id. `relative` anchors

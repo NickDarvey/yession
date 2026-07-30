@@ -32,6 +32,13 @@ module Dom =
         let connection = "data-connection"
         let displayName = "data-display-name"
         let catchUp = "data-catch-up"
+        /// Why the client is not connected, when it knows; absent otherwise.
+        let connectionReason = "data-connection-reason"
+        /// The durable event feed's health (sidebar), carrying a `Text.feed*` token.
+        let feed = "data-feed"
+        /// The one degradation strip over the timeline, carrying the token of whichever leg
+        /// is down (`Text.degraded*` or `Text.feed*`); absent when everything is healthy.
+        let degraded = "data-degraded"
         let lastProcessedOffset = "data-last-processed-offset"
         let latestKnownOffset = "data-latest-known-offset"
         let environment = "data-environment"
@@ -90,6 +97,17 @@ module Dom =
         // Catch-up.
         let catchingUp = "Catching up"
         let upToDate = "Up to date"
+        // Event-feed health tokens (the HTTP leg that carries history). `IsCatchingUp` says
+        // there is more to read; these say whether reading is getting through.
+        let feedLive = "live"
+        let feedRetrying = "retrying"
+        let feedPaused = "paused"
+        // Session-leg tokens for the same strip: the transport itself, not its history feed.
+        let degradedOffline = "offline"
+        let degradedReconnecting = "reconnecting"
+        /// What every degraded state promises: this is a local-first client, so a lost leg
+        /// costs sync, not the ability to work.
+        let localFallback = "You can keep writing — everything is saved locally and syncs when the session is back."
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.

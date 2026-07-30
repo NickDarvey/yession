@@ -65,7 +65,7 @@ module View =
 
     let private connectionLabel =
         function
-        | Disconnected -> Dom.Text.disconnected
+        | Disconnected _ -> Dom.Text.disconnected
         | Connecting -> Dom.Text.connecting
         | Connected -> Dom.Text.connected
         | Reconnecting -> Dom.Text.reconnecting
@@ -77,6 +77,12 @@ module View =
 
     let private catchUpText (consumer: EventConsumerState) =
         if consumer.IsCatchingUp then Dom.Text.catchingUp else Dom.Text.upToDate
+
+    let private feedToken =
+        function
+        | FeedLive -> Dom.Text.feedLive
+        | FeedRetrying _ -> Dom.Text.feedRetrying
+        | FeedStalled _ -> Dom.Text.feedPaused
 
     let private authorLabel =
         function
@@ -122,10 +128,28 @@ module View =
     let private connectionSection (model: ClientModel) : TemplateResult =
         let consumer = model.EventConsumer
         let catchUpClass = if consumer.IsCatchingUp then Style.statusRun else Style.statusOk
+        // The two legs are reported separately because they fail separately: `data-connection`
+        // is the data channel (collaborative state), `data-feed` is the HTTP history feed.
+        let feedClass, feedInner =
+            match consumer.Feed with
+            | FeedLive -> Style.statusOk, html $"""history live"""
+            | FeedRetrying (attempt, reason) ->
+                Style.statusRun,
+                html $"""<span class="{Style.statusDotPulse}"></span>history retrying · {reason} ({attempt})"""
+            | FeedStalled reason -> Style.statusErr, html $"""history paused · {reason}"""
+        // A reason is only ever known for a settled disconnection; `data-connection` keeps its
+        // exact one-word token so the reason is additive, never a rewrite of the status.
+        let connectionReason =
+            match model.Connection with
+            | Disconnected (Some reason) ->
+                html $"""<span class="{Style.small}" data-connection-reason>{reason}</span>"""
+            | _ -> Lit.nothing
         html $"""
             <section class="{Style.sideSectionFirst}">
               <span class="{Style.body}" data-connection>{connectionLabel model.Connection}</span>
+              {connectionReason}
               <span class="{catchUpClass}" data-catch-up>{catchUpText consumer}</span>
+              <span class="{feedClass}" data-feed="{feedToken consumer.Feed}">{feedInner}</span>
               <span class="{Style.label} tabular-nums">processed <b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> · latest <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>
             </section>"""
 
@@ -277,17 +301,58 @@ module View =
 
     // --- Conversation column ------------------------------------------------------------
 
+    /// ONE degradation strip over the timeline: whichever leg is down, said once, with what
+    /// still works. Nothing here disables anything below it — the composer, the queue, and the
+    /// title are CRDT state in a local doc, not reads off the network.
+    let private degradedBanner (model: ClientModel) : TemplateResult =
+        let strip (token: string) (status: TemplateResult) (detail: string) =
+            html $"""
+                <section class="{Style.degradedBanner}" data-degraded="{token}">
+                  {status}
+                  <span class="{Style.small}">{detail}</span>
+                </section>"""
+        match model.Connection, model.EventConsumer.Feed with
+        // The session leg subsumes the history leg: a Process that cannot be reached cannot
+        // serve its feed either, and one strip is the honest report of one problem.
+        | Disconnected (Some reason), _ ->
+            strip
+                Dom.Text.degradedOffline
+                (html $"""<span class="{Style.statusErr}">not connected</span>""")
+                (reason + " · " + Dom.Text.localFallback)
+        | Reconnecting, _ ->
+            strip
+                Dom.Text.degradedReconnecting
+                (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>""")
+                Dom.Text.localFallback
+        | _, FeedRetrying (attempt, reason) ->
+            strip
+                Dom.Text.feedRetrying
+                (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying</span>""")
+                (sprintf "%s · attempt %d · %s" reason attempt Dom.Text.localFallback)
+        | _, FeedStalled reason ->
+            strip
+                Dom.Text.feedPaused
+                (html $"""<span class="{Style.statusErr}">history paused</span>""")
+                (reason + " · " + Dom.Text.localFallback)
+        | _, FeedLive -> Lit.nothing
+
     let private headerStatus (model: ClientModel) : TemplateResult =
-        match model.Connection with
-        | Connected when model.EventConsumer.IsCatchingUp ->
+        // A stalled feed outranks the connection line: "up to date" would be a lie while
+        // history is not arriving, even though the data channel is perfectly healthy.
+        match model.EventConsumer.Feed, model.Connection with
+        | FeedStalled _, _ ->
+            html $"""<span class="{Style.cls [ Style.statusErr; Style.headerStatus ]}">history paused</span>"""
+        | FeedRetrying _, _ ->
+            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>history retrying</span>"""
+        | FeedLive, Connected when model.EventConsumer.IsCatchingUp ->
             html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>catching up</span>"""
-        | Connected ->
+        | FeedLive, Connected ->
             html $"""<span class="{Style.cls [ Style.statusOk; Style.headerStatus ]}"><span class="{Style.statusDot}"></span>up to date</span>"""
-        | Connecting ->
+        | FeedLive, Connecting ->
             html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>connecting</span>"""
-        | Reconnecting ->
+        | FeedLive, Reconnecting ->
             html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>"""
-        | Disconnected ->
+        | FeedLive, Disconnected _ ->
             html $"""<span class="{Style.cls [ Style.statusFaint; Style.headerStatus ]}">disconnected</span>"""
 
     /// The `(selectionStart, selectionEnd)` of the event's target input, or `None`. Read live
@@ -437,6 +502,7 @@ module View =
             {sidebar actions model}
             <div class="{Style.mainColumn}">
               {header actions dispatch model}
+              {degradedBanner model}
               {conversation model.Conversation}
               {agentStrip actions model.Agent}
               {noAgentStrip actions model.Claude}

@@ -61,6 +61,47 @@ module App =
           /// Session Process relays it to other peers and never persists it.
           ReportPresence : Focus option -> unit }
 
+    /// The platform's HTTP GET, as a TOTAL function: the body, the status it refused with,
+    /// or the transport error it never got past. Totality is the whole point — the old port
+    /// threw, and a thrown fetch was indistinguishable from "the log has nothing new".
+    type HttpFailure =
+        | HttpStatus of status: int
+        | HttpUnreachable of detail: string
+
+    type HttpGet = string -> Async<Result<string, HttpFailure>>
+
+    /// Why an event-feed read failed. The cases exist to be classified: a refused
+    /// connection may well come back, an unauthorized read needs a fresh login, and a chunk
+    /// that does not decode is corruption. Retrying helps exactly one of those.
+    type FeedFault =
+        | FeedUnreachable of detail: string
+        | FeedRefused of status: int
+        | FeedCorrupt of detail: string
+
+    module FeedFault =
+
+        /// Is retrying capable of helping? (Polly's "handle" clause, as a total function.)
+        let isTransient =
+            function
+            | FeedUnreachable _ -> true
+            // 5xx is a Session Process in trouble; 408/429 are it asking to be left alone
+            // briefly. Every other status is a decision, not a hiccup.
+            | FeedRefused status -> status >= 500 || status = 408 || status = 429
+            | FeedCorrupt _ -> false
+
+        /// A short reason, for the degraded feed's line in the UI.
+        let describe =
+            function
+            | FeedUnreachable detail -> if detail = "" then "unreachable" else detail
+            | FeedRefused status when status = 401 || status = 403 -> "not authorized"
+            | FeedRefused status -> sprintf "HTTP %d" status
+            | FeedCorrupt detail -> sprintf "corrupt chunk: %s" detail
+
+    /// Reading event pages over something other than frames: the browser's HTTP chunk feed.
+    /// Failure is in the type, so the read loop can tell a dead feed from an empty one — and
+    /// so a resilience policy can be composed onto it without either end knowing.
+    type EventFeed = EventOffset option -> Async<Result<EventPage<SessionEvent>, FeedFault>>
+
     /// How a connection consumes the event log (Step 07).
     type ConnectOptions =
         { /// Resume consumption after this offset (the model's `LastProcessedOffset`
@@ -68,35 +109,35 @@ module App =
           ResumeAfter : EventOffset option
           /// Events per `ReadEventsAfter` request.
           PageSize : int
-          /// When given, event pages are fetched through this function instead of
+          /// When given, event pages are fetched through this feed instead of
           /// `ReadEventsAfter` frames — the browser passes its HTTP chunk fetcher here
           /// so the browser cache serves history (immutable full chunks); pure
           /// data-channel peers leave it `None` and read over frames.
-          FetchEvents : (EventOffset option -> Async<EventPage<SessionEvent>>) option }
+          FetchEvents : EventFeed option }
 
     module ConnectOptions =
         let defaults : ConnectOptions = { ResumeAfter = None; PageSize = 100; FetchEvents = None }
 
-    /// The HTTP event fetcher for `ConnectOptions.FetchEvents`: translates "events
-    /// after offset X" into the Session Process's immutable-chunk URL scheme
-    /// (`/events/{n}`) and decodes the JSONL envelopes. Because full chunks are served
-    /// immutable, an HTTP cache in front of `getText` (the browser's) makes history
-    /// replay local; only the growing tail chunk hits the network.
+    /// The HTTP event feed for `ConnectOptions.FetchEvents`: translates "events after
+    /// offset X" into the Session Process's immutable-chunk URL scheme (`/events/{n}`) and
+    /// decodes the JSONL envelopes. Because full chunks are served immutable, an HTTP cache
+    /// in front of `get` (the browser's) makes history replay local; only the growing tail
+    /// chunk hits the network. Also home to the shipped resilience policy for that feed —
+    /// the policy is a value here so the composition site is one line and the TEST runs the
+    /// same policy that ships.
     module EventFetch =
 
-        /// Build a fetcher over the platform's HTTP GET (`getText` must fail on
-        /// non-success statuses). `urlOf` resolves a route for this platform: a browser
-        /// passes `SessionRoute.relative` and lets `<base href>` do the rest, a Node
-        /// client prefixes the session's absolute address. `token` = a session-minted peer
-        /// token appended as `?token=` — the cookie-less path (Node clients); the browser
-        /// passes None and rides its same-origin auth cookie. A transport failure yields
-        /// an empty final page so the read loop re-arms on the next availability hint
-        /// instead of wedging; a malformed line is real corruption and fails loudly.
-        let overHttp
-            (getText: string -> Async<string>)
-            (urlOf: SessionRoute -> string)
-            (token: string option)
-            : EventOffset option -> Async<EventPage<SessionEvent>> =
+        /// Build a feed over the platform's HTTP GET. `urlOf` resolves a route for this
+        /// platform: a browser passes `SessionRoute.relative` and lets `<base href>` do the
+        /// rest, a Node client prefixes the session's absolute address. `token` = a
+        /// session-minted peer token appended as `?token=` — the cookie-less path (Node
+        /// clients); the browser passes None and rides its same-origin auth cookie.
+        ///
+        /// Every failure is a `FeedFault`, never a fabricated page and never an exception:
+        /// a transport error is `FeedUnreachable`, a refusal keeps its status (so 401 and
+        /// 503 can be told apart), and a line that will not decode is `FeedCorrupt`. This
+        /// function does not retry — `Resilience.Policy.guard` does, wrapped around it.
+        let overHttp (get: HttpGet) (urlOf: SessionRoute -> string) (token: string option) : EventFeed =
             fun after ->
                 async {
                     let nextOffset =
@@ -108,36 +149,108 @@ module App =
                         |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
                         |> Option.defaultValue ""
                     let url = urlOf (Events (EventChunk.indexOf nextOffset)) + tokenSuffix
-                    let! fetched =
-                        async {
-                            try
-                                let! text = getText url
-                                return Some text
-                            with _ ->
-                                return None
-                        }
-                    match fetched with
-                    | None -> return { Events = []; LastOffset = None; IsEnd = true }
-                    | Some text ->
+                    match! get url with
+                    | Error (HttpUnreachable detail) -> return Error (FeedUnreachable detail)
+                    | Error (HttpStatus status) -> return Error (FeedRefused status)
+                    | Ok text ->
                         let lines = text.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
-                        let fresh =
-                            lines
-                            |> Array.map (fun line ->
+                        // Stop at the FIRST line that will not decode: a partially decoded
+                        // chunk is not a page, it is a guess.
+                        let rec decode remaining acc =
+                            match remaining with
+                            | [] -> Ok (List.rev acc)
+                            | line :: rest ->
                                 match Codec.fromString Codec.sessionEventEnvelope line with
-                                | Ok envelope -> envelope
-                                | Error e -> failwithf "event chunk decode failed: %s" e)
-                            |> Array.filter (fun e ->
-                                match after with
-                                | Some o -> EventOffset.value e.Offset > EventOffset.value o
-                                | None -> true)
-                            |> List.ofArray
-                        return
-                            { Events = fresh
-                              LastOffset = fresh |> List.tryLast |> Option.map (fun e -> e.Offset)
-                              // A full chunk means more may exist beyond it; a partial
-                              // chunk IS the log's current tail.
-                              IsEnd = Array.length lines < EventChunk.size }
+                                | Ok envelope -> decode rest (envelope :: acc)
+                                | Error e -> Error (FeedCorrupt e)
+                        match decode (List.ofArray lines) [] with
+                        | Error fault -> return Error fault
+                        | Ok envelopes ->
+                            let fresh =
+                                envelopes
+                                |> List.filter (fun e ->
+                                    match after with
+                                    | Some o -> EventOffset.value e.Offset > EventOffset.value o
+                                    | None -> true)
+                            return
+                                Ok
+                                    { Events = fresh
+                                      LastOffset = fresh |> List.tryLast |> Option.map (fun e -> e.Offset)
+                                      // A full chunk means more may exist beyond it; a partial
+                                      // chunk IS the log's current tail.
+                                      IsEnd = Array.length lines < EventChunk.size }
                 }
+
+        /// The shipped resilience policy for the HTTP feed: five retries, exponentially
+        /// backed off from 250ms with a 10s ceiling, jittered by up to half so a Session
+        /// Process restart does not bring every peer back in lockstep, and applied only to
+        /// faults retrying can fix. `sleep` and `random` are parameters so the policy a test
+        /// drives is the policy that ships — the schedule is fixed here, the clock is not.
+        let policy
+            (sleep: System.TimeSpan -> Async<unit>)
+            (random: unit -> float)
+            (observe: Resilience.Attempt<FeedFault> -> unit)
+            : Resilience.Policy<FeedFault> =
+            { Schedule =
+                Resilience.Schedule.exponential
+                    (System.TimeSpan.FromMilliseconds 250.0)
+                    2.0
+                    (System.TimeSpan.FromSeconds 10.0)
+                    5
+                |> Resilience.Schedule.jittered 0.5 random
+              Retryable = FeedFault.isTransient
+              Sleep = sleep
+              Observe = observe }
+
+        /// The health a failed attempt implies WHILE the policy is still trying. A final
+        /// failure is deliberately absent here: that reaches the model from the read loop,
+        /// the one place that knows the read is over — so the two never race to describe the
+        /// same fact. Composition site: `policy … (retrying >> Option.iter (EventFeedMsg >> dispatch))`.
+        let retrying (attempt: Resilience.Attempt<FeedFault>) : FeedHealth option =
+            attempt.Retrying
+            |> Option.map (fun _ -> FeedRetrying (attempt.Number, FeedFault.describe attempt.Error))
+
+    /// Opening the session transport. The browser's WebRTC handshake is a promise that used
+    /// to settle ONLY on success, so a session that never answered left the shell in
+    /// `Connecting` forever — the same silent dead end the event feed had, one leg over. As a
+    /// total function it either yields a channel or says why not.
+    type ChannelFault =
+        | ChannelUnreachable of detail: string
+        | ChannelTimedOut
+
+    module ChannelFault =
+
+        let describe =
+            function
+            | ChannelUnreachable detail -> if detail = "" then "session unreachable" else detail
+            | ChannelTimedOut -> "the session did not answer"
+
+    module SessionChannel =
+
+        /// The shipped policy for opening the transport: four retries, exponentially backed
+        /// off from 500ms to a 15s ceiling, jittered. EVERY fault is retryable here, and that
+        /// is not laziness — the only faults this port can produce mean "the session is not
+        /// there yet", and a Session Process that is restarting comes back. Authorization is
+        /// settled before this point (`/me`) and peer admission after it (the hello
+        /// handshake), so neither is in scope for a retry decision.
+        ///
+        /// Nothing observes the attempts: while they run the model is `Connecting`, which is
+        /// the whole truth. Interim reporting earns its place on the feed, where the
+        /// alternative is a timeline that silently stops filling; here it would be noise.
+        let policy
+            (sleep: System.TimeSpan -> Async<unit>)
+            (random: unit -> float)
+            : Resilience.Policy<ChannelFault> =
+            { Schedule =
+                Resilience.Schedule.exponential
+                    (System.TimeSpan.FromMilliseconds 500.0)
+                    2.0
+                    (System.TimeSpan.FromSeconds 15.0)
+                    4
+                |> Resilience.Schedule.jittered 0.5 random
+              Retryable = fun _ -> true
+              Sleep = sleep
+              Observe = ignore }
 
     /// Wire a connected channel to the client's doc and the event log: locally-originated
     /// doc updates (the Ylmish binding's writes) are sent as `State` frames, inbound
@@ -148,8 +261,10 @@ module App =
     /// accepted handshake's latest offset) only trigger `ReadEventsAfter` requests; the
     /// returned pages are the source of truth and are folded into the model as
     /// `EventsPageMsg`. One read is in flight at a time; a non-final page immediately
-    /// requests the next. The doc listener is registered before the pump starts so no
-    /// local update can be missed.
+    /// requests the next. A read that FAILS (only possible over a `FetchEvents` feed, which
+    /// has already exhausted its resilience policy) parks the loop and reports
+    /// `FeedStalled` — it never masquerades as an empty page. The doc listener is registered
+    /// before the pump starts so no local update can be missed.
     let connect
         (options: ConnectOptions)
         (doc: Y.Doc)
@@ -185,8 +300,9 @@ module App =
             | Some fetch ->
                 Async.StartImmediate (
                     async {
-                        let! page = fetch lastProcessed
-                        onEventsPage requestId page
+                        match! fetch lastProcessed with
+                        | Ok page -> onEventsPage requestId page
+                        | Error fault -> onFeedFault requestId fault
                     })
             | None ->
                 Async.StartImmediate (channel.Send (EventLog (ReadEventsAfter (requestId, lastProcessed, options.PageSize))))
@@ -202,6 +318,21 @@ module App =
             // A non-final page means more events already exist beyond this one.
             if not page.IsEnd && Option.isNone readInFlight then request ()
             else requestIfBehind ()
+
+        and onFeedFault (requestId: RequestId) (fault: FeedFault) =
+            if readInFlight = Some requestId then readInFlight <- None
+            // The feed's policy has already spent its retries by the time this is reached, so
+            // do NOT re-request here: park, and re-arm on the next availability hint or
+            // reconnect. The read position is untouched, so the re-arm resumes exactly where
+            // consumption stopped.
+            //
+            // This is the seam that used to fail silently. A failed fetch became an empty
+            // FINAL page, which advanced nothing; `behind ()` therefore stayed true and the
+            // loop re-requested immediately — an unbounded spin, one request per round trip,
+            // with no log line and nothing in the model. Drafts, title, and presence kept
+            // syncing over the data channel the whole time, so the only symptom was a
+            // timeline that never filled.
+            dispatch (EventFeedMsg (FeedStalled (FeedFault.describe fault)))
 
         let dispatchAndConsume (msg: ClientMsg) =
             dispatch msg
@@ -259,3 +390,62 @@ module App =
                 // and colour the caret; the Session Process relays it to other peers.
                 Async.StartImmediate (
                     channel.Send (Presence { PeerId = hello.PeerId; DisplayName = hello.DisplayName; Focus = focus })) }
+
+    /// The session leg's lifecycle: open a transport, serve one session over it, and decide
+    /// whether to come back. The outermost layer of the client, and the last one that was only
+    /// reachable through a browser — its rules are extracted here so the browser supplies
+    /// WebRTC and Lit, tests supply in-memory channels, and the RULES live in one place either
+    /// can drive.
+    module SessionLifecycle =
+
+        /// Everything the lifecycle needs from outside itself. Four functions and no state of
+        /// its own — deliberately NOT the model: reading `Connection` the instant `Serve`
+        /// returns races the driver's own `DisconnectedMsg`, so the lifecycle watches the
+        /// messages it routes instead of the state they will eventually produce.
+        type Ports<'channel> =
+            { /// Acquire a transport. Already wrapped in a resilience policy at the composition
+              /// site, so an `Error` here is SETTLED — the lifecycle's job is to report it,
+              /// never to try again in a little while.
+              Open : unit -> Async<Result<'channel, ChannelFault>>
+              /// Run one session to completion over the channel, resuming event consumption
+              /// after the given offset and routing every message through the supplied
+              /// dispatch. Returns when the channel closes.
+              Serve : EventOffset option -> (ClientMsg -> unit) -> 'channel -> Async<unit>
+              /// How far event consumption has got — where a reconnect resumes from.
+              ReadPosition : unit -> EventOffset option
+              /// The lifecycle's own reporting.
+              Dispatch : ClientMsg -> unit }
+
+        /// Drive the session leg to a settled state and keep it there.
+        ///
+        /// A channel that closes after the session was ACCEPTED is an ended session — a
+        /// Process restart, a sleeping laptop, a network blip — so come back, resuming
+        /// consumption from where the read position got to. A channel that closes without ever
+        /// being accepted was refused (a stale token); the model holds that reason and
+        /// reconnecting would only be refused again, so stop.
+        ///
+        /// Those two cases are the whole design, and why this cannot spin: only an accepted
+        /// session earns another attempt, and every other outcome ends here.
+        let run (ports: Ports<'channel>) : Async<unit> =
+            let rec attempt (isFirst: bool) (resumeAfter: EventOffset option) =
+                async {
+                    // Announce the FIRST attempt: until a channel exists the model would read
+                    // `Disconnected`, and opening one costs a handshake plus whatever retries
+                    // the policy spends. A reconnect needs no announcement — `Reconnecting` is
+                    // already the truer word, and the connection driver says `Connecting`
+                    // itself the moment a channel is up.
+                    if isFirst then ports.Dispatch ConnectingMsg
+                    match! ports.Open () with
+                    | Error fault -> ports.Dispatch (ConnectFailedMsg (ChannelFault.describe fault))
+                    | Ok channel ->
+                        // Acceptance is learned from the message that carries it, as it passes.
+                        let mutable accepted = false
+                        let observing msg =
+                            match msg with
+                            | ConnectedMsg _ -> accepted <- true
+                            | _ -> ()
+                            ports.Dispatch msg
+                        do! ports.Serve resumeAfter observing channel
+                        if accepted then return! attempt false (ports.ReadPosition ())
+                }
+            attempt true None

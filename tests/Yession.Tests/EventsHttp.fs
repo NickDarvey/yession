@@ -25,8 +25,23 @@ type private HttpReply =
 [<Emit("fetch($0).then(async r => ({ status: r.status, cacheControl: r.headers.get('cache-control') || '', body: await r.text() }))")>]
 let private httpGet (url: string) : JS.Promise<HttpReply> = Fable.Core.Util.jsNative
 
-[<Emit("fetch($0).then(r => { if (!r.ok) throw new Error('events fetch failed: ' + r.status); return r.text() })")>]
-let private fetchText (url: string) : JS.Promise<string> = Fable.Core.Util.jsNative
+// The chunk GET shaped as `App.HttpGet` is — total, with the status on a refusal. Identical
+// to the browser's port (app/browser/Browser.fs); failure classification is covered in
+// Resilience.fs, so here it only has to be the real thing.
+[<Emit("""fetch($0).then(
+  async r => r.ok ? { ok: true, status: r.status, detail: await r.text() } : { ok: false, status: r.status, detail: '' },
+  e => ({ ok: false, status: 0, detail: String(e) }))""")>]
+let private fetchChunk (url: string) : JS.Promise<{| ok: bool; status: int; detail: string |}> = Fable.Core.Util.jsNative
+
+let private chunkGet : App.HttpGet =
+    fun url ->
+        async {
+            let! reply = fetchChunk url |> Async.AwaitPromise
+            return
+                if reply.ok then Ok reply.detail
+                elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
+                else Error (App.HttpStatus reply.status)
+        }
 
 let private chunkMathTests =
     testList "Chunk math" [
@@ -104,7 +119,7 @@ let private endpointTests =
                 let options =
                     { App.ConnectOptions.defaults with
                         FetchEvents =
-                            Some (App.EventFetch.overHttp (fetchText >> Async.AwaitPromise) (SessionRoute.at baseUrl) (Some mintedToken)) }
+                            Some (App.EventFetch.overHttp chunkGet (SessionRoute.at baseUrl) (Some mintedToken)) }
                 let! a = connectClientWith options signalUrl mintedToken "ada" "Ada"
 
                 do! compose a a.Hello.PeerId "fetched over http"
