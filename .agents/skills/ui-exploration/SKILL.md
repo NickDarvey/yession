@@ -50,7 +50,10 @@ Trust the shot only when `vw` equals the width you asked for. `overflowX: true` 
 4. **Read the PNGs with the Read tool and actually look.** A checklist that catches real
    defects: Is anything clipped or off-canvas? Does hierarchy match importance (is the
    thing a human scans for in the biggest/brightest type)? Do left edges align on one
-   rail? Are actions reachable and anchored? Is there an empty state? Compare against the
+   rail? Are actions reachable and anchored? Is there an empty state? Does it hold the
+   AGENTS.md "UI baseline" (WCAG 2.0 AA contrast, keyboard operability, visible focus —
+   tab through it over CDP `Input.dispatchKeyEvent` and screenshot the focus state)?
+   Compare against the
    design language: the rules live in the `Style.fs` header comment and
    `docs/plans/02-metro-zune-styling.md` (88px header band, statuses are text, buttons
    are bordered Metro rectangles, one gradient in the whole product).

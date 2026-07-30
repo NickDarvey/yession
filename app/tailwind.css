@@ -16,7 +16,10 @@
   --color-hair: #1f1f1f;
   --color-ink: #fff;
   --color-ink-dim: #b4b4b4;
-  --color-ink-faint: #6a6a6a;
+  /* The faintest ink still carries meaning (labels, ids, empty states), so it must keep
+     WCAG 2.0 AA contrast (>= 4.5:1) on EVERY surface it can sit on — #828282 is 4.58:1
+     on surface-2, the dimmest. The theme-contrast test pins this floor. */
+  --color-ink-faint: #828282;
   --color-blue: #1ba1e2;
   --color-green: #a8dd00;
   --color-err: #ff4a4a;

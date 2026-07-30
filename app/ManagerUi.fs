@@ -111,7 +111,16 @@ let sessionsTable (views: ProcessManager.SessionView list) : string = Ssr.render
 // is self-contained — local first, no CDN.
 let private script =
     """
-    const swap = (el, htmlText) => { const t = document.createElement('template'); t.innerHTML = htmlText.trim(); const n = t.content.firstElementChild; if (n && el && n.outerHTML !== el.outerHTML) el.replaceWith(n) }
+    const swap = (el, htmlText) => {
+      const t = document.createElement('template'); t.innerHTML = htmlText.trim()
+      const n = t.content.firstElementChild
+      if (!n || !el || n.outerHTML === el.outerHTML) return
+      const hadFocus = el.contains(document.activeElement)
+      el.replaceWith(n)
+      // Keyboard continuity (WCAG 2.0): replacing the focused element strands focus on
+      // <body>; land it on the replacement's first action instead (the primary, by DOM order).
+      if (hadFocus) { const f = n.querySelector('a[href], button, input'); if (f) f.focus() }
+    }
     document.addEventListener('click', async (e) => {
       const b = e.target.closest('[data-launch],[data-stop]'); if (!b) return
       const id = b.getAttribute('data-launch') || b.getAttribute('data-stop')
