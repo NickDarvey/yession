@@ -47,8 +47,10 @@ let private deliver (source: Y.Doc) (target: Y.Doc) : unit =
 let private enqueue (p: OfflinePeer) (_draftKey: string) (queueKey: string) (text: string) : QueueId =
     let queueId = QueueId.create queueKey |> expect
     let peerId = (p.Runner.Model ()).Peer.PeerId
-    Body.author p.Registry p.Runner peerId text
-    Body.send p.Registry p.Runner peerId queueId
+    // The draft is published carrying `queueId`, so that is the key its send goes in under — the
+    // same key any co-editor's send would use, which is what these race cases lean on.
+    Body.authorAs queueId p.Registry p.Runner peerId text
+    Body.send p.Registry p.Runner peerId |> ignore
     queueId
 
 /// This peer's queue as `(queueId, markdown)` in consumption order — read from its own doc
@@ -500,7 +502,7 @@ let private docPersistenceTests =
                 // one has a real unsent draft.
                 let idle = offlinePeer 24.0 "olive" "Olive"
                 let idlePeer = (idle.Runner.Model ()).Peer.PeerId
-                idle.Runner.Dispatch (user (EnsureDraftMsg idlePeer))
+                idle.Runner.Dispatch (user (EnsureDraftMsg (idlePeer, QueueId.create "q-idle" |> expect)))
                 deliver idle.Doc h1.Doc
                 let writer = offlinePeer 25.0 "wilma" "Wilma"
                 let writerPeer = (writer.Runner.Model ()).Peer.PeerId

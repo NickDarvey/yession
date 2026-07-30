@@ -9,10 +9,11 @@ module Yession.Tests.Browser
 //     dotnet run --project tests/Yession.Tests/Yession.Tests.fsproj
 //
 // It launches two Chromium peers against a real Session Process (app/out/Main.js), verifies
-// Markdown typed into the rich composer renders as formatted rich text (input rules), that it
-// converges over native WebRTC, and that sending — whose durable body is Markdown — renders
-// as that same formatted rich text in both timelines; then proves client-side IndexedDB
-// persistence by wiping the server and reloading
+// Markdown typed into the rich composer renders as formatted rich text (input rules), that the
+// SECOND peer's composer joins that draft rather than opening a rival, that it converges over
+// native WebRTC with live carets, that the second peer can co-edit AND send it — whose durable
+// body is Markdown — rendering as that same formatted rich text in both timelines; then proves
+// client-side IndexedDB persistence by wiping the server and reloading
 // (the draft can only return from the browser), and that the doc store is session-keyed.
 // Event-driven throughout (WaitForFunctionAsync); Playwright's own per-action timeouts watch.
 
@@ -93,8 +94,10 @@ let private awaitU (t: Task) : Async<unit> = Async.AwaitTask t
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
 let private connected = """document.querySelector('[data-connection]')?.textContent === 'Connected'"""
 
-// The local peer's rich composer is a ProseMirror editable (`.ProseMirror`) inside the
-// editable (`data-rich-readonly="false"`) body-mount host; peers' drafts are read-only mirrors.
+// The open draft is a ProseMirror editable (`.ProseMirror`) inside the editable
+// (`data-rich-readonly="false"`) body-mount host — and it is whichever draft this peer has open,
+// which may be someone else's: the composer joins the message already being written. Collapsed
+// drafts are read-only one-line summaries.
 let private composer = """[data-rich-readonly="false"] .ProseMirror"""
 
 let tests =
@@ -139,25 +142,37 @@ let tests =
                     """document.querySelector('[data-rich-readonly="false"] .ProseMirror h1')?.textContent === 'Heading one'"""
                 let! _ = await (pageA.WaitForFunctionAsync renderedHeading)
 
-                // B converges: it renders A's draft (read-only) as the same formatted heading.
+                // B converges: it renders A's draft as the same formatted heading.
                 // (Regression guard: pushing presence decorations on every render used to starve
                 // y-prosemirror's rendering of REMOTE content here, so B's mirror stayed blank.)
                 do! await (pageB.WaitForFunctionAsync
                             """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one')""") |> Async.Ignore
 
-                // B also overlays A's live caret in that read-only mirror: A's presence (a base64
-                // relative position over the draft body) decodes to a caret widget + name label.
-                // This lands just after the content settles (the decoration push is debounced off
-                // the active-convergence window). Guards remote BODY cursors end-to-end.
-                do! await (pageB.WaitForFunctionAsync
-                            """!!document.querySelector('[data-rich-readonly="true"] .pm-caret')""") |> Async.Ignore
+                // And B JOINED it rather than opening a rival blank: the composer B is in is A's
+                // draft, which is why the "new message" way out is offered at all.
+                do! await (pageB.WaitForFunctionAsync """!!document.querySelector('[data-draft-new]')""") |> Async.Ignore
 
-                // A sends; both timelines show the immutable message. The durable body is
-                // MARKDOWN (`# Heading one`, from events not Yjs), but the timeline RENDERS it as
-                // formatted rich text — the same heading the composer showed — so the sent view
-                // mirrors the input: an <h1> whose text is "Heading one" (no literal `#`).
-                do! awaitU (pageA.ClickAsync "[data-send-draft]")
-                let inTimeline = """[...document.querySelectorAll('[data-conversation] [data-message-body] h1')].some(h => h.textContent.trim() === 'Heading one')"""
+                // B overlays A's live caret in it: A's presence (a base64 relative position over
+                // the draft body) decodes to a caret widget + name label. This lands just after
+                // the content settles (the decoration push is debounced off the active-convergence
+                // window). Guards remote BODY cursors end-to-end.
+                do! await (pageB.WaitForFunctionAsync """!!document.querySelector('.pm-caret')""") |> Async.Ignore
+
+                // B CO-EDITS A's draft — the collaboration the read-only mirror used to forbid —
+                // and A sees the words appear in the draft it started.
+                do! awaitU (pageB.ClickAsync composer)
+                do! awaitU (pageB.Keyboard.PressAsync "End")
+                do! awaitU (pageB.Keyboard.TypeAsync " and two")
+                let coEdited =
+                    """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one and two')"""
+                let! _ = await (pageA.WaitForFunctionAsync coEdited)
+
+                // B sends A's draft: any co-editor may. Both timelines show the immutable message.
+                // The durable body is MARKDOWN (`# Heading one and two`, from events not Yjs), but
+                // the timeline RENDERS it as formatted rich text — the same heading the composer
+                // showed — so the sent view mirrors the input: an <h1>, no literal `#`.
+                do! awaitU (pageB.ClickAsync "[data-send-draft]")
+                let inTimeline = """[...document.querySelectorAll('[data-conversation] [data-message-body] h1')].some(h => h.textContent.trim() === 'Heading one and two')"""
                 let! _ = await (pageA.WaitForFunctionAsync inTimeline)
                 do! await (pageB.WaitForFunctionAsync inTimeline) |> Async.Ignore
             }

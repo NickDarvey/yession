@@ -167,6 +167,25 @@ Session Process sweeps the empty slots older docs accumulated at boot
 (`SyncedStateSync.removeEmptyDrafts`), where no peer is connected and an empty body cannot be a
 draft in progress.
 
+**Superseded: owner-sends, and the read-only mirror.** Two of this plan's decisions did not
+survive contact with the product. The delivered UI rendered other peers' drafts READ-ONLY, so the
+"collaborate" mode above existed only in tests — and "owner sends" meant a peer who wrote half a
+message could not send it. Both are now gone:
+
+- Any co-editor may edit any draft (the body was always a CRDT; the carets were always presence)
+  and any co-editor may send it. The entry is still attributed to the draft's AUTHOR — the sender
+  committed it, the author started it — so the queue stays as legible as this plan wanted.
+- The double-send race that argued for owner-sends is now unrepresentable rather than avoided:
+  `DraftState` carries the `QueueId` it will become, minted by its author when the slot is
+  published, so every sender writes the SAME queue key and two concurrent sends merge into one
+  entry. A derived key beat a policy.
+- The composer shows ONE draft at a time: someone else's in-flight draft is what you land in
+  (joining is the default), the rest are one-line summaries with live-caret dots, and "new message"
+  is the way out. That state is per-client (`ComposerChoice`), never synced — two people may have
+  different drafts open in the same session.
+
+Discard stays the author's alone: a co-editor collapses a draft, it does not destroy one.
+
 **Follow-up (not done):** invariant 4 (clean send) is now pinned by its own `property {}`
 block; invariants 1/3/5 are structural (the `Map<PeerId,_>` type and Step 05's existing
 convergence coverage). Invariant 2 (participation) remains the noted follow-up — adding

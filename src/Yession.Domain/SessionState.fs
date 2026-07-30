@@ -12,7 +12,14 @@ namespace Yession.Domain
 /// edits merge in the fragment CRDT, so "collaborate" is co-editing someone's slot and "write
 /// your own" is yours.
 type DraftState =
-    { Author  : PeerId }
+    { Author  : PeerId
+      /// The queue key this draft becomes when sent, minted by the author when the slot is
+      /// published. ANY co-editor may send a draft, and because every sender writes this same
+      /// key, two concurrent sends are one map entry that merges rather than two duplicate
+      /// messages — the double-send race is unrepresentable instead of merely avoided by policy.
+      /// A fresh draft gets a fresh key: the slot is created anew each time, so a sent key is
+      /// never reused while its queue entry may still be waiting.
+      QueueId : QueueId }
 
 /// A message waiting for the agent (Phase 3). Queued messages are collaborative state:
 /// any peer may edit the rich body (the `Y.XmlFragment` merges), reorder (one

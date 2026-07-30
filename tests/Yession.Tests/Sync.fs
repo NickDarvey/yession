@@ -82,9 +82,12 @@ let private codecTests =
             let doc = Y.Doc.Create ()
             let registry = BodyRegistry doc
             let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
-            Body.author registry p ada "queued words"
             let queueId = QueueId.create "q-1" |> expect
-            Body.send registry p ada queueId
+            Body.authorAs queueId registry p ada "queued words"
+            Expect.equal
+                (Body.queueKeyOf p ada) (Some queueId)
+                "the published draft carries the key it will become — what every co-editor's send writes"
+            Expect.equal (Body.send registry p ada) (Some queueId) "and the send goes in under exactly that key"
 
             let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
             Expect.equal decoded (p.Model ()).Synced "the doc decodes back to exactly the model's synced state"
@@ -109,8 +112,8 @@ let private codecTests =
 
             // Ada enqueues two messages by sending twice: each send clears her one slot.
             for text, queueId in [ "first", q1; "second", q2 ] do
-                Body.author regA pA ada text
-                Body.send regA pA ada queueId
+                Body.authorAs queueId regA pA ada text
+                Body.send regA pA ada |> ignore
             syncBoth docA docB
             Expect.equal (queueIds pB) [ "q-1"; "q-2" ] "B sees the queue in order"
 
@@ -148,13 +151,14 @@ let private codecTests =
 let private draftSlotTests =
     testList "Draft slot publication" [
         testCase "the rule answers every state of (body, slot)" <| fun () ->
-            let answer body slot = DraftSlot.reconcile ada body slot
-            Expect.equal (answer DraftSlot.HasContent DraftSlot.Unpublished) (Some (EnsureDraftMsg ada))
+            Expect.equal (DraftSlot.reconcile DraftSlot.HasContent DraftSlot.Unpublished) DraftSlot.Publish
                 "content with no slot publishes one"
-            Expect.equal (answer DraftSlot.Empty DraftSlot.Published) (Some (DiscardDraftMsg ada))
+            Expect.equal (DraftSlot.reconcile DraftSlot.Empty DraftSlot.Published) DraftSlot.Retract
                 "a slot with no content is retracted"
-            Expect.equal (answer DraftSlot.HasContent DraftSlot.Published) None "a published draft is left alone"
-            Expect.equal (answer DraftSlot.Empty DraftSlot.Unpublished) None "an untouched composer says nothing"
+            Expect.equal (DraftSlot.reconcile DraftSlot.HasContent DraftSlot.Published) DraftSlot.Agreed
+                "a published draft is left alone"
+            Expect.equal (DraftSlot.reconcile DraftSlot.Empty DraftSlot.Unpublished) DraftSlot.Agreed
+                "an untouched composer says nothing"
 
         testCaseAsync "the slot follows the body: published on content, retracted when it empties" <|
             async {
@@ -185,7 +189,7 @@ let private draftSlotTests =
             let grace = PeerId.create "grace" |> expect
             // The pre-rule shape, as a persisted doc carries it: ada published a slot and never
             // typed; grace has a real draft.
-            p.Dispatch (user (EnsureDraftMsg ada))
+            p.Dispatch (user (EnsureDraftMsg (ada, QueueId.create "q-idle" |> expect)))
             Body.author registry p grace "still writing this"
 
             Expect.equal (SyncedStateSync.removeEmptyDrafts doc) [ ada ] "only the empty slot is dropped"
@@ -524,6 +528,116 @@ let private e2eTests =
 // Pure client-model reducers for the editable title and cursor presence.
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// The composer: one draft open, joining by default, and a send any co-editor can press.
+// -----------------------------------------------------------------------------
+
+let private composerTests =
+    let grace = PeerId.create "grace" |> expect
+    let ivy = PeerId.create "ivy" |> expect
+    let mine = ClientModel.init (peer "ada" "Ada")
+    let withDrafts (authors: PeerId list) (model: ClientModel) =
+        let drafts =
+            authors
+            |> List.mapi (fun i author ->
+                author, { Author = author; QueueId = QueueId.create (sprintf "q-%d" i) |> expect })
+            |> Map.ofList
+        { model with Synced = { model.Synced with Drafts = drafts } }
+
+    testList "Composer (one draft open at a time)" [
+        testCase "with nothing in flight, the composer is your own" <| fun () ->
+            Expect.equal (ClientModel.composerTarget mine) ada "an empty session opens on your own composer"
+            Expect.equal (ClientModel.collapsedDrafts mine) [] "and nothing is collapsed behind it"
+
+        testCase "someone else's draft in flight IS the composer — joining is the default" <| fun () ->
+            let model = mine |> withDrafts [ grace ]
+            Expect.equal (ClientModel.composerTarget model) grace "you land in the message already being written"
+            Expect.equal (ClientModel.collapsedDrafts model) [] "which leaves nothing to collapse"
+
+        testCase "your own draft wins over a peer's, and the peer's collapses" <| fun () ->
+            let model = mine |> withDrafts [ ada; grace ]
+            Expect.equal (ClientModel.composerTarget model) ada "your own words are what you are shown"
+            Expect.equal (ClientModel.collapsedDrafts model) [ grace ] "the other is a summary"
+
+        testCase "starting a new message opts out of joining, and survives peers typing" <| fun () ->
+            let joined = mine |> withDrafts [ grace; ivy ]
+            let started = ClientModel.update StartDraftMsg joined
+            Expect.equal (ClientModel.composerTarget started) ada "new message opens your own composer"
+            Expect.equal (ClientModel.collapsedDrafts started) [ grace; ivy ] "both peers' drafts collapse to summaries"
+            // The choice is not undone by a third peer starting to type — the point of holding it.
+            let third = started |> withDrafts [ grace; ivy; PeerId.create "iris" |> expect ]
+            Expect.equal (ClientModel.composerTarget third) ada "a peer starting to type does not steal your composer"
+
+        testCase "expanding a peer's draft collapses yours; expanding your own comes back" <| fun () ->
+            let model = mine |> withDrafts [ ada; grace ]
+            let expanded = ClientModel.update (ExpandDraftMsg grace) model
+            Expect.equal (ClientModel.composerTarget expanded) grace "theirs is open"
+            Expect.equal (ClientModel.collapsedDrafts expanded) [ ada ] "and yours is the summary now"
+            let back = ClientModel.update (ExpandDraftMsg ada) expanded
+            Expect.equal (ClientModel.composerTarget back) ada "expanding your own is the way back"
+
+        testCase "a draft that is sent or discarded stops being the composer" <| fun () ->
+            let joined = ClientModel.update (ExpandDraftMsg grace) (mine |> withDrafts [ grace ])
+            let gone = { joined with Synced = { joined.Synced with Drafts = Map.empty } }
+            Expect.equal (ClientModel.composerTarget gone) ada "a vanished draft falls back to your own composer"
+
+        testCase "the roster names peers from the durable log, and only falls back to the id" <| fun () ->
+            let page : EventPage<SessionEvent> =
+                { Events =
+                    [ { EventId = EventId.fresh ()
+                        SessionId = SessionId.create "compose" |> expect
+                        Offset = EventOffset.zero
+                        Actor = PeerRef grace
+                        Timestamp = DateTimeOffset.UtcNow
+                        Event = PeerJoined { PeerId = grace; DisplayName = "brave-owl"; User = None } } ]
+                  LastOffset = Some EventOffset.zero
+                  IsEnd = true }
+            let model = ClientModel.update (EventsPageMsg page) mine
+            Expect.equal (ClientModel.nameOf grace model) "brave-owl" "a joined peer is named, not numbered"
+            Expect.equal (ClientModel.nameOf ivy model) (PeerId.value ivy) "an unknown peer falls back to its id"
+
+        testCase "the editors of a draft are the live carets in it" <| fun () ->
+            let focus (peer: PeerId) : Focus = { Field = DraftBody peer; Pos = { Anchor = "AQI="; Head = "AQI=" } }
+            let model =
+                mine
+                |> withDrafts [ grace ]
+                |> ClientModel.update (RemotePresenceMsg { PeerId = ivy; DisplayName = "keen-fox"; Focus = Some (focus grace) })
+                |> ClientModel.update (RemotePresenceMsg { PeerId = grace; DisplayName = "brave-owl"; Focus = Some (focus ada) })
+            Expect.equal (ClientModel.editorsOf grace model) [ ivy, "keen-fox" ] "only carets in THAT draft count"
+            Expect.equal (ClientModel.editorsOf ada model) [ grace, "brave-owl" ] "a peer in your draft shows in yours"
+
+        testCase "a send goes in under the draft's own key, whoever presses it" <| fun () ->
+            // Grace's draft, sent from Ada's client: the entry is Grace's, under Grace's draft key.
+            let queueId = QueueId.create "q-grace" |> expect
+            let model =
+                { mine with
+                    Synced = { mine.Synced with Drafts = Map.ofList [ grace, { Author = grace; QueueId = queueId } ] } }
+                |> ClientModel.update (SendDraftMsg grace)
+            Expect.isFalse (Map.containsKey grace model.Synced.Drafts) "the draft left the composer"
+            match Map.toList model.Synced.Queue with
+            | [ (key, entry) ] ->
+                Expect.equal key queueId "the queue key is the one the draft carried"
+                Expect.equal entry.Author grace "attributed to whoever wrote it, not whoever sent it"
+            | other -> failwithf "expected exactly one queued entry, got %A" other
+
+        testCase "two clients sending the same draft produce ONE queue entry" <| fun () ->
+            // The reason the key lives in the slot: this is two peers pressing Send at once, and
+            // the replicas merging rather than queueing the message twice.
+            let queueId = QueueId.create "q-shared" |> expect
+            let slot = Map.ofList [ grace, { Author = grace; QueueId = queueId } ]
+            let onAda =
+                { mine with Synced = { mine.Synced with Drafts = slot } }
+                |> ClientModel.update (SendDraftMsg grace)
+            let onIvy =
+                { ClientModel.init (peer "ivy" "Ivy") with Synced = { mine.Synced with Drafts = slot } }
+                |> ClientModel.update (SendDraftMsg grace)
+            Expect.equal
+                (onAda.Synced.Queue |> Map.toList |> List.map fst)
+                (onIvy.Synced.Queue |> Map.toList |> List.map fst)
+                "both senders wrote the same key, so the CRDT has one entry to merge"
+            Expect.equal (Map.count onAda.Synced.Queue) 1 "one message, sent once"
+    ]
+
 let private titlePresenceTests =
     let base' = ClientModel.init (peer "ada" "Ada")
     let bob = PeerId.create "bob" |> expect
@@ -555,6 +669,7 @@ let tests =
     testList "Sync" [
         codecTests
         draftSlotTests
+        composerTests
         queueUnitTests
         titlePresenceTests
         Tag.needs "Draft sync E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)

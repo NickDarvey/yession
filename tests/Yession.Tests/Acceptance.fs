@@ -13,6 +13,9 @@ open Yession.App
 open Yession.Tests.Support
 
 let private queueId = QueueId.create "queue-ui" |> expect
+/// The key the fixture's draft will become when someone sends it — distinct from the entry
+/// already queued, because a draft's key is one the queue does not hold yet.
+let private draftQueueId = QueueId.create "queue-ui-draft" |> expect
 let private ada = PeerId.create "ada" |> expect
 let private bob = PeerId.create "bob" |> expect
 let private sessionId = SessionId.create "demo-session" |> expect
@@ -30,7 +33,7 @@ let private representativeModel : ClientModel =
         // not fields on the model — so the SSR fixture carries only the slot's identity; the
         // checklist below asserts the mount *hosts* render (`data-rich-body`/`data-*-input`),
         // and the body-content rendering is a browser concern covered by the editor E2E.
-        { Drafts = Map.ofList [ ada, { Author = ada } ]
+        { Drafts = Map.ofList [ ada, { Author = ada; QueueId = draftQueueId } ]
           Queue = Map.ofList [ queueId, { QueueId = queueId; Author = ada; Order = 1.0 } ]
           Title = Ylmish.Text.ofString "planning the launch"
           SharedBrief = None }
@@ -52,11 +55,32 @@ let private representativeModel : ClientModel =
           Feed = FeedLive }
       Agent = { ActiveTurn = Some turnId }
       Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } } } ]
+      // The roster names a draft's author even when they are not here: a label, never a peer id.
+      Peers = Map.ofList [ ada, "swift-heron"; bob, "brave-owl" ]
+      Composer = Unchosen
       Environment = EnvironmentNotStarted
       Commands = CommandLog.empty
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
           Flow = ClaudeIdle } }
+
+/// The composer when a PEER is the one writing: their draft is what you are in, yours (if any)
+/// is a summary you can open, and "new message" is the way out of collaborating.
+let private joinedComposerModel : ClientModel =
+    { representativeModel with
+        Synced =
+            { representativeModel.Synced with
+                Drafts =
+                    Map.ofList
+                        [ ada, { Author = ada; QueueId = draftQueueId }
+                          bob, { Author = bob; QueueId = QueueId.create "queue-ui-bob" |> expect } ] }
+        // Bob is writing, and his caret is in his own draft — the activity the summary shows.
+        Presence =
+            Map.ofList
+                [ bob,
+                  { DisplayName = "brave-owl"
+                    Focus = { Field = DraftBody bob; Pos = { Anchor = "AQI="; Head = "AQI=" } } } ]
+        Composer = Joined bob }
 
 let private uiChecklistTests =
     testList "UI checklist" [
@@ -110,6 +134,27 @@ let private uiChecklistTests =
                 let parts = name.Split '-'
                 Expect.equal parts.Length 2 "adjective-animal shape"
                 Expect.isTrue (parts.[0].Length > 0 && parts.[1].Length > 0) "both halves non-empty"
+
+        testCase "joining a peer's draft: theirs is the composer, yours is a summary, and either can be sent" <| fun () ->
+            let html = Support.render joinedComposerModel
+            let required =
+                [ "the joined draft is the composer", Dom.attr Dom.Hooks.draftInput "bob"
+                  "its author is named, not numbered", "brave-owl"
+                  "anyone may send the draft they are in", Dom.attr Dom.Hooks.sendDraft "bob"
+                  "your own draft collapses to a summary", Dom.attr Dom.Hooks.draftSummary "ada"
+                  "a summary opens on click", Dom.attr Dom.Hooks.expandDraft "ada"
+                  "the summary carries the body, clamped", Dom.attr "data-rich-body" (BodyKey.draft ada)
+                  "who is editing it right now", Dom.attr Dom.Hooks.draftEditor' (PeerId.value bob)
+                  "the way out of collaborating", Dom.Hooks.newDraft ]
+            for label, needle in required do
+                Expect.isTrue (html.Contains needle) (sprintf "%s (%s)" label needle)
+            // Destruction stays the author's: you cannot discard a draft you merely joined.
+            Expect.isFalse (html.Contains Dom.Hooks.discardDraft) "no discard on someone else's draft"
+            // And there is exactly ONE editable body host: the composer, not the summaries.
+            Expect.equal
+                (html.Split "data-rich-readonly=\"false\"" |> Array.length |> (fun n -> n - 1))
+                2
+                "one editable draft body, plus the queued message's own editor"
 
         // The timeline renders a sent body's Markdown as formatted rich text — the read-only
         // mirror of the composer — through the very SSR path the browser also runs. This pins

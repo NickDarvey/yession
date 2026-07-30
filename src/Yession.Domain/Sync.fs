@@ -44,14 +44,18 @@ module SyncedStateSync =
         a.Title.Value <- m.Title
         a.SharedBrief.Value <- m.SharedBrief
 
-    /// Per-draft encoding: the map key *is* the author (one draft per client). The entry
-    /// re-states the author as its one field — an empty object would write no Yjs key at all
-    /// (Ylmish creates a nested map lazily, only when a field writes), so the slot would never
-    /// materialize. The rich body is a top-level `Y.XmlFragment` root (`BodyKey.draft`), NOT
-    /// nested here: a fragment in a keyed-map entry crashes Ylmish's structural decode, so it is
-    /// a sibling root the app co-manages (RichText.fs).
+    /// Per-draft encoding: the map key *is* the author (one draft per client), so `author` is
+    /// re-stated only because an empty object would write no Yjs key at all (Ylmish creates a
+    /// nested map lazily, only when a field writes) and the slot would never materialize. The
+    /// `queueId` is the key this draft becomes when sent — it must cross the boundary, because
+    /// every co-editor's send has to write the same queue key for concurrent sends to merge. The
+    /// rich body is a top-level `Y.XmlFragment` root (`BodyKey.draft`), NOT nested here: a
+    /// fragment in a keyed-map entry crashes Ylmish's structural decode, so it is a sibling root
+    /// the app co-manages (RichText.fs).
     let private encodeDraft (d: DraftState) : Encoded =
-        Encode.object [ "author", Encode.string (AVal.constant (PeerId.value d.Author)) ]
+        Encode.object
+            [ "author", Encode.string (AVal.constant (PeerId.value d.Author))
+              "queueId", Encode.string (AVal.constant (QueueId.value d.QueueId)) ]
 
     /// Per-queue-entry encoding: author (stable string) and order (an LWW float register, so
     /// reorder = one register write, never a structural move). The rich body is a top-level
@@ -84,8 +88,13 @@ module SyncedStateSync =
         { Author : string
           Order : float }
 
-    let private decodeDraft<'m> : Decoder<'m, unit> =
-        Decode.object { return () }
+    /// The doc-side draft entry: the queue key it becomes when sent (`author` is the map key,
+    /// so it is not read back).
+    let private decodeDraft<'m> : Decoder<'m, string option> =
+        Decode.object {
+            let! queueId = Decode.object.optional "queueId" Decode.string
+            return queueId
+        }
 
     let private decodeQueued<'m> : Decoder<'m, QueuedFields> =
         Decode.object {
@@ -105,14 +114,16 @@ module SyncedStateSync =
     /// Entries whose identifiers fail the smart constructors are skipped rather than
     /// failing the decode: the doc is shared with peers we don't control, and a decode
     /// must stay total.
-    let private draftsToDomain (h: HashMap<string, unit>) : Map<PeerId, DraftState> =
+    let private draftsToDomain (h: HashMap<string, string option>) : Map<PeerId, DraftState> =
         (Map.empty, HashMap.toSeq h)
-        ||> Seq.fold (fun acc (key, _) ->
+        ||> Seq.fold (fun acc (key, queueId) ->
             // The key is the author (one draft per client); an invalid key is skipped so
-            // the decode stays total over a doc shared with peers we don't control.
-            match PeerId.create key with
-            | Ok author -> acc |> Map.add author { Author = author }
-            | Error _ -> acc)
+            // the decode stays total over a doc shared with peers we don't control. A slot whose
+            // `queueId` is absent or invalid is skipped for the same reason: it could not be sent,
+            // and a slot nobody can send is not a draft.
+            match PeerId.create key, queueId |> Option.map QueueId.create with
+            | Ok author, Some (Ok queueId) -> acc |> Map.add author { Author = author; QueueId = queueId }
+            | _ -> acc)
 
     let private queueToDomain (h: HashMap<string, QueuedFields>) : Map<QueueId, QueuedMessage> =
         (Map.empty, HashMap.toSeq h)
@@ -172,7 +183,13 @@ module SyncedStateSync =
         let draftsH =
             if shareHas doc "drafts" then
                 let m : Yjs.Y.Map<obj> = doc.getMap "drafts"
-                (HashMap.empty, mapKeys m) ||> Array.fold (fun acc k -> HashMap.add k () acc)
+                (HashMap.empty, mapKeys m)
+                ||> Array.fold (fun acc k ->
+                    match m.get k with
+                    | Some entryObj when not (isNull entryObj) ->
+                        let entry = unbox<Yjs.Y.Map<obj>> entryObj
+                        HashMap.add k (entry.get "queueId" |> Option.map (unbox<string>)) acc
+                    | _ -> acc)
             else HashMap.empty
         let queueH =
             if shareHas doc "queue" then
@@ -237,6 +254,22 @@ module SyncedStateSync =
     /// one state, never one of them a model refresh behind).
     let hasDraft (doc: Yjs.Y.Doc) (author: PeerId) : bool =
         shareHas doc "drafts" && (doc.getMap "drafts" : Yjs.Y.Map<obj>).has (PeerId.value author)
+
+    /// The queue key an author's draft will become when sent, read from the doc — the same value
+    /// for every co-editor, which is what makes concurrent sends merge instead of duplicating.
+    /// `None` when there is no slot (nothing published to send).
+    let draftQueueId (doc: Yjs.Y.Doc) (author: PeerId) : QueueId option =
+        if not (shareHas doc "drafts") then None
+        else
+            match (doc.getMap "drafts" : Yjs.Y.Map<obj>).get (PeerId.value author) with
+            | Some entryObj when not (isNull entryObj) ->
+                (unbox<Yjs.Y.Map<obj>> entryObj).get "queueId"
+                |> Option.map (unbox<string>)
+                |> Option.bind (fun value ->
+                    match QueueId.create value with
+                    | Ok id -> Some id
+                    | Error _ -> None)
+            | _ -> None
 
     /// Remove every draft slot whose body has no content, returning the authors dropped.
     /// A slot is published on its author's first keystroke and retracted when their body empties
