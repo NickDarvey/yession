@@ -28,15 +28,21 @@ module DraftSlot =
         | Published
         | Unpublished
 
-    /// The message that brings a slot into agreement with its body, or `None` when they already
-    /// agree. Distinct types for the two facts, so a call site cannot transpose them, and no
-    /// wildcard, so the compiler is the one asserting every state is answered.
-    let reconcile (peer: PeerId) (body: BodyContent) (slot: SlotState) : ClientMsg option =
+    /// What a body and its slot disagree about, if anything.
+    type Reconciliation =
+        | Publish
+        | Retract
+        | Agreed
+
+    /// What to do about a body and its slot. Distinct types for the two facts, so a call site
+    /// cannot transpose them, and no wildcard, so the compiler is the one asserting every state is
+    /// answered. Pure: publishing needs a fresh queue key, and minting is `settle`'s job.
+    let reconcile (body: BodyContent) (slot: SlotState) : Reconciliation =
         match body, slot with
-        | HasContent, Unpublished -> Some (EnsureDraftMsg peer)
-        | Empty, Published -> Some (DiscardDraftMsg peer)
-        | HasContent, Published -> None
-        | Empty, Unpublished -> None
+        | HasContent, Unpublished -> Publish
+        | Empty, Published -> Retract
+        | HasContent, Published -> Agreed
+        | Empty, Unpublished -> Agreed
 
     /// A peer's body as the rule sees it. Emptiness is measured in Markdown — the same read a
     /// send snapshots and the drain durably records — so "publishes a slot" and "sends something"
@@ -50,10 +56,20 @@ module DraftSlot =
     let slotOf (doc: Y.Doc) (peer: PeerId) : SlotState =
         if SyncedStateSync.hasDraft doc peer then Published else Unpublished
 
+    /// The queue key a newly published draft carries: minted once, by its author, and read by
+    /// every co-editor that later sends it.
+    let private mintQueueId () : QueueId =
+        match QueueId.create (string (System.Guid.NewGuid ())) with
+        | Ok id -> id
+        | Error e -> failwithf "queue id invariant violated: %s" e
+
     /// Bring the local peer's slot into agreement with its body, now. Both facts are read from
     /// the doc, so the rule never acts on a stale model snapshot.
     let settle (doc: Y.Doc) (registry: BodyRegistry) (peer: PeerId) (dispatch: Sink<ClientMsg>) : unit =
-        reconcile peer (contentOf registry peer) (slotOf doc peer) |> Option.iter dispatch
+        match reconcile (contentOf registry peer) (slotOf doc peer) with
+        | Publish -> dispatch (EnsureDraftMsg (peer, mintQueueId ()))
+        | Retract -> dispatch (DiscardDraftMsg peer)
+        | Agreed -> ()
 
     // The body is a `Y.XmlFragment`, so its own change events are the exact signal this rule
     // needs — `observeDeep` fires for a keystroke and for a merged remote edit, and for nothing

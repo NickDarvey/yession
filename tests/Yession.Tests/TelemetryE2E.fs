@@ -58,8 +58,8 @@ let tests =
                 let peerRegistry = BodyRegistry peerDoc
                 let peerRunner = Harness.run (App.makeProgram peerDoc (ClientModel.init (peer "ada" "Ada")))
                 let peerId = (peerRunner.Model ()).Peer.PeerId
-                Body.author peerRegistry peerRunner peerId "trigger a turn"
-                Body.send peerRegistry peerRunner peerId (QueueId.create "q-1" |> expect)
+                Body.authorAs (QueueId.create "q-1" |> expect) peerRegistry peerRunner peerId "trigger a turn"
+                Body.send peerRegistry peerRunner peerId |> ignore
                 Y.applyUpdate (host.Doc, Y.encodeStateAsUpdate peerDoc)
 
                 // Wait for the turn's usage to be emitted, then flush the batch exporter so the

@@ -75,6 +75,13 @@ module Dom =
         let draftInput = "data-draft-input"
         let sendDraft = "data-send-draft"
         let discardDraft = "data-discard-draft"
+        /// A collapsed draft's summary row, and the button that opens it.
+        let draftSummary = "data-draft-summary"
+        let expandDraft = "data-draft-expand"
+        /// Starts the local peer's own draft, collapsing whoever's was open.
+        let newDraft = "data-draft-new"
+        /// One per live caret in a draft, so a test can assert who is shown editing it.
+        let draftEditor' = "data-draft-editor-peer"
         // Chrome: the sidebar drawer toggle (lives on the shell root, outside `#app`).
         let navToggle = "data-nav-toggle"
         // Settings drawer (Plan 08 pass): its toggle, the panel, the Claude section, and

@@ -247,6 +247,30 @@ module Style =
     let draftActions = "flex items-center gap-2 pl-4 pr-2 pb-2"
     let draftAuthor = "ml-auto pr-2 font-semibold text-[10px] leading-4 tracking-[0.14em] uppercase text-ink-faint"
 
+    // A draft nobody has open here: one line of it, so the composer reads as "what is being
+    // written" rather than a stack of boxes. Clicking it opens it (and closes whatever was).
+    let draftSummary =
+        "group w-full flex items-center gap-3 h-8 pl-4 pr-2 bg-surface/60 text-left border-l-2 "
+        + "border-hair hover:border-blue hover:bg-surface transition-colors cursor-pointer"
+
+    let draftSummaryName =
+        "shrink-0 font-semibold text-[10px] leading-4 tracking-[0.14em] uppercase text-ink-faint"
+
+    /// The clamped body: the same read-only editor as anywhere else, held to one line. `truncate`
+    /// on the host would fight ProseMirror's block children, so the clamp is on its descendants.
+    let draftSummaryBody =
+        "flex-1 min-w-0 font-sans font-light text-[13px] leading-8 text-ink-dim "
+        + "overflow-hidden whitespace-nowrap [&_*]:inline [&_*]:truncate [&_*]:m-0"
+
+    /// Who is in this draft right now: one dot per live caret, coloured by peer (`PeerColour`).
+    let draftEditors = "shrink-0 flex items-center gap-1 pr-1"
+    let draftEditorDot = "inline-block w-1.5 h-1.5 rounded-full"
+
+    /// Starts your own draft, collapsing whoever's is open — the escape hatch from joining.
+    let draftNew =
+        "self-end font-semibold text-[10px] leading-4 tracking-[0.14em] uppercase text-ink-faint "
+        + "hover:text-blue transition-colors"
+
     // --- Settings drawer ---------------------------------------------------------------------
     // Like the sidebar, the drawer's open state is one bit on the root <html> element
     // (`settings-open`, toggled by [data-settings-toggle]), so it survives re-renders and

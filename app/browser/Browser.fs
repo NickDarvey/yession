@@ -344,7 +344,12 @@ let private start () =
         // triggers a remount.
         let registry = BodyRegistry doc
         let mutable latestModel = initial
-        let mountedBodies = System.Collections.Generic.Dictionary<string, Y.XmlFragment * Editor.EditorHandle> ()
+        // Keyed by body id; the mount records the fragment AND whether it bound read-only, because
+        // both can change under one key: a sent draft's slot is recreated (new fragment), and a
+        // draft collapsing to a summary rebinds the same fragment read-only. Either needs a remount
+        // — an editable editor left on a collapsed summary would let you type into a one-line
+        // preview.
+        let mountedBodies = System.Collections.Generic.Dictionary<string, Y.XmlFragment * bool * Editor.EditorHandle> ()
         // The last cursor set pushed into each editor, so a render only dispatches a decoration
         // transaction when it actually changed. Dispatching one every render competes with
         // y-prosemirror's ySync applying REMOTE edits and starves the read-only mirrors' rendering
@@ -394,14 +399,17 @@ let private start () =
                         match fieldOfKey key, sel with
                         | Some field, Some (a, h) -> sendFocus (Some { Field = field; Pos = { Anchor = a; Head = h } })
                         | _ -> sendFocus None
-                    mountedBodies.[key] <- (fragment, Editor.mountEditor host fragment (hostReadOnly host) reportFocus)
+                    let readOnly = hostReadOnly host
+                    mountedBodies.[key] <- (fragment, readOnly, Editor.mountEditor host fragment readOnly reportFocus)
                 match mountedBodies.TryGetValue key with
-                | true, (bound, handle) when not (System.Object.ReferenceEquals (bound, fragment)) ->
+                | true, (bound, readOnly, handle) when
+                    not (System.Object.ReferenceEquals (bound, fragment)) || readOnly <> hostReadOnly host ->
                     handle.Dispose (); mount ()
                 | true, _ -> ()
                 | _ -> mount ()
             for stale in mountedBodies.Keys |> Seq.filter (seen.Contains >> not) |> Seq.toList do
-                (snd mountedBodies.[stale]).Dispose ()
+                let _, _, handle = mountedBodies.[stale]
+                handle.Dispose ()
                 mountedBodies.Remove stale |> ignore
                 lastPushed.Remove stale |> ignore
 
@@ -432,7 +440,8 @@ let private start () =
             pushTimer <-
                 setTimeoutJs (fun () ->
                     for kv in mountedBodies do
-                        let key, handle = kv.Key, snd kv.Value
+                        let key = kv.Key
+                        let _, _, handle = kv.Value
                         let cursors = cursorsFor key
                         let prev = match lastPushed.TryGetValue key with | true, v -> v | _ -> []
                         if not (List.isEmpty cursors) || prev <> cursors then

@@ -239,8 +239,8 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
         let queueId = QueueId.create (sprintf "queue-%d" enqueueCounter) |> expect
         // Peer i writes its own slot (keyed by its peer id) and sends: `Body.send` clears the
         // slot AND content-copies the rich body draft->queue, so a peer can enqueue repeatedly.
-        Body.author (peerRegistry i) (peerRunner i) (peerIdOf i) (sprintf "message %d" enqueueCounter)
-        Body.send (peerRegistry i) (peerRunner i) (peerIdOf i) queueId
+        Body.authorAs queueId (peerRegistry i) (peerRunner i) (peerIdOf i) (sprintf "message %d" enqueueCounter)
+        Body.send (peerRegistry i) (peerRunner i) (peerIdOf i) |> ignore
         enqueuedIds.Add (QueueId.value queueId)
 
     let pickEntry (i: int) (pick: int) : QueueId option =
@@ -362,15 +362,15 @@ let private runDraftSchedule (ops: DraftOp list) : (string * string) list * Peer
     let mutable qn = 0
     let apply op =
         match op with
-        | SetBody text -> Body.author registry runner owner text
+        | SetBody text ->
+            qn <- qn + 1
+            Body.authorAs (QueueId.create (sprintf "q-%d" qn) |> expect) registry runner owner text
         | Send ->
             match (runner.Model ()).Synced.Drafts |> Map.tryFind owner with
-            | Some _ ->
-                qn <- qn + 1
-                let queueId = QueueId.create (sprintf "q-%d" qn) |> expect
+            | Some draft ->
                 let snapshot = Body.draft registry owner |> Option.defaultValue ""
-                Body.send registry runner owner queueId
-                snapshots.Add (QueueId.value queueId, snapshot)
+                Body.send registry runner owner |> ignore
+                snapshots.Add (QueueId.value draft.QueueId, snapshot)
                 // Clean send, part 1: the sender's slot is gone the instant it is sent.
                 Expect.isFalse
                     (Map.containsKey owner (runner.Model ()).Synced.Drafts)

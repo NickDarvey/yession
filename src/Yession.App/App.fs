@@ -47,10 +47,11 @@ module App =
     type Connection =
         { /// Runs the handshake and frame pump until the channel closes.
           Run : Async<unit>
-          /// Send the draft in the given peer's slot: enqueue it (Phase 3). Owner-sends,
-          /// so the `PeerId` is the local peer's own slot. A pure CRDT model update under a
-          /// freshly minted `QueueId` — no command round-trip; the Session Process
-          /// consumes the queue and the message lands in the timeline as events.
+          /// Send the draft in the given peer's slot: enqueue it (Phase 3). ANY co-editor may
+          /// send, so the `PeerId` names whose draft it is, which is not necessarily the local
+          /// peer. A pure CRDT model update under the key the slot has carried since it was
+          /// published — no command round-trip; the Session Process consumes the queue and the
+          /// message lands in the timeline as events.
           SendDraft : PeerId -> unit
           /// Ask the Session Process to cancel the running agent turn (Step 17). The
           /// outcome arrives as events: `AgentTurnInterrupted` on success, or nothing
@@ -354,7 +355,9 @@ module App =
             Connection.run hello dispatchAndConsume (DocSync.applyRemote doc) onResponse onEventsPage channel
           SendDraft =
             fun peerId ->
-                // Enqueue under a fresh queue id (unique keys make concurrent sends safe).
+                // Enqueue under the key the draft has carried since it was published, read from
+                // the slot rather than minted here: that is what makes two co-editors sending at
+                // once ONE queue entry instead of the same message twice.
                 // Carry the rich body over: seed the queue entry's body root AND create the entry
                 // in ONE Yjs transaction, so the send is a SINGLE doc update — exactly as the old
                 // nested-body design was. Two reasons this must be atomic:
@@ -366,20 +369,22 @@ module App =
                 //      non-synced model field with a decode-time snapshot.
                 // Body roots are `getXmlFragment` (idempotent), so writing the body inside the
                 // same transaction that creates the entry is safe.
-                match QueueId.create (string (System.Guid.NewGuid ())) with
-                | Ok queueId ->
+                match SyncedStateSync.draftQueueId doc peerId with
+                | Some queueId ->
                     let draftBody = registry.Fragment (BodyKey.draft peerId)
                     let md = Markdown.ofFragment draftBody
                     doc.transact ((fun _ ->
                         if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
-                        dispatch (SendDraftMsg (peerId, queueId))
-                        // The composer empties in the SAME transaction: the sender's body root is
-                        // durable (it is not removed with the slot), so it must be cleared
-                        // explicitly — and clearing it separately would publish an update where the
-                        // body still has content but the slot is gone, which `DraftSlot` answers by
+                        dispatch (SendDraftMsg peerId)
+                        // The composer empties in the SAME transaction: the body root is durable
+                        // (it is not removed with the slot), so it must be cleared explicitly —
+                        // and clearing it separately would publish an update where the body still
+                        // has content but the slot is gone, which `DraftSlot` answers by
                         // republishing the very slot the send just removed.
                         Markdown.intoFragment "" draftBody), null)
-                | Error e -> failwithf "queue id invariant violated: %s" e
+                // No slot means nothing published to send: an untouched composer, or a draft a
+                // co-editor sent a moment ago. Both are no-ops, not errors.
+                | None -> ()
           InterruptTurn =
             fun turnId ->
                 Async.StartImmediate (
