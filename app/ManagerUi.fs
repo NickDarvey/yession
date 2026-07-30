@@ -29,15 +29,16 @@ let private statusView (status: ProcessManager.SessionStatus) : TemplateResult =
         let reason = code |> Option.map string |> Option.defaultValue "signal"
         html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""
 
-let private actions (view: ProcessManager.SessionView) : TemplateResult =
+let private actions (access: PublicAccess) (view: ProcessManager.SessionView) : TemplateResult =
     let id = SessionId.value view.Record.SessionId
     match view.Status with
     | ProcessManager.Running (port, _) ->
         // A plain URL: access is authorized by the OIDC bounce (session -> manager ->
-        // back), not by a token in the link. The origin is the configured public one
-        // (docs/plans/09) so a remote browser gets a link it can follow; loopback when
-        // unset.
-        let openUrl = sprintf "%s:%d/" (publicSessionOrigin ()) port
+        // back), not by a token in the link. The address comes from the deployment's
+        // session template (docs/plans/09), the same declaration the session itself used
+        // to register its redirect URI — so a remote browser gets a link it can follow,
+        // and loopback when nothing is configured.
+        let openUrl = sprintf "%s/" (PublicAccess.sessionAddress view.Record.SessionId port access).Url
         html $"""
             <a class="{Style.statusRun} mr-3" href="{openUrl}" target="_blank" data-open>open ↗</a>
             <button type="button" class="{Style.btnDanger}" data-stop="{id}">Stop</button>"""
@@ -47,17 +48,17 @@ let private actions (view: ProcessManager.SessionView) : TemplateResult =
 
 /// One session row — the swap unit: every action and the status poll replace it wholesale,
 /// so the markup is always a pure function of the Manager's current view.
-let private rowTemplate (view: ProcessManager.SessionView) : TemplateResult =
+let private rowTemplate (access: PublicAccess) (view: ProcessManager.SessionView) : TemplateResult =
     let id = SessionId.value view.Record.SessionId
     html $"""
         <tr class="border-b border-hair" data-session="{id}">
           <td class="px-3 py-2 {Style.mono}">{id}</td>
           <td class="px-3 py-2 {Style.body}">{view.Record.DisplayName}</td>
           <td class="px-3 py-2">{statusView view.Status}</td>
-          <td class="px-3 py-2">{actions view}</td>
+          <td class="px-3 py-2">{actions access view}</td>
         </tr>"""
 
-let private tableTemplate (views: ProcessManager.SessionView list) : TemplateResult =
+let private tableTemplate (access: PublicAccess) (views: ProcessManager.SessionView list) : TemplateResult =
     html $"""
         <table class="w-full text-left border-collapse" data-sessions>
           <thead>
@@ -68,14 +69,16 @@ let private tableTemplate (views: ProcessManager.SessionView list) : TemplateRes
               <th class="px-3 py-2 {Style.label}">actions</th>
             </tr>
           </thead>
-          <tbody>{views |> List.map rowTemplate}</tbody>
+          <tbody>{views |> List.map (rowTemplate access)}</tbody>
         </table>"""
 
 /// A rendered fragment (a single row), served to the poll/action swaps.
-let sessionRow (view: ProcessManager.SessionView) : string = Ssr.render (rowTemplate view)
+let sessionRow (access: PublicAccess) (view: ProcessManager.SessionView) : string =
+    Ssr.render (rowTemplate access view)
 
 /// A rendered fragment (the whole table), served after a create.
-let sessionsTable (views: ProcessManager.SessionView list) : string = Ssr.render (tableTemplate views)
+let sessionsTable (access: PublicAccess) (views: ProcessManager.SessionView list) : string =
+    Ssr.render (tableTemplate access views)
 
 // The interactivity, without htmx: a tiny vanilla script that swaps fragments on
 // create/launch/stop and refreshes rows by polling. Inline (no external src) so the page
@@ -105,7 +108,7 @@ let private script =
     }, 2000)
     """
 
-let private bodyTemplate (views: ProcessManager.SessionView list) : TemplateResult =
+let private bodyTemplate (access: PublicAccess) (views: ProcessManager.SessionView list) : TemplateResult =
     html $"""
         <main class="max-w-4xl mx-auto px-8 py-10 flex flex-col gap-8">
           <h1 class="{Style.wordmark}">yession<span class="text-green">.</span> <span class="{Style.label}">manager</span></h1>
@@ -115,17 +118,17 @@ let private bodyTemplate (views: ProcessManager.SessionView list) : TemplateResu
             <input name="name" placeholder="display name" class="bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue">
             <button type="submit" class="{Style.btnPrimary}">Create</button>
           </form>
-          {tableTemplate views}
+          {tableTemplate access views}
         </main>"""
 
-let page (views: ProcessManager.SessionView list) : string =
+let page (access: PublicAccess) (views: ProcessManager.SessionView list) : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>Yession Manager</title>"
         Style.headTags
         sprintf "</head><body class=\"%s\">" Style.app
-        Ssr.render (bodyTemplate views)
+        Ssr.render (bodyTemplate access views)
         sprintf "<script>%s</script>" script
         "</body></html>"
     ]
@@ -177,7 +180,7 @@ let tryHandle
     let path = pathnameOf req.url
     let rowOf (sessionId: SessionId) =
         match pm.TryFind sessionId with
-        | Some view -> sessionRow view
+        | Some view -> sessionRow pm.Public view
         | None -> ""
     let sessionAction (id: string) (action: SessionId -> Async<unit>) =
         match SessionId.create id with
@@ -194,7 +197,7 @@ let tryHandle
     let route : (unit -> unit) option =
         match req.``method``, path with
         | "GET", "/" ->
-            Some (fun () -> html res (page (pm.Sessions ())))
+            Some (fun () -> html res (page pm.Public (pm.Sessions ())))
         | "GET", "/app.css" ->
             // The same locally built stylesheet the session shell uses — shared style, no CDN.
             Some (fun () ->
@@ -211,7 +214,7 @@ let tryHandle
                         | "" -> SessionId.value (SessionId.mint ())
                         | provided -> provided
                     match pm.CreateSession id (formField body "name") with
-                    | Ok _ -> html res (sessionsTable (pm.Sessions ()))
+                    | Ok _ -> html res (sessionsTable pm.Public (pm.Sessions ()))
                     | Error e -> respond res 400 "text/plain" e))
         | method', path when path.StartsWith "/sessions/" ->
             let rest = path.Substring "/sessions/".Length

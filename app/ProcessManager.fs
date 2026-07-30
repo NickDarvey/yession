@@ -70,6 +70,10 @@ type ProcessManager =
       ResolveSecret : SecretStore.ResolveSecret
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
+      /// How this deployment is reached from outside (docs/plans/09). The management UI
+      /// reads it to render each session's open link, so the address a human clicks and
+      /// the redirect URI that session registered come from one declaration.
+      Public : PublicAccess
       /// Stop every running child and the Manager endpoint (Manager shutdown).
       StopAll : unit -> Async<unit> }
 
@@ -95,12 +99,12 @@ type Options =
       /// product default is fixed — a second Manager instance must choose its own
       /// (the bind fails loudly on conflict, never a silent fallback).
       ManagerPort : int option
-      /// The public URL this Manager is reached at (docs/plans/07): the OIDC issuer and
-      /// every URL derived from it. None = the loopback endpoint URL — correct for
-      /// single-machine deployments; behind an authenticating proxy the operator sets
-      /// the proxy's origin (`YESSION_MANAGER_URL`) so off-host browsers can follow the
-      /// authorize bounce.
-      PublicUrl : string option
+      /// How this deployment is reached from outside (docs/plans/07, docs/plans/09): the
+      /// Manager's public origin — its OIDC issuer and every URL derived from it — and
+      /// where each session's port is reachable. `Loopback` is the single-machine
+      /// default: the Manager is its own loopback endpoint URL and sessions answer at
+      /// their loopback ports.
+      Public : PublicAccess
       /// The Manager's own telemetry sink for session-lifecycle signals (launch/exit). The
       /// Manager is a direct OTel emitter; this is its `Log`. Default = ignore. Sessions emit
       /// their own telemetry directly — the Manager does not collect from them; it only passes
@@ -137,7 +141,7 @@ module Options =
           StopGraceMs = 3000
           Grant = None
           ManagerPort = None
-          PublicUrl = None
+          Public = Loopback
           OnEvent = (fun _ _ -> ())
           Strategy = None
           Secrets = None }
@@ -393,8 +397,8 @@ let createWithUi
     // provider reads the issuer lazily, so the mutable slot resolves cleanly.
     let mutable endpointUrl : string option = None
     let issuerOf () =
-        match options.PublicUrl with
-        | Some url -> url.TrimEnd '/'
+        match PublicAccess.managerUrl options.Public with
+        | Some url -> url
         | None -> defaultArg endpointUrl ""
     // The Manager's audit sink (Plan 06 telemetry): one greppable audit line to stdout for
     // each authority decision. (Session telemetry is emitted directly by each process now —
@@ -760,6 +764,7 @@ let createWithUi
             | Some store -> SecretStore.SecretResolution.compose (SecretStore.Audit.injectObserver audit) store usersOf peersOf SecretStore.SecretResolution.processEnv
             | None -> SecretStore.SecretResolution.processEnv
           EndpointPort = controlServer |> Option.map Interop.serverPort
+          Public = options.Public
           StopAll =
             fun () ->
                 async {

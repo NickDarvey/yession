@@ -57,6 +57,14 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 let private auth =
     controlChannel |> Option.map (fun _ -> SessionAuth.create sessionId)
 
+// Where this session is reachable from outside (docs/plans/09), from the same two
+// variables the Manager parsed, inherited by plain env. Fails the boot on a combination
+// that cannot work, rather than registering a redirect URI no browser can reach.
+let private publicAccess =
+    match Interop.publicAccess () with
+    | Ok access -> access
+    | Error e -> failwith e
+
 // Telemetry: this session is a direct OTel emitter — one OTel log record per completed turn.
 // Destination (stdout / a collector / both / off) comes from the standard OTEL_* env the
 // Manager passes through; identity (service.name=yession-session, service.instance.id=<id>)
@@ -233,10 +241,11 @@ Async.StartImmediate (
         // cannot authorize users, so failure is fatal, never a half-open session.
         match controlChannel, auth with
         | Some (url, secret), Some auth ->
-            // The origin is the configured public one (docs/plans/09), inherited from
-            // the Manager's env: behind a port-mirroring proxy the browser must land
-            // on a reachable callback. Loopback when unset (the RFC 8252 default).
-            let redirectUri = sprintf "%s:%d/callback" (Interop.publicSessionOrigin ()) host.Port
+            // The address is the configured public one (docs/plans/09), inherited from
+            // the Manager's env: behind a proxy the browser must land on a reachable
+            // callback. Loopback when unset (the RFC 8252 default).
+            let redirectUri =
+                sprintf "%s/callback" (PublicAccess.sessionAddress sessionId host.Port publicAccess).Url
             match! ControlClient.registerClient url secret redirectUri with
             | Error e ->
                 eprintfn "client registration with the manager failed: %s" e

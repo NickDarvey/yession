@@ -209,6 +209,21 @@ let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNat
 [<Emit("delete process.env[$0]")>]
 let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
+/// A port nothing is listening on, taken by binding :0 and releasing it. Needed where a
+/// Manager's PUBLIC origin has to be known BEFORE it starts: that origin is its OIDC
+/// issuer, and a launched session fetches discovery against it, so — exactly as in a real
+/// fronted deployment — it has to be a URL that resolves from this host. A collision after
+/// release fails the Manager's bind loudly; it can never produce a passing-but-wrong run.
+let private freePort () : Async<int> =
+    async {
+        let server = Interop.createServer (fun _ res -> res.``end`` "")
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        let port = Interop.serverPort listening
+        do! Async.FromContinuations (fun (cont, _, _) -> listening.close (fun _ -> cont ()))
+        return port
+    }
+
 /// Start a bare control server over the given secret→(session, capabilities) table, plus
 /// the real notification and MCP hubs wired to their SSE routes. Returns both hubs so a
 /// test can push down the same wires the Manager uses.
@@ -357,19 +372,19 @@ let private uiRecord : SessionRecord =
 let private uiRenderTests =
     testList "Management UI rendering (Step 25)" [
         testCase "a stopped session's row offers Launch; a running one offers Stop and the open link" <| fun () ->
-            let stopped = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.NotRunning }
+            let stopped = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.NotRunning }
             Expect.isTrue (stopped.Contains (Dom.attr Dom.Manager.launch "ui-render")) "stopped rows can launch (button carries the session id)"
             Expect.isTrue (stopped.Contains "UI &lt;Render&gt;") "display names are escaped"
-            let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
+            let running = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.stop "ui-render")) "running rows can stop"
             Expect.isTrue (running.Contains "href=\"http://127.0.0.1:8199/\"") "the open link is a plain URL to the child's port (no token — access is the OIDC bounce)"
             Expect.isTrue (running.Contains (Dom.attr Dom.Manager.session "ui-render")) "the row is a poll unit keyed by session id"
-            let crashed = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
+            let crashed = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.Exited (Some 1) }
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)) "a crash is visible"
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
         testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
-            let html = ManagerUi.page [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            let html = ManagerUi.page PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
             Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
             Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
             Expect.isFalse (html.Contains "src=\"http") "no external/CDN scripts (local-first)"
@@ -916,18 +931,92 @@ let private registryTests =
             Expect.equal (List.last late) one "the unsubscribed sink received nothing further"
             Expect.equal (List.last received) { Sessions = [] } "the still-subscribed sink got the change"
 
-        testCase "the public session origin defaults to loopback and normalises a configured one" <| fun () ->
-            unsetEnv "YESSION_SESSION_URL"
-            Expect.equal (Interop.publicSessionOrigin ()) "http://127.0.0.1" "unset means loopback — today's behaviour"
-            setEnv "YESSION_SESSION_URL" "http://home.example.ts.net/"
-            Expect.equal (Interop.publicSessionOrigin ()) "http://home.example.ts.net" "a trailing slash is trimmed (each consumer appends the port)"
-            unsetEnv "YESSION_SESSION_URL"
-
-        testCase "a running row's open link carries the configured public origin" <| fun () ->
-            setEnv "YESSION_SESSION_URL" "http://home.example.ts.net"
-            let running = ManagerUi.sessionRow { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
-            unsetEnv "YESSION_SESSION_URL"
+        testCase "a running row's open link carries the configured public address" <| fun () ->
+            let access = PublicAccess.create "https://home.example.ts.net" "http://home.example.ts.net:{port}" |> expect
+            let running = ManagerUi.sessionRow access { Record = uiRecord; Status = ProcessManager.Running (8199, 42) }
             Expect.isTrue (running.Contains "href=\"http://home.example.ts.net:8199/\"") "the open link is followable from a remote browser"
+    ]
+
+// --- Public access: the deployment's two addresses as one value (docs/plans/09) ------------
+
+let private publicAccessTests =
+    let sessionId = SessionId.create "ui-render" |> expect
+    let addressOf managerUrl sessionUrl =
+        PublicAccess.create managerUrl sessionUrl
+        |> Result.map (PublicAccess.sessionAddress sessionId 54321)
+    let errorOf managerUrl sessionUrl =
+        match PublicAccess.create managerUrl sessionUrl with
+        | Error e -> e
+        | Ok _ -> "expected an error, got Ok"
+    testList "Public access (Plan 09)" [
+        testCase "unset means loopback: the Manager is its own endpoint, sessions their own ports" <| fun () ->
+            let access = PublicAccess.create "" "" |> expect
+            Expect.equal access Loopback "neither variable set"
+            Expect.equal (PublicAccess.managerUrl access) None "the caller substitutes its own endpoint URL"
+            Expect.equal
+                (PublicAccess.sessionAddress sessionId 54321 access)
+                { Url = "http://127.0.0.1:54321"; Mount = "" }
+                "the pre-Plan-09 loopback address, at an origin root"
+
+        testCase "a fronted Manager with loopback sessions is a legal deployment" <| fun () ->
+            let access = PublicAccess.create "https://yession.example.com/" "" |> expect
+            Expect.equal (PublicAccess.managerUrl access) (Some "https://yession.example.com") "trailing slash normalised"
+            Expect.equal
+                (PublicAccess.sessionAddress sessionId 54321 access)
+                { Url = "http://127.0.0.1:54321"; Mount = "" }
+                "manage remotely, use sessions on the host — sessions stay loopback"
+
+        testCase "sessions fronted without the Manager is refused, not warned about" <| fun () ->
+            // Always broken: the session bounces its users to the Manager to log in, so a
+            // remote browser would be sent to 127.0.0.1. The one combination with no
+            // constructor.
+            let message = errorOf "" "https://home.example.ts.net:{port}"
+            Expect.isTrue (message.Contains "YESSION_MANAGER_URL") "the message names the missing variable"
+            Expect.isTrue (message.Contains "127.0.0.1") "and why it cannot work"
+
+        testCase "a template describes whichever topology the operator's proxy implements" <| fun () ->
+            let manager = "https://example.com"
+            Expect.equal
+                (addressOf manager "https://home.example.ts.net:{port}")
+                (Ok { Url = "https://home.example.ts.net:54321"; Mount = "" })
+                "port mirroring: a shared host, a port per session, at an origin root"
+            Expect.equal
+                (addressOf manager "https://{id}.sessions.example.com")
+                (Ok { Url = "https://ui-render.sessions.example.com"; Mount = "" })
+                "a subdomain per session: still an origin root, so no prefix"
+            Expect.equal
+                (addressOf manager "https://example.com/s/{id}")
+                (Ok { Url = "https://example.com/s/ui-render"; Mount = "/s/ui-render" })
+                "a path per session: the mount is the path component, derived from the same string"
+            Expect.equal
+                (addressOf manager "https://example.com/s/{id}/")
+                (Ok { Url = "https://example.com/s/ui-render"; Mount = "/s/ui-render" })
+                "a trailing slash is normalised away, so callers append their own path"
+
+        testCase "a session template without a placeholder is refused" <| fun () ->
+            // Before this type the port was appended implicitly, so a bare origin was the
+            // documented spelling and `http://host:8443` silently produced
+            // `http://host:8443:54321`. Now the template says where the port goes.
+            let message = errorOf "https://example.com" "http://home.example.ts.net:8443"
+            Expect.isTrue (message.Contains "{id} or {port}") "the message names the placeholders"
+
+        testCase "an unknown placeholder is refused rather than passed through literally" <| fun () ->
+            let message = errorOf "https://example.com" "https://example.com/s/{name}"
+            Expect.isTrue (message.Contains "{name}") "the message quotes the offending token"
+
+        testCase "a Manager origin is scheme + host, never a path or a placeholder" <| fun () ->
+            // Its routes are origin-anchored and its issuer is a concatenation base, so a
+            // path would work only if the proxy stripped it again — refused rather than
+            // shipped as an unverified maybe.
+            Expect.isTrue
+                ((errorOf "https://example.com/yession" "").Contains "origin root")
+                "a path prefix on the Manager is refused"
+            Expect.isTrue
+                ((errorOf "https://{id}.example.com" "").Contains "placeholder")
+                "the Manager is one address, so a placeholder means nothing"
+            Expect.isTrue
+                ((errorOf "example.com" "").Contains "http://")
+                "a scheme is required"
     ]
 
 let private registryStreamTests =
@@ -936,10 +1025,25 @@ let private registryStreamTests =
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/reg-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                // The two mechanisms a real deployment uses, both driven by the same
+                // declaration: the Manager holds the parsed value (its open links), and a
+                // spawned session parses the same variables from the env it inherits (its
+                // redirect URI).
+                //
+                // The Manager's public origin is a loopback one HERE because it is also the
+                // OIDC issuer the launched session fetches discovery against — the standing
+                // requirement that a fronted Manager's URL resolve from its own host, which
+                // a made-up hostname would not.
+                let! managerPort = freePort ()
+                let managerUrl = sprintf "http://127.0.0.1:%d" managerPort
+                let sessionUrl = "http://home.example.ts.net:{port}"
+                let access = PublicAccess.create managerUrl sessionUrl |> expect
                 let! pm =
                     ProcessManager.createWithUi
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
-                            Strategy = Some Strategy.localhost }
+                            Strategy = Some Strategy.localhost
+                            ManagerPort = Some managerPort
+                            Public = access }
                         (Some ManagerUi.tryHandle)
                 let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
 
@@ -960,7 +1064,8 @@ let private registryStreamTests =
                 do! waitUntil "the empty snapshot" (fun () -> frames |> Seq.exists (fun f -> List.isEmpty f.Sessions))
 
                 let record = pm.CreateSession "reg-1" "Registry One" |> expect
-                setEnv "YESSION_SESSION_URL" "http://home.example.ts.net"
+                setEnv "YESSION_MANAGER_URL" managerUrl
+                setEnv "YESSION_SESSION_URL" sessionUrl
                 try
                     let! launched = pm.Launch record.SessionId
                     let port = expect launched
@@ -980,7 +1085,7 @@ let private registryStreamTests =
                         (second.Value.Sessions |> List.exists (fun e -> e.Port = port))
                         "a fresh subscriber's first frame is the current snapshot"
 
-                    // The public origin reaches both browser-facing URLs: the open link
+                    // The public address reaches both browser-facing URLs: the open link
                     // and the session's registered OAuth redirect URI (via the env the
                     // child inherited at spawn).
                     let! row = Interop.getText (baseUrl + "/sessions/reg-1/row") |> Async.AwaitPromise
@@ -1000,6 +1105,7 @@ let private registryStreamTests =
                     do! waitUntil "the stop frame" (fun () ->
                             frames |> Seq.skip seen |> Seq.exists (fun f -> List.isEmpty f.Sessions))
                 finally
+                    unsetEnv "YESSION_MANAGER_URL"
                     unsetEnv "YESSION_SESSION_URL"
 
                 cancel ()
@@ -1057,6 +1163,7 @@ let tests =
     testList "Phase4" [
         stateTests
         uiRenderTests
+        publicAccessTests
         notificationTests
         mcpTests
         registryTests
