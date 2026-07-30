@@ -112,6 +112,15 @@ as `outputs.{staged,nix,npm}`. To pin it in a system, add the flake as an input 
 `yession.packages.<system>.default` in a NixOS `environment.systemPackages` / home-manager
 `home.packages` list.
 
+### Serving remotely
+
+A Manager and its sessions are loopback-bound by default. Reaching them from another
+device is operator-supplied serving plus two environment variables — Yession ships no
+networking. [docs/serving-over-tailscale.md](docs/serving-over-tailscale.md) is a worked
+end-to-end setup for Tailscale, split into **addressing** (making sessions reachable)
+and **authorizing** (deciding who gets in), including the data-channel precondition to
+prove before building anything.
+
 ### Cloud sessions (Claude Code on the web)
 
 Set the environment's **setup script** to `bash .claude/setup.sh`. It installs single-user
