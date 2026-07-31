@@ -24,6 +24,14 @@ in
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
 
+  # devenv's CLI-vs-modules skew banner, printed on EVERY task invocation, can never be
+  # actionable here: the CLI always comes from the pinned nixpkgs (`nix profile install
+  # nixpkgs#devenv` in both workflows, and .claude/setup.sh does the same), so nobody in this
+  # repo picks a devenv version to keep in sync. Worse, it currently misfires — nixpkgs' devenv
+  # 2.2.0 source ships a stale `src/modules/latest-version` reading 2.1.2, so the banner fires
+  # against devenv's own source and `devenv update` cannot silence it.
+  devenv.warnOnNewVersion = false;
+
   # Point node_modules at the Nix-built tree (addon baked in). Idempotent; replaces a stale
   # symlink or a leftover npm-installed dir. `restore` then skips `npm install` (dir present).
   enterShell = ''
