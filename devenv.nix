@@ -40,7 +40,14 @@ in
       ln -s ${yession.nodeModules}/node_modules node_modules
     fi
     export PATH="$PWD/node_modules/.bin:$PATH"
-    echo "yession — tasks: restore build start dev check verify lint package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring)"
+    # The task list orients someone who just landed in the shell. In front of a one-off
+    # `devenv shell -- <task>` it is pure noise, printed above every check, build and CI log.
+    # devenv says which this is: DEVENV_CMDLINE is a bare `shell` interactively, `shell -- …`
+    # for a task.
+    case "''${DEVENV_CMDLINE:-}" in
+      *" -- "*) ;;
+      *) echo "yession — tasks: restore build start dev check verify lint package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring)" ;;
+    esac
   '';
 
   # --- build outputs (devenv build outputs.<name>) -------------------------------------------
