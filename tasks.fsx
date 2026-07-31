@@ -451,7 +451,38 @@ let private runNodeSuite (target: string) (timeoutMs: int) =
         p.Kill true
         failwith "tests timed out"
 
-let private runCheckOnce (caps: string list) =
+// Is a Docker daemon reachable? `docker info` talks to the daemon over the same socket /
+// DOCKER_HOST the dockerode backend uses, so it answers the question the suites care about
+// (not merely "is the socket file there"). No daemon and no CLI both answer false.
+let private dockerReachable () =
+    try
+        let psi = ProcessStartInfo "docker"
+        psi.ArgumentList.Add "info"
+        psi.WorkingDirectory <- repoRoot
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        use p = Process.Start psi
+        if p.WaitForExit 30000 then p.ExitCode = 0
+        else
+            p.Kill true
+            false
+    with _ -> false
+
+// `Docker` is the one capability a run cannot know it has just by declaring it — `verify`
+// names the whole set, but a laptop or dev container has no daemon. Probe once and drop it
+// when absent, so the Docker suites report a real skip through `Tag.needs` instead of running
+// and passing empty. YESSION_REQUIRE_DOCKER (release.yml sets it) opts OUT of the drop: a gate
+// that was promised a daemon must fail loudly, never quietly skip its way to green.
+let private resolveDocker (caps: string list) : string list =
+    if not (List.contains "Docker" caps) then caps
+    elif not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "YESSION_REQUIRE_DOCKER")) then caps
+    elif dockerReachable () then caps
+    else
+        eprintfn "check: no Docker daemon reachable — dropping the Docker capability (its suites will report a skip)"
+        caps |> List.filter (fun c -> c <> "Docker")
+
+let private runCheckOnce (requested: string list) =
+    let caps = resolveDocker requested
     let capSet = Set.ofList caps
     Environment.SetEnvironmentVariable ("YESSION_TEST_CAPS", String.concat " " caps)
     exec "dotnet" [ "build"; "Yession.slnx" ]

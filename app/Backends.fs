@@ -121,16 +121,6 @@ module DockerBackend =
             return arr.Length
         }
 
-    /// Is a Docker daemon reachable? (Gates the integration suite.)
-    let daemonAvailable () : Async<bool> =
-        async {
-            try
-                let client = DK.create ()
-                do! client.ping () |> Async.AwaitPromise |> Async.Ignore
-                return true
-            with _ -> return false
-        }
-
     let create (resolveSecret: SecretStore.ResolveSecret) : ContainerBackend =
         let client = DK.create ()
 

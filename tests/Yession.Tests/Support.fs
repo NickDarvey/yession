@@ -65,29 +65,6 @@ module Harness =
 /// The view's `ViewActions` are no-ops (handlers fire on live browser events only).
 let render (model: ClientModel) : string = Ssr.renderModel model
 
-/// The Docker daemon gate for the integration suite. A real daemon exists on the CI
-/// `verify` runner but not in the dev container, so the gate makes availability explicit
-/// instead of the old silent no-op: present -> run the body; absent + `YESSION_REQUIRE_DOCKER`
-/// (set on the release gate) -> FAIL, so a daemon-less gate can never pass green; absent
-/// otherwise -> a reported skip. These cases also sit under `Tag.needs [Docker]`, so the cheap
-/// tier never reaches them.
-module Docker =
-
-    [<Fable.Core.Emit("process.env[$0] || ''")>]
-    let private env (name: string) : string = Fable.Core.Util.jsNative
-
-    let private required = env "YESSION_REQUIRE_DOCKER" <> ""
-
-    let gate (name: string) (body: unit -> Async<unit>) =
-        testCaseAsync name <| async {
-            match! Backends.DockerBackend.daemonAvailable () with
-            | true -> do! body ()
-            | false when required ->
-                failwith "verify gate requires a Docker daemon; none reachable (YESSION_REQUIRE_DOCKER is set)"
-            | false ->
-                printfn "skipped '%s': no Docker daemon (set YESSION_REQUIRE_DOCKER to require it)" name
-        }
-
 let peer (id: string) (name: string) : PeerState =
     { PeerId = PeerId.create id |> expect; DisplayName = name }
 
