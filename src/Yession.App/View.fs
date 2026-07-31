@@ -463,37 +463,69 @@ module View =
                     </article>""")
         html $"""<section class="{Style.queue}" data-message-queue>{head}{items}</section>"""
 
+    /// The composer: ONE draft open, everyone else's as a line you can open.
+    ///
+    /// A draft is shared WIP — any peer may edit any draft (the body is a CRDT; the carets are
+    /// presence) and any peer may send one, so the open draft is a full composer whoever's it is.
+    /// What differs by ownership is destruction: discard is the author's alone.
     let private drafts (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         let myPeer = model.Peer.PeerId
-        // Other peers' drafts: a read-only rich editor bound to their body fragment (the
-        // browser mounts it onto this host). Author-badged, not sendable — owner-sends.
-        let others =
-            model.Synced.Drafts
-            |> Map.toList
-            |> List.filter (fun (peerId, _) -> peerId <> myPeer)
-            |> List.map (fun (peerId, _) ->
+        let target = ClientModel.composerTarget model
+        // Live carets in a draft, coloured per peer: "grace and ada are in this one".
+        let editors (peerId: PeerId) =
+            ClientModel.editorsOf peerId model
+            |> List.map (fun (editor, name) ->
                 html $"""
-                    <article class="{Style.draftBox}" data-draft-id="{PeerId.value peerId}" data-draft-author="{PeerId.value peerId}">
-                      <span class="{Style.draftEdge}"></span>
-                      <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft peerId}" data-rich-readonly="true" data-draft-input="{PeerId.value peerId}"></div>
-                      <div class="{Style.draftActions}"><span class="{Style.draftAuthor}">{PeerId.value peerId}</span></div>
-                    </article>""")
-        // The local composer: always present; a rich ProseMirror editor bound to the local
-        // peer's body fragment (mounted imperatively by the browser). Send + Discard.
-        let mine =
+                    <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer editor}"
+                          title="{name}" data-draft-editor-peer="{PeerId.value editor}"></span>""")
+        // A collapsed draft: whose it is, one clamped line of it (the same read-only editor the
+        // browser mounts everywhere, so the CRDT keeps it current), and who is in it. Opening it
+        // collapses whatever was open — including your own composer.
+        let summary (peerId: PeerId) =
             html $"""
-                <article class="{Style.draftBox}" data-draft-id="{PeerId.value myPeer}" data-draft-author="{PeerId.value myPeer}">
+                <button type="button" class="{Style.draftSummary}" data-draft-summary="{PeerId.value peerId}"
+                        data-draft-expand="{PeerId.value peerId}" @click={Ev(fun _ -> dispatch (ExpandDraftMsg peerId))}>
+                  <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value peerId) ]}"></span>
+                  <span class="{Style.draftSummaryName}">{ClientModel.nameOf peerId model}</span>
+                  <span class="{Style.draftSummaryBody}" data-rich-body="{BodyKey.draft peerId}" data-rich-readonly="true"></span>
+                  <span class="{Style.draftEditors}">{editors peerId}</span>
+                </button>"""
+        // The open draft: an editable rich editor bound to that body fragment (mounted
+        // imperatively by the browser), Send for anyone, Discard for its author.
+        let open' =
+            let discard =
+                if target = myPeer then
+                    html $"""
+                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Discard draft"
+                                data-discard-draft @click={Ev(fun _ -> dispatch (DiscardDraftMsg myPeer))}>✕</button>"""
+                else Lit.nothing
+            let author =
+                if target = myPeer then Lit.nothing
+                else html $"""<span class="{Style.draftAuthor}">{ClientModel.nameOf target model}'s message</span>"""
+            html $"""
+                <article class="{Style.draftBox}" data-draft-id="{PeerId.value target}" data-draft-author="{PeerId.value target}">
                   <span class="{Style.draftEdge}"></span>
-                  <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft myPeer}" data-rich-readonly="false" data-draft-input="{PeerId.value myPeer}"></div>
+                  <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft target}" data-rich-readonly="false" data-draft-input="{PeerId.value target}"></div>
                   <div class="{Style.draftActions}">
-                    <button type="button" class="{Style.btnPrimary}" data-send-draft="{PeerId.value myPeer}" @click={Ev(fun _ -> actions.SendDraft myPeer)}>Send</button>
-                    <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Discard draft" data-discard-draft @click={Ev(fun _ -> dispatch (DiscardDraftMsg myPeer))}>✕</button>
+                    <button type="button" class="{Style.btnPrimary}" data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send</button>
+                    {discard}
+                    <span class="{Style.draftEditors}">{editors target}</span>
+                    {author}
                   </div>
                 </article>"""
+        // "New message" only says something when you are in someone else's draft: it is the way
+        // out of collaborating, and pressing it collapses theirs to a summary.
+        let startMine =
+            if target = myPeer then Lit.nothing
+            else
+                html $"""
+                    <button type="button" class="{Style.draftNew}" data-draft-new
+                            @click={Ev(fun _ -> dispatch StartDraftMsg)}>+ New message</button>"""
         html $"""
             <section class="{Style.composer}" data-draft-editor>
-              {others}
-              {mine}
+              {ClientModel.collapsedDrafts model |> List.map summary}
+              {open'}
+              {startMine}
             </section>"""
 
     /// The client shell, rendered into `#app`.

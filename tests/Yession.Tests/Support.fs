@@ -311,13 +311,22 @@ module Body =
 
     type Runner = Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
 
-    /// Author a peer's draft body on a bare runner: ensure the slot, then write the markdown
-    /// into its top-level body fragment. A bare runner has no `DraftSlot.follow` on its doc (that
-    /// is client composition, `connectClientWith`), so the slot is dispatched here — the same slot
-    /// the rule would publish for this content.
-    let author (registry: BodyRegistry) (runner: Runner) (peer: PeerId) (markdown: string) : unit =
-        runner.Dispatch (user (EnsureDraftMsg peer))
+    /// Author a peer's draft body on a bare runner under an EXPLICIT queue key: publish the slot
+    /// carrying that key, then write the markdown into its top-level body fragment. A bare runner
+    /// has no `DraftSlot.follow` on its doc (that is client composition, `connectClientWith`), so
+    /// the slot is dispatched here — the same slot the rule would publish, with the key named so a
+    /// test can assert the queue entry it becomes.
+    let authorAs (queueId: QueueId) (registry: BodyRegistry) (runner: Runner) (peer: PeerId) (markdown: string) : unit =
+        runner.Dispatch (user (EnsureDraftMsg (peer, queueId)))
         Markdown.intoFragment markdown (registry.Fragment (BodyKey.draft peer))
+
+    /// `authorAs` under a minted key — for tests that never name the queue entry.
+    let author (registry: BodyRegistry) (runner: Runner) (peer: PeerId) (markdown: string) : unit =
+        authorAs (QueueId.create (string (System.Guid.NewGuid ())) |> expect) registry runner peer markdown
+
+    /// The queue key a peer's published draft carries, as any co-editor's send would read it.
+    let queueKeyOf (runner: Runner) (peer: PeerId) : QueueId option =
+        (runner.Model ()).Synced.Drafts |> Map.tryFind peer |> Option.map (fun draft -> draft.QueueId)
 
     /// Write a peer's draft body and NOTHING else — what typing into the composer does. The slot
     /// is whatever the publication rule makes of the content (`DraftSlot.follow`), so this is how
@@ -330,18 +339,23 @@ module Body =
     let draft (registry: BodyRegistry) (peer: PeerId) : string option =
         Some (Markdown.ofFragment (registry.Fragment (BodyKey.draft peer)))
 
-    /// The bare-runner analogue of `Connection.SendDraft`: capture the draft body, dispatch
-    /// the enqueue, and seed the new queue fragment (the draft->queue content copy that shared
-    /// Y types cannot do by re-parenting).
-    let send (registry: BodyRegistry) (runner: Runner) (peer: PeerId) (queueId: QueueId) : unit =
-        let md = draft registry peer |> Option.defaultValue ""
-        // Seed the queue body BEFORE the entry (mirrors `Connection.SendDraft`): over an ordered
-        // transport the body update reaches a draining Session Process before the entry, so the
-        // drain never snapshots an entry whose body has not yet landed.
-        if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
-        runner.Dispatch (user (SendDraftMsg (peer, queueId)))
-        // The composer empties after send (the body root is durable, not removed with the slot).
-        Markdown.intoFragment "" (registry.Fragment (BodyKey.draft peer))
+    /// The bare-runner analogue of `Connection.SendDraft`: capture the draft body, seed the queue
+    /// fragment under the key the SLOT carries (the draft->queue content copy that shared Y types
+    /// cannot do by re-parenting), then dispatch the enqueue. Returns the key it went in under, so
+    /// a caller can assert the entry. A no-op returning `None` when nothing is published.
+    let send (registry: BodyRegistry) (runner: Runner) (peer: PeerId) : QueueId option =
+        match queueKeyOf runner peer with
+        | None -> None
+        | Some queueId ->
+            let md = draft registry peer |> Option.defaultValue ""
+            // Seed the queue body BEFORE the entry (mirrors `Connection.SendDraft`): over an
+            // ordered transport the body update reaches a draining Session Process before the
+            // entry, so the drain never snapshots an entry whose body has not yet landed.
+            if md <> "" then Markdown.intoFragment md (registry.Fragment (BodyKey.queued queueId))
+            runner.Dispatch (user (SendDraftMsg peer))
+            // The composer empties after send (the body root is durable, not removed with the slot).
+            Markdown.intoFragment "" (registry.Fragment (BodyKey.draft peer))
+            Some queueId
 
     /// One queue entry's markdown, read straight from the doc (exactly the drain's read).
     let queued (doc: Y.Doc) (queueId: QueueId) : string =

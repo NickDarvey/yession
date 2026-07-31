@@ -55,6 +55,45 @@ let tests =
                 do! host.Stop ()
             }
 
+        testCaseAsync "two peers co-edit one draft and either can send it — once" <|
+            async {
+                let! host = Host.start (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                let! b = connectInMemoryClient host "bob" "Bob"
+                let ada = a.Hello.PeerId
+                // Ada starts a message; Bob's composer opens on it rather than on a rival blank.
+                do! compose a ada "we should ask it to"
+                do! b.Runner.WaitFor (fun m -> Map.containsKey ada m.Synced.Drafts)
+                Expect.equal
+                    (ClientModel.composerTarget (b.Runner.Model ())) ada
+                    "the draft already in flight IS Bob's composer"
+
+                // Bob edits ADA's draft — the co-edit the read-only mirror used to forbid — and
+                // the words converge on both replicas.
+                do! compose b ada "we should ask it to re-run the migration"
+                do! a.Runner.WaitFor (fun _ -> draftBody a ada = Some "we should ask it to re-run the migration")
+
+                // Bob sends Ada's draft. One message, attributed to Ada, and the slot clears
+                // everywhere: the send key came from the draft, not from Bob.
+                b.Connection.SendDraft ada
+                let settled (m: ClientModel) =
+                    Map.isEmpty m.Synced.Queue
+                    && not (Map.containsKey ada m.Synced.Drafts)
+                    && (m.Conversation.Items |> List.map (fun i -> i.Body)) = [ "we should ask it to re-run the migration" ]
+                do! a.Runner.WaitFor settled
+                do! b.Runner.WaitFor settled
+                let! page = host.Log.Read None System.Int32.MaxValue
+                let sent =
+                    page.Events
+                    |> List.choose (fun e -> match e.Event with MessageSent m -> Some m | _ -> None)
+                match sent with
+                | [ message ] ->
+                    Expect.equal message.Author (PeerRef ada) "attributed to the peer whose draft it was"
+                    Expect.equal message.Body "we should ask it to re-run the migration" "the co-written body"
+                | other -> failwithf "expected exactly one MessageSent, got %A" other
+                do! host.Stop ()
+            }
+
         testCaseAsync "a draft box appears only for a peer that has typed, and goes when its composer empties" <|
             async {
                 let! host = Host.start (sid ()) 0

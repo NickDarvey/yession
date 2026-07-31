@@ -70,6 +70,14 @@ type ClaudeViewState =
     { Status : ClaudeStatus
       Flow : ClaudeFlowState }
 
+/// Which draft the composer has open. `Unchosen` is the state a fresh client is in, and the only
+/// one where the DEFAULT applies (join the draft already in flight rather than start a rival) —
+/// once someone picks, the pick stands, so "new message" is not undone by a peer starting to type.
+type ComposerChoice =
+    | Unchosen
+    | Own
+    | Joined of PeerId
+
 /// A remote peer's live caret+selection: the peer's name (for the cursor label) plus its
 /// `Focus` — which collaborative field it is in and its position there. Ephemeral presence,
 /// delivered over `Presence` frames — never synced through Yjs, never durable. The peer's
@@ -89,6 +97,13 @@ type ClientModel =
       /// Other peers' live carets+selections, keyed by peer. Cleared when a peer moves its
       /// caret out of every collaborative field, or disconnects (its `Focus` becomes `None`).
       Presence      : Map<PeerId, RemotePresence>
+      /// Every peer this session has seen, with the display name it joined under — folded from
+      /// the durable log (`PeerJoined`/`PeerLeft`), so it survives a reload and names a draft's
+      /// author even while that author is away. Presence is who is here NOW; this is who is who.
+      Peers         : Map<PeerId, string>
+      /// Which draft this client has OPEN in the composer, of the at-most-one that can be. App
+      /// state, never synced: two people in one session may each have a different draft open.
+      Composer      : ComposerChoice
       /// The session environment's UI status, folded from lifecycle events (Step 12).
       Environment   : EnvironmentStatus
       /// The read-only command log, folded from command events (Step 13).
@@ -125,17 +140,25 @@ type ClientMsg =
     /// A remote peer's cursor moved (or cleared) in the title — ephemeral presence folded
     /// into `Presence`, never into the synced state.
     | RemotePresenceMsg of PresencePayload
-    /// Ensure the draft slot keyed by `PeerId` exists (author only). The body is a rich-text
-    /// `Y.XmlFragment` anchored by the codec once the slot exists, so the editor has a synced
-    /// fragment to bind — the client ensures its own slot so its composer can mount. Editing
-    /// is the editor writing that fragment directly (it syncs through the doc); no body message.
-    | EnsureDraftMsg of PeerId
-    /// Send = enqueue (Phase 3): the owner's draft moves into the shared message queue
-    /// under the app-minted `QueueId`, at the tail, and the slot clears. The body fragment's
-    /// content is copied draft->queue imperatively at send (shared types can't be re-parented).
-    | SendDraftMsg of PeerId * QueueId
-    /// Discard the draft in the slot keyed by `PeerId` without sending it.
+    /// Ensure the draft slot keyed by `PeerId` exists (author only), carrying the queue key it
+    /// will become when anyone sends it. The body is a rich-text `Y.XmlFragment` anchored by the
+    /// codec once the slot exists, so the editor has a synced fragment to bind — the client
+    /// ensures its own slot so its composer can mount. Editing is the editor writing that
+    /// fragment directly (it syncs through the doc); no body message.
+    | EnsureDraftMsg of PeerId * QueueId
+    /// Send = enqueue (Phase 3): the draft in this slot moves into the shared message queue at
+    /// the tail under the key the slot has carried since it was published, and the slot clears.
+    /// ANY co-editor may send; the same key from every sender is what makes concurrent sends one
+    /// entry. The body fragment's content is copied draft->queue imperatively at send (shared
+    /// types can't be re-parented).
+    | SendDraftMsg of PeerId
+    /// Discard the draft in the slot keyed by `PeerId` without sending it. The author's call:
+    /// a co-editor collapses a draft, it does not destroy one.
     | DiscardDraftMsg of PeerId
+    /// Open this peer's draft in the composer, collapsing whatever was open. Local view state.
+    | ExpandDraftMsg of PeerId
+    /// Open the local peer's own composer (the "new message" path), collapsing anyone else's.
+    | StartDraftMsg
     /// Reorder a queued message: one fractional-index register write.
     | ReorderQueuedMsg of QueueId * order: float
     /// Delete a queued message. Until consumed, deletion wins: a deleted entry never
@@ -172,6 +195,8 @@ module ClientModel =
               Feed = FeedLive }
           Agent = { ActiveTurn = None }
           Presence = Map.empty
+          Peers = Map.empty
+          Composer = Unchosen
           Environment = EnvironmentNotStarted
           Commands = CommandLog.empty
           Claude =
@@ -186,6 +211,55 @@ module ClientModel =
 
     let private withSynced (synced: SyncedSessionState) (model: ClientModel) : ClientModel =
         { model with Synced = synced }
+
+    /// Whose draft the composer is showing — the resolved answer to `ComposerChoice`, and the
+    /// only place the "join what is already being written" default lives.
+    ///
+    /// A choice is honoured while that draft still exists (a sent or discarded one falls back).
+    /// Unchosen prefers your own draft if you have one, then the drafts already in flight in a
+    /// stable order, and finally your own empty composer — so a session where someone is midway
+    /// through a message opens on THEIR words, not on a second blank box beside them.
+    let composerTarget (model: ClientModel) : PeerId =
+        let mine = model.Peer.PeerId
+        let others =
+            model.Synced.Drafts
+            |> Map.toList
+            |> List.map fst
+            |> List.filter (fun peer -> peer <> mine)
+        match model.Composer with
+        | Own -> mine
+        | Joined peer when Map.containsKey peer model.Synced.Drafts -> peer
+        | Joined _
+        | Unchosen ->
+            if Map.containsKey mine model.Synced.Drafts then mine
+            else
+                match others with
+                | first :: _ -> first
+                | [] -> mine
+
+    /// The drafts NOT in the composer, in stable order: the collapsed summaries.
+    let collapsedDrafts (model: ClientModel) : PeerId list =
+        let target = composerTarget model
+        model.Synced.Drafts |> Map.toList |> List.map fst |> List.filter (fun peer -> peer <> target)
+
+    /// Who is editing this draft right now, by their live caret (never the local peer — you are
+    /// not your own collaborator). Names come from presence, which is where a live caret's name
+    /// already travels.
+    let editorsOf (peer: PeerId) (model: ClientModel) : (PeerId * string) list =
+        model.Presence
+        |> Map.toList
+        |> List.filter (fun (_, presence) -> presence.Focus.Field = DraftBody peer)
+        |> List.map (fun (editor, presence) -> editor, presence.DisplayName)
+
+    /// A peer's display name: the roster's, else the peer's own live presence, else the raw id
+    /// (an id is a last resort, not a label — `PEER-129755065` is not a person).
+    let nameOf (peer: PeerId) (model: ClientModel) : string =
+        match Map.tryFind peer model.Peers with
+        | Some name -> name
+        | None ->
+            match Map.tryFind peer model.Presence with
+            | Some presence when presence.DisplayName <> "" -> presence.DisplayName
+            | _ -> PeerId.value peer
 
     /// Fold a message into the model.
     let update (msg: ClientMsg) (model: ClientModel) : ClientModel =
@@ -235,12 +309,24 @@ module ClientModel =
             let commands =
                 freshEvents
                 |> List.fold (fun log e -> CommandLog.applyEvent log e.Event) model.Commands
+            // The roster keeps departed peers: a draft's author may have left while their words
+            // are still in the composer, and "who wrote this" must still have an answer.
+            let peers =
+                freshEvents
+                |> List.fold
+                    (fun roster e ->
+                        match e.Event with
+                        | PeerJoined joined when joined.DisplayName.Trim () <> "" ->
+                            Map.add joined.PeerId joined.DisplayName roster
+                        | _ -> roster)
+                    model.Peers
             let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
             { model with
                 Conversation = conversation
                 Agent = agent
                 Environment = environment
                 Commands = commands
+                Peers = peers
                 EventConsumer =
                     { LastProcessedOffset = highWater
                       LatestKnownOffset = latestKnown
@@ -264,33 +350,44 @@ module ClientModel =
                         Map.add payload.PeerId { DisplayName = payload.DisplayName; Focus = focus } model.Presence
                     | None -> Map.remove payload.PeerId model.Presence
                 { model with Presence = presence }
-        | EnsureDraftMsg peerId ->
+        | EnsureDraftMsg (peerId, queueId) ->
             // Materialise the slot keyed by `peerId` (author only) if absent, so the codec
-            // anchors its body fragment and the editor can bind. Idempotent.
+            // anchors its body fragment and the editor can bind. Idempotent — and the queue key
+            // of an existing slot is never re-minted, because every co-editor's send depends on
+            // it staying the one the draft was published with.
             if Map.containsKey peerId model.Synced.Drafts then model
             else
                 model
                 |> withSynced
-                    { model.Synced with Drafts = Map.add peerId { Author = peerId } model.Synced.Drafts }
-        | SendDraftMsg (peerId, queueId) ->
+                    { model.Synced with
+                        Drafts = Map.add peerId { Author = peerId; QueueId = queueId } model.Synced.Drafts }
+        | SendDraftMsg peerId ->
             // Draft -> queue entry, atomically in one model update (one CRDT transaction):
-            // the slot is deleted and the queue key created. Owner-sends: the slot's author
-            // is the attributed author; the entry lands at the queue tail. The body fragment's
-            // content is carried over imperatively (Browser.sendDraft), not in the model.
+            // the slot is deleted and its queue key created. The entry is attributed to the
+            // slot's AUTHOR, not to whoever pressed send — the sender committed it, the author
+            // wrote it — and it lands at the queue tail. Two peers sending this draft
+            // concurrently write the same key, so the replicas merge to one entry instead of
+            // queueing the message twice. The body fragment's content is carried over
+            // imperatively (`App.connect`'s SendDraft), not in the model.
             match Map.tryFind peerId model.Synced.Drafts with
-            | Some draft when not (Map.containsKey queueId model.Synced.Queue) ->
+            | Some draft when not (Map.containsKey draft.QueueId model.Synced.Queue) ->
                 let entry =
-                    { QueueId = queueId
+                    { QueueId = draft.QueueId
                       Author = draft.Author
                       Order = QueueOrder.next model.Synced.Queue }
                 model
                 |> withSynced
                     { model.Synced with
                         Drafts = Map.remove peerId model.Synced.Drafts
-                        Queue = Map.add queueId entry model.Synced.Queue }
+                        Queue = Map.add draft.QueueId entry model.Synced.Queue }
             | _ -> model
         | DiscardDraftMsg peerId ->
             model |> withSynced { model.Synced with Drafts = Map.remove peerId model.Synced.Drafts }
+        | ExpandDraftMsg peerId ->
+            // One draft is open at a time, so opening one IS collapsing the other.
+            { model with Composer = if peerId = model.Peer.PeerId then Own else Joined peerId }
+        | StartDraftMsg ->
+            { model with Composer = Own }
         | ReorderQueuedMsg (queueId, order) ->
             match Map.tryFind queueId model.Synced.Queue with
             | Some entry ->
