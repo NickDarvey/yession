@@ -183,7 +183,7 @@ module View =
                     <div class="{Style.noAgentCard}" data-agent-presence="absent" data-no-agent>
                       <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="{Style.statusRun}">no agent</span></div>
                       <span class="{Style.small}">messages still send — nothing answers them until a Claude account is connected.</span>
-                      <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="open" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
+                      <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="prompt" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
                     </div>"""
             | None ->
                 html $"""<div class="{Style.person}" data-agent-presence="unknown"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span></div>"""
@@ -419,7 +419,7 @@ module View =
     let private agentAbsence (actions: ViewActions) (claude: ClaudeViewState) : TemplateResult =
         match claude.Status.AgentAvailable with
         | Some false ->
-            html $"""<button type="button" class="{Style.headerNoAgent}" data-settings-toggle="open" @click={Ev(fun _ -> actions.ToggleSettings ())}>no agent</button>"""
+            html $"""<button type="button" class="{Style.headerNoAgent}" data-settings-toggle="prompt" @click={Ev(fun _ -> actions.ToggleSettings ())}>no agent</button>"""
         | _ -> Lit.nothing
 
     let private header (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =

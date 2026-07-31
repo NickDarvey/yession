@@ -235,8 +235,11 @@ let tests =
                     let! _ = await (page.WaitForFunctionAsync connected)
 
                     // Sign a credential in for "all my sessions" — the peer's own scope — from
-                    // the settings drawer, exactly as a human does.
-                    do! awaitU (page.ClickAsync "[aria-label='Settings']")
+                    // settings, exactly as a human does. The control is the sidebar's `settings`
+                    // pivot: its own accessible name is the word it shows, so the hook — which is
+                    // the contract — is what to click. (`data-settings-toggle="prompt"` marks the
+                    // calls to action that also lead there; `open` is the pivot alone.)
+                    do! awaitU (page.ClickAsync "[data-settings-toggle='open']")
                     let! _ = await (page.WaitForSelectorAsync "[data-claude-connect]")
                     do! awaitU (page.ClickAsync "[data-claude-connect]")
 

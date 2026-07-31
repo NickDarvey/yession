@@ -87,9 +87,12 @@ module Dom =
         // mobile scrim) — so the browser can hand focus to whichever control replaces the
         // one that was just pressed.
         let navToggle = "data-nav-toggle"
-        // Settings, the column's other face: the toggle (valued `open`/`close`, for the same
-        // focus reason), the pane, the Claude section, and the agent-presence surfaces (the
-        // membership row, and the header's stand-in while the column is off screen).
+        // Settings, the column's other face: the toggle, the pane, the Claude section, and the
+        // agent-presence surfaces (the membership row, and the header's stand-in while the
+        // column is off screen). The toggle's VALUE names the control, not just the direction:
+        // `open`/`close` are the column's own pivots — exactly one of each in the document, so
+        // focus can be handed between them and a test can click one without ambiguity — while
+        // `prompt` is any call to action that happens to lead there.
         let settingsToggle = "data-settings-toggle"
         let settingsPanel = "data-settings-panel"
         let claudePanel = "data-claude-panel"
