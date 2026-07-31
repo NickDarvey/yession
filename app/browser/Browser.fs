@@ -278,14 +278,22 @@ let private mintId (prefix: string) =
 // localStorage under a browser-wide key (not per session — it names the browser, the
 // same human across sessions), so colours, draft slots, and peer-scoped secrets survive
 // reloads. Storage denied (private mode) falls back to the per-load mint.
+//
+// `$0` is substituted TEXTUALLY, so the argument expression must be bound to a const
+// once: with `$0` written three times, the argument (a fresh random mint) evaluated
+// three times, and a first visit stored one id while returning a different one. The
+// returned id rode the login bounce and was witnessed; the stored id — the one every
+// later load reads — was not, so every peer-scoped call (the whole connections surface)
+// was denied for the life of the launch.
 [<Emit("""(() => {
+  const minted = $0
   try {
     const key = 'yession/peer-id'
     const existing = window.localStorage.getItem(key)
     if (existing) return existing
-    window.localStorage.setItem(key, $0)
-    return $0
-  } catch { return $0 }
+    window.localStorage.setItem(key, minted)
+    return minted
+  } catch { return minted }
 })()""")>]
 let private persistentPeerId (minted: string) : string = jsNative
 
