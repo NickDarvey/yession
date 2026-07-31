@@ -217,6 +217,43 @@ let tests =
                     (sprintf "expected a session-keyed doc store, found: %s" (String.Join (", ", dbNames)))
             }
 
+        testCaseAsync "a first-visit browser connects as the peer id it keeps" <|
+            async {
+                // The peer a browser SIGNS IN as (the id riding the login bounce, which the
+                // Manager witnesses into the launch) must be the peer it KEEPS (the id in
+                // localStorage that every later load asserts) — otherwise the whole
+                // peer-scoped surface is denied for the life of the launch. The break was
+                // invisible to the HTTP tests, which pass one id through by hand: it needs a
+                // FIRST VISIT in a real browser, which is what a fresh context is.
+                let! context = await (browser.NewContextAsync ())
+                let! page = await (context.NewPageAsync ())
+                page.SetDefaultTimeout 20000.0f
+                try
+                    let! _ = await (page.GotoAsync BASE)
+                    // Nothing may be evaluated until the login bounce has settled (it destroys
+                    // the execution context); `connected` is only true back on the shell.
+                    let! _ = await (page.WaitForFunctionAsync connected)
+
+                    // Sign a credential in for "all my sessions" — the peer's own scope — from
+                    // the settings drawer, exactly as a human does.
+                    do! awaitU (page.ClickAsync "[aria-label='Settings']")
+                    let! _ = await (page.WaitForSelectorAsync "[data-claude-connect]")
+                    do! awaitU (page.ClickAsync "[data-claude-connect]")
+
+                    // The flow settles either into the paste-the-code step (the broker minted a
+                    // provider authorize URL — no network involved) or into a legible error.
+                    let! _ =
+                        await (page.WaitForFunctionAsync
+                                """!!document.querySelector('[data-claude-authorize]')
+                                   || !!document.querySelector('[data-claude-error]')""")
+                    let! error =
+                        await (page.EvaluateAsync<string>
+                                "() => document.querySelector('[data-claude-error]')?.textContent ?? ''")
+                    Expect.equal error "" "connecting must not be refused for the browser's own peer"
+                finally
+                    context.CloseAsync () |> ignore
+            }
+
         testCaseAsync "shut down the browser peers and the host" <|
             async {
                 if browser <> null then do! awaitU (browser.CloseAsync ())
