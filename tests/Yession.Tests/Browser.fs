@@ -442,57 +442,66 @@ let mountedTests =
                 if Directory.Exists mountDataDir then Directory.Delete (mountDataDir, true)
                 startMountedHost ()
                 let proxy = startMountProxy MOUNT_PROXY_PORT MOUNT_SESSION_PORT
-                let publicUrl = sprintf "http://127.0.0.1:%d/s/%s/" MOUNT_PROXY_PORT MOUNT_SESSION
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (
-                            ExecutablePath = chromiumPath (),
-                            Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
-                let! context = await (br.NewContextAsync ())
-                let! page = await (context.NewPageAsync ())
-                page.SetDefaultTimeout 20000.0f
+                // Teardown in `finally`: a failing assertion used to skip it and leave the
+                // Manager, its session child and the proxy holding ports 8186-8188, so one
+                // red run could poison whatever ran next (the failing CI run showed exactly
+                // that, as "Terminate orphan process" lines).
+                let mutable browserToClose : IBrowser option = None
+                let mutable playwrightToDispose : IPlaywright option = None
+                try
+                    let publicUrl = sprintf "http://127.0.0.1:%d/s/%s/" MOUNT_PROXY_PORT MOUNT_SESSION
+                    let! pw = await (Playwright.CreateAsync ())
+                    playwrightToDispose <- Some pw
+                    let! br =
+                        await (pw.Chromium.LaunchAsync (
+                            BrowserTypeLaunchOptions (
+                                ExecutablePath = chromiumPath (),
+                                Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
+                    browserToClose <- Some br
+                    let! context = await (br.NewContextAsync ())
+                    let! page = await (context.NewPageAsync ())
+                    page.SetDefaultTimeout 20000.0f
 
-                // Everything below happens at the PUBLIC path. Nothing in the browser was
-                // told about a prefix: the shell's `<base href>` is the only thing making
-                // its relative routes resolve under the mount.
-                let! _ = await (page.GotoAsync publicUrl)
+                    // Everything below happens at the PUBLIC path. Nothing in the browser was
+                    // told about a prefix: the shell's `<base href>` is the only thing making
+                    // its relative routes resolve under the mount.
+                    let! _ = await (page.GotoAsync publicUrl)
 
-                // NOTHING may be evaluated until the page has settled. On a 401 from `me`
-                // the client RENAVIGATES through the login bounce (session -> manager ->
-                // `<mount>/callback` -> `./` -> the shell), and an `EvaluateAsync` racing
-                // that navigation dies with "Execution context was destroyed" — which is
-                // exactly how this test passed locally and broke master. `connected` is only
-                // true on the shell after the bounce, and `WaitForFunctionAsync` re-arms
-                // across navigations, so it is the one safe thing to await first.
-                let! _ = await (page.WaitForFunctionAsync connected)
+                    // NOTHING may be evaluated until the page has settled. On a 401 from `me`
+                    // the client RENAVIGATES through the login bounce (session -> manager ->
+                    // `<mount>/callback` -> `./` -> the shell), and an `EvaluateAsync` racing
+                    // that navigation dies with "Execution context was destroyed" — which is
+                    // exactly how this test passed locally and broke master. `connected` is only
+                    // true on the shell after the bounce, and `WaitForFunctionAsync` re-arms
+                    // across navigations, so it is the one safe thing to await first.
+                    let! _ = await (page.WaitForFunctionAsync connected)
 
-                let! baseHref = await (page.EvaluateAsync<string> "() => document.querySelector('base')?.getAttribute('href')")
-                Expect.equal baseHref (sprintf "/s/%s/" MOUNT_SESSION) "the shell declares its mount"
+                    let! baseHref = await (page.EvaluateAsync<string> "() => document.querySelector('base')?.getAttribute('href')")
+                    Expect.equal baseHref (sprintf "/s/%s/" MOUNT_SESSION) "the shell declares its mount"
 
-                // The bundle was fetched from under the mount — had it been root-anchored it
-                // would have hit the proxy's root and 404'd, and the client could not have
-                // reached `connected` above at all.
-                let! assets =
-                    await (page.EvaluateAsync<string[]> """() =>
-                        performance.getEntriesByType('resource').map(e => new URL(e.name).pathname)""")
-                Expect.isTrue
-                    (assets |> Array.exists (fun p -> p = sprintf "/s/%s/client.js" MOUNT_SESSION))
-                    "the client bundle was fetched under the mount"
+                    // The bundle was fetched from under the mount — had it been root-anchored it
+                    // would have hit the proxy's root and 404'd, and the client could not have
+                    // reached `connected` above at all.
+                    let! assets =
+                        await (page.EvaluateAsync<string[]> """() =>
+                            performance.getEntriesByType('resource').map(e => new URL(e.name).pathname)""")
+                    Expect.isTrue
+                        (assets |> Array.exists (fun p -> p = sprintf "/s/%s/client.js" MOUNT_SESSION))
+                        "the client bundle was fetched under the mount"
 
-                // The auth cookie is scoped to this session's mount, not the whole origin.
-                let! cookies = await (context.CookiesAsync ())
-                let sessionCookie =
-                    cookies |> Seq.tryFind (fun c -> c.Name.StartsWith "yession_auth_")
-                match sessionCookie with
-                | None -> failwith "no session auth cookie was set"
-                | Some cookie ->
-                    Expect.equal cookie.Path (sprintf "/s/%s/" MOUNT_SESSION) "scoped to the mount, not shared with siblings"
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                proxy.Stop ()
-                try mountedHost.Kill true with _ -> ()
+                    // The auth cookie is scoped to this session's mount, not the whole origin.
+                    let! cookies = await (context.CookiesAsync ())
+                    let sessionCookie =
+                        cookies |> Seq.tryFind (fun c -> c.Name.StartsWith "yession_auth_")
+                    match sessionCookie with
+                    | None -> failwith "no session auth cookie was set"
+                    | Some cookie ->
+                        Expect.equal cookie.Path (sprintf "/s/%s/" MOUNT_SESSION) "scoped to the mount, not shared with siblings"
+                finally
+                    browserToClose |> Option.iter (fun b -> b.CloseAsync () |> ignore)
+                    playwrightToDispose |> Option.iter (fun p -> p.Dispose ())
+                    proxy.Stop ()
+                    try mountedHost.Kill true with _ -> ()
             }
     ]
 

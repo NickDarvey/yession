@@ -135,6 +135,17 @@ public string — is a possible follow-up, not done here.
   `<base href>` makes a browser ask for is exactly what `parseUnder` claims.
 - Ports/Native: the registry stream and the real login chain against spawned sessions,
   with a fronted Manager at a loopback origin on a known port.
-- Outstanding: a `Browser`-tier test driving real Chromium at a prefixed path through a
-  forwarding proxy. Until it exists, `<base href>` resolution is verified by reasoning and
-  by unit round-trip, not by a browser.
+- Browser tier: real Chromium at a session's PUBLIC prefixed path, through a
+  path-preserving proxy — the shell declares `<base href="/s/<id>/">`, the bundle is
+  fetched from under the mount (read back from `performance.getEntriesByType`), the login
+  bounce completes at the public address, a WebRTC data channel opens through the prefix,
+  and the auth cookie's `Path` is the mount. So `<base href>` resolution is demonstrated in
+  a browser, not argued from unit round-trips.
+
+  That test also broke master once, and the reason is worth keeping: it evaluated
+  `document.querySelector('base')` immediately after `GotoAsync`, while the client was
+  renavigating through the login bounce, so its execution context could be destroyed
+  mid-evaluate. It passed locally every time and failed on the first CI run. Anything
+  driving this flow must await the navigation-tolerant `WaitForFunctionAsync` FIRST and
+  evaluate only after — and a green local run is not evidence that a browser test is
+  free of that race.

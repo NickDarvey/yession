@@ -73,9 +73,16 @@ let
 
   # NuGet global-packages cache — the only network step (a fixed-output derivation). Populated
   # by restoring the solution + the Fable tool; consumed offline by `staged` via NUGET_PACKAGES.
+  #
+  # NO `version` in the name. A fixed-output derivation's store path comes from its NAME and
+  # its HASH, so carrying the version there moved the path every commit — and this is the one
+  # derivation that reaches the NETWORK, so every build re-downloaded the whole NuGet cache
+  # from nuget.org and inherited nuget.org's bad days (a 503 here fails the build with
+  # NU1301, having nothing to do with the change being built). The content is pinned by
+  # `outputHash`; what it is called is not part of that guarantee.
   nugetDeps = pkgs.stdenv.mkDerivation {
-    pname = "yession-nuget-deps";
-    inherit version src;
+    name = "yession-nuget-deps";
+    inherit src;
     nativeBuildInputs = [ pkgs.dotnet-sdk_10 pkgs.cacert ];
     buildPhase = ''
       runHook preBuild
@@ -164,12 +171,18 @@ let
   # the assembled package dir and a prod-pruned node_modules for the installable to reuse.
   staged = pkgs.stdenv.mkDerivation {
     pname = "yession-staged";
-    inherit version src npmDeps;
-    nativeBuildInputs = [ pkgs.dotnet-sdk_10 pkgs.nodejs_24 pkgs.npmHooks.npmConfigHook ];
-    npmFlags = [ "--ignore-scripts" ];
+    inherit version src;
+    nativeBuildInputs = [ pkgs.dotnet-sdk_10 pkgs.nodejs_24 ];
+    # Reuse the cached tree rather than installing a second one. `src` here is the whole
+    # source — correct, because this derivation COMPILES it — but npm's tree does not depend
+    # on a line of F#, so running npmConfigHook here re-did a multi-gigabyte install on every
+    # source change. A COPY, not a symlink: the install phase prunes it with `npm prune`, and
+    # the Nix store is read-only.
     buildPhase = ''
       runHook preBuild
       ${dotnetEnv}
+      cp -a ${nodeModules}/node_modules ./node_modules
+      chmod -R u+w node_modules
       export PATH="$PWD/node_modules/.bin:$PATH"
       # NUGET_PACKAGES must be writable (restore writes lock/temp files); copy the read-only FOD.
       export NUGET_PACKAGES="$TMPDIR/nuget-packages"
