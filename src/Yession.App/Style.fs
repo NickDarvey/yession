@@ -447,11 +447,17 @@ module Style =
     // Said ONCE, in the section that lists who is in this session, because that is where a
     // missing member is missing. It used to be said three times over (a sidebar row, a strip
     // above the composer, and the settings copy); repetition made it wallpaper, not a prompt.
-    // Blue is the agent's voice, so the blue left edge is its absence — the same edge grammar
-    // the queue uses for editability.
+    //
+    // The absent state is the SAME roster row as the live one — same avatar cell, same
+    // right-aligned status slot — so connecting an agent flips "no agent" to "ready" in
+    // place; nothing moves and no box appears or collapses. (It used to be a boxed card,
+    // which broke the roster's geometry and made the connect moment a layout jump.) The
+    // prompt hangs beneath the row, on the roster's text column.
 
-    let noAgentCard = "flex flex-col gap-2 bg-surface border-l-2 border-blue px-3 py-3 mt-1"
-    /// Full-width so it reads as the section's one action, not an afterthought beside the text.
+    let noAgentBlock = "flex flex-col gap-2"
+    /// Indented to the roster's text column: 20px avatar + 10px gutter (`person`'s grid).
+    let noAgentPrompt = "flex flex-col gap-2 pl-[30px]"
+    /// Full-width within the column so it reads as the section's one action.
     let noAgentAction = "w-full text-center"
 
     // --- Document shell ------------------------------------------------------------------------

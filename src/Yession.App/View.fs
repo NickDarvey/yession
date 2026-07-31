@@ -175,12 +175,11 @@ module View =
             </section>"""
 
     /// Who is in this session — and, when the agent is not, the ONE place the product asks for
-    /// a connection. A missing member belongs in the membership list, so the absent state is not
-    /// a status word here but a card with a real call to action: what is missing, what it costs
-    /// while it is missing, and the button that fixes it.
+    /// a connection. A missing member belongs in the membership list, so all three agent states
+    /// wear the SAME roster row — avatar cell, name, right-aligned status — and only the words
+    /// (and the prompt hanging under the row) change. Connecting flips "no agent" to "ready" in
+    /// place; the roster never jumps.
     let private peopleSection (actions: ViewActions) (model: ClientModel) : TemplateResult =
-        // The agent's row tells the truth about its presence: live (green), absent (the
-        // call to action), or unknown until the first probe answers.
         let agentRow =
             match model.Claude.Status.AgentAvailable with
             | Some true ->
@@ -191,10 +190,12 @@ module View =
             // queue does; the copy says what it does.
             | Some false ->
                 html $"""
-                    <div class="{Style.noAgentCard}" data-agent-presence="absent" data-no-agent>
-                      <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="{Style.statusRun}">no agent</span></div>
-                      <span class="{Style.small}">messages still send — they go unanswered until Claude is connected.</span>
-                      <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="prompt" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
+                    <div class="{Style.noAgentBlock}" data-agent-presence="absent" data-no-agent>
+                      <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span><span class="{Style.statusRun} ml-auto">no agent</span></div>
+                      <div class="{Style.noAgentPrompt}">
+                        <span class="{Style.small}">messages still send — they go unanswered until Claude is connected.</span>
+                        <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="prompt" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
+                      </div>
                     </div>"""
             | None ->
                 html $"""<div class="{Style.person}" data-agent-presence="unknown"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span></div>"""
