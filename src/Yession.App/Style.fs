@@ -455,8 +455,11 @@ module Style =
     // prompt hangs beneath the row, on the roster's text column.
 
     let noAgentBlock = "flex flex-col gap-2"
-    /// Indented to the roster's text column: 20px avatar + 10px gutter (`person`'s grid).
-    let noAgentPrompt = "flex flex-col gap-2 pl-[30px]"
+    /// The prompt hangs from the agent's row on a 2px blue edge — the width every other
+    /// edge in the product uses (queue, draft, quote) and the agent's colour — run down
+    /// from the avatar above it: 9px margin + 2px line centres the edge under the 20px
+    /// square, and the padding steps the text back onto the roster's text column (30px).
+    let noAgentPrompt = "flex flex-col gap-2 ml-[9px] border-l-2 border-blue pl-[19px]"
     /// Full-width within the column so it reads as the section's one action.
     let noAgentAction = "w-full text-center"
 
