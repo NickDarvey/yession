@@ -288,16 +288,22 @@ module View =
     /// go there and come back, the timeline never moves under a scrim, and configuration keeps
     /// the section rhythm it already had. Open state is the root element's `settings-open`
     /// class — presentation, not model — so it survives re-renders.
+    ///
+    /// It is laid out as the nav face's mirror: identity in the head (where the wordmark sits),
+    /// the way out at the foot (where `settings ›` sits), and the column's own collapse control
+    /// in the same corner on both faces — chrome that belongs to the column, not to a face, so
+    /// it never disappears under you.
     let private settingsPane (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         html $"""
             <div class="{Style.settingsPane}" data-settings-panel>
               <div class="{Style.cls [ Style.settingsHead; Style.settingsLane0 ]}">
                 <span class="{Style.settingsTitle}">settings</span>
-                <button type="button" class="{Style.navChevron}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}>{Icon.left}back</button>
+                <button type="button" class="{Style.navChevronBack}" aria-label="Collapse sidebar" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.left}</button>
               </div>
               {claudeSection actions dispatch model.Claude}
               <div class="flex-1"></div>
-              <span class="{Style.cls [ Style.label; Style.settingsLane2 ]} pt-4">credentials are sealed by the manager</span>
+              <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
+              <span class="{Style.cls [ Style.label; Style.settingsLane2 ]} pt-3">credentials are sealed by the manager</span>
             </div>"""
 
     /// The workspace face of the column: identity, sync health, membership, environment, log.
@@ -306,17 +312,15 @@ module View =
             <div class="{Style.navPane}">
               <div class="{Style.cls [ Style.sideHead; Style.navLane0 ]}">
                 <span class="{Style.wordmark}">yession<span class="text-green">.</span></span>
-                <div class="flex items-end gap-1">
-                  <button type="button" class="{Style.navChevron}" data-settings-toggle="open" @click={Ev(fun _ -> actions.ToggleSettings ())}>settings</button>
-                  <button type="button" class="{Style.navChevron}" aria-label="Collapse sidebar" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.left}</button>
-                </div>
+                <button type="button" class="{Style.navChevronBack}" aria-label="Collapse sidebar" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.left}</button>
               </div>
               {connectionSection model}
               {peopleSection actions model}
               {environmentSection model.Environment}
               {commandsSection model.Commands}
               <div class="flex-1"></div>
-              <span class="{Style.cls [ Style.label; Style.navLane2 ]} pt-4">local first · every fact is an event</span>
+              <button type="button" class="{Style.cls [ Style.navPivot; Style.navLane2 ]}" data-settings-toggle="open" @click={Ev(fun _ -> actions.ToggleSettings ())}>settings<span class="{Style.pivotMarkForward}">{Icon.pivotRight}</span></button>
+              <span class="{Style.cls [ Style.label; Style.navLane2 ]} pt-3">local first · every fact is an event</span>
             </div>"""
 
     /// The sidebar column: one region, two faces, and — on mobile — the scrim behind it.
@@ -430,7 +434,7 @@ module View =
             |> List.map (fun (peerId, p) -> remoteCursor peerId p)
         html $"""
             <header class="{Style.header}">
-              <button type="button" class="{Style.cls [ Style.navChevron; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle="show" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.right}</button>
+              <button type="button" class="{Style.cls [ Style.navChevronForward; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle="show" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.right}</button>
               <div class="{Style.cls [ Style.titleWrap; Style.headerTitle ]}">
                 <input type="text" class="{Style.titleInput}" data-session-title aria-label="Session title" placeholder="session"
                        value="{titleStr}"

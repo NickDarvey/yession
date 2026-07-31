@@ -19,7 +19,14 @@ const [url, w, h, out, expression] = [process.argv[2], Number(process.argv[3]), 
 if (!url || !w || !h || !out) { console.error('usage: node shot.mjs <url> <width> <height> <out.png> [expression]'); process.exit(2) }
 
 const port = 9333
-const proc = spawn(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' })
+// Headless Chromium has no pointing device, so `(hover: hover)` is FALSE — and Tailwind wraps
+// every `hover:` utility in that media query, so hover styles silently do nothing and a
+// screenshot of a hovered control is a screenshot of its rest state. Desktop widths declare the
+// capabilities a desktop has (2 = hover, 4 = fine pointer); below 600 the default is right.
+// (`Emulation.setEmulatedMedia` cannot do this — hover/pointer are not emulatable features, and
+// `Emulation.setTouchEmulationEnabled` UNDOES it.)
+const pointerFlags = w >= 600 ? ['--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4'] : []
+const proc = spawn(chrome, ['--headless=new', '--no-sandbox', '--disable-gpu', ...pointerFlags, `--remote-debugging-port=${port}`, 'about:blank'], { stdio: 'ignore' })
 await new Promise(r => setTimeout(r, 1500))
 
 const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json()

@@ -60,11 +60,53 @@ module Style =
     let btnDanger = btnBase + " border-[#2e2e2e] text-ink-dim hover:border-err hover:text-err active:bg-err active:text-bg"
     /// 24px square icon button (compose after `btn`/`btnDanger` to override the padding).
     let btnIcon = "w-6 h-6 p-0 grid place-items-center tracking-normal"
-    /// Chrome, not an action: the subtle sidebar collapse/expand and settings controls.
-    let navChevron =
+    /// Chrome, not an action: the small sidebar collapse/reveal chevrons. They lean the way
+    /// they travel on hover and lead further on press — the only motion chrome earns, and the
+    /// reason the two directions are separate values rather than one class plus a guess.
+    let private navChevronBase =
         "bg-transparent border-0 cursor-pointer text-ink-faint hover:text-ink text-[13px] leading-4 px-1 "
-        + "flex items-center gap-1 transition-colors "
+        + "flex items-center gap-1 transition-[translate,color] duration-150 ease-out "
+        + "motion-reduce:transition-none "
         + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
+
+    let navChevronBack = navChevronBase + " hover:-translate-x-0.5 active:-translate-x-1"
+    let navChevronForward = navChevronBase + " hover:translate-x-0.5 active:translate-x-1"
+
+    // --- Pivots: the sidebar's two destinations, set as type ----------------------------
+    // Zune navigated by WORDS — big, quiet, lowercase, with a thin chevron pointing the way the
+    // surface was about to move — and Courier's chrome earned its place by being set rather than
+    // drawn. `settings ›` and `‹ back` are ONE control, mirrored: same size, same foot of the
+    // same column, so pressing it leaves the word replaced and the mark flipped, in place. (The
+    // head is identity — the wordmark, then the settings title — and never navigation; the two
+    // fought for the 280px band when they shared it, and two chevrons a thumb apart read as a
+    // pair of arrows rather than a way in and a way out.)
+    //
+    // Everything that marks them as interactive is a RESPONSE: the word brightens to ink, the
+    // mark turns blue and steps the way it points, and a press sends it further. Nothing at rest
+    // but type.
+
+    /// One step below the settings title (28/32) and two below the wordmark (32/36), on the
+    /// same 4px rhythm: a destination, never a heading.
+    let private pivotBase =
+        "group bg-transparent border-0 cursor-pointer flex items-center gap-2 "
+        + "font-extralight text-[19px] leading-6 tracking-[-0.01em] lowercase "
+        + "text-ink-faint hover:text-ink focus-visible:text-ink transition-colors duration-150 ease-out "
+        + "motion-reduce:transition-none "
+        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-4"
+
+    let navPivot = pivotBase
+
+    let private pivotMarkBase =
+        "block transition-[translate,color] duration-150 ease-out motion-reduce:transition-none "
+        + "group-hover:text-blue group-focus-visible:text-blue"
+
+    /// Into settings — the column turns and the mark leads right.
+    let pivotMarkForward =
+        pivotMarkBase + " group-hover:translate-x-1 group-focus-visible:translate-x-1 group-active:translate-x-2"
+
+    /// Back to the session — the same step, mirrored.
+    let pivotMarkBack =
+        pivotMarkBase + " group-hover:-translate-x-1 group-focus-visible:-translate-x-1 group-active:-translate-x-2"
 
     // --- Tiny square display pics (never round) -----------------------------------------
     // Two-tone checkers in the blue/green family stand in until real avatars exist; the
