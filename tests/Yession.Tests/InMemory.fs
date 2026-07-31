@@ -122,6 +122,31 @@ let tests =
                 do! host.Stop ()
             }
 
+        testCaseAsync "discarding a draft empties the composer, not just the slot" <|
+            async {
+                let! host = Host.start (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                let! b = connectInMemoryClient host "bob" "Bob"
+                let ada = a.Hello.PeerId
+                do! compose a ada "never mind, wrong session"
+                do! b.Runner.WaitFor (fun m -> Map.containsKey ada m.Synced.Drafts)
+
+                // Discard is what the composer's ✕ does. It has to reach the BODY: the slot is
+                // republished by the publication rule from whatever the body holds, so removing
+                // the slot alone left the words on screen and the next keystroke put the draft
+                // straight back — the button changed nothing a person could see.
+                a.Connection.DiscardDraft ada
+                do! a.Runner.WaitFor (fun m -> not (Map.containsKey ada m.Synced.Drafts))
+                do! b.Runner.WaitFor (fun m -> not (Map.containsKey ada m.Synced.Drafts))
+                Expect.equal (draftBody a ada) (Some "") "the composer is empty on the author's replica"
+                Expect.equal (draftBody b ada) (Some "") "and on everyone else's"
+
+                // And it stays discarded: with the body empty, the rule has nothing to publish.
+                do! compose a ada "a fresh thought"
+                Expect.equal (draftBody a ada) (Some "a fresh thought") "typing again starts a new draft, not the discarded one"
+                do! host.Stop ()
+            }
+
         testCaseAsync "a peer's cursor presence relays to others in any field and clears on disconnect" <|
             async {
                 let! host = Host.start (sid ()) 0

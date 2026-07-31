@@ -60,9 +60,53 @@ module Style =
     let btnDanger = btnBase + " border-[#2e2e2e] text-ink-dim hover:border-err hover:text-err active:bg-err active:text-bg"
     /// 24px square icon button (compose after `btn`/`btnDanger` to override the padding).
     let btnIcon = "w-6 h-6 p-0 grid place-items-center tracking-normal"
-    /// Chrome, not an action: the subtle sidebar collapse/expand chevrons.
-    let navChevron =
-        "bg-transparent border-0 cursor-pointer text-ink-faint hover:text-ink text-[13px] leading-4 px-1 transition-colors"
+    /// Chrome, not an action: the small sidebar collapse/reveal chevrons. They lean the way
+    /// they travel on hover and lead further on press — the only motion chrome earns, and the
+    /// reason the two directions are separate values rather than one class plus a guess.
+    let private navChevronBase =
+        "bg-transparent border-0 cursor-pointer text-ink-faint hover:text-ink text-[13px] leading-4 px-1 "
+        + "flex items-center gap-1 transition-[translate,color] duration-150 ease-out "
+        + "motion-reduce:transition-none "
+        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
+
+    let navChevronBack = navChevronBase + " hover:-translate-x-0.5 active:-translate-x-1"
+    let navChevronForward = navChevronBase + " hover:translate-x-0.5 active:translate-x-1"
+
+    // --- Pivots: the sidebar's two destinations, set as type ----------------------------
+    // Zune navigated by WORDS — big, quiet, lowercase, with a thin chevron pointing the way the
+    // surface was about to move — and Courier's chrome earned its place by being set rather than
+    // drawn. `settings ›` and `‹ back` are ONE control, mirrored: same size, same foot of the
+    // same column, so pressing it leaves the word replaced and the mark flipped, in place. (The
+    // head is identity — the wordmark, then the settings title — and never navigation; the two
+    // fought for the 280px band when they shared it, and two chevrons a thumb apart read as a
+    // pair of arrows rather than a way in and a way out.)
+    //
+    // Everything that marks them as interactive is a RESPONSE: the word brightens to ink, the
+    // mark turns blue and steps the way it points, and a press sends it further. Nothing at rest
+    // but type.
+
+    /// One step below the settings title (28/32) and two below the wordmark (32/36), on the
+    /// same 4px rhythm: a destination, never a heading.
+    let private pivotBase =
+        "group bg-transparent border-0 cursor-pointer flex items-center gap-2 "
+        + "font-extralight text-[19px] leading-6 tracking-[-0.01em] lowercase "
+        + "text-ink-faint hover:text-ink focus-visible:text-ink transition-colors duration-150 ease-out "
+        + "motion-reduce:transition-none "
+        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-4"
+
+    let navPivot = pivotBase
+
+    let private pivotMarkBase =
+        "block transition-[translate,color] duration-150 ease-out motion-reduce:transition-none "
+        + "group-hover:text-blue group-focus-visible:text-blue"
+
+    /// Into settings — the column turns and the mark leads right.
+    let pivotMarkForward =
+        pivotMarkBase + " group-hover:translate-x-1 group-focus-visible:translate-x-1 group-active:translate-x-2"
+
+    /// Back to the session — the same step, mirrored.
+    let pivotMarkBack =
+        pivotMarkBase + " group-hover:-translate-x-1 group-focus-visible:-translate-x-1 group-active:-translate-x-2"
 
     // --- Tiny square display pics (never round) -----------------------------------------
     // Two-tone checkers in the blue/green family stand in until real avatars exist; the
@@ -94,17 +138,65 @@ module Style =
         "bg-[#0e1418] grid place-items-center after:content-[''] after:w-1.5 after:h-1.5 after:bg-blue"
 
     // --- Workspace regions ---------------------------------------------------------------
-    // The sidebar/drawer state is one bit: the root <html> element's `nav-alt` class
-    // (toggled by [data-nav-toggle] in the shell). Default = sidebar visible on desktop,
-    // off-canvas on mobile; `nav-alt` = the inverse. Expressed with arbitrary variants so
-    // it stays plain Tailwind.
+    // Two presentation bits live on the root <html> element, outside `#app`, so they survive
+    // every re-render and stay out of the model: `nav-alt` (toggled by [data-nav-toggle]) and
+    // `settings-open` (by [data-settings-toggle]). Default = sidebar visible on desktop,
+    // off-canvas on mobile; `nav-alt` = the inverse. Expressed with arbitrary variants so it
+    // stays plain Tailwind.
 
+    /// The 280px column. It holds TWO faces — the workspace nav and settings (`navPane` /
+    /// `settingsPane`) — because settings is a place you go, not a thing that covers what you
+    /// were reading. Collapsing on desktop animates the column's width shut; on mobile the
+    /// column is an off-canvas drawer that slides over the conversation.
     let sidebar =
-        "w-[280px] shrink-0 bg-panel h-full flex flex-col px-6 pb-5 border-r border-hair overflow-y-auto z-40 "
-        + "md:[.nav-alt_&]:hidden "
+        "relative w-[280px] shrink-0 bg-panel h-full overflow-hidden z-40 border-r border-hair "
+        + "md:transition-[width] md:duration-200 md:ease-out "
+        + "md:[.nav-alt_&]:w-0 md:[.nav-alt_&]:border-r-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:w-[min(280px,84vw)] "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out max-md:-translate-x-[101%] "
         + "max-md:[.nav-alt_&]:translate-x-0 motion-reduce:transition-none"
+
+    /// One face of the column: the two are stacked in place and held at the column's full
+    /// width, so nothing reflows while the column animates shut.
+    ///
+    /// `visibility` is in the transition list on purpose — it is what keeps the hidden face out
+    /// of the tab order and the accessibility tree, and transitioning it holds `visible` for the
+    /// whole fade OUT (a discrete step at the end) while flipping instantly on the way IN.
+    /// `opacity-0` alone would leave focusable controls behind an invisible panel.
+    let private paneBase =
+        "absolute inset-y-0 left-0 w-[280px] max-md:w-[min(280px,84vw)] flex flex-col px-6 pb-5 "
+        + "overflow-y-auto transition-[opacity,visibility] duration-200 ease-out motion-reduce:transition-none"
+
+    let navPane = paneBase + " [.settings-open_&]:opacity-0 [.settings-open_&]:invisible"
+
+    let settingsPane =
+        paneBase + " opacity-0 invisible [.settings-open_&]:opacity-100 [.settings-open_&]:visible"
+
+    // Zune's signature motion, recast: the two faces do not merely cross-fade — the arriving
+    // face's rows slide in from the side a beat apart, and the leaving face's go in one piece,
+    // the way it came from. Directional, fast, and never delayed on the way out.
+    //
+    // The delays are LITERAL class names, one value per lane, because Tailwind scans this source
+    // for class names: a `sprintf "delay-[%dms]"` would compose a class that is never generated
+    // (the same trap the avatar checkers hit — see `@source inline` in app/tailwind.css).
+    // `translate`, not `transform`: Tailwind v4's `translate-x-*` utilities set the CSS
+    // `translate` property, so a transition list naming `transform` animates nothing and the
+    // rows would jump into place. (Measured on the live page — computed `transform` stayed
+    // `none` through the whole toggle.)
+    let private laneBase =
+        "transition-[translate,opacity] duration-200 ease-out motion-reduce:transition-none"
+
+    let private navLaneOut = " [.settings-open_&]:-translate-x-6 [.settings-open_&]:opacity-0 [.settings-open_&]:delay-0"
+    /// The nav's rows, in arrival order (they return staggered and leave together).
+    let navLane0 = laneBase + navLaneOut
+    let navLane1 = laneBase + " delay-[60ms]" + navLaneOut
+    let navLane2 = laneBase + " delay-[120ms]" + navLaneOut
+
+    let private settingsLaneIn = " translate-x-6 opacity-0 [.settings-open_&]:translate-x-0 [.settings-open_&]:opacity-100"
+    /// The settings rows, in arrival order (they arrive staggered and leave together).
+    let settingsLane0 = laneBase + settingsLaneIn
+    let settingsLane1 = laneBase + settingsLaneIn + " [.settings-open_&]:delay-[60ms]"
+    let settingsLane2 = laneBase + settingsLaneIn + " [.settings-open_&]:delay-[120ms]"
 
     /// Mobile-only backdrop behind the open drawer; clicking it closes (data-nav-toggle).
     let scrim = "hidden max-md:[.nav-alt_&]:block fixed inset-0 z-30 bg-black/60"
@@ -125,7 +217,20 @@ module Style =
     /// Indent the heading one avatar column (20px + 12px gutter) so its left edge sits
     /// exactly on the message-text column below.
     let headerTitle = "ml-8"
-    let headerStatus = "ml-auto shrink-0 pb-1"
+    /// The header's right-hand group: sync status, and — only while the sidebar is off screen —
+    /// the agent's absence.
+    let headerAside = "ml-auto shrink-0 flex items-end gap-5 pb-1"
+    let headerStatus = "shrink-0"
+
+    /// The agent's absence, FOLLOWING the surface that normally says it: shown only when the
+    /// sidebar column (which holds the real call to action) is collapsed or off-canvas — which
+    /// on a phone is most of the time. Never both at once, so it is a relocation, not a repeat.
+    /// Same visibility rule as `navReopen`, for the same reason.
+    let headerNoAgent =
+        "bg-transparent border-0 cursor-pointer font-semibold text-[11px] leading-4 "
+        + "tracking-[0.14em] uppercase text-blue hover:text-[#7fd0f5] transition-colors "
+        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2 "
+        + "hidden md:[.nav-alt_&]:block max-md:block max-md:[.nav-alt_&]:hidden"
 
     /// The degradation strip between the header and the timeline: a hairline notice, never a
     /// modal and never a blocker — the client below it stays fully usable.
@@ -224,6 +329,7 @@ module Style =
 
     let queueInput =
         "flex-1 min-w-0 self-center h-5 bg-transparent border-0 outline-none resize-none "
+        + "[&_.ProseMirror]:outline-none "
         + "font-sans font-light text-[13px] leading-5 text-ink-dim focus:text-ink"
 
     let queueTools =
@@ -232,7 +338,9 @@ module Style =
     // --- Composer: the one gradient in the product lives on its focus edge --------------------
 
     let composer = "shrink-0 flex flex-col gap-3 px-8 pt-4 pb-6 max-md:px-4 max-md:pb-4"
-    let draftBox = "group relative bg-surface"
+    /// The box lifts a tone while anything inside it has focus, so "this is where I am typing"
+    /// is legible at a glance and not only from the 2px edge below.
+    let draftBox = "group relative bg-surface focus-within:bg-surface-2 transition-colors"
 
     /// The focus edge: grows top-to-bottom in the blue→green gradient on focus —
     /// Zune's orange→pink signature, recast, spent exactly once.
@@ -240,12 +348,23 @@ module Style =
         "absolute left-0 inset-y-0 w-0.5 bg-grad scale-y-0 origin-top transition-transform "
         + "duration-300 ease-out group-focus-within:scale-y-100 motion-reduce:transition-none"
 
+    /// `[&_.ProseMirror]:outline-none` is not cosmetic tidying: the editor mounts its own
+    /// `contenteditable` INSIDE this host, so `outline-none` here never reached it and the
+    /// browser drew its default focus box around the composer — a white rectangle across the
+    /// whole width, in a design with no rectangles. The focus signal is the gradient edge and
+    /// the box's lift (`draftBox`), both of which stay.
     let draftInput =
         "block w-full bg-transparent border-0 outline-none resize-none font-sans font-light "
+        + "[&_.ProseMirror]:outline-none "
         + "text-[15px] leading-6 text-ink placeholder:text-ink-faint px-4 pt-3 pb-1"
 
     let draftActions = "flex items-center gap-2 pl-4 pr-2 pb-2"
-    let draftAuthor = "ml-auto pr-2 font-semibold text-[10px] leading-4 tracking-[0.14em] uppercase text-ink-faint"
+
+    /// Send sits at the TRAILING edge — where the eye ends the line it just wrote, and where
+    /// every send button a person has ever used lives — with discard as its quiet neighbour.
+    /// Everything that describes the draft (who is in it, whose it is) stays on the left.
+    let draftCommit = "ml-auto flex items-center gap-2"
+    let draftAuthor = "pr-1 font-semibold text-[10px] leading-4 tracking-[0.14em] uppercase text-ink-faint truncate"
 
     // A draft nobody has open here: one line of it, so the composer reads as "what is being
     // written" rather than a stack of boxes. Clicking it opens it (and closes whatever was).
@@ -271,20 +390,13 @@ module Style =
         "self-end font-semibold text-[10px] leading-4 tracking-[0.14em] uppercase text-ink-faint "
         + "hover:text-blue transition-colors"
 
-    // --- Settings drawer ---------------------------------------------------------------------
-    // Like the sidebar, the drawer's open state is one bit on the root <html> element
-    // (`settings-open`, toggled by [data-settings-toggle]), so it survives re-renders and
-    // stays out of the model. A right-hand Metro panel over a scrim; content is ordinary
-    // side-section rhythm.
+    // --- Settings ------------------------------------------------------------------------------
+    // Settings is the column's other face, not a drawer over the conversation: you go there and
+    // come back, and the thing you were reading never moves. Its open state is one bit on the
+    // root <html> element (`settings-open`, toggled by [data-settings-toggle]).
 
-    let settingsDrawer =
-        "hidden [.settings-open_&]:flex fixed inset-y-0 right-0 w-[min(400px,92vw)] "
-        + "bg-panel border-l border-hair z-50 flex-col px-6 pb-6 overflow-y-auto"
-
-    /// Backdrop behind the open drawer; clicking it closes (data-settings-toggle).
-    let settingsScrim = "hidden [.settings-open_&]:block fixed inset-0 z-40 bg-black/60"
-
-    /// The drawer's header band: same 88px rhythm as the sidebar and main header.
+    /// The settings face's header band: the same 88px rhythm as the nav and the main header, so
+    /// the three baselines still align when the column changes face.
     let settingsHead = "h-[88px] shrink-0 flex items-end justify-between pb-5"
     let settingsTitle = "font-extralight text-[28px] leading-8 tracking-[-0.01em] lowercase text-ink"
 
@@ -294,14 +406,16 @@ module Style =
         "w-full bg-surface border border-hair focus:border-blue outline-none appearance-none "
         + "px-3 py-2 font-light text-[13px] leading-5 text-ink placeholder:text-ink-faint"
 
-    // --- The no-agent prompt strip -------------------------------------------------------------
-    // Shown above the composer when the session has no agent at all: the one place the
-    // product ASKS for a connection. Same anatomy as the activity strip, blue accent —
-    // blue is the agent's voice, and this is the agent's absence.
+    // --- The agent's absence -------------------------------------------------------------------
+    // Said ONCE, in the section that lists who is in this session, because that is where a
+    // missing member is missing. It used to be said three times over (a sidebar row, a strip
+    // above the composer, and the settings copy); repetition made it wallpaper, not a prompt.
+    // Blue is the agent's voice, so the blue left edge is its absence — the same edge grammar
+    // the queue uses for editability.
 
-    let noAgent =
-        "shrink-0 flex items-center gap-3 px-8 py-3 border-t border-hair bg-surface max-md:px-4 max-md:flex-wrap"
-    let noAgentMark = "w-2 h-2 border border-blue"
+    let noAgentCard = "flex flex-col gap-2 bg-surface border-l-2 border-blue px-3 py-3 mt-1"
+    /// Full-width so it reads as the section's one action, not an afterthought beside the text.
+    let noAgentAction = "w-full text-center"
 
     // --- Document shell ------------------------------------------------------------------------
 

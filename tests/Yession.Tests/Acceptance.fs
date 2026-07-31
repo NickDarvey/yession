@@ -156,6 +156,26 @@ let private uiChecklistTests =
                 2
                 "one editable draft body, plus the queued message's own editor"
 
+        // The agent's absence is a call to action, and a call to action repeated three times
+        // is wallpaper: it used to be a sidebar row, a strip over the composer, AND the
+        // settings copy, all at once. It now lives where the session's members are listed.
+        testCase "the agent's absence is asked for exactly once, where the session's members are" <| fun () ->
+            let html = Support.render representativeModel // no agent in this model
+            let occurrences (needle: string) = (html.Split needle |> Array.length) - 1
+            Expect.equal (occurrences Dom.Hooks.noAgentConnect) 1 "one connect call-to-action, not several"
+            // It sits in the membership section, which the shell renders before the timeline.
+            Expect.isTrue
+                (html.IndexOf Dom.Hooks.noAgentConnect < html.IndexOf Dom.Hooks.conversation)
+                "the prompt is in the sidebar's membership section, not over the composer"
+            // A session WITH an agent asks for nothing at all.
+            let connected =
+                { representativeModel with
+                    Claude =
+                        { representativeModel.Claude with
+                            Status = { representativeModel.Claude.Status with AgentAvailable = Some true } } }
+            let connectedHtml = Support.render connected
+            Expect.isFalse (connectedHtml.Contains Dom.Hooks.noAgent) "nothing asks for a connection once there is one"
+
         // The timeline renders a sent body's Markdown as formatted rich text — the read-only
         // mirror of the composer — through the very SSR path the browser also runs. This pins
         // it in the cheap tier; the real-browser two-peer flow (Browser.fs) covers it live.

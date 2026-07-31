@@ -13,6 +13,7 @@
     <Compile Include="Connection.fs" />
     <Compile Include="PeerName.fs" />
     <Compile Include="Style.fs" />
+    <Compile Include="Icon.fs" />
     <Compile Include="ProseMirror.fs" />
     <Compile Include="Editor.fs" />
     <Compile Include="RichText.fs" />

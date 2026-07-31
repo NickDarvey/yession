@@ -30,6 +30,23 @@ Trust the shot only when `vw` equals the width you asked for. `overflowX: true` 
 `docW > vw`) means horizontal overflow a phone user cannot scroll away when the body is
 `overflow-hidden` — that is a reachability bug, not a cosmetic one.
 
+## The second trap: hover states that never happen
+
+Headless Chromium reports no pointing device, so `(hover: hover)` is false — and Tailwind
+wraps EVERY `hover:` utility in that media query. Move the mouse over a control with CDP
+and `:hover` matches in JS while not one hover style applies, so the "hover" screenshot is
+the rest state and the review passes something never seen. `shot.mjs` now launches desktop
+widths with the pointer capabilities a desktop has; if you drive Chromium yourself, pass:
+
+```
+--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4
+```
+
+Check it, don't assume it: `matchMedia('(hover: hover)').matches` must be true before you
+trust a hover capture. `Emulation.setEmulatedMedia` cannot set it (hover/pointer are not
+emulatable features) and `Emulation.setTouchEmulationEnabled` switches it back off. Below
+600px leave the default — a phone genuinely has no hover, and that is what you want to see.
+
 ## The loop
 
 1. **Boot the real app.** From the repo root, inside devenv (see AGENTS.md Bootstrap):
