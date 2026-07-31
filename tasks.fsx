@@ -215,11 +215,35 @@ let private defaultVersion () =
 
 // --- compile: F# -> JS (both entries), the browser client bundle, and the stylesheet --------
 
+// Fable copies each referenced package's `fable/` folder into `<out>/fable_modules/<pkg>`
+// verbatim, package.json included — and a package whose manifest omits `"type"` (Fable.Lit
+// 1.4.2 is the one) shadows the repo root's `"type": "module"` for everything beneath it. Node
+// then has to reparse each of those files to discover they are ESM after all, and says so:
+// eighteen five-line MODULE_TYPELESS_PACKAGE_JSON warnings per run, about a tree that is ESM
+// and always was. Stamp the field the manifest should have carried. Idempotent, and re-run
+// after every Fable invocation because a recompile restores the package's own copy.
+let private declareEsm (outDir: string) =
+    let modules = Path.Combine (repoRoot, outDir, "fable_modules")
+    if Directory.Exists modules then
+        for manifest in Directory.GetFiles (modules, "package.json", SearchOption.AllDirectories) do
+            let node = Text.Json.Nodes.JsonNode.Parse (File.ReadAllText manifest)
+            if isNull node.["type"] then
+                node.["type"] <- Text.Json.Nodes.JsonValue.Create "module"
+                let options = Text.Json.JsonSerializerOptions (WriteIndented = true)
+                File.WriteAllText (manifest, node.ToJsonString options + "\n")
+
+/// Compile an F# project to JS. `quiet` captures Fable's banner — the build verbs print their
+/// own one-line progress; `check` streams it.
+let private fable (quiet: bool) (project: string) (outDir: string) =
+    if quiet then run "dotnet" [ "fable"; project; "-o"; outDir ] |> ignore
+    else exec "dotnet" [ "fable"; project; "-o"; outDir ]
+    declareEsm outDir
+
 let compile () =
     printfn "compiling F# -> JS"
     run "dotnet" [ "build"; "Yession.slnx" ] |> ignore
-    run "dotnet" [ "fable"; "app/main/Yession.Host.Main.fsproj"; "-o"; "app/out" ] |> ignore
-    run "dotnet" [ "fable"; "app/browser/Yession.Browser.fsproj"; "-o"; "app/out/browser" ] |> ignore
+    fable true "app/main/Yession.Host.Main.fsproj" "app/out"
+    fable true "app/browser/Yession.Browser.fsproj" "app/out/browser"
     run esbuild [ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--minify"; "--outfile=app/out/public/client.js" ] |> ignore
     // Tailwind, built locally into a served stylesheet (no CDN); scans the F# sources.
     run tailwind [ "-i"; "app/tailwind.css"; "-o"; "app/out/public/app.css"; "--minify" ] |> ignore
@@ -481,23 +505,35 @@ let private resolveDocker (caps: string list) : string list =
         eprintfn "check: no Docker daemon reachable — dropping the Docker capability (its suites will report a skip)"
         caps |> List.filter (fun c -> c <> "Docker")
 
+// A full `verify` spends its first ~80 seconds in restore, build, Fable and stage — tools that
+// are either silent or so chatty their own progress reads as scrollback, so the run looks
+// hung. One line per stage, named for the stage and not the tool, is enough to tell "working"
+// from "wedged"; the stages the caps skip never announce themselves.
+let private progress (label: string) = printfn "check: %s" label
+
 let private runCheckOnce (requested: string list) =
     let caps = resolveDocker requested
     let capSet = Set.ofList caps
     Environment.SetEnvironmentVariable ("YESSION_TEST_CAPS", String.concat " " caps)
+    progress (sprintf "capabilities: %s" (if List.isEmpty caps then "none (cheap tier)" else String.concat " " caps))
+    progress "building the solution"
     exec "dotnet" [ "build"; "Yession.slnx" ]
 
     // Browser output feeds both the host-spawning Node suites and the editor Browser E2E.
     if hasAny capSet [ "Ports"; "Native"; "Docker"; "LiveAgent"; "Browser" ] then
-        exec "dotnet" [ "fable"; "app/browser/Yession.Browser.fsproj"; "-o"; "app/out/browser" ]
+        progress "compiling the browser client"
+        fable false "app/browser/Yession.Browser.fsproj" "app/out/browser"
 
     // Host-spawning Node suites drive the assembled npm package — stage it (compile + bundle).
     // `test` names what this build is; the suites assert the bins report it back.
     if hasAny capSet [ "Ports"; "Native"; "Docker"; "LiveAgent" ] then
+        progress "staging the npm package"
         stage "test"
 
     // The Node (Fable/JS) path — always runs; self-skips suites whose caps/runtime don't match.
-    exec "dotnet" [ "fable"; "tests/Yession.Tests/Yession.Tests.fsproj"; "-o"; "tests/Yession.Tests/out" ]
+    progress "compiling the suite"
+    fable false "tests/Yession.Tests/Yession.Tests.fsproj" "tests/Yession.Tests/out"
+    progress "running the Node suite"
     runNodeSuite "tests/Yession.Tests/out/Main.js" 240000
 
     // The .NET CLR (Playwright) path — only when a Browser-tagged suite is enabled.
@@ -505,6 +541,7 @@ let private runCheckOnce (requested: string list) =
         ensureBrowser ()
         Directory.CreateDirectory (Path.Combine (repoRoot, "tests/browser/out")) |> ignore
         exec esbuild [ "app/out/browser/EditorHarness.js"; "--bundle"; "--format=esm"; "--outfile=tests/browser/out/harness.js" ]
+        progress "running the browser suite (.NET CLR)"
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 
 // The Keyring-tagged suites need a usable Secret Service. A desktop has one; a headless Linux
@@ -530,6 +567,14 @@ exec "$dbus_bin" --config-file="$session_conf" "\${args[@]}"
 SHIM
 chmod +x "$shim_dir/dbus-daemon-shim"
 
+# dbus-daemon always tries to raise RLIMIT_NOFILE to 65536 and says so when it cannot. Here it
+# never can — the container's hard limit is 4096 and raising it needs CAP_SYS_RESOURCE — and the
+# daemon carries on regardless, but the line lands third in every `check Keyring` looking like a
+# hard failure. Drop that ONE pattern and let every other word reach stderr.
+#
+# The filter sits out here, on dbus-run-session, and NOT inside the shim: a process substitution
+# in the shim would hand `grep` a copy of the fd dbus-daemon prints the bus address on, so
+# dbus-run-session would wait forever for an EOF that a live grep is holding open.
 exec dbus-run-session --dbus-daemon="$shim_dir/dbus-daemon-shim" -- bash -euo pipefail -c '
   # An isolated keyring home so runs never touch (or depend on) a real user keyring.
   export XDG_DATA_HOME="$(mktemp -d)"
@@ -540,7 +585,7 @@ exec dbus-run-session --dbus-daemon="$shim_dir/dbus-daemon-shim" -- bash -euo pi
   # creates + unlocks the login collection and its "default" alias on first run.
   eval "$(printf "\n" | gnome-keyring-daemon --unlock | sed "s/^/export /")"
   exec "$@"
-' -- "$@"
+' -- "$@" 2> >(grep --line-buffered -v 'Failed to set fd limit to' >&2)
 """
 
 let private needsKeyringWrap (caps: string list) =
