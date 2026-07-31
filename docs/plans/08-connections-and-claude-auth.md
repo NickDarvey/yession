@@ -93,6 +93,14 @@ provider redirect ──────────► GET /connections/callback (M
   by paste — `ConnectionBeginRequest.RedirectUri` carries this per flow, standards-only.
   The Manager's `/connections/callback` remains the anchor for connectors whose clients
   CAN register it.
+- Field-verified: Anthropic's token endpoint does NOT accept the standards-mandated
+  `application/x-www-form-urlencoded` grant body (RFC 6749 §4.1.3) — it answers
+  `invalid_request_error: "Invalid request format"`. Its own clients post JSON, with
+  `state` replayed in the body (hence the `code#state` paste). So "standards-only" is the
+  broker's DEFAULT, not its only dialect: `ConnectionBeginRequest.TokenDialect` carries
+  the encoding per flow, exactly like `RedirectUri` above, and the grant records it so
+  refreshes speak it too. Provider knowledge stays session-side; the broker still never
+  learns which service it brokered.
 - Anthropic's ToS restricts subscription OAuth tokens to Claude Code/claude.ai;
   using them to drive the Agent SDK is the operator's call (acknowledged when this
   plan was set). API keys via the same paste surface are the sanctioned path.
