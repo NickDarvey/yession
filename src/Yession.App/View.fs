@@ -85,9 +85,6 @@ module View =
         | Some offset -> string (EventOffset.value offset)
         | None -> Dom.Text.offsetNone
 
-    let private catchUpText (consumer: EventConsumerState) =
-        if consumer.IsCatchingUp then Dom.Text.catchingUp else Dom.Text.upToDate
-
     let private feedToken =
         function
         | FeedLive -> Dom.Text.feedLive
@@ -137,16 +134,26 @@ module View =
 
     let private connectionSection (model: ClientModel) : TemplateResult =
         let consumer = model.EventConsumer
-        let catchUpClass = if consumer.IsCatchingUp then Style.statusRun else Style.statusOk
         // The two legs are reported separately because they fail separately: `data-connection`
-        // is the data channel (collaborative state), `data-feed` is the HTTP history feed.
-        let feedClass, feedInner =
-            match consumer.Feed with
-            | FeedLive -> Style.statusOk, html $"""history live"""
-            | FeedRetrying (attempt, reason) ->
-                Style.statusRun,
-                html $"""<span class="{Style.statusDotPulse}"></span>history retrying · {reason} ({attempt})"""
-            | FeedStalled reason -> Style.statusErr, html $"""history paused · {reason}"""
+        // is the data channel (collaborative state), `data-feed` (on the section, always
+        // carrying its exact token) is the HTTP history feed. But HEALTHY is one quiet line —
+        // faint caps behind a green dot. Colour, the feed's own line, and the catch-up
+        // offsets appear only while a leg actually needs attention; four stacked green
+        // status lines said "everything is fine" louder than anything else on the page.
+        let dot, connClass =
+            match model.Connection with
+            | Connected -> html $"""<span class="{Style.syncDot} bg-green"></span>""", Style.statusFaint
+            | Connecting | Reconnecting -> html $"""<span class="{Style.syncDotPulse} bg-blue"></span>""", Style.statusRun
+            | Disconnected _ -> html $"""<span class="{Style.syncDot} bg-err"></span>""", Style.statusErr
+        // Catch-up rides the same line. The raw offsets are progress, so they exist only
+        // while catch-up is running; offline, freshness is unknowable and nothing is said.
+        let catchUp =
+            match model.Connection, consumer.IsCatchingUp with
+            | Disconnected _, _ -> Lit.nothing
+            | _, true ->
+                html $"""<span class="{Style.statusFaint}">·</span><span class="{Style.statusRun}" data-catch-up>{Dom.Text.catchingUp}</span><span class="{Style.label} tabular-nums"><b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> / <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>"""
+            | _, false ->
+                html $"""<span class="{Style.statusFaint}">·</span><span class="{Style.statusFaint}" data-catch-up>{Dom.Text.upToDate}</span>"""
         // A reason is only ever known for a settled disconnection; `data-connection` keeps its
         // exact one-word token so the reason is additive, never a rewrite of the status.
         let connectionReason =
@@ -154,13 +161,17 @@ module View =
             | Disconnected (Some reason) ->
                 html $"""<span class="{Style.small}" data-connection-reason>{reason}</span>"""
             | _ -> Lit.nothing
+        let feedLine =
+            match consumer.Feed with
+            | FeedLive -> Lit.nothing
+            | FeedRetrying (attempt, reason) ->
+                html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying · {reason} ({attempt})</span>"""
+            | FeedStalled reason -> html $"""<span class="{Style.statusErr}">history paused · {reason}</span>"""
         html $"""
-            <section class="{Style.cls [ Style.sideSectionFirst; Style.navLane1 ]}">
-              <span class="{Style.body}" data-connection>{connectionLabel model.Connection}</span>
+            <section class="{Style.cls [ Style.sideSectionFirst; Style.navLane1 ]}" data-feed="{feedToken consumer.Feed}">
+              <span class="{Style.syncRow}">{dot}<span class="{connClass}" data-connection>{connectionLabel model.Connection}</span>{catchUp}</span>
               {connectionReason}
-              <span class="{catchUpClass}" data-catch-up>{catchUpText consumer}</span>
-              <span class="{feedClass}" data-feed="{feedToken consumer.Feed}">{feedInner}</span>
-              <span class="{Style.label} tabular-nums">processed <b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> · latest <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>
+              {feedLine}
             </section>"""
 
     /// Who is in this session — and, when the agent is not, the ONE place the product asks for
@@ -182,7 +193,7 @@ module View =
                 html $"""
                     <div class="{Style.noAgentCard}" data-agent-presence="absent" data-no-agent>
                       <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="{Style.statusRun}">no agent</span></div>
-                      <span class="{Style.small}">messages still send — nothing answers them until a Claude account is connected.</span>
+                      <span class="{Style.small}">messages still send — they go unanswered until Claude is connected.</span>
                       <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="prompt" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
                     </div>"""
             | None ->
@@ -219,6 +230,11 @@ module View =
         | CommandFinished (CommandExecutionFailed _) -> html $"""<span class="{Style.statusErr}">failed</span>"""
 
     let private commandsSection (log: CommandLog) : TemplateResult =
+        // An empty log keeps its hook (the contract) but takes no room: a bare "commands"
+        // heading over nothing is furniture, not information.
+        let sectionClass =
+            if List.isEmpty log.Entries then "hidden"
+            else Style.cls [ Style.sideSection; Style.navLane2 ]
         let entries =
             log.Entries
             |> List.map (fun entry ->
@@ -232,7 +248,7 @@ module View =
                       {output}
                     </article>""")
         html $"""
-            <section class="{Style.cls [ Style.sideSection; Style.navLane2 ]}" data-command-log>
+            <section class="{sectionClass}" data-command-log>
               <span class="{Style.label}">commands</span>
               {entries}
             </section>"""
@@ -244,7 +260,7 @@ module View =
         let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
             match kind with
             | Some kind ->
-                html $"""<div class="{Style.sideRow}" data-claude-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.cls [ Style.btnDanger; Style.btnIcon ]}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>{Icon.close}</button></div>"""
+                html $"""<div class="{Style.sideRow}" data-claude-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconDanger}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>{Icon.close}</button></div>"""
             | None -> html $""""""
         let controls =
             match claude.Flow with
@@ -277,7 +293,7 @@ module View =
         html $"""
             <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-claude-panel>
               <span class="{Style.label}">claude</span>
-              <span class="{Style.small}">the agent answers with whoever sent the message — connect your account here</span>
+              <span class="{Style.small}">the agent answers each message with its sender's Claude account</span>
               {connectedRow "all my sessions" "mine" claude.Status.MineCredential}
               {connectedRow "this session" "session" claude.Status.SessionCredential}
               {error}
@@ -303,7 +319,6 @@ module View =
               {claudeSection actions dispatch model.Claude}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
-              <span class="{Style.cls [ Style.label; Style.settingsLane2 ]} pt-3">credentials are sealed by the manager</span>
             </div>"""
 
     /// The workspace face of the column: identity, sync health, membership, environment, log.
@@ -320,7 +335,6 @@ module View =
               {commandsSection model.Commands}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.navLane2 ]}" data-settings-toggle="open" @click={Ev(fun _ -> actions.ToggleSettings ())}>settings<span class="{Style.pivotMarkForward}">{Icon.pivotRight}</span></button>
-              <span class="{Style.cls [ Style.label; Style.navLane2 ]} pt-3">local first · every fact is an event</span>
             </div>"""
 
     /// The sidebar column: one region, two faces, and — on mobile — the scrim behind it.
@@ -506,9 +520,9 @@ module View =
                       <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value entry.Author) ]}"></span>
                       <div class="{Style.queueInput}" data-rich-body="{BodyKey.queued id}" data-rich-readonly="false" data-queue-input="{QueueId.value id}"></div>
                       <div class="{Style.queueTools}">
-                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
-                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
-                        <button type="button" class="{Style.cls [ Style.btnDanger; Style.btnIcon ]}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>{Icon.close}</button>
+                        <button type="button" class="{Style.btnIcon}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                        <button type="button" class="{Style.btnIcon}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                        <button type="button" class="{Style.btnIconDanger}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>{Icon.close}</button>
                       </div>
                     </article>""")
         html $"""<section class="{Style.queue}" data-message-queue>{head}{items}</section>"""
@@ -546,7 +560,7 @@ module View =
             let discard =
                 if target = myPeer then
                     html $"""
-                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Discard draft"
+                        <button type="button" class="{Style.btnIconDangerLg}" aria-label="Discard draft"
                                 data-discard-draft @click={Ev(fun _ -> actions.DiscardDraft myPeer)}>{Icon.close}</button>"""
                 else Lit.nothing
             let author =

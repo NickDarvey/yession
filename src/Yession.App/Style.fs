@@ -48,6 +48,15 @@ module Style =
     let statusDot = "inline-block w-1.5 h-1.5 rounded-full bg-current mr-1.5 align-[1px]"
     let statusDotPulse = statusDot + " animate-pulse2 motion-reduce:animate-none"
 
+    /// A standalone dot given its colour explicitly (`bg-green` etc. composed at the use
+    /// site) for a row whose text is a DIFFERENT colour — `bg-current` would fight the
+    /// composed colour utility, and which `bg-*` wins is stylesheet order, not authoring
+    /// order.
+    let syncDot = "inline-block w-1.5 h-1.5 rounded-full shrink-0"
+    let syncDotPulse = syncDot + " animate-pulse2 motion-reduce:animate-none"
+    /// The sidebar's one-line sync summary: dot and status words on one baseline.
+    let syncRow = "flex items-center gap-2"
+
     // --- Buttons: bordered Metro rectangles — hover brightens, press fills --------------
 
     let private btnBase =
@@ -58,8 +67,25 @@ module Style =
     let btn = btnBase + " border-[#2e2e2e] text-ink-dim hover:border-ink hover:text-ink active:bg-ink active:text-bg"
     let btnPrimary = btnBase + " border-blue text-blue hover:text-[#7fd0f5] active:bg-blue active:text-bg"
     let btnDanger = btnBase + " border-[#2e2e2e] text-ink-dim hover:border-err hover:text-err active:bg-err active:text-bg"
-    /// 24px square icon button (compose after `btn`/`btnDanger` to override the padding).
-    let btnIcon = "w-6 h-6 p-0 grid place-items-center tracking-normal"
+
+    /// Square icon buttons — self-contained, NOT composed over `btn`: Tailwind emits `p-0`
+    /// BEFORE `px-*`/`py-*` in the stylesheet, so "btn + p-0" kept the text button's padding
+    /// and crushed the glyph into a corner of a lopsided box (measured live: 30×24, ×
+    /// touching the bottom-right edge).
+    let private btnIconBase =
+        "bg-transparent cursor-pointer border p-0 grid place-items-center transition-colors "
+        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
+
+    let private btnIconNeutralFace = " border-[#2e2e2e] text-ink-dim hover:border-ink hover:text-ink active:bg-ink active:text-bg"
+    let private btnIconDangerFace = " border-[#2e2e2e] text-ink-dim hover:border-err hover:text-err active:bg-err active:text-bg"
+
+    /// 24px square: the queue's reorder controls.
+    let btnIcon = btnIconBase + " w-6 h-6" + btnIconNeutralFace
+    /// 24px square, destructive: delete / disconnect.
+    let btnIconDanger = btnIconBase + " w-6 h-6" + btnIconDangerFace
+    /// 32px square, destructive: the composer's discard — the same height as the Send
+    /// button it sits beside, so the pair shares top and bottom edges.
+    let btnIconDangerLg = btnIconBase + " w-8 h-8" + btnIconDangerFace
     /// Chrome, not an action: the small sidebar collapse/reveal chevrons. They lean the way
     /// they travel on hover and lead further on press — the only motion chrome earns, and the
     /// reason the two directions are separate values rather than one class plus a guess.
