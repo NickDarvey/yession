@@ -244,8 +244,9 @@ module Style =
     /// exactly on the message-text column below.
     let headerTitle = "ml-8"
     /// The header's right-hand group: sync status, and — only while the sidebar is off screen —
-    /// the agent's absence.
-    let headerAside = "ml-auto shrink-0 flex items-end gap-5 pb-1"
+    /// the agent's absence. `pb-[1px]` is optical, not rhythm: it drops the 11px caps line's
+    /// baseline onto the wordmark/title baseline (pb-1 left it 3px high, measured live).
+    let headerAside = "ml-auto shrink-0 flex items-end gap-5 pb-[1px]"
     let headerStatus = "shrink-0"
 
     /// The agent's absence, FOLLOWING the surface that normally says it: shown only when the
@@ -271,15 +272,25 @@ module Style =
 
     /// The title itself: the heading, worn by a text input. No chrome except a subtle dotted
     /// underline (the editable affordance) that goes solid blue on focus. Edits in place, no
-    /// save button — the model is the collaborative `Title` text.
+    /// save button — the model is the collaborative `Title` text. `md:top-[2px]` is optical:
+    /// a 28/32 line box holds its baseline 2px higher over the shared bottom edge than the
+    /// wordmark's 32/36 does, so the input steps down to put both on one line (measured
+    /// live; mobile has no cross-column baseline to meet, so no nudge there).
     let titleInput =
         "w-full min-w-0 bg-transparent border-0 border-b border-dotted border-ink-faint "
         + "focus:border-solid focus:border-blue outline-none px-0 py-0 "
         + "font-extralight text-[28px] leading-8 tracking-[-0.01em] lowercase text-ink "
-        + "placeholder:text-ink-faint truncate"
+        + "placeholder:text-ink-faint truncate relative md:top-[2px]"
 
     /// The session id, shown small and dim under the title as a stable secondary identifier.
-    let titleId = "font-mono text-[11px] leading-4 text-ink-faint truncate mt-0.5"
+    /// On md+ it hangs OUT OF FLOW below the title, into the header band's bottom padding:
+    /// in flow it added 18px under the title inside the bottom-aligned stack and lifted the
+    /// title's baseline that far off the wordmark's (measured 41.5 vs 61 at 1440). On mobile
+    /// the sidebar is off-canvas (no baseline to meet) and the band is only 64px, so the id
+    /// stays in flow there.
+    let titleId =
+        "font-mono text-[11px] leading-4 text-ink-faint truncate mt-0.5 "
+        + "md:absolute md:top-full md:left-0 md:right-0"
 
     /// A collaborator's selection highlight in the title: an absolutely-positioned span the
     /// browser sizes to `lo..hi` by measurement (the translucent background is set inline).
