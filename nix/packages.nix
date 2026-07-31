@@ -73,9 +73,16 @@ let
 
   # NuGet global-packages cache — the only network step (a fixed-output derivation). Populated
   # by restoring the solution + the Fable tool; consumed offline by `staged` via NUGET_PACKAGES.
+  #
+  # NO `version` in the name. A fixed-output derivation's store path comes from its NAME and
+  # its HASH, so carrying the version there moved the path every commit — and this is the one
+  # derivation that reaches the NETWORK, so every build re-downloaded the whole NuGet cache
+  # from nuget.org and inherited nuget.org's bad days (a 503 here fails the build with
+  # NU1301, having nothing to do with the change being built). The content is pinned by
+  # `outputHash`; what it is called is not part of that guarantee.
   nugetDeps = pkgs.stdenv.mkDerivation {
-    pname = "yession-nuget-deps";
-    inherit version src;
+    name = "yession-nuget-deps";
+    inherit src;
     nativeBuildInputs = [ pkgs.dotnet-sdk_10 pkgs.cacert ];
     buildPhase = ''
       runHook preBuild
