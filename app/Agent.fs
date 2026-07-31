@@ -74,6 +74,13 @@ type private RunOutcome =
         settingSources: [],
         includePartialMessages: true,
         mcpServers: { yession },
+        // The turn's ONLY tools are the five above. `tools: []` drops every built-in
+        // (Bash/Read/Glob/Grep/WebFetch/Agent/Skill) from the model's context; MCP
+        // servers ride a separate channel, so `yession`'s tools survive it.
+        // `allowedTools` is NOT a restriction — it is the auto-approve list, and on its
+        // own it left the read-only built-ins reachable (a session could list the host
+        // filesystem). It stays so our tools run without a permission round-trip.
+        tools: [],
         allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret'],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
