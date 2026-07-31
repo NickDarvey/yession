@@ -53,6 +53,11 @@ module App =
           /// published — no command round-trip; the Session Process consumes the queue and the
           /// message lands in the timeline as events.
           SendDraft : PeerId -> unit
+          /// Discard a draft: empty its body, which retracts the slot through the SAME
+          /// publication rule that typing published it with (`DraftSlot`). The body is what a
+          /// person sees, so removing the slot without emptying it changed nothing on screen
+          /// and the next keystroke re-published — the discard button appeared not to work.
+          DiscardDraft : PeerId -> unit
           /// Ask the Session Process to cancel the running agent turn (Step 17). The
           /// outcome arrives as events: `AgentTurnInterrupted` on success, or nothing
           /// if the turn already finished (the request is then rejected).
@@ -385,6 +390,17 @@ module App =
                 // No slot means nothing published to send: an untouched composer, or a draft a
                 // co-editor sent a moment ago. Both are no-ops, not errors.
                 | None -> ()
+          DiscardDraft =
+            fun peerId ->
+                // Emptying the body IS the discard: `DraftSlot.follow` watches that fragment and
+                // retracts the slot the moment it goes empty, exactly as it published on the
+                // first keystroke. The slot removal is dispatched in the SAME transaction so the
+                // send-shaped invariant holds here too — one doc update, never a moment where the
+                // body is empty but the slot still advertises a draft to collaborators.
+                let body = registry.Fragment (BodyKey.draft peerId)
+                doc.transact ((fun _ ->
+                    Markdown.intoFragment "" body
+                    dispatch (DiscardDraftMsg peerId)), null)
           InterruptTurn =
             fun turnId ->
                 Async.StartImmediate (

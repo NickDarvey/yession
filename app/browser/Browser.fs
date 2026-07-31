@@ -179,11 +179,50 @@ let private clearTimeoutJs (handle: float) : unit = jsNative
 // The sidebar/drawer state is one bit on the root element, outside `#app`, so it survives
 // every re-render: default = sidebar visible on desktop, off-canvas on mobile; `nav-alt`
 // = the inverse (see Style.sidebar).
-[<Emit("document.documentElement.classList.toggle('nav-alt')")>]
+//
+// Collapsing is a PREFERENCE on desktop, so it is remembered; on mobile the same bit means
+// "the drawer is open", which is not a preference and is never stored. The stored value is
+// re-applied before first paint by the shell document's one inline script (`Ssr.page`) — here,
+// only written.
+//
+// Focus is moved deliberately: the control that was pressed is the one about to disappear, so
+// it hands focus to whichever control replaces it (the header's reopen chevron, or the nav
+// head's collapse button). Skipping that strands focus on a hidden element.
+[<Emit("""(() => {
+  const root = document.documentElement
+  const desktop = window.matchMedia('(min-width: 768px)').matches
+  root.classList.toggle('nav-alt')
+  // The nav control always returns the column to its workspace face — a column that reopened
+  // on settings would be a surprise, and `settings-open` is what chooses the face.
+  root.classList.remove('settings-open')
+  const shown = desktop !== root.classList.contains('nav-alt')
+  if (desktop) { try { localStorage.setItem('yession.nav', shown ? 'open' : 'collapsed') } catch (e) {} }
+  requestAnimationFrame(() => {
+    const next = document.querySelector(shown ? 'button[data-nav-toggle="hide"]' : '[data-nav-toggle="show"]')
+    if (next) next.focus()
+  })
+})()""")>]
 let private toggleNav () : unit = jsNative
 
-// The settings drawer's open state is the same kind of bit, on the same root element.
-[<Emit("document.documentElement.classList.toggle('settings-open')")>]
+// Settings is the sidebar column's other FACE (Style.settingsPane), not a drawer over the
+// conversation — so opening it has to bring that column on screen, and `nav-alt` means the
+// opposite thing on each side of the breakpoint: uncollapse on desktop, slide the drawer in on
+// mobile. Focus follows the same rule as the nav toggle.
+[<Emit("""(() => {
+  const root = document.documentElement
+  const desktop = window.matchMedia('(min-width: 768px)').matches
+  const opening = !root.classList.contains('settings-open')
+  root.classList.toggle('settings-open', opening)
+  if (desktop) { if (opening) root.classList.remove('nav-alt') }
+  else root.classList.toggle('nav-alt', opening)
+  // TWO frames: the face that is arriving is `visibility: hidden` until the transition it
+  // just started reaches its first style flush, and `focus()` on a hidden element is a no-op
+  // (measured — one frame left focus on <body>).
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const next = document.querySelector(opening ? '[data-settings-toggle="close"]' : '[data-settings-toggle="open"]')
+    if (next) next.focus()
+  }))
+})()""")>]
 let private toggleSettings () : unit = jsNative
 
 // The auth probe: `me` answers with a peer token when the browser's cookie (or an
@@ -512,6 +551,7 @@ let private start () =
         // implementation in `App.connect` (capture markdown, enqueue, seed the queue fragment).
         let actions : ViewActions =
             { SendDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.SendDraft peer)
+              DiscardDraft = fun peer -> connectionRef |> Option.iter (fun c -> c.DiscardDraft peer)
               Interrupt = fun turn -> connectionRef |> Option.iter (fun c -> c.InterruptTurn turn)
               ToggleNav = toggleNav
               ToggleSettings =

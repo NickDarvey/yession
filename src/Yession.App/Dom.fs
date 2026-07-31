@@ -82,10 +82,14 @@ module Dom =
         let newDraft = "data-draft-new"
         /// One per live caret in a draft, so a test can assert who is shown editing it.
         let draftEditor' = "data-draft-editor-peer"
-        // Chrome: the sidebar drawer toggle (lives on the shell root, outside `#app`).
+        // Chrome: the sidebar column's collapse/reveal. Its VALUE names the direction —
+        // `show` (the header's reopen chevron) or `hide` (the nav head's chevron, and the
+        // mobile scrim) — so the browser can hand focus to whichever control replaces the
+        // one that was just pressed.
         let navToggle = "data-nav-toggle"
-        // Settings drawer (Plan 08 pass): its toggle, the panel, the Claude section, and
-        // the agent-presence surfaces (the sidebar row and the composer's prompt strip).
+        // Settings, the column's other face: the toggle (valued `open`/`close`, for the same
+        // focus reason), the pane, the Claude section, and the agent-presence surfaces (the
+        // membership row, and the header's stand-in while the column is off screen).
         let settingsToggle = "data-settings-toggle"
         let settingsPanel = "data-settings-panel"
         let claudePanel = "data-claude-panel"

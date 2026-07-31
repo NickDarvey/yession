@@ -23,16 +23,25 @@ type ViewActions =
       /// new queue entry, and enqueue. Imperative because the fragment content-copy (shared
       /// types can't be re-parented) can't live in the pure reducer.
       SendDraft : PeerId -> unit
+      /// Discard the local peer's draft: EMPTY its body, which retracts the slot through the
+      /// same publication rule typing published it with (`DraftSlot`). Imperative for the same
+      /// reason `SendDraft` is — the body is a fragment the reducer cannot touch. Retracting
+      /// the slot alone (what the button used to do) left the text sitting in the composer and
+      /// the next keystroke published it straight back, so the button looked broken.
+      DiscardDraft : PeerId -> unit
       /// Ask the Session Process to cancel the running agent turn.
       Interrupt : AgentTurnId -> unit
-      /// Toggle the sidebar drawer (a presentation bit on the shell root, not model).
+      /// Collapse or reveal the sidebar column (a presentation bit on the shell root, not
+      /// model; the browser also remembers a desktop collapse and moves focus to whichever
+      /// control replaces the one that was pressed).
       ToggleNav : unit -> unit
       /// Broadcast the local selection in the title as `(anchor, head)` UTF-16 indices
       /// (`None` = caret left the title), so collaborators see the cursor. The Browser turns
       /// the indices into relative positions and relays them; ephemeral presence.
       ReportTitleSelection : (int * int) option -> unit
-      /// Toggle the settings drawer (a presentation bit on the shell root, like the nav);
-      /// the browser also re-probes the Claude status on toggle so the drawer opens fresh.
+      /// Turn the sidebar column to its settings face, or back (a presentation bit on the
+      /// shell root, like the nav); the browser also brings that column on screen and
+      /// re-probes the Claude status on toggle, so settings always opens fresh.
       ToggleSettings : unit -> unit
       /// Claude connection panel (Plan 08). Imperative because they read panel inputs and
       /// drive the /claude round-trips; the reducer only folds the resulting messages.
@@ -50,6 +59,7 @@ module ViewActions =
     /// are never invoked while rendering — they fire on user events in the live browser.
     let ssr : ViewActions =
         { SendDraft = ignore
+          DiscardDraft = ignore
           Interrupt = ignore
           ToggleNav = ignore
           ReportTitleSelection = ignore
@@ -145,7 +155,7 @@ module View =
                 html $"""<span class="{Style.small}" data-connection-reason>{reason}</span>"""
             | _ -> Lit.nothing
         html $"""
-            <section class="{Style.sideSectionFirst}">
+            <section class="{Style.cls [ Style.sideSectionFirst; Style.navLane1 ]}">
               <span class="{Style.body}" data-connection>{connectionLabel model.Connection}</span>
               {connectionReason}
               <span class="{catchUpClass}" data-catch-up>{catchUpText consumer}</span>
@@ -153,20 +163,33 @@ module View =
               <span class="{Style.label} tabular-nums">processed <b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> · latest <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>
             </section>"""
 
+    /// Who is in this session — and, when the agent is not, the ONE place the product asks for
+    /// a connection. A missing member belongs in the membership list, so the absent state is not
+    /// a status word here but a card with a real call to action: what is missing, what it costs
+    /// while it is missing, and the button that fixes it.
     let private peopleSection (actions: ViewActions) (model: ClientModel) : TemplateResult =
-        // The agent's row tells the truth about its presence: live (green), absent (a
-        // quiet prompt into settings), or unknown until the first probe answers.
+        // The agent's row tells the truth about its presence: live (green), absent (the
+        // call to action), or unknown until the first probe answers.
         let agentRow =
             match model.Claude.Status.AgentAvailable with
             | Some true ->
                 html $"""<div class="{Style.person}" data-agent-presence="live"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]}"></span>agent<span class="{Style.statusOk} ml-auto"><span class="{Style.statusDot}"></span>ready</span></div>"""
+            // What actually happens with no agent: the drain appends the message with no turn
+            // (`Scheduler.create` — a `None` runner at drain time), so it is recorded and simply
+            // unanswered. The old strip promised messages "will wait", which is not what the
+            // queue does; the copy says what it does.
             | Some false ->
-                html $"""<div class="{Style.person}" data-agent-presence="absent"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">no agent</span><button type="button" class="{Style.navChevron} ml-auto" data-settings-toggle @click={Ev(fun _ -> actions.ToggleSettings ())}>connect ›</button></div>"""
+                html $"""
+                    <div class="{Style.noAgentCard}" data-agent-presence="absent" data-no-agent>
+                      <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="{Style.statusRun}">no agent</span></div>
+                      <span class="{Style.small}">messages still send — nothing answers them until a Claude account is connected.</span>
+                      <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="open" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
+                    </div>"""
             | None ->
                 html $"""<div class="{Style.person}" data-agent-presence="unknown"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span></div>"""
         html $"""
-            <section class="{Style.sideSection}">
-              <span class="{Style.label}">people</span>
+            <section class="{Style.cls [ Style.sideSection; Style.navLane1 ]}">
+              <span class="{Style.label}">in this session</span>
               <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value model.Peer.PeerId) ]}"></span><span class="truncate" data-display-name>{model.Peer.DisplayName}</span><span class="{Style.label}">you</span></div>
               {agentRow}
             </section>"""
@@ -182,7 +205,7 @@ module View =
     let private environmentSection (status: EnvironmentStatus) : TemplateResult =
         let statusClass, statusInner = environmentStatus status
         html $"""
-            <section class="{Style.sideSection}" data-environment="{environmentLabel status}">
+            <section class="{Style.cls [ Style.sideSection; Style.navLane2 ]}" data-environment="{environmentLabel status}">
               <div class="{Style.sideRow}"><span class="{Style.label}">environment</span><span class="{statusClass}">{statusInner}</span></div>
             </section>"""
 
@@ -190,8 +213,8 @@ module View =
         function
         | CommandPending -> html $"""<span class="{Style.statusFaint}">pending</span>"""
         | CommandRunning -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>running</span>"""
-        | CommandFinished (CommandSucceeded code) -> html $"""<span class="{Style.statusOk}">✓ {code}</span>"""
-        | CommandFinished (CommandFailed code) -> html $"""<span class="{Style.statusErr}">✗ {code}</span>"""
+        | CommandFinished (CommandSucceeded code) -> html $"""<span class="{Style.statusOk}">{Icon.checkSm} {code}</span>"""
+        | CommandFinished (CommandFailed code) -> html $"""<span class="{Style.statusErr}">{Icon.crossSm} {code}</span>"""
         | CommandFinished CommandTimedOut -> html $"""<span class="{Style.statusErr}">timed out</span>"""
         | CommandFinished (CommandExecutionFailed _) -> html $"""<span class="{Style.statusErr}">failed</span>"""
 
@@ -209,7 +232,7 @@ module View =
                       {output}
                     </article>""")
         html $"""
-            <section class="{Style.sideSection}" data-command-log>
+            <section class="{Style.cls [ Style.sideSection; Style.navLane2 ]}" data-command-log>
               <span class="{Style.label}">commands</span>
               {entries}
             </section>"""
@@ -221,7 +244,7 @@ module View =
         let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
             match kind with
             | Some kind ->
-                html $"""<div class="{Style.sideRow}" data-claude-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.cls [ Style.btnDanger; Style.btnIcon ]}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>✕</button></div>"""
+                html $"""<div class="{Style.sideRow}" data-claude-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.cls [ Style.btnDanger; Style.btnIcon ]}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>{Icon.close}</button></div>"""
             | None -> html $""""""
         let controls =
             match claude.Flow with
@@ -252,7 +275,7 @@ module View =
             | ClaudeError reason -> html $"""<span class="{Style.statusErr}" data-claude-error>{reason}</span>"""
             | _ -> html $""""""
         html $"""
-            <section class="{Style.sideSection}" data-claude-panel>
+            <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-claude-panel>
               <span class="{Style.label}">claude</span>
               <span class="{Style.small}">the agent answers with whoever sent the message — connect your account here</span>
               {connectedRow "all my sessions" "mine" claude.Status.MineCredential}
@@ -261,42 +284,48 @@ module View =
               {controls}
             </section>"""
 
-    /// The settings drawer: a right-hand Metro panel over a scrim, holding everything
-    /// that is configuration rather than conversation. Open state is the root element's
-    /// `settings-open` class — presentation, not model — so it survives re-renders.
-    let private settingsDrawer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+    /// Settings, as the sidebar column's OTHER FACE. Not a drawer over the conversation: you
+    /// go there and come back, the timeline never moves under a scrim, and configuration keeps
+    /// the section rhythm it already had. Open state is the root element's `settings-open`
+    /// class — presentation, not model — so it survives re-renders.
+    let private settingsPane (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         html $"""
-            <div class="{Style.settingsScrim}" data-settings-toggle @click={Ev(fun _ -> actions.ToggleSettings ())}></div>
-            <aside class="{Style.settingsDrawer}" data-settings-panel>
-              <div class="{Style.settingsHead}"><span class="{Style.settingsTitle}">settings</span><button type="button" class="{Style.navChevron}" aria-label="Close settings" data-settings-toggle @click={Ev(fun _ -> actions.ToggleSettings ())}>✕</button></div>
+            <div class="{Style.settingsPane}" data-settings-panel>
+              <div class="{Style.cls [ Style.settingsHead; Style.settingsLane0 ]}">
+                <span class="{Style.settingsTitle}">settings</span>
+                <button type="button" class="{Style.navChevron}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}>{Icon.left}back</button>
+              </div>
               {claudeSection actions dispatch model.Claude}
-            </aside>"""
+              <div class="flex-1"></div>
+              <span class="{Style.cls [ Style.label; Style.settingsLane2 ]} pt-4">credentials are sealed by the manager</span>
+            </div>"""
 
-    /// The one place the product ASKS for a connection: shown above the composer only
-    /// when the session verifiably has no agent (never while that is still unknown).
-    let private noAgentStrip (actions: ViewActions) (claude: ClaudeViewState) : TemplateResult =
-        match claude.Status.AgentAvailable with
-        | Some false ->
-            html $"""
-                <section class="{Style.noAgent}" data-no-agent>
-                  <span class="{Style.noAgentMark}"></span>
-                  <span class="{Style.statusRun}">no agent in this session</span>
-                  <span class="{Style.small}">messages will wait until a Claude account is connected</span>
-                  <button type="button" class="{Style.btnPrimary} ml-auto" data-settings-toggle data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
-                </section>"""
-        | _ -> html $"""<section class="hidden" data-no-agent></section>"""
-
-    let private sidebar (actions: ViewActions) (model: ClientModel) : TemplateResult =
+    /// The workspace face of the column: identity, sync health, membership, environment, log.
+    let private navPane (actions: ViewActions) (model: ClientModel) : TemplateResult =
         html $"""
-            <div class="{Style.scrim}" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}></div>
-            <aside class="{Style.sidebar}">
-              <div class="{Style.sideHead}"><span class="{Style.wordmark}">yession<span class="text-green">.</span></span><div class="flex items-end gap-1"><button type="button" class="{Style.navChevron}" aria-label="Settings" data-settings-toggle @click={Ev(fun _ -> actions.ToggleSettings ())}>settings</button><button type="button" class="{Style.navChevron}" aria-label="Hide sidebar" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}>‹</button></div></div>
+            <div class="{Style.navPane}">
+              <div class="{Style.cls [ Style.sideHead; Style.navLane0 ]}">
+                <span class="{Style.wordmark}">yession<span class="text-green">.</span></span>
+                <div class="flex items-end gap-1">
+                  <button type="button" class="{Style.navChevron}" data-settings-toggle="open" @click={Ev(fun _ -> actions.ToggleSettings ())}>settings</button>
+                  <button type="button" class="{Style.navChevron}" aria-label="Collapse sidebar" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.left}</button>
+                </div>
+              </div>
               {connectionSection model}
               {peopleSection actions model}
               {environmentSection model.Environment}
               {commandsSection model.Commands}
               <div class="flex-1"></div>
-              <span class="{Style.label} pt-4">local first · every fact is an event</span>
+              <span class="{Style.cls [ Style.label; Style.navLane2 ]} pt-4">local first · every fact is an event</span>
+            </div>"""
+
+    /// The sidebar column: one region, two faces, and — on mobile — the scrim behind it.
+    let private sidebar (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        html $"""
+            <div class="{Style.scrim}" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}></div>
+            <aside class="{Style.sidebar}">
+              {navPane actions model}
+              {settingsPane actions dispatch model}
             </aside>"""
 
     // --- Conversation column ------------------------------------------------------------
@@ -347,7 +376,11 @@ module View =
         | FeedLive, Connected when model.EventConsumer.IsCatchingUp ->
             html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>catching up</span>"""
         | FeedLive, Connected ->
-            html $"""<span class="{Style.cls [ Style.statusOk; Style.headerStatus ]}"><span class="{Style.statusDot}"></span>up to date</span>"""
+            // The one status worth suppressing on a phone: "everything is fine" is the least
+            // actionable thing in a 390px header, and it costs the session title the room it
+            // needs. Every UNhealthy state above stays, at every width, and the sidebar still
+            // reports this one in full.
+            html $"""<span class="{Style.cls [ Style.statusOk; Style.headerStatus ]} max-md:hidden"><span class="{Style.statusDot}"></span>up to date</span>"""
         | FeedLive, Connecting ->
             html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>connecting</span>"""
         | FeedLive, Reconnecting ->
@@ -375,6 +408,16 @@ module View =
               </span>
             </span>"""
 
+    /// The agent's absence, said in the header only while the sidebar — where the real call to
+    /// action lives — is off screen. A phone's sidebar is off-canvas by default, so without this
+    /// the one prompt would be one a phone never sees; the CSS in `Style.headerNoAgent` makes the
+    /// two mutually exclusive, so it is never said twice.
+    let private agentAbsence (actions: ViewActions) (claude: ClaudeViewState) : TemplateResult =
+        match claude.Status.AgentAvailable with
+        | Some false ->
+            html $"""<button type="button" class="{Style.headerNoAgent}" data-settings-toggle="open" @click={Ev(fun _ -> actions.ToggleSettings ())}>no agent</button>"""
+        | _ -> Lit.nothing
+
     let private header (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         let titleStr = Ylmish.Text.toString model.Synced.Title
         let sessionIdText = model.Session |> Option.map SessionId.value |> Option.defaultValue ""
@@ -387,7 +430,7 @@ module View =
             |> List.map (fun (peerId, p) -> remoteCursor peerId p)
         html $"""
             <header class="{Style.header}">
-              <button type="button" class="{Style.cls [ Style.navChevron; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle @click={Ev(fun _ -> actions.ToggleNav ())}>›</button>
+              <button type="button" class="{Style.cls [ Style.navChevron; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle="show" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.right}</button>
               <div class="{Style.cls [ Style.titleWrap; Style.headerTitle ]}">
                 <input type="text" class="{Style.titleInput}" data-session-title aria-label="Session title" placeholder="session"
                        value="{titleStr}"
@@ -401,7 +444,10 @@ module View =
                 {cursors}
                 <span class="{Style.titleId}" data-session-id>{sessionIdText}</span>
               </div>
-              {headerStatus model}
+              <div class="{Style.headerAside}">
+                {agentAbsence actions model.Claude}
+                {headerStatus model}
+              </div>
             </header>"""
 
     let private conversation (projection: ConversationProjection) : TemplateResult =
@@ -456,9 +502,9 @@ module View =
                       <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value entry.Author) ]}"></span>
                       <div class="{Style.queueInput}" data-rich-body="{BodyKey.queued id}" data-rich-readonly="false" data-queue-input="{QueueId.value id}"></div>
                       <div class="{Style.queueTools}">
-                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>↑</button>
-                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>↓</button>
-                        <button type="button" class="{Style.cls [ Style.btnDanger; Style.btnIcon ]}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>✕</button>
+                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                        <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                        <button type="button" class="{Style.cls [ Style.btnDanger; Style.btnIcon ]}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>{Icon.close}</button>
                       </div>
                     </article>""")
         html $"""<section class="{Style.queue}" data-message-queue>{head}{items}</section>"""
@@ -497,7 +543,7 @@ module View =
                 if target = myPeer then
                     html $"""
                         <button type="button" class="{Style.cls [ Style.btn; Style.btnIcon ]}" aria-label="Discard draft"
-                                data-discard-draft @click={Ev(fun _ -> dispatch (DiscardDraftMsg myPeer))}>✕</button>"""
+                                data-discard-draft @click={Ev(fun _ -> actions.DiscardDraft myPeer)}>{Icon.close}</button>"""
                 else Lit.nothing
             let author =
                 if target = myPeer then Lit.nothing
@@ -507,10 +553,12 @@ module View =
                   <span class="{Style.draftEdge}"></span>
                   <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft target}" data-rich-readonly="false" data-draft-input="{PeerId.value target}"></div>
                   <div class="{Style.draftActions}">
-                    <button type="button" class="{Style.btnPrimary}" data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send</button>
-                    {discard}
                     <span class="{Style.draftEditors}">{editors target}</span>
                     {author}
+                    <div class="{Style.draftCommit}">
+                      {discard}
+                      <button type="button" class="{Style.btnPrimary} flex items-center gap-2" data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send{Icon.send}</button>
+                    </div>
                   </div>
                 </article>"""
         // "New message" only says something when you are in someone else's draft: it is the way
@@ -531,14 +579,12 @@ module View =
     /// The client shell, rendered into `#app`.
     let view (actions: ViewActions) (model: ClientModel) (dispatch: ClientMsg -> unit) : TemplateResult =
         html $"""
-            {sidebar actions model}
+            {sidebar actions dispatch model}
             <div class="{Style.mainColumn}">
               {header actions dispatch model}
               {degradedBanner model}
               {conversation model.Conversation}
               {agentStrip actions model.Agent}
-              {noAgentStrip actions model.Claude}
               {queue dispatch model.Synced}
               {drafts actions dispatch model}
-            </div>
-            {settingsDrawer actions dispatch model}"""
+            </div>"""

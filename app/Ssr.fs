@@ -109,6 +109,14 @@ let page (sessionId: SessionId) (mount: string) (model: ClientModel) : string =
         sprintf "<meta name=\"%s\" content=\"%s\">" Dom.sessionMetaName (escapeAttr (SessionId.value sessionId))
         "<title>Yession</title>"
         Style.headTags
+        // The ONE inline script in the shell, and the only thing that has to run before first
+        // paint: a collapsed sidebar is a stored preference (written by the nav toggle), and
+        // applying it from the bundle would paint the sidebar open and then shut it. Desktop
+        // only — below the breakpoint the same class means "the drawer is open" (Style.sidebar),
+        // which is never a preference.
+        "<script>try{if(matchMedia('(min-width: 768px)').matches"
+        + "&&localStorage.getItem('yession.nav')==='collapsed')"
+        + "document.documentElement.classList.add('nav-alt')}catch(e){}</script>"
         "</head><body>"
         sprintf "<main id=\"%s\" class=\"%s\">%s</main>" Dom.appId Style.app (renderModel model)
         sprintf "<script type=\"module\" src=\"%s\"></script>" (SessionRoute.relative ClientBundle)
