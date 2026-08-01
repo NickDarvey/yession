@@ -55,7 +55,9 @@ let private endsWithAttr (s: string) : bool = jsNative
 let private escapeText (s: string) =
     s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;")
 
-let private escapeAttr (s: string) =
+/// Public because the Manager's own standalone pages need it too (Plan 11's `/open`
+/// landing page): one escaper for every string this process puts in an attribute.
+let escapeAttr (s: string) =
     s.Replace("&", "&amp;").Replace("\"", "&quot;")
 
 let rec private renderValue (inAttr: bool) (v: obj) : string =
@@ -100,13 +102,20 @@ let renderModel (model: ClientModel) : string =
 /// the page and in the client bundle resolves against (`SessionRoute.relative` emits
 /// nothing else), so a page rendered without one would ask the origin root for its own
 /// assets. There is no way to render this document and forget it.
-let page (sessionId: SessionId) (mount: string) (model: ClientModel) : string =
+let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (model: ClientModel) : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         // Before the stylesheet and the bundle, because it governs how both resolve.
         sprintf "<base href=\"%s/\">" (escapeAttr mount)
         sprintf "<meta name=\"%s\" content=\"%s\">" Dom.sessionMetaName (escapeAttr (SessionId.value sessionId))
+        // Where to ask for this session back once it has stopped (Plan 11). OMITTED, never
+        // emitted empty, when this session has no Manager: the client's offer to bring the
+        // session back is a total function of the model, so a missing tag is what makes it
+        // structurally impossible to render a button with nowhere to go.
+        (match managerOrigin with
+         | Some origin -> sprintf "<meta name=\"%s\" content=\"%s\">" Dom.managerMetaName (escapeAttr origin)
+         | None -> "")
         "<title>Yession</title>"
         Style.headTags
         // The ONE inline script in the shell, and the only thing that has to run before first

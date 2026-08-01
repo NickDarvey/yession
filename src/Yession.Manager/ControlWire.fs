@@ -238,6 +238,17 @@ module ControlWire =
         { Encode = fun name -> Encode.object [ "name", Encode.string name ]
           Decode = Decode.field "name" Decode.string }
 
+    /// Whether a session is IN USE, reported child→Manager (Plan 11). Like the name report
+    /// this is metadata — one boolean, never who is connected or what they are doing.
+    ///
+    /// The session is the only process that can answer: peers hold data channels straight
+    /// to it, and the running turn lives in its scheduler. The Manager supplies the policy
+    /// (how long idle is too long) and the CLOCK — it timestamps each report on arrival, so
+    /// a child's idea of the time never enters the decision.
+    let sessionActivityReport : Codec<bool> =
+        { Encode = fun busy -> Encode.object [ "busy", Encode.bool busy ]
+          Decode = Decode.field "busy" Decode.bool }
+
     /// A Manager→Session notification (the reverse leg, Manager-pushed): the payload of the
     /// `/control/notifications` SSE stream. Tagged by `kind` like every other control shape,
     /// so new cases extend it without breaking older decoders. See `SessionNotification`.

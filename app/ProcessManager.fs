@@ -104,8 +104,12 @@ type Options =
       /// product, `node <SessionMain.js>` in development and tests.
       SessionCommand : string
       SessionArgs : string list
-      /// Fixed port for a launched session; None = OS-assigned per launch.
-      SessionPort : int option
+      /// How a launched session's port is chosen (Plan 11). `Ephemeral` is the default and
+      /// the historical behaviour: the OS assigns one per launch. `Pinned` draws a port
+      /// from a reserved range at CREATION and reuses it for the life of the session, so
+      /// the session's origin — and the client-side storage a browser partitions by it —
+      /// survives a stop, a reap, and a resume.
+      SessionPorts : SessionPorts
       /// How long a child may take to print its readiness line.
       LaunchTimeoutMs : int
       /// SIGTERM → SIGKILL escalation grace.
@@ -140,7 +144,13 @@ type Options =
       /// Secrets (Plan 06): how the Manager's secret store is keyed. None = the
       /// feature is off — the secrets routes answer 403 and injection sees only the
       /// process-env fallback (the pre-Plan-06 behaviour).
-      Secrets : SecretsBacking option }
+      Secrets : SecretsBacking option
+      /// How long a session may go without being in use before the Manager stops it
+      /// (Plan 11). None = never, the default: reaping is an explicit operator choice,
+      /// because it trades a launch on the next visit for everything an idle session
+      /// holds — and, on a deployment that tracks a fast-moving build, for sessions that
+      /// come back on the new one without the Manager having to restart.
+      IdleTimeout : TimeSpan option }
 
 /// How the secret store is keyed on this host.
 and SecretsBacking =
@@ -156,7 +166,7 @@ module Options =
         { DataDir = dataDir
           SessionCommand = sessionCommand
           SessionArgs = sessionArgs
-          SessionPort = None
+          SessionPorts = Ephemeral
           LaunchTimeoutMs = 15000
           StopGraceMs = 3000
           Grant = None
@@ -164,12 +174,23 @@ module Options =
           Public = Loopback
           OnEvent = (fun _ _ -> ())
           Strategy = None
-          Secrets = None }
+          Secrets = None
+          IdleTimeout = None }
 
 [<Fable.Core.Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
 
+[<Fable.Core.Emit("setInterval($1, $0)")>]
+let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
+
 let private clock () = DateTimeOffset.UtcNow
+
+/// How often to look for sessions to reap, derived from the window rather than configured
+/// separately: a quarter of it, so the worst-case overshoot is a quarter of a window and
+/// there is no second setting to hold a contradictory value. Clamped so a very short window
+/// cannot spin and a very long one still checks within the minute.
+let private sweepIntervalMsFor (timeout: TimeSpan) : int =
+    int (max 5000.0 (min 60000.0 (timeout.TotalMilliseconds / 4.0)))
 
 /// The secrets handlers (Plan 06): the ONLY place a verified AuthzSubject is built, so
 /// the route arms stay policy-free. Every deny is logged (subject/action/scope — never
@@ -318,12 +339,50 @@ let createWithUi
     let statePath = sprintf "%s/manager.json" options.DataDir
     let mutable state = ManagerStore.load statePath
 
+    // Plan 11, before anything can launch. Two sessions holding one port is a registry
+    // that cannot work — the second to launch fails to bind, and until then the first
+    // answers for both — so it fails the boot where the cause is still visible, rather
+    // than at whichever launch happens to come second.
+    match ManagerState.duplicatePorts state with
+    | [] -> ()
+    | clashes ->
+        let describe (port, ids) =
+            sprintf "%d (%s)" port (ids |> List.map SessionId.value |> String.concat ", ")
+        failwithf
+            "manager state %s claims one port for several sessions: %s"
+            statePath
+            (clashes |> List.map describe |> String.concat "; ")
+
+    // Give any session that has no address one. Covers both the registry written before
+    // this Manager pinned ports and a deployment that has just turned pinning on. Durable
+    // before anything uses it, exactly like every other registry write.
+    match ManagerState.assignMissingPorts options.SessionPorts state with
+    | Error e -> failwithf "session ports: %s" e
+    | Ok (_, []) -> ()
+    | Ok (assigned, allocations) ->
+        state <- assigned
+        ManagerStore.save statePath state
+        for sessionId, port in allocations do
+            options.OnEvent
+                "session port assigned"
+                [ "yession.session.id", box (SessionId.value sessionId); "yession.session.port", box port ]
+
     // Runtime-only: the child handle per running session, and the last observed exit
     // for sessions that died without a Stop.
     let mutable children : Map<string, Spawn.RunningChild * int> = Map.empty
     let mutable lastExit : Map<string, int option> = Map.empty
     // Stops in flight: their exits are expected, not crashes.
     let mutable stopping : Set<string> = Set.empty
+
+    // What each RUNNING launch has told us about being in use (Plan 11). Runtime-only and
+    // keyed like `children`, so it is born at launch and dies at exit — a stopped session
+    // has no idle clock, and a relaunch starts a fresh one rather than inheriting the
+    // staleness of the launch before it.
+    let mutable activity : Map<string, LaunchActivity> = Map.empty
+    // Reaps in flight, so the exit that follows can say why it happened. Cleared on that
+    // exit, and cleared again if the stop fails — a reason must never outlive its attempt
+    // and mislabel the next ordinary stop.
+    let mutable reaping : Map<string, ReapReason> = Map.empty
 
     // The control endpoint (Step 24): per-launch secrets resolve to the capabilities
     // the Manager granted that launch — the RPC equivalent of the Step 11 closure. A
@@ -399,6 +458,32 @@ let createWithUi
             ManagerStore.save statePath state
             publishSessions ()
         | _ -> ()
+
+    // The control channel's activity report (Plan 11): the secret identifies the reporting
+    // session, exactly like the name report. `LastBusyAt` moves only while the session says
+    // it is BUSY — an idle report is not a denial of service to itself, it is the session
+    // starting its own clock — so the field means what it is called.
+    let reportActivity (secret: string) (busy: bool) : Async<Result<unit, string>> =
+        async {
+            match Map.tryFind secret secretSessions with
+            | Some sessionId ->
+                let key = SessionId.value sessionId
+                match Map.tryFind key activity with
+                | Some launch ->
+                    activity <-
+                        Map.add
+                            key
+                            { launch with
+                                LastBusyAt = (if busy then clock () else launch.LastBusyAt)
+                                EverReported = true }
+                            activity
+                // A report from a launch the Manager is not tracking (its exit raced this
+                // request) is not an error worth failing: the launch it described is gone,
+                // and there is nothing left to reap.
+                | None -> ()
+                return Ok ()
+            | None -> return Error "invalid control secret"
+        }
 
     // The control channel's name report: the secret identifies the reporting session; a
     // blank name is ignored (the list keeps the registered name until a real title arrives).
@@ -611,7 +696,7 @@ let createWithUi
         async {
             let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
                 let handled =
-                    Control.tryHandle resolveCaller reportName notifications.Register mcp.Register provider.RegisterClient secretsApi connectionsApi connectionsHub.Register (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
+                    Control.tryHandle resolveCaller reportName reportActivity notifications.Register mcp.Register provider.RegisterClient secretsApi connectionsApi connectionsHub.Register (fun path -> audit (SecretStore.Audit.controlUnauthorized path)) req res
                     || handleConnectionsCallback req res
                     || provider.TryHandle req res
                     || (match ui, self with
@@ -637,18 +722,28 @@ let createWithUi
         match SessionId.create sessionId with
         | Error e -> Error e
         | Ok id ->
-            let record =
-                { SessionId = id
-                  DisplayName = if displayName.Trim().Length > 0 then displayName.Trim () else sessionId
-                  CreatedAt = clock ()
-                  DataDir = sprintf "sessions/%s" (SessionId.value id) }
-            match ManagerState.addSession record state with
-            | Error e -> Error e
-            | Ok next ->
-                // Durable before visible: the registry write precedes any use.
-                ManagerStore.save statePath next
-                state <- next
-                Ok record
+            // The address is decided HERE, once, and never again for this session — that is
+            // the whole point of pinning. A range with nothing left is a refused creation:
+            // a session with no address is worse than no session.
+            let allocated =
+                match options.SessionPorts with
+                | Ephemeral -> Ok None
+                | Pinned range -> ManagerState.nextPort range state |> Result.map Some
+            allocated
+            |> Result.bind (fun port ->
+                let record =
+                    { SessionId = id
+                      DisplayName = if displayName.Trim().Length > 0 then displayName.Trim () else sessionId
+                      CreatedAt = clock ()
+                      DataDir = sprintf "sessions/%s" (SessionId.value id)
+                      Port = port }
+                match ManagerState.addSession record state with
+                | Error e -> Error e
+                | Ok next ->
+                    // Durable before visible: the registry write precedes any use.
+                    ManagerStore.save statePath next
+                    state <- next
+                    Ok record)
 
     let launch (sessionId: SessionId) : Async<Result<int, string>> =
         async {
@@ -688,7 +783,10 @@ let createWithUi
                 let env =
                     [ "YESSION_SESSION", SessionId.value record.SessionId
                       "YESSION_SESSION_DATA", sprintf "%s/%s" options.DataDir record.DataDir
-                      "YESSION_PORT", string (defaultArg options.SessionPort 0)
+                      // The session's own pinned address, or 0 for "ask the OS" under
+                      // `Ephemeral`. Read off the RECORD, not the options: the port belongs
+                      // to the session, not to this launch.
+                      "YESSION_PORT", string (defaultArg record.Port 0)
                       // The child watches its stdin and exits when this Manager dies.
                       "YESSION_PARENT_GUARD", "1" ]
                     @ fst controlEnv
@@ -715,16 +813,36 @@ let createWithUi
                 match! Spawn.launch options.SessionCommand options.SessionArgs env options.LaunchTimeoutMs with
                 | Error reason ->
                     revokeSecret ()
-                    return Error reason
+                    // Name the port when one was pinned. A child that cannot bind exits
+                    // before readiness, and "exited before ready" alone sends the reader
+                    // hunting through session logs for what is nearly always something
+                    // else holding the address. Never fall back to an OS-assigned port:
+                    // moving the session is precisely the data-losing behaviour pinning
+                    // exists to prevent.
+                    return
+                        Error (
+                            match record.Port with
+                            | Some port -> sprintf "%s (pinned port %d)" reason port
+                            | None -> reason
+                        )
                 | Ok (child, port) ->
                     children <- Map.add key (child, port) children
                     lastExit <- Map.remove key lastExit
+                    // Plan 11: a session is in use the moment it starts, so the idle clock
+                    // begins here. A launch therefore always gets the whole window before
+                    // it can be reaped, whether or not it ever reports.
+                    activity <-
+                        Map.add
+                            key
+                            { SessionId = record.SessionId; LastBusyAt = clock (); EverReported = false }
+                            activity
                     publishSessions ()
                     // The Manager emits its own lifecycle telemetry directly (session launched).
                     options.OnEvent "session launched"
                         [ "yession.session.id", box key; "yession.session.port", box port ]
                     child.OnExit (fun code ->
                         children <- Map.remove key children
+                        activity <- Map.remove key activity
                         // The launch's authority dies with it.
                         revokeSecret ()
                         // A stop's exit is the expected outcome, not a crash to report.
@@ -736,10 +854,18 @@ let createWithUi
                         // stream does exactly that), so announcing before `lastExit` was set
                         // would show a crashed session as merely stopped until the next change.
                         publishSessions ()
+                        // A reap is a stop, but not every stop is a reap — an operator's
+                        // click and an elapsed idle window look identical in the exit code,
+                        // and only one of them is something to go and look at.
+                        let reapReason = Map.tryFind key reaping
+                        reaping <- Map.remove key reaping
                         options.OnEvent "session exited"
-                            [ "yession.session.id", box key
-                              "yession.session.exit_code", box (defaultArg code -1)
-                              "yession.session.stopped", box stopped ])
+                            ([ "yession.session.id", box key
+                               "yession.session.exit_code", box (defaultArg code -1)
+                               "yession.session.stopped", box stopped ]
+                             @ (match reapReason with
+                                | Some reason -> [ "yession.session.stop_reason", box (ReapReason.describe reason) ]
+                                | None -> [])))
                     return Ok port
         }
 
@@ -758,6 +884,35 @@ let createWithUi
                             if not (child.HasExited ()) then child.Kill ())
                         |> ignore)
         }
+
+    // The reaper's sweep (Plan 11). Every rule about WHEN a session may be stopped lives in
+    // `Reaper.plan`, which is pure and decided without a clock or a process; this is the
+    // loop over its answer, and it is deliberately the whole of the impure part.
+    match options.IdleTimeout with
+    | None -> ()
+    | Some timeout ->
+        let sweep () =
+            // `activity` holds running launches only, so nothing here can name a session
+            // that is already stopped. The `stopping` guard covers the narrower race: a
+            // stop in flight whose exit has not landed yet must not be asked for twice.
+            Reaper.plan (clock ()) timeout (activity |> Map.toList |> List.map snd)
+            |> List.iter (fun (sessionId, reason) ->
+                let key = SessionId.value sessionId
+                if Map.containsKey key children && not (Set.contains key stopping) then
+                    reaping <- Map.add key reason reaping
+                    Async.StartImmediate (
+                        async {
+                            match! stop sessionId with
+                            | Ok () -> ()
+                            | Error e ->
+                                // Leave the launch in `activity`: it is still running, still
+                                // idle, and the next sweep will try again. Saying so is the
+                                // point — a reaper that silently gives up looks exactly like
+                                // one that had nothing to do.
+                                reaping <- Map.remove key reaping
+                                eprintfn "[reaper] could not stop idle session %s: %s" key e
+                        }))
+        setInterval (sweepIntervalMsFor timeout) sweep |> ignore
 
     let pm =
         { CreateSession = createSession

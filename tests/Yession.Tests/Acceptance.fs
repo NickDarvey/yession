@@ -28,6 +28,10 @@ let private representativeModel : ClientModel =
     { Peer = { PeerId = ada; DisplayName = "swift-heron" }
       Connection = Connected
       Session = Some sessionId
+      // Connected, so the reconnect offer (Plan 11) is not showing — but the origin is
+      // present, which is the interesting case: the offer must be gated on the CONNECTION,
+      // not merely on whether a Manager is known.
+      Manager = Some "http://127.0.0.1:8321"
       Synced =
         // Draft/queue bodies are rich-text `Y.XmlFragment`s mounted by the browser editor,
         // not fields on the model — so the SSR fixture carries only the slot's identity; the
@@ -206,7 +210,96 @@ let private uiChecklistTests =
             Expect.isFalse (timeline.Contains "**bold**") "the bold '**' is not literal text"
     ]
 
+// The offer to bring a stopped session back (Plan 11). It replaces the connection status
+// word, so the thing to pin is WHEN it appears — a button with nowhere to go, or one shown
+// over a session that is merely reconnecting, are both worse than the plain status.
+let private reconnectOfferTests =
+    testList "The reconnect offer" [
+        let stopped (manager: string option) (session: SessionId option) =
+            { representativeModel with
+                Connection = Disconnected (Some "the session did not answer")
+                Manager = manager
+                Session = session }
+
+        testCase "a settled disconnection with a manager and a session offers a way back" <| fun () ->
+            let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
+            Expect.isTrue (html.Contains Dom.Hooks.sessionGone) "the card renders"
+            Expect.isTrue (html.Contains Dom.Text.reopenSession) "with its button"
+            Expect.isTrue
+                (html.Contains "http://127.0.0.1:8321/sessions/demo-session/open")
+                "pointing at the manager's open route for THIS session"
+
+        // Replaces, never accompanies: the status word and a button to fix it would be
+        // saying the same thing twice.
+        testCase "the offer replaces the connection status word" <| fun () ->
+            let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
+            // `data-connection-reason` has `data-connection` as a prefix, so this one
+            // assertion covers both the status word and its separate reason line.
+            Expect.isFalse (html.Contains Dom.Hooks.connection) "neither the status word nor its reason line"
+            // The reason itself is not lost — it moves into the card's copy.
+            Expect.isTrue (html.Contains "the session did not answer") "the reason still reaches the reader"
+
+        // The three ways the offer must decline to render, each of which would otherwise be
+        // a button that cannot work.
+        testCase "no manager origin means no offer, just the status" <| fun () ->
+            let html = Support.render (stopped None (Some sessionId))
+            Expect.isFalse (html.Contains Dom.Hooks.sessionGone) "nothing to ask, so nothing offered"
+            Expect.isTrue (html.Contains Dom.Hooks.connection) "the ordinary status still renders"
+
+        testCase "no session id means no offer" <| fun () ->
+            let html = Support.render (stopped (Some "http://127.0.0.1:8321") None)
+            Expect.isFalse (html.Contains Dom.Hooks.sessionGone) "nothing to ask FOR"
+            Expect.isTrue (html.Contains Dom.Hooks.connection) "the ordinary status still renders"
+
+        testCase "a session that is merely reconnecting is not offered a reopen" <| fun () ->
+            let html =
+                Support.render
+                    { representativeModel with
+                        Connection = Reconnecting
+                        Manager = Some "http://127.0.0.1:8321" }
+            Expect.isFalse (html.Contains Dom.Hooks.sessionGone) "reconnecting is not stopped"
+
+        testCase "a connected session shows no offer" <| fun () ->
+            Expect.isFalse
+                ((Support.render representativeModel).Contains Dom.Hooks.sessionGone)
+                "connected, with a manager known — still nothing to offer"
+    ]
+
+// The bootstrap shell itself (`Ssr.page`), which had no Node-tier coverage. What matters
+// here is the manager meta tag's ABSENCE rule: the client's offer is gated on the value
+// being present, so a shell that emitted an empty one would turn a structural guarantee
+// into a string check nobody wrote.
+let private shellTests =
+    testList "Bootstrap shell" [
+        let page (managerOrigin: string option) =
+            Yession.Host.Ssr.page sessionId "" managerOrigin representativeModel
+
+        testCase "a manager origin is emitted as its meta tag" <| fun () ->
+            Expect.isTrue
+                ((page (Some "http://127.0.0.1:8321")).Contains
+                    """<meta name="yession-manager" content="http://127.0.0.1:8321">""")
+                "the origin rides the shell"
+
+        testCase "no manager origin emits no tag at all — not an empty one" <| fun () ->
+            let html = page None
+            Expect.isFalse (html.Contains Dom.managerMetaName) "the tag is absent, so the client reads None"
+
+        testCase "the session id is always there, so a client knows what it is before connecting" <| fun () ->
+            Expect.isTrue
+                ((page None).Contains (sprintf """<meta name="%s" content="demo-session">""" Dom.sessionMetaName))
+                "session identity does not depend on having a manager"
+
+        // The origin is operator-configured rather than user input, but it lands in an
+        // attribute, and one escaper for every attribute is the rule.
+        testCase "an origin containing a quote is escaped, not injected" <| fun () ->
+            let html = page (Some "http://x\"onload=alert(1)")
+            Expect.isFalse (html.Contains "\"onload=alert(1)") "the quote must not close the attribute"
+            Expect.isTrue (html.Contains "&quot;onload=alert(1)") "it is escaped in place"
+    ]
+
 let tests =
     testList "Acceptance" [
         uiChecklistTests
+        reconnectOfferTests
+        shellTests
     ]

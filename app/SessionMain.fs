@@ -47,6 +47,12 @@ let private environmentCapabilities =
 let private reportName =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.nameReporter url secret)
 
+// ...and whether this session is in use, so the Manager can stop it when it is not
+// (Plan 11). Absent without a control channel: a session with no Manager has nothing to
+// report to, and nothing that would stop it.
+let private reportActivity =
+    controlChannel |> Option.map (fun (url, secret) -> ControlClient.activityReporter url secret)
+
 // Secrets (Plan 06): the session's write/list/delete surface over the same channel,
 // pre-bound to this session's own scope. Built after the session id parses (below).
 let private secretsCapabilitiesFor (sessionId: SessionId) =
@@ -66,6 +72,17 @@ let private publicAccess =
 /// stripped off every incoming request. (That is why a template may not put `{port}` in
 /// its path.)
 let private sessionMount = PublicAccess.sessionMount sessionId publicAccess
+
+/// Where a client that has lost this session should ask for it back (Plan 11): the
+/// Manager's public origin, baked into the shell.
+///
+/// Known synchronously, at boot, on EVERY deployment — including loopback, where
+/// `PublicAccess` alone has no answer. `YESSION_CONTROL_URL` is the Manager's own endpoint
+/// URL, and that endpoint is the same HTTP server as the management UI, so it is precisely
+/// the origin that serves `/sessions/{id}/open`. Same precedence as the Manager's OIDC
+/// issuer, and by construction the same value.
+let private managerOrigin =
+    PublicAccess.managerUrlOr (controlChannel |> Option.map fst) publicAccess
 
 // User authorization: with a Manager, this session is an OIDC client of it; the RP
 // configuration completes after listen (the redirect URI needs the bound port).
@@ -248,7 +265,7 @@ Async.StartImmediate (
                         (fun () -> envCreds || connectedSomewhere ())
                         sessionMount)
             | _ -> None
-        let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount port
+        let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

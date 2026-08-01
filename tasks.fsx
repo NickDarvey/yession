@@ -392,7 +392,6 @@ let bootSmoke (command: string) (arguments: string list) =
     psi.WorkingDirectory <- repoRoot
     psi.RedirectStandardOutput <- true
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- dataDir
-    psi.EnvironmentVariables.["YESSION_PORT"] <- "0"
     psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- "0"
     let p = Process.Start psi
 

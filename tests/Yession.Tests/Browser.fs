@@ -65,7 +65,10 @@ let private startHost () : unit =
     psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true   // stderr inherits → visible in the log
-    psi.EnvironmentVariables.["YESSION_PORT"] <- string PORT
+    // A single-port range pins the one session in this fixture to a known address, which
+    // is what the navigation below needs. (Plan 11 replaced the Manager's `YESSION_PORT`
+    // with per-session pinning; a range of one expresses the same fixture requirement.)
+    psi.EnvironmentVariables.["YESSION_SESSION_PORTS"] <- string PORT
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- dataDir
     let p = new Process (StartInfo = psi)
     let ready = TaskCompletionSource<bool> ()
@@ -460,7 +463,7 @@ let private startMountedHost () : unit =
     psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true
-    psi.EnvironmentVariables.["YESSION_PORT"] <- string MOUNT_SESSION_PORT
+    psi.EnvironmentVariables.["YESSION_SESSION_PORTS"] <- string MOUNT_SESSION_PORT
     psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- string MOUNT_MANAGER_PORT
     psi.EnvironmentVariables.["YESSION_SESSION"] <- MOUNT_SESSION
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- mountDataDir

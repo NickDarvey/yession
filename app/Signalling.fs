@@ -21,14 +21,14 @@ open Yession.App
 /// randomly in the browser, so the server-rendered placeholder is left blank. The page
 /// embeds the serving session's id, so the browser can key its local doc store by
 /// session before (and without) any connection.
-let private bootstrapHtml (sessionId: SessionId) (mount: string) =
+let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) =
     let placeholderPeer =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
         | Error e -> failwith e
     // Seed the serving session id so the secondary identifier renders on first paint (the
     // browser re-learns it from `PeerAccepted` once connected).
-    Ssr.page sessionId mount { ClientModel.init placeholderPeer with Session = Some sessionId }
+    Ssr.page sessionId mount managerOrigin { ClientModel.init placeholderPeer with Session = Some sessionId }
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
 let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
@@ -88,9 +88,13 @@ let start
     // — the opposite contract (proxy strips, session serves at root) would make
     // correctness depend on per-proxy rewriting behaviour that cannot be tested here.
     (mount: string)
+    // The Manager's public origin, baked into the shell (Plan 11). Computed once with the
+    // page: this is a deployment fact, fixed at boot, not something that varies per
+    // request — which is why the shell stays a single cached string.
+    (managerOrigin: string option)
     (port: int)
     : Async<HttpServer * (unit -> Async<unit>)> =
-    let bootstrapHtml = bootstrapHtml sessionId mount
+    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin
     // Every accepted peer connection, so a stopping Host can drain them. Never pruned
     // mid-life (closePeerConnection resolves immediately for already-closed ones, and a
     // session hosts a bounded handful of peers).

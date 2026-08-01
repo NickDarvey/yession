@@ -188,6 +188,19 @@ module PublicAccess =
         | ManagerOnly origin
         | Fronted (origin, _) -> Some (ManagerOrigin.value origin)
 
+    /// The Manager's public URL, falling back to whatever endpoint the caller can offer
+    /// when this deployment is loopback-only.
+    ///
+    /// ONE statement of the precedence, so the Manager's OIDC issuer and the origin a
+    /// session publishes to its clients cannot disagree: the CONFIGURED public origin
+    /// always wins, because a loopback endpoint is not reachable from a browser that is
+    /// not on this machine. The fallback is for the deployment where it is — a single
+    /// machine, where the Manager's own `http://127.0.0.1:<port>` is exactly right.
+    let managerUrlOr (fallback: string option) (access: PublicAccess) : string option =
+        match managerUrl access with
+        | Some url -> Some url
+        | None -> fallback
+
     /// Where sessions live. Total — an unfronted deployment serves the loopback
     /// template — so no consumer branches on deployment shape.
     let sessions (access: PublicAccess) : SessionTemplate =
