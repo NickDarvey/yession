@@ -29,9 +29,18 @@ open System.Diagnostics
 open System.Threading.Tasks
 open Microsoft.Playwright
 
-let private PORT = 8180
-let private BASE = sprintf "http://127.0.0.1:%d/" PORT
+/// The session's address, learned from the Manager's readiness line rather than pinned.
+/// Sessions are addressed by an OS-assigned port here (this fixture is deliberately the
+/// UNMOUNTED shape), so the fixture reads the port it was actually given — the mounted
+/// fixture below is the one that exercises a stable address.
+let mutable private BASE = ""
 let private dataDir = "tests/browser/.data"
+
+/// The URL out of a "launched at http://127.0.0.1:PORT/ …" line. Same shape the packaged
+/// composition test uses to learn both endpoints from stdout.
+let private urlIn (line: string) =
+    let m = System.Text.RegularExpressions.Regex.Match (line, "http://[0-9.:]+/")
+    if m.Success then Some m.Value else None
 
 // --- Chromium discovery -----------------------------------------------------------------
 //
@@ -110,21 +119,23 @@ let private startHost () : unit =
     psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true   // stderr inherits → visible in the log
-    // A single-port range pins the one session in this fixture to a known address, which
-    // is what the navigation below needs. (Plan 11 replaced the Manager's `YESSION_PORT`
-    // with per-session pinning; a range of one expresses the same fixture requirement.)
-    psi.EnvironmentVariables.["YESSION_SESSION_PORTS"] <- string PORT
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- dataDir
     let p = new Process (StartInfo = psi)
     let ready = TaskCompletionSource<bool> ()
     // Keep draining stdout (like the JS 'data' handler) so the pipe never blocks the host;
     // resolve readiness on the "launched at" line.
     p.OutputDataReceived.Add (fun e ->
-        if e.Data <> null && e.Data.Contains "launched at" then ready.TrySetResult true |> ignore)
+        if e.Data <> null && e.Data.Contains "launched at" then
+            match urlIn e.Data with
+            | Some url ->
+                BASE <- url
+                ready.TrySetResult true |> ignore
+            | None -> ())
     p.Start () |> ignore
     p.BeginOutputReadLine ()
     host <- p
     if not (ready.Task.Wait 30000) then failwith "host never reported readiness"
+    if BASE = "" then failwith "the readiness line carried no session URL"
 
 let private killHost () : unit =
     try if host <> null then host.Kill true with _ -> ()
@@ -461,8 +472,11 @@ let editorTests =
 // --- A path-mounted session in a real browser (docs/plans/10) ---------------------------
 
 let private MOUNT_PROXY_PORT = 8186
-let private MOUNT_SESSION_PORT = 8187
 let private MOUNT_MANAGER_PORT = 8188
+/// The session's own loopback port, learned from the readiness line. The PUBLIC address is
+/// `/s/<id>` on the proxy and does not contain it — which is the whole point of the shape
+/// under test, and why nothing here may pin it.
+let mutable private mountSessionPort = 0
 let private MOUNT_SESSION = "mounted"
 let private mountDataDir = "tests/browser/.data-mounted"
 
@@ -537,7 +551,6 @@ let private startMountedHost () : unit =
     psi.ArgumentList.Add "localhost"
     psi.UseShellExecute <- false
     psi.RedirectStandardOutput <- true
-    psi.EnvironmentVariables.["YESSION_SESSION_PORTS"] <- string MOUNT_SESSION_PORT
     psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- string MOUNT_MANAGER_PORT
     psi.EnvironmentVariables.["YESSION_SESSION"] <- MOUNT_SESSION
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- mountDataDir
@@ -546,11 +559,19 @@ let private startMountedHost () : unit =
     let p = new Process (StartInfo = psi)
     let ready = TaskCompletionSource<bool> ()
     p.OutputDataReceived.Add (fun e ->
-        if e.Data <> null && e.Data.Contains "launched at" then ready.TrySetResult true |> ignore)
+        if e.Data <> null && e.Data.Contains "launched at" then
+            // The Manager reports the session's LOOPBACK address here, which is what the
+            // proxy must forward to; the browser never sees it.
+            match urlIn e.Data |> Option.map Uri with
+            | Some uri ->
+                mountSessionPort <- uri.Port
+                ready.TrySetResult true |> ignore
+            | None -> ())
     p.Start () |> ignore
     p.BeginOutputReadLine ()
     mountedHost <- p
     if not (ready.Task.Wait 30000) then failwith "mounted host never reported readiness"
+    if mountSessionPort = 0 then failwith "the readiness line carried no session port"
 
 let mountedTests =
     testList "Path-mounted session (browser)" [
@@ -558,7 +579,7 @@ let mountedTests =
             async {
                 if Directory.Exists mountDataDir then Directory.Delete (mountDataDir, true)
                 startMountedHost ()
-                let proxy = startMountProxy MOUNT_PROXY_PORT MOUNT_SESSION_PORT
+                let proxy = startMountProxy MOUNT_PROXY_PORT mountSessionPort
                 // Teardown in `finally`: a failing assertion used to skip it and leave the
                 // Manager, its session child and the proxy holding ports 8186-8188, so one
                 // red run could poison whatever ran next (the failing CI run showed exactly

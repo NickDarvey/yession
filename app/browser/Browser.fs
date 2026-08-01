@@ -395,7 +395,8 @@ let private start () =
                         match SessionId.create value with
                         | Ok id -> Some id
                         | Error _ -> None)
-                Manager = metaContent Dom.managerMetaName }
+                Manager = metaContent Dom.managerMetaName
+                EphemeralStorage = (metaContent Dom.ephemeralStorageMetaName).IsSome }
 
         // The connection is wired later (after persistence and signalling); the interrupt
         // control holds this ref so everything else works before — and without — the
@@ -629,11 +630,14 @@ let private start () =
               ReopenSession =
                 fun () ->
                     // A full navigation to the Manager, not a fetch: it launches the session
-                    // if it is stopped and then hands us on to wherever this deployment says
-                    // the session lives, which may be a different port entirely. Nothing is
-                    // lost by reloading — the doc is in IndexedDB and the log replays — and a
-                    // pinned port means we land back on the same origin, so what was written
-                    // offline is still here to sync.
+                    // if it is stopped and hands us on to wherever this deployment says the
+                    // session lives.
+                    //
+                    // What the reload costs depends on the address. Under a `{id}` template
+                    // we land on the SAME origin, so the doc in IndexedDB is still this
+                    // session's and syncs straight back. Addressed by port we land somewhere
+                    // new, and anything written since it stopped stays behind — which is why
+                    // the card says so before this runs.
                     //
                     // The anchor's href is the same URL, so this is an enhancement rather
                     // than the mechanism: with no JS the link still works.

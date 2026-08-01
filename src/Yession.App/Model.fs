@@ -100,6 +100,14 @@ type ClientModel =
       /// Static for the life of the page. Never a message, never folded: it is a fact
       /// about the deployment that served this document, not part of the session's state.
       Manager       : string option
+      /// Whether this deployment's sessions change address between launches (Plan 12).
+      /// When true the browser's storage does not survive a restart, because it is
+      /// partitioned by origin and the origin carries the port — so the client's
+      /// local-first promise has to be qualified wherever it is made.
+      ///
+      /// Static for the life of the page, like `Manager`: a fact about the deployment that
+      /// served this document, never a message and never folded.
+      EphemeralStorage : bool
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
       EventConsumer : EventConsumerState
@@ -196,6 +204,7 @@ module ClientModel =
           Connection = Disconnected None
           Session = None
           Manager = None
+          EphemeralStorage = false
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
           EventConsumer =

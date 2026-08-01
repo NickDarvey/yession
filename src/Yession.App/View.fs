@@ -151,6 +151,15 @@ module View =
         match model.Connection, model.Manager, model.Session with
         | Disconnected (Some reason), Some origin, Some sessionId ->
             let target = sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId)
+            // What reopening actually costs. Under a `{id}` template the session returns to
+            // the same address, so the doc in this browser is still its doc and syncs on
+            // reconnect. Addressed by port it returns somewhere new, and everything written
+            // here since it went is stranded — say so before they click, not after.
+            let reopenPromise =
+                if model.EphemeralStorage then
+                    "It reopens at a new address, so anything written here since it stopped will not come with it."
+                else
+                    "Your work is saved here and syncs when it comes back."
             Some (
                 html
                     $"""
@@ -159,7 +168,7 @@ module View =
                       <div class="{Style.noAgentPrompt}">
                         <span class="{Style.noAgentEdge}"></span>
                         <div class="{Style.noAgentBody}">
-                          <span class="{Style.small}">{reason}. Your work is saved here and syncs when it comes back.</span>
+                          <span class="{Style.small}">{reason}. {reopenPromise}</span>
                           <a class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}"
                              href="{target}"
                              data-session-reopen="{target}"
@@ -404,6 +413,12 @@ module View =
     /// still works. Nothing here disables anything below it — the composer, the queue, and the
     /// title are CRDT state in a local doc, not reads off the network.
     let private degradedBanner (model: ClientModel) : TemplateResult =
+        // The local-first promise, stated only where it is true. A deployment that addresses
+        // sessions by port brings them back at a new origin, and a browser partitions storage
+        // by origin — so "everything is saved locally" is exactly wrong there, and wrong at
+        // the one moment someone would rely on it.
+        let localPromise =
+            if model.EphemeralStorage then Dom.Text.localFallbackEphemeral else Dom.Text.localFallback
         let strip (token: string) (status: TemplateResult) (detail: string) =
             html $"""
                 <section class="{Style.degradedBanner}" data-degraded="{token}">
@@ -413,26 +428,30 @@ module View =
         match model.Connection, model.EventConsumer.Feed with
         // The session leg subsumes the history leg: a Process that cannot be reached cannot
         // serve its feed either, and one strip is the honest report of one problem.
+        // Deliberately bare: `reconnectOffer` is on screen for exactly this case, saying
+        // what happened AND offering the way back. Repeating the local-first promise here
+        // would state it twice on the one screen where it matters most — and, on an
+        // ephemeral deployment, would have been wrong twice.
         | Disconnected (Some reason), _ ->
             strip
                 Dom.Text.degradedOffline
                 (html $"""<span class="{Style.statusErr}">not connected</span>""")
-                (reason + " · " + Dom.Text.localFallback)
+                reason
         | Reconnecting, _ ->
             strip
                 Dom.Text.degradedReconnecting
                 (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>""")
-                Dom.Text.localFallback
+                localPromise
         | _, FeedRetrying (attempt, reason) ->
             strip
                 Dom.Text.feedRetrying
                 (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying</span>""")
-                (sprintf "%s · attempt %d · %s" reason attempt Dom.Text.localFallback)
+                (sprintf "%s · attempt %d · %s" reason attempt localPromise)
         | _, FeedStalled reason ->
             strip
                 Dom.Text.feedPaused
                 (html $"""<span class="{Style.statusErr}">history paused</span>""")
-                (reason + " · " + Dom.Text.localFallback)
+                (reason + " · " + localPromise)
         | _, FeedLive -> Lit.nothing
 
     let private headerStatus (model: ClientModel) : TemplateResult =

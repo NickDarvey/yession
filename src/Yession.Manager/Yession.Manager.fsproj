@@ -11,7 +11,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Ports.fs" />
     <Compile Include="Reaper.fs" />
     <Compile Include="State.fs" />
     <Compile Include="SecretsState.fs" />

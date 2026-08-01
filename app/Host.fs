@@ -83,6 +83,9 @@ let startFull
     // where to ask for this session back (Plan 11). None for a Manager-less session:
     // there is then nothing to ask.
     (managerOrigin: string option)
+    // Whether a session keeps its address across launches (Plan 12); false means the
+    // client's local-first promise has to be qualified. Baked into the shell.
+    (ephemeralStorage: bool)
     (port: int)
     : Async<SessionHost> =
     async {
@@ -377,7 +380,7 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin port
+        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin ephemeralStorage port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -437,7 +440,7 @@ let startWithEnvironment
     (port: int)
     : Async<SessionHost> =
     // No mount: these helpers serve an unfronted, origin-root session.
-    startFull (fun () -> runAgent) makeEnvironment None baseLog None None None (fun _ _ -> ()) None None None sessionId None "" None port
+    startFull (fun () -> runAgent) makeEnvironment None baseLog None None None (fun _ _ -> ()) None None None sessionId None "" None false port
 
 /// `startWithEnvironment` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =
