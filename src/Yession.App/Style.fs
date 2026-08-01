@@ -48,6 +48,15 @@ module Style =
     let statusDot = "inline-block w-1.5 h-1.5 rounded-full bg-current mr-1.5 align-[1px]"
     let statusDotPulse = statusDot + " animate-pulse2 motion-reduce:animate-none"
 
+    /// A standalone dot given its colour explicitly (`bg-green` etc. composed at the use
+    /// site) for a row whose text is a DIFFERENT colour — `bg-current` would fight the
+    /// composed colour utility, and which `bg-*` wins is stylesheet order, not authoring
+    /// order.
+    let syncDot = "inline-block w-1.5 h-1.5 rounded-full shrink-0"
+    let syncDotPulse = syncDot + " animate-pulse2 motion-reduce:animate-none"
+    /// The sidebar's one-line sync summary: dot and status words on one baseline.
+    let syncRow = "flex items-center gap-2"
+
     // --- Buttons: bordered Metro rectangles — hover brightens, press fills --------------
 
     let private btnBase =
@@ -58,8 +67,25 @@ module Style =
     let btn = btnBase + " border-[#2e2e2e] text-ink-dim hover:border-ink hover:text-ink active:bg-ink active:text-bg"
     let btnPrimary = btnBase + " border-blue text-blue hover:text-[#7fd0f5] active:bg-blue active:text-bg"
     let btnDanger = btnBase + " border-[#2e2e2e] text-ink-dim hover:border-err hover:text-err active:bg-err active:text-bg"
-    /// 24px square icon button (compose after `btn`/`btnDanger` to override the padding).
-    let btnIcon = "w-6 h-6 p-0 grid place-items-center tracking-normal"
+
+    /// Square icon buttons — self-contained, NOT composed over `btn`: Tailwind emits `p-0`
+    /// BEFORE `px-*`/`py-*` in the stylesheet, so "btn + p-0" kept the text button's padding
+    /// and crushed the glyph into a corner of a lopsided box (measured live: 30×24, ×
+    /// touching the bottom-right edge).
+    let private btnIconBase =
+        "bg-transparent cursor-pointer border p-0 grid place-items-center transition-colors "
+        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
+
+    let private btnIconNeutralFace = " border-[#2e2e2e] text-ink-dim hover:border-ink hover:text-ink active:bg-ink active:text-bg"
+    let private btnIconDangerFace = " border-[#2e2e2e] text-ink-dim hover:border-err hover:text-err active:bg-err active:text-bg"
+
+    /// 24px square: the queue's reorder controls.
+    let btnIcon = btnIconBase + " w-6 h-6" + btnIconNeutralFace
+    /// 24px square, destructive: delete / disconnect.
+    let btnIconDanger = btnIconBase + " w-6 h-6" + btnIconDangerFace
+    /// 32px square, destructive: the composer's discard — the same height as the Send
+    /// button it sits beside, so the pair shares top and bottom edges.
+    let btnIconDangerLg = btnIconBase + " w-8 h-8" + btnIconDangerFace
     /// Chrome, not an action: the small sidebar collapse/reveal chevrons. They lean the way
     /// they travel on hover and lead further on press — the only motion chrome earns, and the
     /// reason the two directions are separate values rather than one class plus a guess.
@@ -206,7 +232,12 @@ module Style =
     let sideSection = "flex flex-col gap-2 py-4 border-t border-hair"
     let sideSectionFirst = "flex flex-col gap-2 pb-4"
     let sideRow = "flex items-baseline justify-between gap-2"
-    let person = "flex items-center gap-2.5 font-light text-[13px] leading-5 text-ink-dim"
+    /// A roster row aligns on the TEXT BASELINE, so the 11px caps ("you", a status) sit on
+    /// the 13px name's baseline instead of floating box-centred beside it.
+    let person = "flex items-baseline gap-2.5 font-light text-[13px] leading-5 text-ink-dim"
+    /// The avatar opts back out: a box has no baseline (it would park its bottom edge on
+    /// the line), so it centres in the row the way it always did.
+    let personAvatar = "self-center"
     let commandCard = "flex flex-col gap-1 px-3 py-2 bg-surface"
 
     let mainColumn = "flex-1 flex flex-col min-w-0 h-full"
@@ -218,8 +249,9 @@ module Style =
     /// exactly on the message-text column below.
     let headerTitle = "ml-8"
     /// The header's right-hand group: sync status, and — only while the sidebar is off screen —
-    /// the agent's absence.
-    let headerAside = "ml-auto shrink-0 flex items-end gap-5 pb-1"
+    /// the agent's absence. `pb-[1px]` is optical, not rhythm: it drops the 11px caps line's
+    /// baseline onto the wordmark/title baseline (pb-1 left it 3px high, measured live).
+    let headerAside = "ml-auto shrink-0 flex items-end gap-5 pb-[1px]"
     let headerStatus = "shrink-0"
 
     /// The agent's absence, FOLLOWING the surface that normally says it: shown only when the
@@ -245,15 +277,25 @@ module Style =
 
     /// The title itself: the heading, worn by a text input. No chrome except a subtle dotted
     /// underline (the editable affordance) that goes solid blue on focus. Edits in place, no
-    /// save button — the model is the collaborative `Title` text.
+    /// save button — the model is the collaborative `Title` text. `md:top-[2px]` is optical:
+    /// a 28/32 line box holds its baseline 2px higher over the shared bottom edge than the
+    /// wordmark's 32/36 does, so the input steps down to put both on one line (measured
+    /// live; mobile has no cross-column baseline to meet, so no nudge there).
     let titleInput =
         "w-full min-w-0 bg-transparent border-0 border-b border-dotted border-ink-faint "
         + "focus:border-solid focus:border-blue outline-none px-0 py-0 "
         + "font-extralight text-[28px] leading-8 tracking-[-0.01em] lowercase text-ink "
-        + "placeholder:text-ink-faint truncate"
+        + "placeholder:text-ink-faint truncate relative md:top-[2px]"
 
     /// The session id, shown small and dim under the title as a stable secondary identifier.
-    let titleId = "font-mono text-[11px] leading-4 text-ink-faint truncate mt-0.5"
+    /// On md+ it hangs OUT OF FLOW below the title, into the header band's bottom padding:
+    /// in flow it added 18px under the title inside the bottom-aligned stack and lifted the
+    /// title's baseline that far off the wordmark's (measured 41.5 vs 61 at 1440). On mobile
+    /// the sidebar is off-canvas (no baseline to meet) and the band is only 64px, so the id
+    /// stays in flow there.
+    let titleId =
+        "font-mono text-[11px] leading-4 text-ink-faint truncate mt-0.5 "
+        + "md:absolute md:top-full md:left-0 md:right-0"
 
     /// A collaborator's selection highlight in the title: an absolutely-positioned span the
     /// browser sizes to `lo..hi` by measurement (the translucent background is set inline).
@@ -410,11 +452,20 @@ module Style =
     // Said ONCE, in the section that lists who is in this session, because that is where a
     // missing member is missing. It used to be said three times over (a sidebar row, a strip
     // above the composer, and the settings copy); repetition made it wallpaper, not a prompt.
-    // Blue is the agent's voice, so the blue left edge is its absence — the same edge grammar
-    // the queue uses for editability.
+    //
+    // The absent state is the SAME roster row as the live one — same avatar cell, same
+    // right-aligned status slot — so connecting an agent flips "no agent" to "ready" in
+    // place; nothing moves and no box appears or collapses. (It used to be a boxed card,
+    // which broke the roster's geometry and made the connect moment a layout jump.) The
+    // prompt hangs beneath the row, on the roster's text column.
 
-    let noAgentCard = "flex flex-col gap-2 bg-surface border-l-2 border-blue px-3 py-3 mt-1"
-    /// Full-width so it reads as the section's one action, not an afterthought beside the text.
+    let noAgentBlock = "flex flex-col gap-2"
+    /// The prompt hangs from the agent's row on a 2px blue edge — the width every other
+    /// edge in the product uses (queue, draft, quote) and the agent's colour — run down
+    /// from the avatar above it: 9px margin + 2px line centres the edge under the 20px
+    /// square, and the padding steps the text back onto the roster's text column (30px).
+    let noAgentPrompt = "flex flex-col gap-2 ml-[9px] border-l-2 border-blue pl-[19px]"
+    /// Full-width within the column so it reads as the section's one action.
     let noAgentAction = "w-full text-center"
 
     // --- Document shell ------------------------------------------------------------------------
