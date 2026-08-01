@@ -100,6 +100,12 @@ let
     name = "yession-nuget-deps";
     inherit src;
     nativeBuildInputs = [ pkgs.dotnet-sdk_10 pkgs.cacert ];
+    # The one derivation here that reaches the network, so the one that has to be told how to
+    # leave the box. A sandboxed fixed-output build gets a cleared environment; without the
+    # proxy variables passed through, NuGet dials out directly and a box that only egresses
+    # through a proxy answers with `NU1301 … 503`, which reads like nuget.org having a bad day
+    # rather than a build that never reached it. .NET's HttpClient picks these up on its own.
+    impureEnvVars = lib.fetchers.proxyImpureEnvVars;
     buildPhase = ''
       runHook preBuild
       ${dotnetEnv}
@@ -273,5 +279,8 @@ let
   };
 in
 {
-  inherit libdatachannel node-datachannel claude-code nodeModules staged nix npm;
+  # nugetDeps is exposed for one reason: its `outputHash` can only be re-derived by building it
+  # (`nix build --file nix/worktree.nix nugetDeps`), and a hash you cannot rebuild on demand is
+  # a hash nobody updates until a release job fails.
+  inherit libdatachannel node-datachannel claude-code nugetDeps nodeModules staged nix npm;
 }
