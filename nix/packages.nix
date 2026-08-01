@@ -42,6 +42,14 @@ let
 
   # Only the files the build consumes, so editing devenv config / CI / docs doesn't invalidate
   # the (slow) F#/Fable build. README.md is kept — tasks.fsx copies it into the package.
+  #
+  # node_modules is excluded for a second, harder reason: in a dev shell it is a SYMLINK to
+  # ${nodeModules}/node_modules (enterShell), and that store path is also a build input of
+  # `staged` — so an unfiltered copy lands a live symlink to a read-only directory at the exact
+  # path `staged` then copies onto, and `cp -a ... ./node_modules` descends into it and dies with
+  # `cannot create directory './node_modules/node_modules'`. Invisible in CI, which builds from a
+  # fresh checkout with no dev shell entered. The `.devenv` state dir and the sandbox-only
+  # devenv.local.yaml go for the first reason: both move constantly and neither is a build input.
   src =
     let root = ./..;
     in lib.cleanSourceWith {
@@ -53,6 +61,9 @@ let
           || lib.hasPrefix ".github/" rel
           || lib.hasPrefix "docs/" rel
           || lib.hasPrefix ".claude/" rel
+          || rel == "node_modules"
+          || rel == ".devenv"
+          || rel == "devenv.local.yaml"
           || rel == "flake.nix"
           || rel == "flake.lock"
           || rel == "devenv.nix"
