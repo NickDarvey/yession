@@ -542,6 +542,12 @@ let private reapingTests =
                 // Every lifecycle event the Manager emits, so the reap's REASON is read from
                 // the telemetry that operators read, not inferred from the session being gone.
                 let events = ResizeArray<string * (string * obj) list> ()
+                // A free port rather than a fixed one, like the fronted registry test below:
+                // the Manager must actually ANSWER on the origin it declares, because a
+                // launched session fetches OIDC discovery against it (docs/plans/10).
+                // Declaring one it does not answer on fails the launch, not the assertion.
+                let! managerPort = freePort ()
+                let origin = sprintf "http://127.0.0.1:%d" managerPort
                 let! pm =
                     ProcessManager.createWithUi
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
@@ -549,8 +555,8 @@ let private reapingTests =
                             // Path-mounted: a session's address is derived from its ID, so it
                             // is the same string before and after a reap however the OS
                             // reassigns ports. That is the guarantee that replaced pinning.
-                            Public =
-                                PublicAccess.create "http://127.0.0.1:8199" "http://127.0.0.1:8199/s/{id}" |> expect
+                            ManagerPort = Some managerPort
+                            Public = PublicAccess.create origin (origin + "/s/{id}") |> expect
                             IdleTimeout = Some (TimeSpan.FromSeconds 3.0)
                             OnEvent = fun name attrs -> lock events (fun () -> events.Add (name, attrs)) }
                         (Some ManagerUi.tryHandle)
@@ -561,7 +567,7 @@ let private reapingTests =
                 // The address this deployment publishes for the session, before it has ever
                 // run: derived from the id alone, which is why it needs no port to compute.
                 let address () = (PublicAccess.sessionAddress sessionId 0 pm.Public).Url
-                Expect.equal (address ()) "http://127.0.0.1:8199/s/reap-1" "addressed by id, not by port"
+                Expect.equal (address ()) (origin + "/s/reap-1") "addressed by id, not by port"
 
                 let! launched = pm.Launch sessionId
                 Expect.isTrue (Result.isOk launched) "the session launches"
@@ -593,9 +599,9 @@ let private reapingTests =
                 // bookkeeping — the address never mentioned the port to begin with.
                 let! reopened = Interop.getText (baseUrl + "/sessions/reap-1/open") |> Async.AwaitPromise
                 Expect.isTrue
-                    (reopened.Contains "http://127.0.0.1:8199/s/reap-1/")
+                    (reopened.Contains (origin + "/s/reap-1/"))
                     "reopening lands on the address the reaped session had"
-                Expect.equal (address ()) "http://127.0.0.1:8199/s/reap-1" "and it is unchanged by the reap"
+                Expect.equal (address ()) (origin + "/s/reap-1") "and it is unchanged by the reap"
                 match (pm.TryFind sessionId).Value.Status with
                 | ProcessManager.Running _ -> ()
                 | other -> failwithf "expected /open to have relaunched it, got %A" other
