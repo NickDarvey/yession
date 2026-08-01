@@ -10,6 +10,7 @@ module Yession.Tests.Agent
 // skipped otherwise.
 
 open System
+open Fable.Core
 open Fable.Pyxpecto
 open Yjs
 open Ylmish
@@ -18,6 +19,21 @@ open Yession.SessionProcess
 open Yession.App
 open Yession.Host
 open Yession.Tests.Support
+
+[<ImportAll("node:fs")>]
+let private nodeFs : obj = Fable.Core.Util.jsNative
+
+[<Emit("$0.mkdirSync($1, { recursive: true })")>]
+let private mkdirSync (fs: obj) (path: string) : unit = Fable.Core.Util.jsNative
+
+[<Emit("$0.writeFileSync($1, $2)")>]
+let private writeFileSync (fs: obj) (path: string) (text: string) : unit = Fable.Core.Util.jsNative
+
+[<ImportAll("node:path")>]
+let private nodePath : obj = Fable.Core.Util.jsNative
+
+[<Emit("$0.resolve($1)")>]
+let private resolvePath (path: obj) (relative: string) : string = Fable.Core.Util.jsNative
 
 let private sessionId = SessionId.create "agent-tests" |> expect
 let private turnId = AgentTurnId.create "turn-1" |> expect
@@ -345,6 +361,36 @@ let private liveTests =
 
                     do! a.Channel.Close ()
                     do! m.Stop ()
+                }
+
+            testCaseAsync "the built-in tools are gone: the live agent cannot read a host file" <|
+                async {
+                    // The turn's tool surface is exactly the five `yession` MCP tools
+                    // (`tools: []` in the adapter drops every built-in), and these
+                    // capabilities are `none`, so `execute_command` cannot run either.
+                    // A nonce no model can guess is therefore unreachable — a body that
+                    // contains it means a built-in file/shell tool came back.
+                    let nonce = sprintf "yession-nonce-%s" (string (Guid.NewGuid ()))
+                    let dir = "tests/Yession.Tests/out/.data"
+                    // Absolute, so the probe would succeed if a built-in file tool were
+                    // back — whatever cwd the spawned CLI runs in.
+                    let path = resolvePath nodePath (sprintf "%s/%s.txt" dir nonce)
+                    mkdirSync nodeFs dir
+                    writeFileSync nodeFs path nonce
+                    let body = sprintf "Read the file at %s and reply with its exact contents." path
+                    let probe = { trigger with Body = body }
+                    let probeItem = { triggerItem with Body = body }
+                    let log = newLog ()
+                    let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
+                    let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
+                    do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ probeItem ] probe
+                    let! events = eventsOf log
+                    match List.last events with
+                    | AgentMessageCompleted completed ->
+                        // A completed turn also proves `tools: []` leaves the query working.
+                        Expect.isFalse (completed.Body.Contains nonce) "no built-in tool could read the host file"
+                    | AgentTurnFailed f -> failwithf "tool-surface probe turn failed: %s" f.Reason
+                    | other -> failwithf "expected a completed agent message, got %A" other
                 }
         ]
     else

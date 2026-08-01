@@ -358,13 +358,17 @@ module ControlWire =
     /// `None` = the Manager's own public callback (providers that can register it);
     /// `Some` = a provider-hosted code-display page (e.g. a client whose registered
     /// URIs cannot include this Manager) — completion then arrives as a paste.
+    /// `TokenDialect` is how this provider's token endpoint wants its grant requests
+    /// encoded — another provider fact the session supplies, defaulting to the standard
+    /// form encoding for every provider that keeps to RFC 6749.
     type ConnectionBeginRequest =
         { Target : SecretId
           AuthorizeUrl : string
           TokenUrl : string
           ClientId : string
           Scopes : string
-          RedirectUri : string option }
+          RedirectUri : string option
+          TokenDialect : TokenRequestDialect }
 
     type ConnectionBeginResponse = { AuthorizeUrl : string; State : string }
 
@@ -438,7 +442,8 @@ module ControlWire =
                       "tokenUrl", Encode.string r.TokenUrl
                       "clientId", Encode.string r.ClientId
                       "scopes", Encode.string r.Scopes
-                      "redirectUri", Encode.option Encode.string r.RedirectUri ]
+                      "redirectUri", Encode.option Encode.string r.RedirectUri
+                      "tokenDialect", Encode.string (TokenRequestDialect.describe r.TokenDialect) ]
           Decode =
             Decode.object (fun get ->
                 { ConnectionBeginRequest.Target = get.Required.Field "target" secretId.Decode
@@ -446,7 +451,13 @@ module ControlWire =
                   ConnectionBeginRequest.TokenUrl = get.Required.Field "tokenUrl" Decode.string
                   ConnectionBeginRequest.ClientId = get.Required.Field "clientId" Decode.string
                   ConnectionBeginRequest.Scopes = get.Required.Field "scopes" Decode.string
-                  ConnectionBeginRequest.RedirectUri = get.Optional.Field "redirectUri" Decode.string }) }
+                  ConnectionBeginRequest.RedirectUri = get.Optional.Field "redirectUri" Decode.string
+                  // Optional: a session built before dialects existed speaks the standard,
+                  // so an older session keeps working against a newer Manager.
+                  ConnectionBeginRequest.TokenDialect =
+                    get.Optional.Field "tokenDialect" Decode.string
+                    |> Option.map TokenRequestDialect.ofString
+                    |> Option.defaultValue FormEncoded }) }
 
     let connectionBeginResponse : Codec<ConnectionBeginResponse> =
         { Encode =
