@@ -47,8 +47,9 @@ type ExecuteCommand = CommandRequest -> (CommandOutputChunk -> unit) -> Async<Co
 
 /// Persist a secret under the session's own scope (Plan 06). WRITE-ONLY from the
 /// agent's side: there is no capability that returns a value — a stored secret is used
-/// by referencing its name in an environment spec (`SecretRef`), resolved Manager-side
-/// straight into the container env, never through the agent loop or the transcript.
+/// by referencing its name in an environment spec (`SecretRef`), resolved at sandbox
+/// spawn straight into the sandbox env, never through the agent loop or the
+/// transcript.
 type SetSessionSecret = SecretName -> string -> Async<Result<SecretMetadata, string>>
 
 /// List the session's secret METADATA — names and timestamps, never values (the type

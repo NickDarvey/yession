@@ -25,6 +25,92 @@ let expect =
 
 let user msg = Ylmish.Program.Message.User msg
 
+// --- The sandbox seam's deterministic test double ----------------------------------------
+
+/// Counts sandbox lifecycle calls so tests can assert an operation happened (or was
+/// prevented) at the seam.
+type SandboxRecorder () =
+    member val Created = 0 with get, set
+    member val Disposed = 0 with get, set
+    member val Spawned = 0 with get, set
+
+/// A policy with nothing in it — for scripted sandboxes that ignore it.
+let emptyPolicy : SandboxPolicy =
+    { ReadPaths = []
+      WritePaths = []
+      AllowedDomains = None
+      Env = Map.empty
+      WorkingDirectory = None }
+
+let preparedEmptyPolicy : unit -> Async<Result<SandboxPolicy, string>> =
+    fun () -> async { return Ok emptyPolicy }
+
+/// A deterministic in-memory sandbox: creations/disposals are counted, spawns are
+/// delegated to an injected script. The seam analogue of the old InMemoryBackend.
+let scriptedSandbox
+    (recorder: SandboxRecorder)
+    (script: SandboxExec -> (OutputStream * string -> unit) -> Async<SandboxRun>)
+    : CreateSandbox =
+    fun _policy ->
+        async {
+            recorder.Created <- recorder.Created + 1
+            let ref = sprintf "scripted-%d" recorder.Created
+            return
+                Ok
+                    { Ref = ref
+                      Spawn =
+                        fun exec onChunk ->
+                            async {
+                                recorder.Spawned <- recorder.Spawned + 1
+                                return
+                                    Ok
+                                        { WriteStdin = ignore
+                                          CloseStdin = ignore
+                                          Kill = ignore
+                                          Exited = script exec onChunk }
+                            }
+                      Dispose = fun () -> async { recorder.Disposed <- recorder.Disposed + 1 } }
+        }
+
+/// The standard scripted spawn: one stdout chunk, exit 0.
+let echoSandboxScript : SandboxExec -> (OutputStream * string -> unit) -> Async<SandboxRun> =
+    fun _ onChunk ->
+        async {
+            onChunk (Stdout, "ok")
+            return SandboxExited 0
+        }
+
+/// Run one command in a sandbox and wait for its end, accumulating stdout/stderr —
+/// the execute path without an event log, for backend-level tests.
+let runInSandbox
+    (sandbox: Sandbox)
+    (executable: string)
+    (args: string list)
+    (env: Map<string, string>)
+    (workingDirectory: string option)
+    : Async<SandboxRun * string * string> =
+    async {
+        let out = System.Text.StringBuilder ()
+        let err = System.Text.StringBuilder ()
+        let! spawned =
+            sandbox.Spawn
+                { Executable = executable
+                  Arguments = args
+                  Env = env
+                  WorkingDirectory = workingDirectory }
+                (fun (stream, text) ->
+                    (match stream with
+                     | Stdout -> out
+                     | Stderr -> err)
+                        .Append text
+                    |> ignore)
+        match spawned with
+        | Error reason -> return SandboxRunFailed reason, out.ToString (), err.ToString ()
+        | Ok handle ->
+            let! run = handle.Exited
+            return run, out.ToString (), err.ToString ()
+    }
+
 /// Run an Elmish program headlessly, exposing the latest model, dispatch, and an
 /// event-driven `WaitFor` that resolves the first time the model satisfies a predicate.
 module Harness =

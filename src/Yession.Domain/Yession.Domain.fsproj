@@ -12,6 +12,7 @@
     <Compile Include="Identity.fs" />
     <Compile Include="Events.fs" />
     <Compile Include="EventLog.fs" />
+    <Compile Include="Sandbox.fs" />
     <Compile Include="Environment.fs" />
     <Compile Include="Secrets.fs" />
     <Compile Include="Connections.fs" />

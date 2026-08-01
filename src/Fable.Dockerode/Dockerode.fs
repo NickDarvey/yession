@@ -4,7 +4,7 @@ module Fable.Dockerode
 // Engine API (Docker ships no official Node SDK; only Go and Python are official). This is
 // the binding layer only, mirroring how `Fable.Yjs` wraps `yjs`: it declares the slice of
 // dockerode's surface the Docker backend uses and nothing more. The engine lives behind
-// the `ContainerBackend` seam, so nothing above this file knows dockerode exists.
+// the sandbox seam (`CreateSandbox`), so nothing above this file knows dockerode exists.
 //
 // Fable-only: `dotnet build` type-checks it; Fable emits the JS that runs on Node. Methods
 // that return promises surface as `JS.Promise<_>` for `Async.AwaitPromise` at the call site.
@@ -12,9 +12,12 @@ module Fable.Dockerode
 open Fable.Core
 open Fable.Core.JsInterop
 
-/// The slice of a Node stream we consume: event subscription only.
+/// The slice of a Node stream we consume: event subscription, plus write/end for the
+/// hijacked exec duplex (stdin rides the same socket the output is demuxed from).
 type [<AllowNullLiteral>] Stream =
     abstract on: event: string * handler: (obj -> unit) -> Stream
+    abstract write: chunk: obj -> bool
+    abstract ``end``: unit -> unit
 
 /// A `node:stream` PassThrough — a writable sink `demuxStream` pushes one output stream
 /// into, and a readable we drain via its `'data'`/`'end'` events.

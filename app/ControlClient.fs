@@ -1,10 +1,10 @@
 module Yession.Host.ControlClient
 
-// The Session Process side of the control RPC (Phase 4, Step 24): a
-// `SessionEnvironmentCapabilities` whose calls go to the Manager's control endpoint,
-// authenticated by this launch's secret. Failures are values — a transport error
-// degrades to the capability's failed result shapes, never an exception, because the
-// Session Process turns them into events.
+// The Session Process side of the control RPC (Phase 4, Step 24): the supervision,
+// secrets, and connections calls to the Manager's control endpoint, authenticated by
+// this launch's secret. Failures are values — a transport error degrades to a failed
+// result shape, never an exception, because the Session Process turns them into
+// events.
 
 open Fable.Core
 open Yession.Domain
@@ -14,25 +14,6 @@ open Yession.Oidc
 [<Emit("""fetch($0, { method: 'POST', headers: { 'x-yession-control': $1, 'content-type': 'application/json' }, body: $2 })
   .then(r => { if (!r.ok) throw new Error('control rpc failed: ' + r.status); return r.text() })""")>]
 let private postJson (url: string) (secret: string) (body: string) : JS.Promise<string> = jsNative
-
-// Stream the NDJSON response: each complete line goes to the callback as it arrives.
-[<Emit("""(async () => {
-  const res = await fetch($0, { method: 'POST', headers: { 'x-yession-control': $1, 'content-type': 'application/json' }, body: $2 })
-  if (!res.ok) throw new Error('control rpc failed: ' + res.status)
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split('\n')
-    buffer = parts.pop()
-    for (const line of parts) if (line.trim().length > 0) $3(line)
-  }
-  if (buffer.trim().length > 0) $3(buffer)
-})()""")>]
-let private postStream (url: string) (secret: string) (body: string) (onLine: string -> unit) : JS.Promise<unit> = jsNative
 
 /// The control-leg case of `Sse.subscribe`: the per-launch secret is the whole authentication.
 let private openEventStream (url: string) (secret: string) (onData: Sink<string>) : Subscription =
@@ -135,9 +116,10 @@ let activityReporter (baseUrl: string) (secret: string) : bool -> Async<unit> =
 /// The session's secrets capability (Plan 06), pre-bound to ITS OWN session scope —
 /// "capabilities are scoped, not ambient": this surface cannot even express another
 /// scope. Write/list/delete only; there is no read — a stored secret is USED by
-/// referencing its name in an EnvironmentSpec env var (SecretRef), resolved
-/// Manager-side straight into the container. Failures (including policy 403s, with
-/// the Manager's reason) are values, never exceptions.
+/// referencing its name in an EnvironmentSpec env var (SecretRef), resolved at sandbox
+/// spawn straight into the sandbox env (`resolveSecret` below, which is
+/// session-internal and never surfaces as an agent tool). Failures (including policy
+/// 403s, with the Manager's reason) are values, never exceptions.
 type SessionSecretsCapabilities =
     { SetSecret : SecretName -> string -> Async<Result<SecretMetadata, string>>
       ListSecrets : unit -> Async<Result<SecretMetadata list, string>>
@@ -169,6 +151,28 @@ let secretsCapabilities (baseUrl: string) (secret: string) (sessionId: SessionId
             post "delete"
                 (ControlWire.toString ControlWire.deleteSecretRequest { Scope = scope; Name = name })
                 (ControlWire.fromString ControlWire.deleteSecretResponse >> Result.map (fun r -> r.Deleted)) }
+
+/// Resolve one referenced secret value at sandbox spawn — the one value-returning
+/// secrets call. Session-internal: the value goes into the sandbox's policy env and is
+/// dropped; it never reaches the agent loop (no agent tool wraps this).
+let resolveSecret (baseUrl: string) (secret: string) : SecretName -> Async<Result<string, string>> =
+    fun name ->
+        async {
+            try
+                let! reply =
+                    postJsonReply
+                        (sprintf "%s/control/secrets/resolve" baseUrl)
+                        secret
+                        (ControlWire.toString ControlWire.resolveSecretRequest { Name = name })
+                    |> Async.AwaitPromise
+                if reply.status = 200 then
+                    return
+                        ControlWire.fromString ControlWire.resolveSecretResponse reply.body
+                        |> Result.map (fun r -> r.Value)
+                else return Error (sprintf "secrets resolve refused (%d): %s" reply.status reply.body)
+            with e ->
+                return Error (sprintf "control unreachable: %s" e.Message)
+        }
 
 /// The session side of the Manager's connection broker (Plan 08). Service-agnostic like
 /// the wire: callers supply targets and provider endpoints as data. `Resolve` is the one
@@ -245,53 +249,3 @@ let registerClient (baseUrl: string) (secret: string) (redirectUri: string) : As
             return Error (sprintf "control unreachable: %s" e.Message)
     }
 
-/// Build the capability record over the Manager's control endpoint.
-let capabilities (baseUrl: string) (secret: string) : SessionEnvironmentCapabilities =
-    let url (route: string) = sprintf "%s/control/%s" baseUrl route
-
-    { StartContainer =
-        fun spec ->
-            async {
-                try
-                    let! text =
-                        postJson (url "start") secret (ControlWire.toString ControlWire.environmentSpec spec)
-                        |> Async.AwaitPromise
-                    match ControlWire.fromString ControlWire.startContainerResult text with
-                    | Ok result -> return result
-                    | Error e -> return ContainerStartFailed (sprintf "control decode failed: %s" e)
-                with e ->
-                    return ContainerStartFailed (sprintf "control unreachable: %s" e.Message)
-            }
-      StopContainer =
-        fun handle ->
-            async {
-                try
-                    let! text =
-                        postJson (url "stop") secret (ControlWire.toString ControlWire.containerHandle handle)
-                        |> Async.AwaitPromise
-                    match ControlWire.fromString ControlWire.stopContainerResult text with
-                    | Ok result -> return result
-                    | Error e -> return ContainerStopFailed (sprintf "control decode failed: %s" e)
-                with e ->
-                    return ContainerStopFailed (sprintf "control unreachable: %s" e.Message)
-            }
-      Execute =
-        fun handle command onChunk ->
-            async {
-                let body =
-                    ControlWire.toString ControlWire.executeRequest { Handle = handle; Command = command }
-                // If the stream ends without a result line, the Manager died mid-command:
-                // surface it as an execution failure, never a hang.
-                let mutable result = CommandExecutionFailed "control stream ended without a result"
-                try
-                    do!
-                        postStream (url "execute") secret body (fun line ->
-                            match ControlWire.fromString ControlWire.executeLine line with
-                            | Ok (ControlWire.OutputLine chunk) -> onChunk chunk
-                            | Ok (ControlWire.ResultLine r) -> result <- r
-                            | Error e -> eprintfn "control stream line decode failed: %s" e)
-                        |> Async.AwaitPromise
-                    return result
-                with e ->
-                    return CommandExecutionFailed (sprintf "control unreachable: %s" e.Message)
-            } }

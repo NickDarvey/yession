@@ -50,23 +50,33 @@ discovers it in production. Items are roughly ordered by how much they matter.
   outcome is a 401 on every UI route, and the default `--auth none` denies everything.
   Under `--auth localhost` anyone with local access can still manage sessions — that
   is the localhost trust rule working as stated, not an oversight.
-- **`LocalProcessBackend` provides no OS isolation.** Commands run as child processes of
-  the Manager with the Manager's own user and environment. The *authority* contract
-  (session scoping, handle validation) is enforced and tested, but the *engine* is not a
-  sandbox. Use the Docker backend for isolation — see next.
+- **The `host` sandbox backend provides no OS isolation — and it is the default.**
+  Sandboxes are session-owned (the `CreateSandbox` seam): agent-issued commands run as
+  child processes of the Session Process. The host backend passes an allowlisted env
+  (never the process's own — the credential-leak regression test pins this), but file
+  system and network are unconfined. `YESSION_WORK_SANDBOX=docker` opts into isolation;
+  flipping the default to a confining backend (srt — bubblewrap/Seatbelt via
+  `@anthropic-ai/sandbox-runtime` — is the planned sub-second tier) is deliberate
+  future work.
+- **The agent CLI itself still runs unconfined in the Session Process** (`tools: []`
+  bounds the model's tool surface, not the process). Moving the CLI behind the sandbox
+  seam via the SDK's `spawnClaudeCodeProcess` is the next planned step (AgentSandbox).
 - **The Docker backend runs through the `dockerode` SDK and is integration-tested in the
-  verify gate.** Containers and a per-session named workspace volume are named by the
+  verify gate.** Containers and a per-sandbox named workspace volume are named by the
   session id (a Crockford base32 id, always a valid Docker object name), and `EnvironmentSpec`
   is fully interpreted — image/build, mounts (incl. the persistent workspace volume),
-  working directory, env-var refs, secret refs, and command timeouts. The suite
-  (`tests/Yession.Tests/DockerIntegration.fs`) runs where a daemon exists; on the CI
-  `verify` runner `YESSION_REQUIRE_DOCKER=1` makes a missing daemon a hard failure rather
-  than a silent skip. The dev container has no daemon, so local runs still report a skip.
+  working directory, env-var refs, and secret refs (resolved at sandbox spawn). The
+  container drops all capabilities and sets `no-new-privileges`; it still runs the
+  image's default (usually root) user with no resource limits — deliberate until a
+  config surface exists. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
+  where a daemon exists; on the CI `verify` runner `YESSION_REQUIRE_DOCKER=1` makes a
+  missing daemon a hard failure rather than a silent skip. The dev container has no
+  daemon, so local runs still report a skip.
 - **Secrets are a real Manager-owned store now** ([Plan 06](plans/06-secrets-and-abac.md)):
   AES-256-GCM per-entry ciphertext in `<DataDir>/secrets.json`, the KEK in the OS
   credential manager (`@napi-rs/keyring`, imported non-extractably each start), a
-  write/list/delete-only `/control/secrets/*` surface (no value-returning route,
-  anywhere), a pure default-deny `Policy.authorize` over the composite
+  a `/control/secrets/*` surface whose only value-returning route is
+  `resolve` (below), a pure default-deny `Policy.authorize` over the composite
   session+user+peer identity, and store-backed `SecretRef` injection (session scope ▸
   bound users' scopes ▸ witnessed peers' scopes ▸ Manager process env — peers per
   [Plan 07](plans/07-byo-user-authorization.md)). Remaining, deliberate:
@@ -78,19 +88,22 @@ discovers it in production. Items are roughly ordered by how much they matter.
     writer (the Plan 08 connection broker writes only its own credential entries,
     through its own policy family). User↔launch and peer↔launch bindings are
     launch-lifetime (re-login re-forms them).
-  - **One deliberate exception to "no value-returning route"**:
-    `/control/connections/resolve` (Plan 08) returns a connection credential's current
-    value to the calling session — an agent turn needs the token in-process, unlike
-    container env injection. Policy-gated to targets whose scope the caller is bound
-    to; refresh tokens still never leave the Manager.
-  - **`LocalProcessBackend` still performs no env-var injection**; the process-env
-    fallback remains (lowest precedence, shadowed by any store entry).
+  - **Two deliberate value-returning routes, both resolve-shaped**:
+    `/control/connections/resolve` (Plan 08) returns a connection credential to the
+    calling session (an agent turn needs the token in-process), and
+    `/control/secrets/resolve` feeds `SecretRef` env injection at the session's
+    sandbox spawn (sandboxes are session-owned, so injection happens there). Both are
+    gated to the caller's readable scopes; refresh tokens still never leave the
+    Manager, and no agent-facing tool wraps either.
+  - **Secret-token-injection is future work.** A resolved secret enters the sandbox
+    as a plain env var, so anything the agent runs inside can read it. The srt
+    backend's enforced egress allowlist will bound where a read value can be *sent*
+    — most of the practical risk — and the real fix is egress substitution (a
+    placeholder inside the sandbox, the real value substituted at the proxy toward
+    declared hosts); srt's mandatory proxy is the natural host for that.
   - **No KEK rotation/recovery** (a lost credential entry orphans the store loudly;
     the operator deletes the file), and multi-user same-name injection precedence is
     unresolved until a real multi-user strategy lands.
-  - **The environment routes still gate on their capability grant**, not
-    `Policy.authorize` — folding them in is the follow-up that proves the ABAC
-    layer's reuse.
   - `@napi-rs/keyring`'s per-platform prebuilds join `node-datachannel` in the
     "unsigned third-party native binaries" trust bucket below; macOS/Windows paths
     are field-verified only (CI exercises Linux/Secret Service).
@@ -98,7 +111,8 @@ discovers it in production. Items are roughly ordered by how much they matter.
 ## Runtime & topology
 
 - **The process split is done** (Phase 4): each session is a child OS process of the
-  Manager, capabilities cross the boundary as a secret-scoped control RPC, and
+  Manager, supervision and secrets custody cross the boundary as a secret-scoped
+  control RPC (environments are session-owned via the sandbox seam), and
   sessions are created/launched/resumed/stopped from the htmx management UI — but
   **children die with the Manager** (no daemonising, no orphan adoption): a Manager
   restart stops every running session, and resumes are manual clicks.

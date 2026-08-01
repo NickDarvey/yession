@@ -49,16 +49,16 @@ type SessionHost =
 /// between peers through the doc. The Process is the single consumer of the shared
 /// message queue: when the agent is idle it drains the queue into `MessageSent` events
 /// and — when `runAgent` is given — starts one coalesced turn per batch (Phase 3).
-/// When `environmentCapabilities` is given (granted by the Session Manager, Step 11),
-/// the session gets a lazily-started environment (Step 12). When `docStore` is given
-/// (Step 19), the persisted doc is replayed at boot — unsent queue entries and drafts
-/// survive restarts — and every subsequent update is durably appended. Resolves once
-/// the server is listening.
+/// When `makeEnvironment` is given (the session-owned WorkSandbox composition over the
+/// sandbox seam), the session gets a lazily-started environment (Step 12) wired to the
+/// log this host creates. When `docStore` is given (Step 19), the persisted doc is
+/// replayed at boot — unsent queue entries and drafts survive restarts — and every
+/// subsequent update is durably appended. Resolves once the server is listening.
 let startFull
     // A THUNK, read at every drain (Plan 08): agent availability is dynamic — a
     // credential connected mid-session enables turns without a relaunch.
     (runAgent: unit -> RunAgent option)
-    (environmentCapabilities: SessionEnvironmentCapabilities option)
+    (makeEnvironment: (EventLog<SessionEvent> -> SessionEnvironment.SessionEnvironment) option)
     // Secrets (Plan 06): the Manager-granted, session-scoped secrets surface
     // (write/list/delete — never read). None = turns see the `none` denials.
     (secretsCapabilities: ControlClient.SessionSecretsCapabilities option)
@@ -174,16 +174,11 @@ let startFull
         let initialConsumed =
             replayed.Events |> List.choose (fun e -> QueueDrain.consumedOf e.Event) |> Set.ofList
 
-        // The session's environment: lazily started through the Manager-granted scoped
-        // capability; absent capability, needs are recorded as unavailable.
+        // The session's environment: the session-owned WorkSandbox, lazily created on
+        // first need; absent a composition, needs are recorded as unavailable.
         let environment =
-            match environmentCapabilities with
-            | Some capabilities ->
-                SessionEnvironment.create
-                    log
-                    capabilities
-                    EnvironmentSpec.localProcess
-                    (sprintf "env-%s" (SessionId.value sessionId))
+            match makeEnvironment with
+            | Some make -> make log
             | None -> SessionEnvironment.unavailable
 
         let mintTurnId () =
@@ -420,6 +415,9 @@ let startFull
                     async {
                         notifications |> Option.iter (fun s -> s.Stop ())
                         mcpTools |> Option.iter (fun s -> s.Stop ())
+                        // Sandbox lifetime = session lifetime: take the WorkSandbox (and
+                        // anything still running in it) down with the session.
+                        do! environment.Stop ()
                         server.close ignore
                         // Drain every accepted peer connection: Stop resolves only once
                         // libdatachannel has reported each one closed, so a caller may
@@ -431,19 +429,19 @@ let startFull
 /// `startFull` without doc persistence — collaborative state is memory-only. No auth
 /// gate on the HTTP surface (peer-token gating still applies at `PeerHello`); callers
 /// mint peer tokens from the host handle.
-let startWithCapabilities
+let startWithEnvironment
     (runAgent: RunAgent option)
-    (environmentCapabilities: SessionEnvironmentCapabilities option)
+    (makeEnvironment: (EventLog<SessionEvent> -> SessionEnvironment.SessionEnvironment) option)
     (baseLog: EventLog<SessionEvent> option)
     (sessionId: SessionId)
     (port: int)
     : Async<SessionHost> =
     // No mount: these helpers serve an unfronted, origin-root session.
-    startFull (fun () -> runAgent) environmentCapabilities None baseLog None None None (fun _ _ -> ()) None None None sessionId None "" None port
+    startFull (fun () -> runAgent) makeEnvironment None baseLog None None None (fun _ _ -> ()) None None None sessionId None "" None port
 
-/// `startWithCapabilities` without an environment — Step 08-era topology.
+/// `startWithEnvironment` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =
-    startWithCapabilities runAgent None None sessionId port
+    startWithEnvironment runAgent None None sessionId port
 
 /// `startWith` without an agent — transport/draft/send scenarios that predate Step 08.
 let start (sessionId: SessionId) (port: int) : Async<SessionHost> =

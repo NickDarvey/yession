@@ -1,12 +1,14 @@
 namespace Yession.SessionProcess
 
+open System
 open Yession.Domain
 
-/// The session's lazily-started environment (Step 12). One environment per session:
-/// nothing starts at session creation; a signalled need (usually from the agent) starts
-/// a container through the scoped capability; a stopped environment is restarted by the
-/// next need under the same environment id. Every transition is appended as an event —
-/// the Session Process is the only writer.
+/// The session's lazily-started WorkSandbox (Step 12, reworked over the sandbox seam).
+/// One environment per session: nothing starts at session creation; a signalled need
+/// (usually from the agent) creates a sandbox through the injected `CreateSandbox`; a
+/// stopped environment is recreated by the next need under the same environment id.
+/// Every transition is appended as an event — the Session Process is the only writer,
+/// and the event flow is the pinned observable protocol.
 module SessionEnvironment =
 
     type SessionEnvironment =
@@ -19,25 +21,57 @@ module SessionEnvironment =
           Execute : CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult>
           /// Stop the environment if it is running (recorded as events).
           Stop : unit -> Async<unit>
-          /// The running container's handle, if any.
-          CurrentHandle : unit -> ContainerHandle option }
+          /// The running sandbox's backend reference, if any.
+          CurrentRef : unit -> string option }
 
-    /// A session with no environment capability: needs are recorded as unavailable
-    /// without any container authority existing in the Process.
+    /// A session with no environment: needs are recorded as unavailable without any
+    /// sandbox existing in the Process.
     let unavailable : SessionEnvironment =
-        { Ensure = fun _ _ -> async { return EnvironmentUnavailable "this session has no environment capability" }
-          Execute = fun _ _ -> async { return CommandExecutionFailed "this session has no environment capability" }
+        { Ensure = fun _ _ -> async { return EnvironmentUnavailable "this session has no environment" }
+          Execute = fun _ _ -> async { return CommandExecutionFailed "this session has no environment" }
           Stop = fun () -> async { return () }
-          CurrentHandle = fun () -> None }
+          CurrentRef = fun () -> None }
+
+    /// Race a process's end against its command timeout. `None` = the timeout fired
+    /// first. Single-settle by construction; safe on the Node loop and under the CLR
+    /// type-check alike.
+    let private raceTimeout (timeout: TimeSpan option) (work: Async<SandboxRun>) : Async<SandboxRun option> =
+        match timeout with
+        | None ->
+            async {
+                let! run = work
+                return Some run
+            }
+        | Some window ->
+            Async.FromContinuations (fun (cont, _, _) ->
+                let mutable settled = false
+                let finish value =
+                    if not settled then
+                        settled <- true
+                        cont value
+                Async.StartImmediate (
+                    async {
+                        let! run = work
+                        finish (Some run)
+                    })
+                Async.StartImmediate (
+                    async {
+                        do! Async.Sleep (int window.TotalMilliseconds)
+                        finish None
+                    }))
 
     let create
         (log: EventLog<SessionEvent>)
-        (capabilities: SessionEnvironmentCapabilities)
-        (spec: EnvironmentSpec)
+        (createSandbox: CreateSandbox)
+        // Assembled fresh at every (re)creation: this is where `SecretRef` env vars
+        // resolve — at sandbox spawn, and nowhere else.
+        (preparePolicy: unit -> Async<Result<SandboxPolicy, string>>)
+        // A one-line description of the backend + spec for the start-requested event.
+        (specSummary: string)
         (environmentId: string)
         : SessionEnvironment =
 
-        let mutable running : ContainerHandle option = None
+        let mutable running : Sandbox option = None
 
         let append event =
             async {
@@ -55,15 +89,21 @@ module SessionEnvironment =
                 | None ->
                     do! append (EnvironmentStartRequested
                                     { EnvironmentId = environmentId
-                                      SpecSummary = EnvironmentSpec.summary spec })
-                    match! capabilities.StartContainer spec with
-                    | ContainerStarted handle ->
-                        running <- Some handle
+                                      SpecSummary = specSummary })
+                    let! prepared =
+                        async {
+                            match! preparePolicy () with
+                            | Error reason -> return Error reason
+                            | Ok policy -> return! createSandbox policy
+                        }
+                    match prepared with
+                    | Ok sandbox ->
+                        running <- Some sandbox
                         do! append (EnvironmentStarted
                                         { EnvironmentId = environmentId
-                                          ContainerRef = ContainerHandle.containerId handle })
+                                          ContainerRef = sandbox.Ref })
                         return EnvironmentAvailable
-                    | ContainerStartFailed reason ->
+                    | Error reason ->
                         do! append (EnvironmentStartFailed { EnvironmentId = environmentId; Reason = reason })
                         return EnvironmentUnavailable reason
             }
@@ -79,16 +119,36 @@ module SessionEnvironment =
                     let result = CommandExecutionFailed "no running environment"
                     do! append (CommandCompleted { CommandId = request.CommandId; Result = result })
                     return result
-                | Some handle ->
+                | Some sandbox ->
                     do! append (CommandStarted { CommandId = request.CommandId })
-                    let onChunk (chunk: CommandOutputChunk) =
+                    let onChunk (stream: OutputStream, text: string) =
+                        let chunk : CommandOutputChunk = { CommandId = request.CommandId; Stream = stream; Text = text }
                         onCallerChunk chunk
                         Async.StartImmediate (
                             append (CommandOutputReceived
                                         { CommandId = chunk.CommandId
                                           Stream = chunk.Stream
                                           Text = chunk.Text }))
-                    let! result = capabilities.Execute handle request onChunk
+                    let! spawned =
+                        sandbox.Spawn
+                            { Executable = request.Executable
+                              Arguments = request.Arguments
+                              Env = request.Environment
+                              WorkingDirectory = request.WorkingDirectory }
+                            onChunk
+                    let! result =
+                        async {
+                            match spawned with
+                            | Error reason -> return CommandExecutionFailed reason
+                            | Ok handle ->
+                                match! raceTimeout request.Timeout handle.Exited with
+                                | None ->
+                                    handle.Kill ()
+                                    return CommandTimedOut
+                                | Some (SandboxExited 0) -> return CommandSucceeded 0
+                                | Some (SandboxExited code) -> return CommandFailed code
+                                | Some (SandboxRunFailed reason) -> return CommandExecutionFailed reason
+                        }
                     do! append (CommandCompleted { CommandId = request.CommandId; Result = result })
                     return result
             }
@@ -97,18 +157,14 @@ module SessionEnvironment =
             async {
                 match running with
                 | None -> return ()
-                | Some handle ->
+                | Some sandbox ->
                     do! append (EnvironmentStopRequested { EnvironmentId = environmentId })
-                    match! capabilities.StopContainer handle with
-                    | ContainerStopped ->
-                        running <- None
-                        do! append (EnvironmentStopped { EnvironmentId = environmentId })
-                    | ContainerStopFailed _ ->
-                        // The container may still be running; keep the handle.
-                        return ()
+                    do! sandbox.Dispose ()
+                    running <- None
+                    do! append (EnvironmentStopped { EnvironmentId = environmentId })
             }
 
         { Ensure = ensure
           Execute = execute
           Stop = stop
-          CurrentHandle = fun () -> running }
+          CurrentRef = fun () -> running |> Option.map (fun s -> s.Ref) }

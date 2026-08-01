@@ -22,6 +22,7 @@
     <Compile Include="EventStore.fs" />
     <Compile Include="DocStore.fs" />
     <Compile Include="Fs.fs" />
+    <Compile Include="Sandboxes.fs" />
     <Compile Include="ManagerStore.fs" />
     <Compile Include="SecretsCipher.fs" />
     <Compile Include="KeyStore.fs" />
@@ -37,7 +38,6 @@
     <Compile Include="ProcessManager.fs" />
     <Compile Include="ManagerUi.fs" />
     <Compile Include="Host.fs" />
-    <Compile Include="Backends.fs" />
     <Compile Include="Manager.fs" />
     <Compile Include="SessionMain.fs" />
   </ItemGroup>

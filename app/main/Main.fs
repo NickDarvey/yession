@@ -84,10 +84,9 @@ let private sessionCommand, sessionArgs =
 
 Async.StartImmediate(
     async {
-        // Container authority lives HERE, in the Manager: sessions reach it only over
-        // the control endpoint with their per-launch secret (Step 24).
-        let containers = Yession.Manager.Authority.ContainerRegistry ()
-        let backend = Backends.LocalProcessBackend.create ()
+        // Environments are session-owned (the sandbox seam): each child creates its own
+        // sandboxes, and only secrets custody stays here — resolved to a child at
+        // sandbox spawn over the control endpoint with its per-launch secret.
         // The Manager is a direct OTel emitter, configured by how it was started (the standard
         // OTEL_* env — stdout, a collector, or both; see app/Telemetry.fs). It emits its own
         // session-lifecycle signals and passes its OTEL_* environment through to each child.
@@ -105,7 +104,6 @@ Async.StartImmediate(
                 { ProcessManager.Options.defaults dataDir sessionCommand sessionArgs with
                     SessionPorts = sessionPorts
                     IdleTimeout = idleTimeout
-                    Grant = Some (Yession.Manager.Authority.grant containers backend)
                     ManagerPort = Some managerPort
                     // Behind an authenticating proxy the issuer must be the proxy's
                     // origin, or off-host browsers cannot follow the authorize bounce.

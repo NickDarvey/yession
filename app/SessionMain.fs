@@ -9,6 +9,7 @@ module Yession.Host.SessionMain
 
 open Fable.Core
 open Yession.Domain
+open Yession.SessionProcess
 open Yession.Host
 
 // `--version` answers before any configuration is read: no data directory, no ports, no
@@ -27,20 +28,32 @@ let private port = Interop.envOr "YESSION_PORT" "0" |> int
 let private dataDir =
     Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId))
 
-// The control channel to the Manager (Step 24): environment capability calls, the
-// display-name report, AND this launch's OAuth client registration all authenticate
-// with the same per-launch secret. Absent (a bare `yession-session` run), the session
-// is environment-less and its HTTP surface is ungated.
+// The control channel to the Manager (Step 24): supervision reports, secrets custody,
+// AND this launch's OAuth client registration all authenticate with the same
+// per-launch secret. Absent (a bare `yession-session` run), the session runs
+// unsupervised and its HTTP surface is ungated.
 let private controlChannel =
     match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
     | "", _
     | _, "" -> None
     | url, secret -> Some (url, secret)
 
-// Environment capabilities over the control RPC, when the Manager granted them. A
-// launch without a grant still holds the channel (403 on environment routes).
-let private environmentCapabilities =
-    controlChannel |> Option.map (fun (url, secret) -> ControlClient.capabilities url secret)
+// The session-owned WorkSandbox (the sandbox seam): the backend comes from
+// `YESSION_WORK_SANDBOX` (default host — explicitly unsandboxed for now), parsed
+// fail-closed at boot — a typo refuses the start rather than silently dropping
+// isolation.
+let private workBackend =
+    match SandboxBackend.parse (Interop.envOr "YESSION_WORK_SANDBOX" "host") with
+    | Ok backend -> backend
+    | Error e -> failwith e
+
+// Secret references in the sandbox spec resolve over the control channel at sandbox
+// spawn — the values go straight into the sandbox policy env and are dropped. Without
+// a Manager there is nothing to resolve against; plain values still work.
+let private resolveSecretRef : SecretName -> Async<Result<string, string>> =
+    match controlChannel with
+    | Some (url, secret) -> ControlClient.resolveSecret url secret
+    | None -> fun name -> async { return Error (sprintf "no control channel to resolve secret '%s'" (SecretName.value name)) }
 
 // The same control channel carries the collaborative title back to the Manager as the
 // session's display name.
@@ -57,6 +70,30 @@ let private reportActivity =
 // pre-bound to this session's own scope. Built after the session id parses (below).
 let private secretsCapabilitiesFor (sessionId: SessionId) =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.secretsCapabilities url secret sessionId)
+
+// The WorkSandbox composition: an unavailable backend (or one this build does not
+// implement) refuses the boot with its reason. The environment itself stays lazy —
+// nothing is created until the first signalled need.
+let private makeEnvironment : Yession.SessionProcess.EventLog<SessionEvent> -> SessionEnvironment.SessionEnvironment =
+    let name = SessionId.value sessionId
+    let workSpec = EnvironmentSpec.defaults
+    match Sandboxes.forBackend workBackend name workSpec with
+    | Error e -> failwithf "work sandbox: %s" e
+    | Ok createSandbox ->
+        // Host-family sandboxes work under the session's own data directory; a docker
+        // sandbox's workspace lives at the spec/backend default inside the container.
+        let workspace =
+            match workBackend with
+            | HostBackend
+            | SrtBackend -> Some (sprintf "%s/workspace" dataDir)
+            | DockerBackend -> workSpec.WorkingDirectory
+        fun log ->
+            SessionEnvironment.create
+                log
+                createSandbox
+                (Sandboxes.preparePolicy workBackend resolveSecretRef workspace workSpec)
+                (Sandboxes.summaryFor workBackend workSpec)
+                (sprintf "env-%s" name)
 
 // Where this session is reachable from outside (docs/plans/09), from the same two
 // variables the Manager parsed, inherited by plain env. Fails the boot on a combination
@@ -265,7 +302,7 @@ Async.StartImmediate (
                         (fun () -> envCreds || connectedSomewhere ())
                         sessionMount)
             | _ -> None
-        let! host = Host.startFull runAgent environmentCapabilities (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin port
+        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register
