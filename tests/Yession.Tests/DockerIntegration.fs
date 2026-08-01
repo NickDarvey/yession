@@ -26,6 +26,12 @@ let private nodeOs : obj = importAll "node:os"
 [<Emit("$0.mkdtempSync($1.tmpdir() + '/yession-')")>]
 let private mkdtemp (fs: obj) (os: obj) : string = jsNative
 
+// World-writable, because the hardened container (CapDrop ALL) has no
+// CAP_DAC_OVERRIDE: its root cannot write into a 0700 host dir owned by another
+// uid. The mount-mode test asserts rw-vs-ro mount semantics, not DAC override.
+[<Emit("$0.chmodSync($1, 0o777)")>]
+let private makeWorldWritable (fs: obj) (path: string) : unit = jsNative
+
 [<Emit("$0.readFileSync($1, 'utf8')")>]
 let private readFile (fs: obj) (path: string) : string = jsNative
 
@@ -153,6 +159,7 @@ let tests =
 
             testCaseAsync "HostPath mounts honour read-write and read-only" (async {
                 let dir = mkdtemp nodeFs nodeOs
+                makeWorldWritable nodeFs dir
                 // Read-write: the container writes, the host reads it back.
                 let specRW = { alpineSpec with Mounts = [ { Source = HostPath dir; Target = "/host"; Mode = ReadWrite } ] }
                 let! _, sandboxRW = startOrFail specRW
