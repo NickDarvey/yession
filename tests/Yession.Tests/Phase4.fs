@@ -386,7 +386,7 @@ let private uiRenderTests =
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
         testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
-            let html = ManagerUi.page PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            let html = ManagerUi.page "app.css" PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
             Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
             Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
             Expect.isFalse (html.Contains "src=\"http") "no external/CDN scripts (local-first)"

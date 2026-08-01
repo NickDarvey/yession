@@ -123,6 +123,22 @@ let private sha256B64u (cryptoModule: obj) (input: string) : string = jsNative
 
 let sha256Base64Url (input: string) : string = sha256B64u nodeCrypto input
 
+/// A short content address: enough of the SHA-256 that a different build is a different
+/// string, which is what lets bytes be served under an immutable cache policy — and short
+/// enough to read in a network panel. 72 bits; a collision needs two builds whose hashes agree
+/// there, which no real edit produces.
+///
+/// `None` — the build output is missing — has nothing to address. The empty string renders as
+/// the bare `client.js`/`app.css`, so a developer meets the "not built (run: build)" 404
+/// rather than a 404 on a hash of nothing.
+///
+/// Used for the two static assets and for the shell's `ETag`, which is the same question
+/// ("are these the bytes you already have?") asked of a document instead of a file.
+let contentDigest (content: string option) : string =
+    match content with
+    | Some text -> (sha256Base64Url text).Substring (0, 12)
+    | None -> ""
+
 /// Constant-time string equality (client secrets); length mismatch short-circuits,
 /// which leaks only the length.
 [<Emit("(() => { const left = Buffer.from($1, 'utf8'), right = Buffer.from($2, 'utf8'); return left.length === right.length && $0.timingSafeEqual(left, right) })()")>]

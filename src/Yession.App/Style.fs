@@ -490,8 +490,12 @@ module Style =
     /// swaps its innerHTML, so these persist untouched across re-renders).
     let app = "flex h-screen overflow-hidden bg-bg text-ink font-sans antialiased"
 
-    /// Tailwind, built locally into a stylesheet and served from the Session Process at
-    /// `/app.css` — never a CDN (local first; the app works offline). The utilities and the
-    /// theme tokens come from the CLI build over `app/tailwind.css`, whose `@source` rules
-    /// scan the F# sources for the composed class names.
-    let headTags = sprintf "<link rel=\"stylesheet\" href=\"%s\">" (SessionRoute.relative AppCss)
+    /// Tailwind, built locally into a stylesheet and served by both the Session Process and
+    /// the Manager UI — never a CDN (local first). The utilities and the theme tokens come
+    /// from the CLI build over `app/tailwind.css`, whose `@source` rules scan the F# sources
+    /// for the composed class names.
+    ///
+    /// Takes the URL rather than building it: the stylesheet is addressed by a digest of its
+    /// own bytes, which only the serving process (having read them) can know.
+    let headTags (styleSheetUrl: string) =
+        sprintf "<link rel=\"stylesheet\" href=\"%s\">" styleSheetUrl

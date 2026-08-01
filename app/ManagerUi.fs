@@ -170,13 +170,15 @@ let private bodyTemplate (access: PublicAccess) (views: ProcessManager.SessionVi
           </div>
         </main>"""
 
-let page (access: PublicAccess) (views: ProcessManager.SessionView list) : string =
+/// `styleSheetUrl` is passed in rather than read from the module below: F# scopes top-down, and
+/// the stylesheet's address is derived from bytes read further down the file.
+let page (styleSheetUrl: string) (access: PublicAccess) (views: ProcessManager.SessionView list) : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<meta name=\"color-scheme\" content=\"dark\">"
         "<title>Yession Manager</title>"
-        Style.headTags
+        Style.headTags styleSheetUrl
         sprintf "</head><body class=\"%s\">" Style.app
         Ssr.render (bodyTemplate access views)
         sprintf "<script>%s</script>" script
@@ -196,14 +198,27 @@ let private fs : obj = Fable.Core.Util.jsNative
 
 let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
 
+/// The same stylesheet the session shell serves, read and addressed once at boot rather than
+/// per request — the Manager page is rendered per request, so this is what keeps every render
+/// naming the same bytes. Addressed by `Interop.contentDigest`, the same function the session
+/// uses, so one stylesheet never has two spellings.
+let private css = readAsset "app.css" cssPath fs
+
+let private cssUrl = SessionRoute.relative (AppCss (contentDigest css))
+
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
     req.on ("data", fun chunk -> acc <- acc + bufferToString chunk) |> ignore
     req.on ("end", fun _ -> cont acc) |> ignore
 
-let private respond (res: ServerResponse) (status: int) (contentType: string) (body: string) =
-    res.writeHead (status, createObj [ "content-type", box contentType; "cache-control", box "no-store" ]) |> ignore
+let private respondWith (res: ServerResponse) (status: int) (contentType: string) (cacheControl: string) (body: string) =
+    res.writeHead (status, createObj [ "content-type", box contentType; "cache-control", box cacheControl ]) |> ignore
     res.``end`` body
+
+/// Every management response but one is a live view of mutable process state, so `no-store` is
+/// the default here. The stylesheet is the exception — see its route.
+let private respond (res: ServerResponse) (status: int) (contentType: string) (body: string) =
+    respondWith res status contentType "no-store" body
 
 let private html (res: ServerResponse) (body: string) = respond res 200 "text/html; charset=utf-8" body
 
@@ -293,12 +308,17 @@ let tryHandle
     let route : (unit -> unit) option =
         match req.``method``, path with
         | "GET", "/" ->
-            Some (fun () -> html res (page pm.Public (pm.Sessions ())))
-        | "GET", "/app.css" ->
-            // The same locally built stylesheet the session shell uses — shared style, no CDN.
+            Some (fun () -> html res (page cssUrl pm.Public (pm.Sessions ())))
+        | "GET", path when path = "/" + cssUrl ->
+            // The same locally built stylesheet the session shell uses — shared style, no CDN
+            // — and the one management response that is cacheable, because it is addressed by
+            // a digest of its own bytes. An address that is not the current one is never
+            // served: see `Signalling.serveAsset` for why answering it would be worse than a
+            // 404. The Manager has no `<base href>` and always sits at its origin root, so the
+            // relative URL the page emits resolves to exactly this path.
             Some (fun () ->
-                match readAsset "app.css" cssPath fs with
-                | Some css -> respond res 200 "text/css; charset=utf-8" css
+                match css with
+                | Some body -> respondWith res 200 "text/css; charset=utf-8" CachePolicy.asset body
                 | None -> respond res 404 "text/plain" "stylesheet not built (run: build)")
         | "POST", "/sessions" ->
             Some (fun () ->

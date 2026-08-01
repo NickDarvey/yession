@@ -21,14 +21,14 @@ open Yession.App
 /// randomly in the browser, so the server-rendered placeholder is left blank. The page
 /// embeds the serving session's id, so the browser can key its local doc store by
 /// session before (and without) any connection.
-let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) =
+let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) (assets: AssetDigests) =
     let placeholderPeer =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
         | Error e -> failwith e
     // Seed the serving session id so the secondary identifier renders on first paint (the
     // browser re-learns it from `PeerAccepted` once connected).
-    Ssr.page sessionId mount managerOrigin { ClientModel.init placeholderPeer with Session = Some sessionId }
+    Ssr.page sessionId mount managerOrigin assets { ClientModel.init placeholderPeer with Session = Some sessionId }
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
 let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
@@ -39,6 +39,31 @@ let private fs : obj = Fable.Core.Util.jsNative
 // From the package's assets/ when installed; from the build output in development.
 let private readBundle () : string option = readAsset "client.js" bundlePath fs
 let private readCss () : string option = readAsset "app.css" cssPath fs
+
+/// Serve a fingerprinted asset, but only at its own address.
+///
+/// A `requested` digest that is not `ours` is a stale shell asking for a build this process no
+/// longer is. Answering it with CURRENT bytes would write them into an `immutable` cache entry
+/// under the old address — wrong for a year, and unfixable from the server. The 404 sends the
+/// browser back to the shell, which revalidates and names the asset that does exist.
+let private serveAsset
+    (requested: string)
+    (ours: string)
+    (content: string option)
+    (contentType: string)
+    (what: string)
+    (res: ServerResponse)
+    =
+    match content with
+    | None ->
+        res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
+        res.``end`` (sprintf "%s not built (run: build)" what)
+    | Some _ when requested <> ours ->
+        res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
+        res.``end`` (sprintf "stale %s address (reload)" what)
+    | Some body ->
+        res.writeHead (200, createObj [ "content-type", box contentType; "cache-control", box CachePolicy.asset ]) |> ignore
+        res.``end`` body
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
@@ -94,7 +119,19 @@ let start
     (managerOrigin: string option)
     (port: int)
     : Async<HttpServer * (unit -> Async<unit>)> =
-    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin
+    // Read and address the assets ONCE, here, rather than per request. Three things follow,
+    // and all three are the point: the shell can name the exact bytes the server will hand
+    // out (a per-request read could drift from the document that named it), the immutable
+    // URLs are stable for the life of the process, and the two static routes stop doing a
+    // synchronous `readFileSync` on every hit.
+    let bundle = readBundle ()
+    let css = readCss ()
+    let assets = { Bundle = contentDigest bundle; Css = contentDigest css }
+    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin assets
+    // The shell is a pure function of the session id, the mount, the Manager origin, and the
+    // assets it names — all fixed at boot — so its validator is too, and a reload costs a 304
+    // instead of the whole document.
+    let shellEtag = sprintf "\"%s\"" (contentDigest (Some bootstrapHtml))
     // Every accepted peer connection, so a stopping Host can drain them. Never pruned
     // mid-life (closePeerConnection resolves immediately for already-closed ones, and a
     // session hosts a bounded handful of peers).
@@ -150,28 +187,27 @@ let start
                         res.``end`` answer
                     }))
         | Some Shell ->
-            // A one-day cache window: the browser can reopen the app offline for up to a
-            // day before it must fetch a fresh shell (local-first, tight back-compat window).
-            res.writeHead (200, createObj [ "content-type", box "text/html; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
-            res.``end`` bootstrapHtml
-        | Some ClientBundle ->
+            // The document that NAMES the fingerprinted assets, so it is the one thing that
+            // must never be served stale — a cached shell pins the whole UI to the build it
+            // was rendered against. Revalidated every time; the ETag makes that a 304.
+            if headerOf req "if-none-match" = Some shellEtag then
+                res.writeHead (304, createObj [ "cache-control", box CachePolicy.shell; "etag", box shellEtag ]) |> ignore
+                res.``end`` ""
+            else
+                res.writeHead (
+                    200,
+                    createObj
+                        [ "content-type", box "text/html; charset=utf-8"
+                          "cache-control", box CachePolicy.shell
+                          "etag", box shellEtag ])
+                |> ignore
+                res.``end`` bootstrapHtml
+        | Some (ClientBundle digest) ->
             // The browser client bundle, built by `build` (esbuild output).
-            match readBundle () with
-            | Some js ->
-                res.writeHead (200, createObj [ "content-type", box "text/javascript; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
-                res.``end`` js
-            | None ->
-                res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-                res.``end`` "client bundle not built (run: build)"
-        | Some AppCss ->
-            // The locally built Tailwind stylesheet (no CDN); same one-day offline window.
-            match readCss () with
-            | Some css ->
-                res.writeHead (200, createObj [ "content-type", box "text/css; charset=utf-8"; "cache-control", box "max-age=86400" ]) |> ignore
-                res.``end`` css
-            | None ->
-                res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-                res.``end`` "stylesheet not built (run: build)"
+            serveAsset digest assets.Bundle bundle "text/javascript; charset=utf-8" "client bundle" res
+        | Some (AppCss digest) ->
+            // The locally built Tailwind stylesheet (no CDN).
+            serveAsset digest assets.Css css "text/css; charset=utf-8" "stylesheet" res
         | Some (Events index) ->
             match events with
             | Some endpoint -> serveChunk endpoint req req.url index res

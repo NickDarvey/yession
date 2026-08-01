@@ -12,8 +12,8 @@ module Yession.Tests.Oidc
 //     verifier; the certified openid-client inside the session is the first), code
 //     replay, wrong verifier, wrong secret.
 //   * The composed flow ([Ports]): a real Manager + child Session Process, the full
-//     login bounce via OidcHttp, the gated data surfaces, the ungated cached shell
-//     (offline-first invariant), and registration revocation on stop.
+//     login bounce via OidcHttp, the gated data surfaces, the ungated shell and the
+//     fingerprinted assets it names, and registration revocation on stop.
 //
 // The key non-extractability invariant is pinned at the mechanism level: a jose
 // keypair generated `extractable = false` must refuse to export its private half.
@@ -457,7 +457,7 @@ let private postControl (url: string) (secret: string) (body: string) : JS.Promi
 
 let private flowTests =
     testList "Composed authorization flow" [
-        testCaseAsync "a real child session gates its data surfaces behind the manager's OIDC bounce; the shell stays cached and ungated" <|
+        testCaseAsync "a real child session gates its data surfaces behind the manager's OIDC bounce; the shell stays ungated, revalidated, and names immutable assets" <|
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/oidc-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
@@ -471,10 +471,31 @@ let private flowTests =
                 let port = launched |> expect
                 let sessionUrl = sprintf "http://127.0.0.1:%d" port
 
-                // Offline-first invariant: the shell is ungated and cacheable for anyone.
-                let! shell = headRequest (sessionUrl + "/") |> Async.AwaitPromise
-                Expect.equal shell.status 200 "the shell serves without auth"
-                Expect.equal shell.cacheControl "max-age=86400" "the shell keeps its offline cache window"
+                // The shell is ungated, and it is the ONE document that must never be served
+                // from cache unasked: it NAMES the fingerprinted assets, so a cached shell
+                // pins the whole UI to the build it was rendered against. That is the bug
+                // this policy fixes — a day-long `max-age` on stable asset URLs made every
+                // release invisible to an already-open browser.
+                let shellJar = OidcHttp.newJar ()
+                let! shell = OidcHttp.getWithJar shellJar (sessionUrl + "/")
+                Expect.equal shell.Status 200 "the shell serves without auth"
+                Expect.equal shell.CacheControl "no-cache" "the shell is revalidated before every use"
+
+                // The other half of the pair: what the shell names is addressed by a digest of
+                // its own bytes, so those bytes can be kept forever. Fresh document, immutable
+                // assets — neither works without the other.
+                let bundleUrl =
+                    System.Text.RegularExpressions.Regex.Match(shell.Body, "src=\"(client\\.[^\"]+\\.js)\"").Groups.[1].Value
+                Expect.notEqual bundleUrl "" "the shell names a fingerprinted bundle"
+                let! bundle = OidcHttp.getWithJar shellJar (sessionUrl + "/" + bundleUrl)
+                Expect.equal bundle.Status 200 "the fingerprinted bundle serves"
+                Expect.equal bundle.CacheControl "public, max-age=31536000, immutable" "its address pins its bytes, so it never expires"
+
+                // An address this build does not serve is refused, not answered with current
+                // bytes: those would land in an `immutable` cache entry under the stale
+                // address and be wrong there for a year, unfixable from the server.
+                let! stale = OidcHttp.getWithJar shellJar (sessionUrl + "/client.0000notreal.js")
+                Expect.equal stale.Status 404 "a stale asset address is a 404, never a redirect to current bytes"
 
                 // The data surfaces are gated bare.
                 let! bareMe = headRequest (sessionUrl + "/me") |> Async.AwaitPromise
