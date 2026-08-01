@@ -1,25 +1,25 @@
 module Yession.Host.Control
 
-// The Manager's control endpoint (Phase 4, Step 24): the environment capability
-// surface for its child Session Processes, across the process boundary. Authority
-// stays IN the Manager — the child authenticates each call with its per-launch secret,
-// the secret resolves to the capabilities the Manager granted that launch (the RPC
-// equivalent of the Step 11 closure), and every handle re-validates against the
-// Manager's registry. 127.0.0.1 only. The channel carries environment and command
-// traffic, plus ONE piece of session metadata — the session's self-assigned display name
-// (a label, never conversation or event content) — so the Manager's list reflects the title.
+// The Manager's control endpoint (Phase 4, Step 24): the supervision + custody surface
+// for its child Session Processes, across the process boundary. The child
+// authenticates each call with its per-launch secret; 127.0.0.1 only. Environments and
+// commands are session-owned (the sandbox seam) and never cross this channel — it
+// carries secrets custody, connections, supervision reports, and ONE piece of session
+// metadata: the session's self-assigned display name (a label, never conversation or
+// event content), so the Manager's list reflects the title.
 //
 // Routes (secret in the `x-yession-control` header):
-//   POST /control/start            EnvironmentSpec  -> StartContainerResult
-//   POST /control/stop             ContainerHandle  -> StopContainerResult
-//   POST /control/execute          ExecuteRequest   -> NDJSON: chunk* then exactly one result
 //   POST /control/name             { name }         -> "ok" (updates the registry display name)
 //   POST /control/register-client  { redirectUri }  -> { clientId, clientSecret, issuer }
 //   POST /control/secrets/set      { scope, name, value } -> secret metadata (never a value)
 //   POST /control/secrets/list     { scope }        -> { secrets: metadata[] } (never values)
 //   POST /control/secrets/delete   { scope, name }  -> { deleted }
-//        (there is deliberately NO /control/secrets/get: values leave the Manager only
-//         by environment injection at container start — see Plan 06)
+//   POST /control/secrets/resolve  { name }         -> { value }
+//        (the one value-returning SECRETS route: a session resolves the values its
+//         sandbox spec references at sandbox spawn — gated by the caller's readable
+//         scopes, the same walk Manager-side injection always used. The value crosses
+//         only this authenticated loopback channel, only at sandbox spawn, and never
+//         reaches the agent loop — there is still no agent-facing read capability.)
 //   GET  /control/notifications                     -> text/event-stream (the reverse leg:
 //        the Manager pushing notifications DOWN to this session, multiplexed as SSE frames
 //        of `ControlWire.sessionNotification` JSON — see NotificationHub / SessionNotification)
@@ -37,10 +37,8 @@ module Yession.Host.Control
 //        the caller's readable connection statuses on subscribe, then a fresh list on every
 //        change — metadata frames of `ControlWire.connectionStatusList`, never values)
 //
-// Every launch can call the channel (its secret always resolves to a caller); whether
-// the caller also holds ENVIRONMENT capabilities is a separate grant — a session
-// without one still registers its OAuth client here, it just gets 403 on the
-// environment routes.
+// Every launch can call the channel: its secret resolves to WHICH session is calling,
+// and the secrets/connections handlers apply their own policy per call.
 
 open Fable.Core.JsInterop
 open Yession.Domain
@@ -48,14 +46,12 @@ open Yession.Manager
 open Yession.Oidc
 open Yession.Host.Interop
 
-/// What a control secret resolves to: WHICH launch is calling, the environment
-/// capabilities that launch was granted (None = environment-less session), and the
-/// users and peers the Manager verified into the launch at ID-token issuance (empty
-/// until a login completes). Manager-verified, never self-asserted — this is the ABAC
-/// composite identity (Plan 06; peers per docs/plans/07).
+/// What a control secret resolves to: WHICH launch is calling, and the users and peers
+/// the Manager verified into the launch at ID-token issuance (empty until a login
+/// completes). Manager-verified, never self-asserted — this is the ABAC composite
+/// identity (Plan 06; peers per docs/plans/07).
 type ControlCaller =
     { SessionId : SessionId
-      Capabilities : SessionEnvironmentCapabilities option
       Users : Set<UserId>
       Peers : Set<PeerId> }
 
@@ -66,13 +62,16 @@ type SecretsError =
     | SecretsDenied of reason: string
     | SecretsFailed of reason: string
 
-/// The Manager's secrets handlers (Plan 06), pre-composed with authorization. NO
-/// operation returns a secret value — set answers metadata, list metadata, delete a
-/// flag; injection is the only read and it happens Manager-side at container start.
+/// The Manager's secrets handlers (Plan 06), pre-composed with authorization. `Resolve`
+/// is the one operation that returns a value: it feeds env injection at the SESSION'S
+/// sandbox spawn, gated by the caller's readable scopes (the same precedence walk
+/// Manager-side injection always used). Set answers metadata, list metadata, delete a
+/// flag — the agent-facing surface still has no read.
 type SecretsApi =
     { Set : ControlCaller -> ControlWire.SetSecretRequest -> Async<Result<SecretMetadata, SecretsError>>
       List : ControlCaller -> ControlWire.ListSecretsRequest -> Async<Result<SecretMetadata list, SecretsError>>
-      Delete : ControlCaller -> ControlWire.DeleteSecretRequest -> Async<Result<bool, SecretsError>> }
+      Delete : ControlCaller -> ControlWire.DeleteSecretRequest -> Async<Result<bool, SecretsError>>
+      Resolve : ControlCaller -> ControlWire.ResolveSecretRequest -> Async<Result<string, SecretsError>> }
 
 /// The Manager's connection-broker handlers (Plan 08), pre-composed with authorization
 /// (`ConnectionAction` × the request's target scope). `Resolve` is the one operation in
@@ -136,43 +135,7 @@ let tryHandle
                     match decode body with
                     | Ok value -> handle value
                     | Error e -> respond res 400 (sprintf "malformed control request: %s" e))
-            // The environment routes need the launch's capability grant; a session
-            // launched without one gets a clean 403, not a crash.
-            let withCapabilities (handle: SessionEnvironmentCapabilities -> unit) =
-                match caller.Capabilities with
-                | Some capabilities -> handle capabilities
-                | None -> respond res 403 "no environment capabilities granted"
             match req.``method``, path with
-            | "POST", "/control/start" ->
-                withCapabilities (fun capabilities ->
-                    decodeAnd (ControlWire.fromString ControlWire.environmentSpec) (fun spec ->
-                        Async.StartImmediate (
-                            async {
-                                let! result = capabilities.StartContainer spec
-                                respondJson res (ControlWire.toString ControlWire.startContainerResult result)
-                            })))
-            | "POST", "/control/stop" ->
-                withCapabilities (fun capabilities ->
-                    decodeAnd (ControlWire.fromString ControlWire.containerHandle) (fun handle ->
-                        Async.StartImmediate (
-                            async {
-                                let! result = capabilities.StopContainer handle
-                                respondJson res (ControlWire.toString ControlWire.stopContainerResult result)
-                            })))
-            | "POST", "/control/execute" ->
-                withCapabilities (fun capabilities ->
-                    decodeAnd (ControlWire.fromString ControlWire.executeRequest) (fun request ->
-                        // Chunks stream as NDJSON lines the moment they arrive; the final
-                        // line is the command result. Ordering rides the response stream.
-                        res.writeHead (200, createObj [ "content-type", box "application/x-ndjson"; "cache-control", box "no-store" ]) |> ignore
-                        Async.StartImmediate (
-                            async {
-                                let! result =
-                                    capabilities.Execute request.Handle request.Command (fun chunk ->
-                                        res.write (ControlWire.toString ControlWire.executeLine (ControlWire.OutputLine chunk) + "\n")
-                                        |> ignore)
-                                res.``end`` (ControlWire.toString ControlWire.executeLine (ControlWire.ResultLine result) + "\n")
-                            })))
             | "POST", "/control/name" ->
                 // Session metadata, not environment authority: the secret only names WHICH
                 // session is reporting; the Manager updates that session's display name.
@@ -202,11 +165,11 @@ let tryHandle
                 decodeAnd (Wire.fromString Wire.registerClientRequest) (fun request ->
                     let response = registerClient (Option.defaultValue "" secret) caller.SessionId request.RedirectUri
                     respondJson res (Wire.toString Wire.registerClientResponse response))
-            | "POST", ("/control/secrets/set" | "/control/secrets/list" | "/control/secrets/delete" as secretsPath) ->
+            | "POST", ("/control/secrets/set" | "/control/secrets/list" | "/control/secrets/delete" | "/control/secrets/resolve" as secretsPath) ->
                 // Secrets (Plan 06). The arms stay thin: decode, hand the verified
                 // caller to the Manager's pre-authorized handlers, map the outcome.
-                // No store configured -> a clean 403 (the withCapabilities shape);
-                // a policy Deny -> 403 with its reason; a store failure -> 500.
+                // No store configured -> a clean 403; a policy Deny -> 403 with its
+                // reason; a store failure -> 500.
                 match secretsApi with
                 | None -> respond res 403 "no secrets store configured"
                 | Some api ->
@@ -231,6 +194,16 @@ let tryHandle
                                     respondWith
                                         (fun secretsList ->
                                             ControlWire.toString ControlWire.listSecretsResponse { Secrets = secretsList })
+                                        outcome
+                                }))
+                    | "/control/secrets/resolve" ->
+                        decodeAnd (ControlWire.fromString ControlWire.resolveSecretRequest) (fun request ->
+                            Async.StartImmediate (
+                                async {
+                                    let! outcome = api.Resolve caller request
+                                    respondWith
+                                        (fun value ->
+                                            ControlWire.toString ControlWire.resolveSecretResponse { Value = value })
                                         outcome
                                 }))
                     | _ ->

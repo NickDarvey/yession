@@ -330,7 +330,7 @@ let private liveTests =
                     let m =
                         Manager.create
                             (Some Agent.run)
-                            (Some (Backends.LocalProcessBackend.create ()))
+                            (Some (fun sid -> Sandboxes.forBackend HostBackend (SessionId.value sid) EnvironmentSpec.defaults |> expect))
                             8135
                     let! _ =
                         m.StartSession

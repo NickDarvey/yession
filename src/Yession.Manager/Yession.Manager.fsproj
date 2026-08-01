@@ -1,9 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    The Session Manager's authority layer: session/container ownership enforcement over
-    an injected container backend. The Session Process never references this project —
-    it only ever receives the pre-scoped capability record from Yession.Domain.
+    The Session Manager's pure state and wire layer: the durable registry, port and
+    reaper policy, secrets/broker state, and the control-RPC codecs. Environments are
+    session-owned (the sandbox seam in Yession.Domain); this project holds no
+    environment authority.
   -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -16,7 +17,6 @@
     <Compile Include="SecretsState.fs" />
     <Compile Include="BrokerState.fs" />
     <Compile Include="ControlWire.fs" />
-    <Compile Include="Authority.fs" />
   </ItemGroup>
 
   <ItemGroup>

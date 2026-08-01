@@ -493,7 +493,7 @@ let private brokerTests =
 // --- [Ports]: the control routes + status stream --------------------------------------------
 
 let private caller sessionId users peers : Control.ControlCaller =
-    { SessionId = sessionId; Capabilities = None; Users = users; Peers = peers }
+    { SessionId = sessionId; Users = users; Peers = peers }
 
 /// A bare control server with the SAME pre-authorized connection handlers the Manager
 /// composes (ProcessManager.connectionsApiFor), plus the ProcessManager-style status

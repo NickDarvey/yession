@@ -29,6 +29,9 @@ let private writeSyncedImpl (fs: obj) (path: string) (text: string) : unit = jsN
 
 let exists (path: string) : bool = existsSyncImpl fs path
 
+/// Create a directory (and any missing parents); a no-op when it already exists.
+let ensureDir (path: string) : unit = mkdirSyncImpl fs path
+
 let readText (path: string) : string = readFileSyncImpl fs path
 
 let private directoryOf (path: string) : string =

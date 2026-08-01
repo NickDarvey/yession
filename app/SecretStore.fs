@@ -5,9 +5,11 @@ module Yession.Host.SecretStore
 // manager holds (KeyStore). One code path serves both modes: `Some path` = durable
 // (encrypted file in the Manager's data dir, ManagerStore-style atomic writes);
 // `None` = ephemeral (no credential manager on this host — no file I/O at all, a
-// per-boot random KEK, everything dies with the Manager). `Resolve` is
-// Manager-INTERNAL: it feeds environment injection only; no control route calls it,
-// so a secret value never travels back over the control channel.
+// per-boot random KEK, everything dies with the Manager). `Resolve` feeds environment
+// injection only, and with session-owned sandboxes that injection happens at the
+// SESSION'S sandbox spawn: a value crosses only the authenticated loopback control
+// channel (`/control/secrets/resolve`, gated by the readable-scope walk below), only
+// at sandbox spawn, and never reaches the agent loop.
 
 open System
 open Yession.Domain
@@ -51,8 +53,9 @@ module OpenError =
 
 let private now () : DateTimeOffset = DateTimeOffset.UtcNow
 
-/// How a launched environment's `SecretRef` env vars resolve to values, pre-scoped to
-/// the session being started. The ONLY consumer of `SecretStore.Resolve`.
+/// How a WorkSandbox's `SecretRef` env vars resolve to values, scoped to the session
+/// whose sandbox is spawning. The ONLY consumer of `SecretStore.Resolve`; served to
+/// sessions by the `/control/secrets/resolve` route.
 type ResolveSecret = SessionId -> SecretName -> Async<Result<string, string>>
 
 /// Open the store. Durable when `persistPath` is set: KEK through the KeyStore

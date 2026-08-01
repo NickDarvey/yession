@@ -225,15 +225,15 @@ let private freePort () : Async<int> =
         return port
     }
 
-/// Start a bare control server over the given secret→(session, capabilities) table, plus
-/// the real notification and MCP hubs wired to their SSE routes. Returns both hubs so a
-/// test can push down the same wires the Manager uses.
-let private startControlServer (secrets: (string * SessionId * SessionEnvironmentCapabilities) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * RetainedHub.RetainedHub<McpToolList>> =
+/// Start a bare control server over the given secret→session table, plus the real
+/// notification and MCP hubs wired to their SSE routes. Returns both hubs so a test
+/// can push down the same wires the Manager uses.
+let private startControlServer (secrets: (string * SessionId) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * RetainedHub.RetainedHub<McpToolList>> =
     async {
         let table =
             secrets
-            |> List.map (fun (secret, sessionId, capabilities) ->
-                let caller : Control.ControlCaller = { SessionId = sessionId; Capabilities = Some capabilities; Users = Set.empty; Peers = Set.empty }
+            |> List.map (fun (secret, sessionId) ->
+                let caller : Control.ControlCaller = { SessionId = sessionId; Users = Set.empty; Peers = Set.empty }
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
@@ -252,82 +252,15 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
     }
 
 let private controlRpcTests =
-    testList "Authority over the control RPC (Step 24)" [
-        testCaseAsync "Step 11's rejections hold across the wire; output streams in order; rejections never reach the backend" <|
-            async {
-                let sessionA = SessionId.create "rpc-session-a" |> expect
-                let sessionB = SessionId.create "rpc-session-b" |> expect
-                let registry = Authority.ContainerRegistry ()
-                let recorder = InMemoryBackend.Recorder ()
-                let scriptedExec : CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult> =
-                    fun command onChunk ->
-                        async {
-                            onChunk { CommandId = command.CommandId; Stream = Stdout; Text = "one" }
-                            onChunk { CommandId = command.CommandId; Stream = Stderr; Text = "warn" }
-                            onChunk { CommandId = command.CommandId; Stream = Stdout; Text = "two" }
-                            return CommandSucceeded 0
-                        }
-                let backend = InMemoryBackend.create recorder scriptedExec
-                let grant = Authority.grant registry backend
-                let! server, url, _, _ = startControlServer [ "secret-a", sessionA, grant sessionA; "secret-b", sessionB, grant sessionB ]
-
-                let capsA = ControlClient.capabilities url "secret-a"
-                let capsB = ControlClient.capabilities url "secret-b"
-                let request =
-                    { CommandId = CommandId.create "rpc-cmd" |> expect
-                      Executable = "echo"
-                      Arguments = [ "ok" ]
-                      WorkingDirectory = None
-                      Environment = Map.empty
-                      Timeout = None }
-
-                // The happy path: start + execute over the wire, chunks in order.
-                let! started = capsA.StartContainer EnvironmentSpec.localProcess
-                let handle = match started with ContainerStarted h -> h | r -> failwithf "start failed: %A" r
-                let mutable chunks : (OutputStream * string) list = []
-                let! result = capsA.Execute handle request (fun c -> chunks <- chunks @ [ c.Stream, c.Text ])
-                Expect.equal result (CommandSucceeded 0) "the command ran through the RPC"
-                Expect.equal chunks [ Stdout, "one"; Stderr, "warn"; Stdout, "two" ] "chunks streamed in order across the wire"
-
-                // A forged secret gets nothing.
-                let mallory = ControlClient.capabilities url "stolen-secret"
-                match! mallory.StartContainer EnvironmentSpec.localProcess with
-                | ContainerStartFailed reason -> Expect.isTrue (reason.Contains "401") "rejected at the door"
-                | ContainerStarted _ -> failwith "a forged secret must not start containers"
-
-                // Cross-session use of A's handle through B's secret is rejected by the
-                // registry — before the backend is reached.
-                let executedBefore = recorder.Executed
-                match! capsB.Execute handle request ignore with
-                | CommandExecutionFailed reason -> Expect.isTrue (reason.Contains "session") "rejected as cross-session"
-                | other -> failwithf "expected rejection, got %A" other
-                Expect.equal recorder.Executed executedBefore "the backend was never reached"
-
-                // A fabricated handle is unknown; a stopped container cannot exec.
-                let forged = ContainerHandle.create sessionB "ctr-fabricated"
-                match! capsB.Execute forged request ignore with
-                | CommandExecutionFailed reason -> Expect.isTrue (reason.Contains "unknown") "fabricated handles are unknown"
-                | other -> failwithf "expected rejection, got %A" other
-                let! stopped = capsA.StopContainer handle
-                Expect.equal stopped ContainerStopped "stop crossed the wire"
-                match! capsA.Execute handle request ignore with
-                | CommandExecutionFailed reason -> Expect.isTrue (reason.Contains "not running") "a stopped container cannot exec"
-                | other -> failwithf "expected rejection, got %A" other
-
-                server.close ignore
-            }
-
-        testCaseAsync "a child Session Process exercises the capability end to end (diagnostic agent across real processes)" <|
+    testList "Session-owned environment across real processes (Step 24, reworked)" [
+        testCaseAsync "a child Session Process runs its own WorkSandbox end to end (diagnostic agent across real processes)" <|
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/rpc-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
-                let registry = Authority.ContainerRegistry ()
-                let backend = Backends.LocalProcessBackend.create ()
                 let! pm =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
-                            Strategy = Some Strategy.localhost
-                            Grant = Some (Authority.grant registry backend) }
+                            Strategy = Some Strategy.localhost }
                 let record = pm.CreateSession "rpc-child" "RPC child" |> expect
 
                 // The child inherits our environment: run its built-in diagnostic agent.
@@ -341,9 +274,9 @@ let private controlRpcTests =
                 do! compose a a.Hello.PeerId "run the diagnostic"
                 a.Connection.SendDraft a.Hello.PeerId
 
-                // Everything below happened ACROSS process boundaries: the child asked
-                // the Manager (this test process) over the control RPC; the Manager's
-                // authority + engine ran the command; events streamed back to a client.
+                // Everything below happened ACROSS process boundaries: the child created
+                // its own host sandbox (no Manager grant exists any more), ran the
+                // command in it, and streamed the events back to a client.
                 do! a.Runner.WaitFor (fun m ->
                         (m.Conversation.Items
                          |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "diagnostic-ok"))
@@ -974,21 +907,14 @@ let private notificationTests =
             hub.NotifySecret "secret-unknown" (EnvironmentChanged ())
     ]
 
-// A valid-but-inert capability set: notifications only need the secret to resolve past the
-// control endpoint's 401 gate, not any real environment authority.
-let private stubCapabilities : SessionEnvironmentCapabilities =
-    { StartContainer = fun _ -> async { return ContainerStartFailed "stub" }
-      StopContainer = fun _ -> async { return ContainerStopped }
-      Execute = fun _ _ _ -> async { return CommandExecutionFailed "stub" } }
-
 let private notificationStreamTests =
     testList "Manager→Session notifications over SSE (reverse control leg)" [
         testCaseAsync "a pushed notification reaches the subscribed session, is scoped to it, and stops on cancel" <|
             async {
                 let! server, url, hub, _ =
                     startControlServer
-                        [ "secret-a", (SessionId.create "sse-a" |> expect), stubCapabilities
-                          "secret-b", (SessionId.create "sse-b" |> expect), stubCapabilities ]
+                        [ "secret-a", (SessionId.create "sse-a" |> expect)
+                          "secret-b", (SessionId.create "sse-b" |> expect) ]
 
                 let mutable receivedA : SessionNotification list = []
                 let mutable receivedB : SessionNotification list = []
@@ -1082,7 +1008,7 @@ let private mcpStreamTests =
         testCaseAsync "a subscriber gets the current list on connect, then every change, and stops on cancel" <|
             async {
                 let! server, url, _, mcp =
-                    startControlServer [ "secret-a", (SessionId.create "sse-mcp" |> expect), stubCapabilities ]
+                    startControlServer [ "secret-a", (SessionId.create "sse-mcp" |> expect) ]
                 // Seed a list before anyone subscribes: a connecting session must still see it.
                 mcp.Publish { Tools = [ searchTool ] }
 
@@ -1440,7 +1366,7 @@ let tests =
         mcpTests
         registryTests
         Tag.needs "Session Process as an OS process (Step 23)" [ Tag.Ports; Tag.Native ] (fun () -> processTests)
-        Tag.needs "Authority over the control RPC (Step 24)" [ Tag.Ports; Tag.Native ] (fun () -> controlRpcTests)
+        Tag.needs "Session-owned environment across real processes" [ Tag.Ports; Tag.Native ] (fun () -> controlRpcTests)
         Tag.needs "Manager→Session notifications over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> notificationStreamTests)
         Tag.needs "MCP tool stream over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)

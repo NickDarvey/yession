@@ -82,12 +82,6 @@ type ProcessManager =
       /// issuance (docs/plans/07): the browser's peer id rode the authorize bounce.
       /// Same lifetime as UsersOf.
       PeersOf : SessionId -> Set<PeerId>
-      /// Session-scoped secret resolution for environment injection (Plan 06):
-      /// store-backed precedence (session scope, then bound users' scopes, then the
-      /// Manager's process env) when a store is configured; bare process env otherwise.
-      /// Hand this to a container backend — values resolve at container start, never
-      /// over the control channel.
-      ResolveSecret : SecretStore.ResolveSecret
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
       /// How this deployment is reached from outside (docs/plans/09). The management UI
@@ -114,10 +108,6 @@ type Options =
       LaunchTimeoutMs : int
       /// SIGTERM → SIGKILL escalation grace.
       StopGraceMs : int
-      /// Environment authority (Step 24): grants session-scoped capabilities, served
-      /// to children over the control endpoint with a per-launch secret. None =
-      /// sessions run environment-less.
-      Grant : (SessionId -> SessionEnvironmentCapabilities) option
       /// Fixed port for the Manager's own endpoint (control + management UI);
       /// None = OS-assigned. A management UI wants a bookmarkable address, so the
       /// product default is fixed — a second Manager instance must choose its own
@@ -169,7 +159,6 @@ module Options =
           SessionPorts = Ephemeral
           LaunchTimeoutMs = 15000
           StopGraceMs = 3000
-          Grant = None
           ManagerPort = None
           Public = Loopback
           OnEvent = (fun _ _ -> ())
@@ -197,9 +186,16 @@ let private sweepIntervalMsFor (timeout: TimeSpan) : int =
 
 /// The secrets handlers (Plan 06): the ONLY place a verified AuthzSubject is built, so
 /// the route arms stay policy-free. Every deny is logged (subject/action/scope — never
-/// values); every permitted call goes straight to the store. Module-level so the
-/// authorization matrix is testable over a bare control server.
-let secretsApiFor (audit: SecretStore.Audit.Sink) (store: SecretStore.SecretStore) : Control.SecretsApi =
+/// values); every permitted call goes straight to the store. `resolve` is the same
+/// precedence walk env injection always used (session scope, then bound users' scopes,
+/// then the Manager's process env) — the walk IS the authorization, and its observer
+/// audits every resolution. Module-level so the authorization matrix is testable over
+/// a bare control server.
+let secretsApiFor
+    (audit: SecretStore.Audit.Sink)
+    (resolve: SecretStore.ResolveSecret)
+    (store: SecretStore.SecretStore)
+    : Control.SecretsApi =
     let authorize (caller: Control.ControlCaller) (action: SecretAction) (resource: AuthzResource) =
         let request =
             { Subject = { Session = Some caller.SessionId; Users = caller.Users; Peers = caller.Peers }
@@ -249,6 +245,13 @@ let secretsApiFor (audit: SecretStore.Audit.Sink) (store: SecretStore.SecretStor
                     | Error e ->
                         audit (SecretStore.Audit.secretDelete caller.SessionId id false)
                         return Error (Control.SecretsFailed e)
+            }
+      Resolve =
+        fun caller request ->
+            async {
+                match! resolve caller.SessionId request.Name with
+                | Ok value -> return Ok value
+                | Error e -> return Error (Control.SecretsDenied e)
             } }
 
 /// The connection-broker handlers (Plan 08): same discipline as `secretsApiFor` — the
@@ -389,12 +392,9 @@ let createWithUi
     // The reaper's sweep timer, so `StopAll` can clear it. See where it is set.
     let mutable reapSweep : obj option = None
 
-    // The control endpoint (Step 24): per-launch secrets resolve to the capabilities
-    // the Manager granted that launch — the RPC equivalent of the Step 11 closure. A
-    // secret dies with its launch.
-    let mutable secrets : Map<string, SessionEnvironmentCapabilities> = Map.empty
-    // The same per-launch secret also names which session is reporting its display name
-    // (the collaborative title); this map lives and dies with the secret.
+    // The control endpoint (Step 24): the per-launch secret names WHICH session is
+    // calling — supervision reports, secrets custody, connections. A secret dies with
+    // its launch.
     let mutable secretSessions : Map<string, SessionId> = Map.empty
     // Users the Manager verified into a LAUNCH (Plan 06): recorded at ID-token issuance,
     // keyed by the per-launch control secret so the binding dies with the launch, exactly
@@ -572,18 +572,14 @@ let createWithUi
     let strategy = defaultArg options.Strategy Strategy.none
     let! provider = ManagerOidc.create issuerOf strategy recordTokenIssued
 
-    // What a control secret resolves to: the launch's session plus its (optional)
-    // environment grant. Registration works for every launch; environment routes 403
-    // without a grant.
+    // What a control secret resolves to: WHICH launch is calling, with its verified
+    // user/peer bindings. The secrets/connections handlers apply their own policy.
     let resolveCaller (secret: string) : Control.ControlCaller option =
         Map.tryFind secret secretSessions
         |> Option.map (fun sessionId ->
             { Control.ControlCaller.SessionId = sessionId
-              Capabilities = Map.tryFind secret secrets
               Users = Map.tryFind secret launchUsers |> Option.defaultValue Set.empty
               Peers = Map.tryFind secret launchPeers |> Option.defaultValue Set.empty })
-
-    let secretsApi : Control.SecretsApi option = secretStore |> Option.map (secretsApiFor audit)
 
     // The connection broker (Plan 08): exists exactly when the secret store does — its
     // envelopes are ordinary encrypted entries. Standards-only; its one owned constant
@@ -648,6 +644,20 @@ let createWithUi
                     Set.union acc (Map.tryFind secret launchPeers |> Option.defaultValue Set.empty)
                 else acc)
             Set.empty
+
+    // Session-scoped secret resolution (Plan 06): store-backed precedence (session
+    // scope, then bound users' scopes, then the Manager's process env) when a store is
+    // configured; bare process env otherwise. Serves the `/control/secrets/resolve`
+    // route — values now cross to the SESSION at sandbox spawn, and this walk is the
+    // authorization.
+    let resolveSecret : SecretStore.ResolveSecret =
+        match secretStore with
+        | Some store ->
+            SecretStore.SecretResolution.compose (SecretStore.Audit.injectObserver audit) store usersOf peersOf SecretStore.SecretResolution.processEnv
+        | None -> SecretStore.SecretResolution.processEnv
+
+    let secretsApi : Control.SecretsApi option =
+        secretStore |> Option.map (secretsApiFor audit resolveSecret)
 
     // The per-request authenticator the UI routes gate on: the same strategy value that
     // authenticates /authorize, applied to any Manager request.
@@ -757,16 +767,14 @@ let createWithUi
             | None -> return Error (sprintf "unknown session %s" key)
             | Some _ when Map.containsKey key children -> return Error (sprintf "session %s is already running" key)
             | Some record ->
-                // Step 24: mint the per-launch secret — every launch gets one (it now
-                // authenticates OAuth client registration as well as environment calls).
-                // The capability grant stays separate: only granted launches enter
-                // `secrets`; the session scope is established HERE, by the Manager.
+                // Step 24: mint the per-launch secret — every launch gets one; it
+                // authenticates OAuth client registration, supervision reports, and the
+                // secrets/connections custody calls. The session scope is established
+                // HERE, by the Manager.
                 let controlEnv =
                     match controlUrl () with
                     | Some url ->
                         let secret = Interop.randomSecret ()
-                        options.Grant
-                        |> Option.iter (fun grant -> secrets <- Map.add secret (grant record.SessionId) secrets)
                         secretSessions <- Map.add secret record.SessionId secretSessions
                         [ "YESSION_CONTROL_URL", url; "YESSION_CONTROL_SECRET", secret ], Some secret
                     | None -> [], None
@@ -805,7 +813,6 @@ let createWithUi
                           | Some sessionId when Map.containsKey secret launchUsers ->
                               audit (SecretStore.Audit.bindingRevoked sessionId)
                           | _ -> ())
-                         secrets <- Map.remove secret secrets
                          secretSessions <- Map.remove secret secretSessions
                          // The launch's notification subscriptions, OAuth client
                          // registration, and user bindings die with its authority.
@@ -955,10 +962,6 @@ let createWithUi
           PublishMcpTools = mcp.Publish
           UsersOf = usersOf
           PeersOf = peersOf
-          ResolveSecret =
-            match secretStore with
-            | Some store -> SecretStore.SecretResolution.compose (SecretStore.Audit.injectObserver audit) store usersOf peersOf SecretStore.SecretResolution.processEnv
-            | None -> SecretStore.SecretResolution.processEnv
           EndpointPort = controlServer |> Option.map Interop.serverPort
           Public = options.Public
           StopAll =

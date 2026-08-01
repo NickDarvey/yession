@@ -602,7 +602,19 @@ let private startControlServer (callers: (string * Control.ControlCaller) list) 
     }
 
 let private caller sessionId users : Control.ControlCaller =
-    { SessionId = sessionId; Capabilities = None; Users = users; Peers = Set.empty }
+    { SessionId = sessionId; Users = users; Peers = Set.empty }
+
+/// The pre-authorized handlers over a store, with the SAME readable-scope walk the
+/// Manager composes for `resolve` — the user table injected per test.
+let private apiOver (audit: SecretStore.Audit.Sink) (usersOf: SessionId -> Set<UserId>) (store: SecretStore.SecretStore) : Control.SecretsApi =
+    let walk =
+        SecretStore.SecretResolution.compose
+            (fun _ _ _ -> ())
+            store
+            usersOf
+            (fun _ -> Set.empty)
+            (fun _ n -> async { return Error (sprintf "secret '%s' is not available in any readable scope" (SecretName.value n)) })
+    ProcessManager.secretsApiFor audit walk store
 
 let private routeTests =
     testList "control routes" [
@@ -616,7 +628,7 @@ let private routeTests =
                     startControlServer
                         [ "secret-a", caller sessionA (Set.singleton alice)
                           "secret-b", caller sessionB Set.empty ]
-                        (Some (ProcessManager.secretsApiFor (fun r -> audited <- r :: audited) store))
+                        (Some (apiOver (fun r -> audited <- r :: audited) (fun s -> if s = sessionA then Set.singleton alice else Set.empty) store))
                         (fun path -> unauthorized <- path :: unauthorized)
                 let post route secret body = postControl (sprintf "%s/control/secrets/%s" url route) secret body |> Async.AwaitPromise
                 let eventNames () =
@@ -681,13 +693,53 @@ let private routeTests =
                     Expect.isFalse ((SecretStore.Audit.format r).Contains "hunter2") "no audit record ever renders a value"
             }
 
+        testCaseAsync "resolve-at-spawn reads only the caller's readable scopes, over the authenticated channel" <|
+            async {
+                let! store = openEphemeral ()
+                let usersOf s = if s = sessionA then Set.singleton alice else Set.empty
+                let! _, url =
+                    startControlServer
+                        [ "secret-a", caller sessionA (Set.singleton alice)
+                          "secret-b", caller sessionB Set.empty ]
+                        (Some (apiOver (fun _ -> ()) usersOf store))
+                        ignore
+                let userName = SecretName.create "user-held-token" |> expect
+                let! _ = store.Set { Scope = SessionScope sessionA; Name = name } "session-held"
+                let! _ = store.Set { Scope = UserScope alice; Name = userName } "user-held"
+                let post secret body = postControl (url + "/control/secrets/resolve") secret body |> Async.AwaitPromise
+                let resolveBody = ControlWire.toString ControlWire.resolveSecretRequest { Name = name }
+
+                // The caller's own scope resolves — this is the ONE value-returning
+                // secrets route, feeding env injection at the session's sandbox spawn.
+                let! own = post "secret-a" resolveBody
+                Expect.equal own.status 200 "own-scope resolve permits"
+                Expect.isTrue (own.body.Contains "session-held") "the value crosses the authenticated channel"
+
+                // A bound user's scope is readable too (same walk as injection)...
+                let! bound = post "secret-a" (ControlWire.toString ControlWire.resolveSecretRequest { Name = userName })
+                Expect.equal bound.status 200 "a bound user's secret resolves"
+
+                // ...but a sibling session reaches neither, and the deny echoes no value.
+                let! cross = post "secret-b" resolveBody
+                Expect.equal cross.status 403 "another session's secret does not resolve"
+                Expect.isFalse (cross.body.Contains "session-held") "the deny carries no value"
+
+                // An unknown control secret is turned away at the door.
+                let! unknown = post "stolen" resolveBody
+                Expect.equal unknown.status 401 "invalid control secret"
+
+                // The typed session-side client (what sandbox spawn uses) round-trips.
+                let! typed = ControlClient.resolveSecret url "secret-a" name
+                Expect.equal (expect typed) "session-held" "the typed client resolves the value"
+            }
+
         testCaseAsync "the session-side typed capability drives the full lifecycle over the wire" <|
             async {
                 let! store = openEphemeral ()
                 let! _, url =
                     startControlServer
                         [ "secret-a", caller sessionA Set.empty ]
-                        (Some (ProcessManager.secretsApiFor (fun _ -> ()) store))
+                        (Some (apiOver (fun _ -> ()) (fun _ -> Set.empty) store))
                         ignore
                 // The capability a Session Process builds in SessionMain: pre-bound to
                 // its own scope; failures are values.

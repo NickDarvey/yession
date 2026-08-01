@@ -274,7 +274,7 @@ let private crashRepairTests =
 
                 // First life: the entry is consumed (appended durably, removed from the
                 // process doc). The peer never receives the removal.
-                let! h1 = Host.startWithCapabilities None None (Some (openLog ())) sessionId 0
+                let! h1 = Host.startWithEnvironment None None (Some (openLog ())) sessionId 0
                 let o = offlinePeer 16.0 "olive" "Olive"
                 let q1 = enqueue o "d-1" "q-1" "exactly once"
                 deliver o.Doc h1.Doc
@@ -285,7 +285,7 @@ let private crashRepairTests =
                 // Second life: a fresh process doc (doc persistence arrives in Step 19),
                 // the SAME durable log. The stale peer re-syncs the consumed entry —
                 // exactly the crash-between-append-and-removal shape.
-                let! h2 = Host.startWithCapabilities None None (Some (openLog ())) sessionId 0
+                let! h2 = Host.startWithEnvironment None None (Some (openLog ())) sessionId 0
                 deliver o.Doc h2.Doc
 
                 let! secondLife = sentMessages h2.Log

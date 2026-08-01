@@ -92,123 +92,53 @@ let private launchTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Step 11 — scoped environment capability: ownership + handle validation.
+// The sandbox seam — backend parsing and policy assembly are pure and fail
+// closed; the host backend's env allowlist is the credential-leak regression
+// guard. (The old Step 11 handle-validation suite pinned the deleted
+// Manager-side transport and went with it: sandboxes are session-owned, so
+// there is no cross-session handle to forge.)
 // -----------------------------------------------------------------------------
 
-open Yession.Manager
+[<Fable.Core.Emit("process.env[$0] = $1")>]
+let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNative
 
-let private echoExec : CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult> =
-    fun command onChunk ->
-        async {
-            onChunk { CommandId = command.CommandId; Stream = Stdout; Text = "ok" }
-            return CommandSucceeded 0
-        }
+[<Fable.Core.Emit("delete process.env[$0]")>]
+let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
-let private commandRequest (id: string) : CommandRequest =
-    { CommandId = CommandId.create id |> expect
-      Executable = "echo"
-      Arguments = [ "ok" ]
-      WorkingDirectory = None
-      Environment = Map.empty
-      Timeout = None }
+let private sandboxPolicyTests =
+    testList "Sandbox policy (pure)" [
+        testCase "backend parsing accepts exactly host, srt, and docker — and fails closed" <| fun () ->
+            Expect.equal (SandboxBackend.parse "host") (Ok HostBackend) "host"
+            Expect.equal (SandboxBackend.parse "srt") (Ok SrtBackend) "srt"
+            Expect.equal (SandboxBackend.parse " Docker ") (Ok DockerBackend) "case/space tolerant"
+            Expect.isError (SandboxBackend.parse "podman") "an unknown backend is a loud error, never a fallback"
+            Expect.isError (SandboxBackend.parse "") "blank is not a choice"
 
-let private authorityTests =
-    let sessionA = SessionId.create "session-a" |> expect
-    let sessionB = SessionId.create "session-b" |> expect
+        testCase "the host baseline is an allowlist: credentials never pass it" <| fun () ->
+            let ambient =
+                Map.ofList
+                    [ "PATH", "/usr/bin"
+                      "HOME", "/home/u"
+                      "ANTHROPIC_API_KEY", "super-secret"
+                      "CLAUDE_CODE_OAUTH_TOKEN", "also-secret"
+                      "YESSION_CONTROL_SECRET", "launch-secret" ]
+            let baseline = Sandboxes.hostBaseline ambient
+            Expect.equal (Map.tryFind "PATH" baseline) (Some "/usr/bin") "PATH survives"
+            Expect.equal (Map.tryFind "HOME" baseline) (Some "/home/u") "HOME survives"
+            Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" baseline) None "credentials do not"
+            Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" baseline) None "no credential survives"
+            Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" baseline) None "the launch secret does not"
 
-    testList "Scoped environment capability" [
-        testCaseAsync "StartContainer creates a session-owned container" <|
-            async {
-                let registry = Authority.ContainerRegistry ()
-                let recorder = InMemoryBackend.Recorder ()
-                let capsA = Authority.grant registry (InMemoryBackend.create recorder echoExec) sessionA
-                match! capsA.StartContainer EnvironmentSpec.localProcess with
-                | ContainerStarted handle ->
-                    Expect.equal (registry.OwnerOf (ContainerHandle.containerId handle)) (Some sessionA)
-                        "the container is owned by the starting session"
-                    Expect.equal recorder.Started 1 "the backend started exactly one container"
-                | ContainerStartFailed reason -> failwithf "start failed: %s" reason
-            }
-
-        testCaseAsync "Exec runs through a valid scoped handle, streaming output" <|
-            async {
-                let registry = Authority.ContainerRegistry ()
-                let recorder = InMemoryBackend.Recorder ()
-                let capsA = Authority.grant registry (InMemoryBackend.create recorder echoExec) sessionA
-                let! started = capsA.StartContainer EnvironmentSpec.localProcess
-                let handle = match started with ContainerStarted h -> h | r -> failwithf "start failed: %A" r
-                let mutable chunks = []
-                let! result = capsA.Execute handle (commandRequest "cmd-1") (fun c -> chunks <- c :: chunks)
-                Expect.equal result (CommandSucceeded 0) "the command ran"
-                Expect.equal (chunks |> List.map (fun c -> c.Text)) [ "ok" ] "output streamed"
-                Expect.equal recorder.Executed 1 "the backend executed once"
-            }
-
-        testCaseAsync "a Process cannot exec in another session's container (E2E authority)" <|
-            async {
-                let registry = Authority.ContainerRegistry ()
-                let recorder = InMemoryBackend.Recorder ()
-                let backend = InMemoryBackend.create recorder echoExec
-                let capsA = Authority.grant registry backend sessionA
-                let capsB = Authority.grant registry backend sessionB
-                let! started = capsA.StartContainer EnvironmentSpec.localProcess
-                let handleA = match started with ContainerStarted h -> h | r -> failwithf "start failed: %A" r
-
-                // Session B tries with A's handle verbatim, and with a re-minted handle
-                // naming its own session but A's container. Both must be rejected
-                // before the backend is reached.
-                let! withStolenHandle = capsB.Execute handleA (commandRequest "cmd-2") ignore
-                match withStolenHandle with
-                | CommandExecutionFailed _ -> ()
-                | other -> failwithf "expected rejection, got %A" other
-
-                let reminted = ContainerHandle.create sessionB (ContainerHandle.containerId handleA)
-                let! withRemintedHandle = capsB.Execute reminted (commandRequest "cmd-3") ignore
-                match withRemintedHandle with
-                | CommandExecutionFailed _ -> ()
-                | other -> failwithf "expected rejection, got %A" other
-
-                Expect.equal recorder.Executed 0 "the backend was never reached"
-            }
-
-        testCaseAsync "a Process cannot exec with a forged handle (E2E authority)" <|
-            async {
-                let registry = Authority.ContainerRegistry ()
-                let recorder = InMemoryBackend.Recorder ()
-                let capsA = Authority.grant registry (InMemoryBackend.create recorder echoExec) sessionA
-                let forged = ContainerHandle.create sessionA "no-such-container"
-                let! result = capsA.Execute forged (commandRequest "cmd-4") ignore
-                match result with
-                | CommandExecutionFailed _ -> ()
-                | other -> failwithf "expected rejection, got %A" other
-                Expect.equal recorder.Executed 0 "the backend was never reached"
-            }
-
-        testCaseAsync "Stop validates ownership too, and a stopped container cannot exec" <|
-            async {
-                let registry = Authority.ContainerRegistry ()
-                let recorder = InMemoryBackend.Recorder ()
-                let backend = InMemoryBackend.create recorder echoExec
-                let capsA = Authority.grant registry backend sessionA
-                let capsB = Authority.grant registry backend sessionB
-                let! started = capsA.StartContainer EnvironmentSpec.localProcess
-                let handleA = match started with ContainerStarted h -> h | r -> failwithf "start failed: %A" r
-
-                match! capsB.StopContainer handleA with
-                | ContainerStopFailed _ -> ()
-                | other -> failwithf "expected stop rejection, got %A" other
-                Expect.equal recorder.Stopped 0 "the backend never stopped anything for B"
-
-                match! capsA.StopContainer handleA with
-                | ContainerStopped -> ()
-                | other -> failwithf "expected stop, got %A" other
-
-                let! afterStop = capsA.Execute handleA (commandRequest "cmd-5") ignore
-                match afterStop with
-                | CommandExecutionFailed reason ->
-                    Expect.isTrue (reason.Contains "not running") "rejected because stopped"
-                | other -> failwithf "expected rejection, got %A" other
-            }
+        testCase "policy assembly: spec variables win over the baseline; docker takes no baseline" <| fun () ->
+            let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
+            let resolved = Map.ofList [ "HOME", "/workspace-home"; "TOKEN", "t" ]
+            let host = Sandboxes.policyFor HostBackend ambient resolved (Some "/ws")
+            Expect.equal (Map.tryFind "HOME" host.Env) (Some "/workspace-home") "the spec's variable wins"
+            Expect.equal (Map.tryFind "PATH" host.Env) (Some "/usr/bin") "the baseline fills the rest"
+            Expect.equal host.WorkingDirectory (Some "/ws") "the workspace is the default cwd"
+            let docker = Sandboxes.policyFor DockerBackend ambient resolved None
+            Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
+            Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
     ]
 
 // -----------------------------------------------------------------------------
@@ -256,8 +186,7 @@ let private lazyLifecycleTests =
     testList "Lazy environment lifecycle" [
         testCaseAsync "a conversational one-shot does not start an environment (E2E-1)" <|
             async {
-                let recorder = InMemoryBackend.Recorder ()
-                let backend = InMemoryBackend.create recorder echoExec
+                let recorder = SandboxRecorder ()
                 // A conversational agent: answers from context, never signals need.
                 let conversational : RunAgent =
                     fun _ _ _signal onChunk ->
@@ -265,7 +194,7 @@ let private lazyLifecycleTests =
                             onChunk { Text = "just an answer" }
                             return AgentCompleted ("just an answer", None)
                         }
-                let m = Manager.create (Some conversational) (Some backend) lazyEnvironmentPort
+                let m = Manager.create (Some conversational) (Some (fun _ -> scriptedSandbox recorder echoSandboxScript)) lazyEnvironmentPort
                 let! _ =
                     m.StartSession
                         { SessionLaunchRequest.SessionId = SessionId.create "lazy-1" |> expect }
@@ -277,7 +206,7 @@ let private lazyLifecycleTests =
                 do! a.Runner.WaitFor (fun model ->
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "just an answer"))
 
-                Expect.equal recorder.Started 0 "no container started for a one-shot"
+                Expect.equal recorder.Created 0 "no sandbox created for a one-shot"
                 let! envEvents = environmentEventsOf managed.Host.Log
                 Expect.isEmpty envEvents "no environment events for a one-shot"
 
@@ -287,8 +216,7 @@ let private lazyLifecycleTests =
 
         testCaseAsync "a development task identifies need and starts the environment (E2E-2)" <|
             async {
-                let recorder = InMemoryBackend.Recorder ()
-                let backend = InMemoryBackend.create recorder echoExec
+                let recorder = SandboxRecorder ()
                 // A task agent: signals need through the typed capability, twice — the
                 // second need must reuse the running environment.
                 let taskAgent : RunAgent =
@@ -302,7 +230,7 @@ let private lazyLifecycleTests =
                                 return AgentCompleted ("environment is up", None)
                             | other -> return AgentFailed (sprintf "%A" other)
                         }
-                let m = Manager.create (Some taskAgent) (Some backend) (lazyEnvironmentPort + 1)
+                let m = Manager.create (Some taskAgent) (Some (fun _ -> scriptedSandbox recorder echoSandboxScript)) (lazyEnvironmentPort + 1)
                 let! _ =
                     m.StartSession
                         { SessionLaunchRequest.SessionId = SessionId.create "lazy-2" |> expect }
@@ -315,7 +243,7 @@ let private lazyLifecycleTests =
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "environment is up")
                         && (match model.Environment with EnvironmentRunning _ -> true | _ -> false))
 
-                Expect.equal recorder.Started 1 "exactly one container started across two needs"
+                Expect.equal recorder.Created 1 "exactly one sandbox created across two needs"
                 let! envEvents = environmentEventsOf managed.Host.Log
                 Expect.equal
                     envEvents
@@ -332,23 +260,22 @@ let private lazyLifecycleTests =
 
         testCaseAsync "a stopped environment is restarted by the next need, under the same id (E2E-7)" <|
             async {
-                let recorder = InMemoryBackend.Recorder ()
-                let backend = InMemoryBackend.create recorder echoExec
-                let registry = Authority.ContainerRegistry ()
+                let recorder = SandboxRecorder ()
                 let sessionId = SessionId.create "lazy-3" |> expect
-                let capabilities = Authority.grant registry backend sessionId
                 let log =
                     Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
                 let environment =
-                    Yession.SessionProcess.SessionEnvironment.create log capabilities EnvironmentSpec.localProcess "env-lazy-3"
+                    Yession.SessionProcess.SessionEnvironment.create
+                        log (scriptedSandbox recorder echoSandboxScript) preparedEmptyPolicy "scripted" "env-lazy-3"
 
                 let! first = environment.Ensure None "initial task"
                 Expect.equal first EnvironmentAvailable "first ensure starts"
                 do! environment.Stop ()
-                Expect.equal (environment.CurrentHandle ()) None "stopped"
+                Expect.equal (environment.CurrentRef ()) None "stopped"
+                Expect.equal recorder.Disposed 1 "the stop disposed the sandbox"
                 let! second = environment.Ensure None "back for more"
                 Expect.equal second EnvironmentAvailable "the next need restarts"
-                Expect.equal recorder.Started 2 "two starts across the stop"
+                Expect.equal recorder.Created 2 "two sandbox creations across the stop"
 
                 let! envEvents = environmentEventsOf log
                 Expect.equal
@@ -384,6 +311,22 @@ let private nodeCommand (id: string) (script: string) : CommandRequest =
       Environment = Map.empty
       Timeout = None }
 
+/// A real host-backend WorkSandbox composition over the given log — exactly what
+/// SessionMain wires, minus the control channel (no secret refs here).
+let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>) (name: string) =
+    let createSandbox = Sandboxes.forBackend HostBackend name EnvironmentSpec.defaults |> expect
+    let noSecrets = fun (n: SecretName) -> async { return Error (sprintf "no secrets: %s" (SecretName.value n)) }
+    Yession.SessionProcess.SessionEnvironment.create
+        log
+        createSandbox
+        (Sandboxes.preparePolicy HostBackend noSecrets None EnvironmentSpec.defaults)
+        (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
+        (sprintf "env-%s" name)
+
+/// The per-session host sandbox for the in-process Manager compositions below.
+let private hostSandboxFor (sessionId: SessionId) : CreateSandbox =
+    Sandboxes.forBackend HostBackend (SessionId.value sessionId) EnvironmentSpec.defaults |> expect
+
 // Pure fold + a local child-process integration — cheap tier, no ports.
 let private commandFoldTests =
     testList "Command execution (local)" [
@@ -416,13 +359,10 @@ let private commandFoldTests =
 
         testCaseAsync "a real command streams its output into the event log (integration)" <|
             async {
-                let registry = Authority.ContainerRegistry ()
                 let sessionId = SessionId.create "cmd-int" |> expect
-                let capabilities = Authority.grant registry (Backends.LocalProcessBackend.create ()) sessionId
                 let log =
                     Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
-                let environment =
-                    Yession.SessionProcess.SessionEnvironment.create log capabilities EnvironmentSpec.localProcess "env-cmd"
+                let environment = hostEnvironment log "cmd-int"
                 let! _ = environment.Ensure None "run a command"
 
                 let! result =
@@ -458,6 +398,66 @@ let private commandFoldTests =
                     |> List.map snd
                 Expect.equal kinds [ "requested"; "started"; "completed" ] "the lifecycle, in order"
             }
+
+        testCaseAsync "a command past its timeout maps to CommandTimedOut and kills the process" <|
+            async {
+                // Timeout is ONE mechanism now — the session races the sandbox handle's
+                // Exited — so this covers every backend.
+                let recorder = SandboxRecorder ()
+                let mutable killed = false
+                let neverEnding : CreateSandbox =
+                    fun _ ->
+                        async {
+                            return
+                                Ok
+                                    { Ref = "never"
+                                      Spawn =
+                                        fun _ _ ->
+                                            async {
+                                                return
+                                                    Ok
+                                                        { WriteStdin = ignore
+                                                          CloseStdin = ignore
+                                                          Kill = fun () -> killed <- true
+                                                          Exited = Async.FromContinuations (fun _ -> ()) }
+                                            }
+                                      Dispose = fun () -> async { recorder.Disposed <- recorder.Disposed + 1 } }
+                        }
+                let sessionId = SessionId.create "cmd-timeout" |> expect
+                let log =
+                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                let environment =
+                    Yession.SessionProcess.SessionEnvironment.create log neverEnding preparedEmptyPolicy "scripted" "env-timeout"
+                let! _ = environment.Ensure None "hang"
+                let! result =
+                    environment.Execute
+                        { nodeCommand "cmd-hang" "unused" with Timeout = Some (TimeSpan.FromMilliseconds 50.0) }
+                        ignore
+                Expect.equal result CommandTimedOut "the timeout fires before the command finishes"
+                Expect.isTrue killed "the timed-out process is killed"
+            }
+
+        testCaseAsync "a host-sandbox command never inherits the session's credentials (leak regression)" <|
+            async {
+                // The old Manager-side spawn merged `process.env` into every command;
+                // this plants a credential there and proves the seam keeps it out.
+                setEnv "ANTHROPIC_API_KEY" "planted-credential"
+                try
+                    let sessionId = SessionId.create "cmd-leak" |> expect
+                    let log =
+                        Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                    let environment = hostEnvironment log "cmd-leak"
+                    let! _ = environment.Ensure None "leak probe"
+                    let mutable output = ""
+                    let! result =
+                        environment.Execute
+                            (nodeCommand "cmd-leak-probe" "console.log('key=' + (process.env.ANTHROPIC_API_KEY || 'absent'))")
+                            (fun c -> output <- output + c.Text)
+                    Expect.equal result (CommandSucceeded 0) "the probe ran"
+                    Expect.isTrue (output.Contains "key=absent") "the planted credential does not reach the command"
+                finally
+                    unsetEnv "ANTHROPIC_API_KEY"
+            }
     ]
 
 let private commandTests =
@@ -477,7 +477,7 @@ let private commandTests =
                                 return AgentCompleted ("ran it", None)
                             | other -> return AgentFailed (sprintf "%A" other)
                         }
-                let m = Manager.create (Some devAgent) (Some (Backends.LocalProcessBackend.create ())) commandPort
+                let m = Manager.create (Some devAgent) (Some hostSandboxFor) commandPort
                 let! _ =
                     m.StartSession
                         { SessionLaunchRequest.SessionId = SessionId.create "cmd-e2e-session" |> expect }
@@ -573,7 +573,7 @@ let private acceptanceE2eTests =
                             onChunk { Text = "done" }
                             return AgentCompleted ("done", None)
                         }
-                let m = Manager.create (Some devAgent) (Some (Backends.LocalProcessBackend.create ())) acceptancePort
+                let m = Manager.create (Some devAgent) (Some hostSandboxFor) acceptancePort
                 let! _ =
                     m.StartSession
                         { SessionLaunchRequest.SessionId = SessionId.create "catchup-session" |> expect }
@@ -614,29 +614,19 @@ let private acceptanceE2eTests =
         // run drops that capability and this reports one skip. Richer coverage lives in the
         // DockerIntegration suite.
         Tag.needs "Docker adapter smoke" [ Tag.Docker ] (fun () ->
-            testCaseAsync "real container start/exec/stop" (async {
-                let registry = Authority.ContainerRegistry ()
-                let sessionId = SessionId.mint ()
-                let capabilities = Authority.grant registry (Backends.DockerBackend.create Yession.Host.SecretStore.SecretResolution.processEnv) sessionId
-                match! capabilities.StartContainer EnvironmentSpec.localProcess with
-                | ContainerStartFailed reason -> failwithf "docker start failed: %s" reason
-                | ContainerStarted handle ->
-                    let mutable output = ""
-                    let! result =
-                        capabilities.Execute
-                            handle
-                            { CommandId = CommandId.create "docker-echo" |> expect
-                              Executable = "echo"
-                              Arguments = [ "hello-from-docker" ]
-                              WorkingDirectory = None
-                              Environment = Map.empty
-                              Timeout = None }
-                            (fun c -> output <- output + c.Text)
-                    Expect.equal result (CommandSucceeded 0) "docker exec succeeded"
-                    Expect.isTrue (output.Contains "hello-from-docker") "docker exec streamed"
-                    match! capabilities.StopContainer handle with
-                    | ContainerStopped -> ()
-                    | ContainerStopFailed reason -> failwithf "docker stop failed: %s" reason
+            testCaseAsync "real container create/spawn/dispose" (async {
+                let name = SessionId.value (SessionId.mint ())
+                let spec = { EnvironmentSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } }
+                let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
+                match! createSandbox (Sandboxes.policyFor DockerBackend Map.empty Map.empty None) with
+                | Error reason -> failwithf "docker sandbox failed: %s" reason
+                | Ok sandbox ->
+                    let! run, out, _ = runInSandbox sandbox "echo" [ "hello-from-docker" ] Map.empty None
+                    Expect.equal run (SandboxExited 0) "docker exec succeeded"
+                    Expect.isTrue (out.Contains "hello-from-docker") "docker exec streamed"
+                    do! sandbox.Dispose ()
+                    let! remaining = Sandboxes.DockerSandbox.countByLabel (sprintf "yession-session=%s" name)
+                    Expect.equal remaining 0 "dispose removed the container"
             }))
     ]
 
@@ -702,8 +692,8 @@ let private persistenceTests =
 
 let tests =
     testList "Phase2" [
-        // Cheap tier: pure folds, in-memory authority, local child-process integration.
-        authorityTests
+        // Cheap tier: pure policy/parse, folds, host-sandbox child-process integration.
+        sandboxPolicyTests
         environmentProjectionTests
         commandFoldTests
         acceptanceTests
