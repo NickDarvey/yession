@@ -271,8 +271,12 @@ let private reconnectOfferTests =
 // into a string check nobody wrote.
 let private shellTests =
     testList "Bootstrap shell" [
+        // Digests the shell merely carries into its asset URLs; this suite is about the
+        // manager meta tag, so any pair does.
+        let assets : AssetDigests = { Bundle = "testbundle01"; Css = "testcss0001" }
+
         let page (managerOrigin: string option) =
-            Yession.Host.Ssr.page sessionId "" managerOrigin representativeModel
+            Yession.Host.Ssr.page sessionId "" managerOrigin assets representativeModel
 
         testCase "a manager origin is emitted as its meta tag" <| fun () ->
             Expect.isTrue

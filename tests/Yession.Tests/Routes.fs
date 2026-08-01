@@ -12,8 +12,13 @@ open Yession.App
 /// this list is what makes it also fail these tests until it is listed.
 let private every =
     [ Shell
-      ClientBundle
-      AppCss
+      // Both forms of a fingerprinted asset: the digested address a built server emits, and
+      // the bare one it falls back to when the build output is missing. The properties below
+      // hold for each, which is what keeps `relative` and `parse` exact inverses.
+      ClientBundle "K3nR7pQx2wL0"
+      ClientBundle ""
+      AppCss "8fZs1mVb4tHc"
+      AppCss ""
       Signal
       Me
       Login
@@ -101,7 +106,7 @@ let private mountTests =
     let mount = "/s/01hx"
     testList "A path-mounted session" [
         testCase "claims its own prefix and nothing outside it" <| fun () ->
-            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/client.js") (Some ClientBundle) "its bundle"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/client.abc123.js") (Some (ClientBundle "abc123")) "its bundle"
             Expect.equal (SessionRoute.parseUnder mount "POST" "/s/01hx/signal") (Some Signal) "its signalling"
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/events/4") (Some (Events 4)) "its event chunks"
             Expect.equal (SessionRoute.parseUnder mount "GET" "/client.js") None "the origin root is not its own"
@@ -113,7 +118,7 @@ let private mountTests =
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx") (Some Shell) "and the bare mount"
 
         testCase "an unmounted session is unchanged" <| fun () ->
-            Expect.equal (SessionRoute.parseUnder "" "GET" "/client.js") (Some ClientBundle) "byte-identical to today"
+            Expect.equal (SessionRoute.parseUnder "" "GET" "/client.abc123.js") (Some (ClientBundle "abc123")) "an origin-root session claims the path as written"
             Expect.equal (SessionRoute.parseUnder "" "GET" "/") (Some Shell) "including its shell"
 
         testCase "what the browser asks for is what the session claims" <| fun () ->

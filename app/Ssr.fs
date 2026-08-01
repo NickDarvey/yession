@@ -102,7 +102,10 @@ let renderModel (model: ClientModel) : string =
 /// the page and in the client bundle resolves against (`SessionRoute.relative` emits
 /// nothing else), so a page rendered without one would ask the origin root for its own
 /// assets. There is no way to render this document and forget it.
-let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (model: ClientModel) : string =
+/// `assets` carries the digests of the bundle and the stylesheet this shell is rendered
+/// against, so the document names the exact bytes the server will hand out. That pairing is
+/// what makes the assets cacheable forever and the shell the only thing that has to be fresh.
+let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (assets: AssetDigests) (model: ClientModel) : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -117,7 +120,7 @@ let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (
          | Some origin -> sprintf "<meta name=\"%s\" content=\"%s\">" Dom.managerMetaName (escapeAttr origin)
          | None -> "")
         "<title>Yession</title>"
-        Style.headTags
+        Style.headTags (SessionRoute.relative (AppCss assets.Css))
         // The ONE inline script in the shell, and the only thing that has to run before first
         // paint: a collapsed sidebar is a stored preference (written by the nav toggle), and
         // applying it from the bundle would paint the sidebar open and then shut it. Desktop
@@ -128,6 +131,6 @@ let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (
         + "document.documentElement.classList.add('nav-alt')}catch(e){}</script>"
         "</head><body>"
         sprintf "<main id=\"%s\" class=\"%s\">%s</main>" Dom.appId Style.app (renderModel model)
-        sprintf "<script type=\"module\" src=\"%s\"></script>" (SessionRoute.relative ClientBundle)
+        sprintf "<script type=\"module\" src=\"%s\"></script>" (SessionRoute.relative (ClientBundle assets.Bundle))
         "</body></html>"
     ]

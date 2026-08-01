@@ -386,7 +386,7 @@ let private uiRenderTests =
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
         testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
-            let html = ManagerUi.page PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            let html = ManagerUi.page "app.css" PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
             Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
             Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
             Expect.isFalse (html.Contains "src=\"http") "no external/CDN scripts (local-first)"
@@ -472,7 +472,14 @@ let private uiFlowTests =
                 // The page serves, self-contained.
                 let! page = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
                 Expect.isTrue (page.Contains Dom.Manager.createSession) "the create form is served"
-                let! css = Interop.getText (baseUrl + "/app.css") |> Async.AwaitPromise
+                // Fetch the stylesheet the PAGE names rather than a path spelled here: it is
+                // addressed by a digest of its own bytes, so a hardcoded URL would be a second
+                // spelling of it, wrong the moment the stylesheet changes. Following the link
+                // is also the stronger assertion — it proves the page and the route agree.
+                let styleSheetUrl =
+                    System.Text.RegularExpressions.Regex.Match(page, "href=\"(app[^\"]*\\.css)\"").Groups.[1].Value
+                Expect.notEqual styleSheetUrl "" "the page names a stylesheet"
+                let! css = Interop.getText (baseUrl + "/" + styleSheetUrl) |> Async.AwaitPromise
                 Expect.isTrue (css.Length > 500) "the shared local stylesheet serves from the endpoint (no CDN)"
 
                 // Create over the form endpoint.
