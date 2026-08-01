@@ -192,4 +192,58 @@ let tests =
                 Expect.equal reported "ship it" "the Host reports the settled title to the Manager hook"
                 do! host.Stop ()
             }
+
+        // Plan 11's dangerous direction. Reaping an idle session costs a relaunch; reaping a
+        // session someone is USING costs their turn and their connection, so the property
+        // that has to hold is that a connected peer keeps the session busy. `Reaper.plan`
+        // covers the Manager's half (it never reaps a launch reported busy); this covers the
+        // half only the Host knows — that a peer arriving and leaving is what moves the
+        // report.
+        //
+        // Synchronised on the Host's OWN completion points, not on the reports under test:
+        // `connectInMemoryClient` returns once the peer is accepted, and
+        // `WaitForNextSessionEnd` resolves once a peer session has torn down — and the busy
+        // report is made inside each of those, before they complete. So every assertion here
+        // reads a list that is already final.
+        //
+        // That distinction is what makes this diagnose rather than merely detect. An earlier
+        // version awaited the REPORT itself; break the busy signal and it hung until the
+        // suite's 240s timeout, which reads as infrastructure trouble rather than as the
+        // property having broken. Waiting on something independent of the thing under test
+        // means a regression fails an assertion, by name, immediately.
+        testCaseAsync "a connected peer holds the session busy; the LAST one leaving releases it" <|
+            async {
+                let reports = ResizeArray<bool> ()
+                let report (busy: bool) = async { reports.Add busy }
+
+                let! host =
+                    Host.startFull (fun () -> None) None None None None None (Some report) (fun _ _ -> ()) None None None (sid ()) None "" None 0
+
+                // A session nobody has attached to is idle from the moment it boots — which
+                // is what lets the Manager's window start at launch rather than at first
+                // visitor, and what makes an abandoned launch collectable at all.
+                Expect.equal (List.ofSeq reports) [ false ] "a freshly booted session reports itself idle"
+
+                let! ada = connectInMemoryClient host "ada" "Ada"
+                Expect.equal (Seq.last reports) true "a peer joining makes the session report busy"
+
+                // A second peer joins and the first leaves: still occupied, so the session
+                // must NOT release. This is the case a naive "someone disconnected, so we are
+                // idle" gets wrong, and it is exactly how a reap lands on a live user.
+                let! bob = connectInMemoryClient host "bob" "Bob"
+                let departed = host.WaitForNextSessionEnd ()
+                do! ada.Channel.Close ()
+                do! departed
+                Expect.isFalse
+                    (Seq.contains false (Seq.skip 1 reports))
+                    "with a peer still attached, a departure must never report idle"
+
+                // The last one leaves, and only now does it release.
+                let lastDeparted = host.WaitForNextSessionEnd ()
+                do! bob.Channel.Close ()
+                do! lastDeparted
+                Expect.equal (Seq.last reports) false "the last peer leaving reports the session idle"
+
+                do! host.Stop ()
+            }
     ]
