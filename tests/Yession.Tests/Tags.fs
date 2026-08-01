@@ -39,6 +39,7 @@ type Need =
     | Docker      // a reachable Docker daemon
     | LiveAgent   // real model credentials
     | Keyring     // a usable OS credential manager (Keychain / Credential Manager / Secret Service)
+    | Nix         // the nix CLI, to evaluate/build this repo's derivations against the working tree
 
 // process.env under Node; the CLR reads it through System.Environment below. Guarded so this
 // branch is dead-code-eliminated out of the .NET build path — jsNative would throw there.
@@ -51,7 +52,7 @@ let private getEnv (name: string) : string =
         match System.Environment.GetEnvironmentVariable name with null -> "" | v -> v
     else jsEnv name
 
-let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring ]
+let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix ]
 
 let private parseNeed (s: string) : Need option =
     match s.Trim().ToLowerInvariant () with
@@ -61,6 +62,7 @@ let private parseNeed (s: string) : Need option =
     | "docker"    -> Some Docker
     | "liveagent" -> Some LiveAgent
     | "keyring"   -> Some Keyring
+    | "nix"       -> Some Nix
     | _           -> None
 
 let private hasCreds =

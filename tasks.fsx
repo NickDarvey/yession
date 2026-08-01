@@ -475,13 +475,13 @@ let private runNodeSuite (target: string) (timeoutMs: int) =
         p.Kill true
         failwith "tests timed out"
 
-// Is a Docker daemon reachable? `docker info` talks to the daemon over the same socket /
-// DOCKER_HOST the dockerode backend uses, so it answers the question the suites care about
-// (not merely "is the socket file there"). No daemon and no CLI both answer false.
-let private dockerReachable () =
+// Ask the box whether it really has a capability, by running the cheapest command that can
+// only succeed if it does. A missing binary, a non-zero exit and a hang all answer false —
+// the caller drops the capability, and its suites report a skip instead of failing.
+let private probeSucceeds (command: string) (arguments: string list) =
     try
-        let psi = ProcessStartInfo "docker"
-        psi.ArgumentList.Add "info"
+        let psi = ProcessStartInfo command
+        arguments |> List.iter psi.ArgumentList.Add
         psi.WorkingDirectory <- repoRoot
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
@@ -491,6 +491,11 @@ let private dockerReachable () =
             p.Kill true
             false
     with _ -> false
+
+// `docker info` talks to the daemon over the same socket / DOCKER_HOST the dockerode backend
+// uses, so it answers the question the suites care about (not merely "is the socket file
+// there").
+let private dockerReachable () = probeSucceeds "docker" [ "info" ]
 
 // `Docker` is the one capability a run cannot know it has just by declaring it — `verify`
 // names the whole set, but a laptop or dev container has no daemon. Probe once and drop it
@@ -505,6 +510,38 @@ let private resolveDocker (caps: string list) : string list =
         eprintfn "check: no Docker daemon reachable — dropping the Docker capability (its suites will report a skip)"
         caps |> List.filter (fun c -> c <> "Docker")
 
+// For Nix the CLI being there is the whole question: the invocations below pass
+// `--extra-experimental-features nix-command` themselves, so a box that never opted into the
+// new CLI still runs the gate rather than failing on an unrecognised subcommand.
+let private nixAvailable () = probeSucceeds "nix" [ "--version" ]
+
+// Same shape as `resolveDocker`, and for the same reason: `verify` names the whole capability
+// set, but plenty of boxes have no Nix. YESSION_REQUIRE_NIX (release.yml) opts out of the drop.
+let private resolveNix (caps: string list) : string list =
+    if not (List.contains "Nix" caps) then caps
+    elif not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "YESSION_REQUIRE_NIX")) then caps
+    elif nixAvailable () then caps
+    else
+        eprintfn "check: no nix CLI on PATH — dropping the Nix capability (its suites will report a skip)"
+        caps |> List.filter (fun c -> c <> "Nix")
+
+// Build the installable from the WORKING TREE and boot it.
+//
+// Every nix build CI runs goes through a flake, and a flake source copy is what git tracks —
+// so no CI job has ever built the tree a developer actually has, and nothing outside this gate
+// notices when the two diverge (a `node_modules` symlink from the dev shell landing in the
+// derivation; a NuGet FOD hash that no longer matches what a restore produces). release.yml's
+// package-nix job stays the check of the pure consumer route; this is the check of yours.
+let private buildNixPackage () =
+    let out =
+        run "nix" [ "build"; "--extra-experimental-features"; "nix-command"
+                    "--file"; "nix/worktree.nix"; "nix"
+                    "--no-link"; "--print-out-paths"; "--print-build-logs" ]
+    let outPath = out.Split '\n' |> Array.last |> fun s -> s.Trim ()
+    // A build is not a boot: the wrapped bins resolve their runtime node_modules and the native
+    // addon out of the store paths this derivation assembled, and only running one proves it.
+    bootSmoke (Path.Combine (outPath, "bin/yession-manager")) []
+
 // A full `verify` spends its first ~80 seconds in restore, build, Fable and stage — tools that
 // are either silent or so chatty their own progress reads as scrollback, so the run looks
 // hung. One line per stage, named for the stage and not the tool, is enough to tell "working"
@@ -512,7 +549,7 @@ let private resolveDocker (caps: string list) : string list =
 let private progress (label: string) = printfn "check: %s" label
 
 let private runCheckOnce (requested: string list) =
-    let caps = resolveDocker requested
+    let caps = requested |> resolveDocker |> resolveNix
     let capSet = Set.ofList caps
     Environment.SetEnvironmentVariable ("YESSION_TEST_CAPS", String.concat " " caps)
     progress (sprintf "capabilities: %s" (if List.isEmpty caps then "none (cheap tier)" else String.concat " " caps))
@@ -543,6 +580,14 @@ let private runCheckOnce (requested: string list) =
         exec esbuild [ "app/out/browser/EditorHarness.js"; "--bundle"; "--format=esm"; "--outfile=tests/browser/out/harness.js" ]
         progress "running the browser suite (.NET CLR)"
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
+
+    // Last, because it is the long pole (a cold NuGet FOD fetch plus the whole compile again,
+    // offline, inside the sandbox) and because the suites are the sharper signal. The Node run
+    // above already asserted what the derivation is allowed to SEE (NixSource.fs); this asserts
+    // that what it sees still builds and boots.
+    if capSet.Contains "Nix" then
+        progress "building the Nix package from the working tree"
+        buildNixPackage ()
 
 // The Keyring-tagged suites need a usable Secret Service. A desktop has one; a headless Linux
 // host (CI, dev containers) has no session bus at all, so `check` wraps ITSELF in a private
@@ -615,7 +660,7 @@ let check (caps: string list) =
     restore ()
     runCheckOnce caps
 
-let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring" ]
+let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix" ]
 
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 
