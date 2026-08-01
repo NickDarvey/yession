@@ -183,7 +183,7 @@ module View =
         let agentRow =
             match model.Claude.Status.AgentAvailable with
             | Some true ->
-                html $"""<div class="{Style.person}" data-agent-presence="live"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]}"></span>agent<span class="{Style.statusOk} ml-auto"><span class="{Style.statusDot}"></span>ready</span></div>"""
+                html $"""<div class="{Style.person}" data-agent-presence="live"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]}"></span>agent<span class="{Style.statusOk} ml-auto"><span class="{Style.statusDot}"></span>ready</span></div>"""
             // What actually happens with no agent: the drain appends the message with no turn
             // (`Scheduler.create` — a `None` runner at drain time), so it is recorded and simply
             // unanswered. The old strip promised messages "will wait", which is not what the
@@ -191,18 +191,18 @@ module View =
             | Some false ->
                 html $"""
                     <div class="{Style.noAgentBlock}" data-agent-presence="absent" data-no-agent>
-                      <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span><span class="{Style.statusRun} ml-auto">no agent</span></div>
+                      <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span><span class="{Style.statusRun} ml-auto">no agent</span></div>
                       <div class="{Style.noAgentPrompt}">
                         <span class="{Style.small}">messages still send — they go unanswered until Claude is connected.</span>
                         <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="prompt" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
                       </div>
                     </div>"""
             | None ->
-                html $"""<div class="{Style.person}" data-agent-presence="unknown"><span class="{Style.cls [ Style.avatar; Style.agentAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span></div>"""
+                html $"""<div class="{Style.person}" data-agent-presence="unknown"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span></div>"""
         html $"""
             <section class="{Style.cls [ Style.sideSection; Style.navLane1 ]}">
               <span class="{Style.label}">in this session</span>
-              <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value model.Peer.PeerId) ]}"></span><span class="truncate" data-display-name>{model.Peer.DisplayName}</span><span class="{Style.label}">you</span></div>
+              <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value model.Peer.PeerId); Style.personAvatar ]}"></span><span class="truncate" data-display-name>{model.Peer.DisplayName}</span><span class="{Style.label} ml-auto">you</span></div>
               {agentRow}
             </section>"""
 

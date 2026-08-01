@@ -232,7 +232,12 @@ module Style =
     let sideSection = "flex flex-col gap-2 py-4 border-t border-hair"
     let sideSectionFirst = "flex flex-col gap-2 pb-4"
     let sideRow = "flex items-baseline justify-between gap-2"
-    let person = "flex items-center gap-2.5 font-light text-[13px] leading-5 text-ink-dim"
+    /// A roster row aligns on the TEXT BASELINE, so the 11px caps ("you", a status) sit on
+    /// the 13px name's baseline instead of floating box-centred beside it.
+    let person = "flex items-baseline gap-2.5 font-light text-[13px] leading-5 text-ink-dim"
+    /// The avatar opts back out: a box has no baseline (it would park its bottom edge on
+    /// the line), so it centres in the row the way it always did.
+    let personAvatar = "self-center"
     let commandCard = "flex flex-col gap-1 px-3 py-2 bg-surface"
 
     let mainColumn = "flex-1 flex flex-col min-w-0 h-full"
