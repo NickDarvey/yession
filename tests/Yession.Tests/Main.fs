@@ -37,7 +37,7 @@ let all =
         Tag.needs "WebRTC E2E" [ Tag.Ports; Tag.Native ] (fun () -> E2E.tests)
         Tag.needs "Client shell E2E" [ Tag.Ports; Tag.Native ] (fun () -> Client.tests)
         Tag.needs "Phase2" [] (fun () -> Phase2.tests)
-        Tag.needs "Docker integration" [] (fun () -> DockerIntegration.tests)
+        Tag.needs "Docker integration" [ Tag.Docker ] (fun () -> DockerIntegration.tests)
         Tag.needs "Phase3" [] (fun () -> Phase3.tests)
         Tag.needs "EventsHttp" [] (fun () -> EventsHttp.tests)
         Tag.needs "Transport resilience" [] (fun () -> Resilience.tests)
@@ -46,6 +46,10 @@ let all =
         Tag.needs "Properties" [] (fun () -> Properties.tests)
         Tag.needs "Acceptance" [] (fun () -> Acceptance.tests)
         Tag.needs "InMemory" [] (fun () -> InMemory.tests)
+        // What the Nix derivations may see of this repo. `Nix` because it evaluates the
+        // derivation for real; it is the only check of a contract every CI route is blind to
+        // (they build flake source copies, which git already filtered).
+        Tag.needs "Nix build source" [ Tag.Nix ] (fun () -> NixSource.tests)
         // The rich editor rendering E2E stands alone: it needs a browser but NOT the native
         // WebRTC host, so it runs wherever Chromium exists ([Browser]). The full two-peer
         // convergence/persistence E2E spawns the real Session Process, so it also needs Native.

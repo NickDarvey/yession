@@ -22,17 +22,17 @@ let private randomVerifier () : string = jsNative
 [<Emit("crypto.subtle.digest('SHA-256', Buffer.from($0, 'ascii')).then(d => Buffer.from(d).toString('base64url'))")>]
 let private s256Challenge (verifier: string) : JS.Promise<string> = jsNative
 
-/// POST a form-encoded grant to a token endpoint. Standard shape for both the
-/// authorization-code and refresh grants; a non-2xx answer becomes an Error with the
-/// provider's body (OAuth error JSON is designed to be shown).
-[<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', 'accept': 'application/json' }, body: $1 })
+/// POST a grant to a token endpoint in the dialect the flow declared (the content type
+/// travels with the body, so the two can never disagree). A non-2xx answer becomes an
+/// Error with the provider's body (OAuth error JSON is designed to be shown).
+[<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': $1, 'accept': 'application/json' }, body: $2 })
   .then(async r => ({ status: r.status, body: await r.text() }))""")>]
-let private postForm (url: string) (body: string) : JS.Promise<{| status: int; body: string |}> = jsNative
+let private postGrant (url: string) (contentType: string) (body: string) : JS.Promise<{| status: int; body: string |}> = jsNative
 
-let private grantAt (tokenUrl: string) (body: string) : Async<Result<string, string>> =
+let private grantAt (tokenUrl: string) (request: TokenRequest) : Async<Result<string, string>> =
     async {
         try
-            let! reply = postForm tokenUrl body |> Async.AwaitPromise
+            let! reply = postGrant tokenUrl request.ContentType request.Body |> Async.AwaitPromise
             if reply.status >= 200 && reply.status < 300 then return Ok reply.body
             else return Error (sprintf "token endpoint refused (%d): %s" reply.status reply.body)
         with e ->
@@ -85,15 +85,16 @@ let create
             | Error e -> return Error e
         }
 
-    let exchange (flow: PendingFlow) (code: string) : Async<Result<unit, string>> =
+    let exchange (flow: PendingFlow) (state: string) (code: string) : Async<Result<unit, string>> =
         async {
             // RFC 6749 §4.1.3: the exchange repeats EXACTLY the redirect_uri the
             // authorize URL carried — the flow's pended one, never re-derived.
-            let body = BrokerFlow.exchangeBody flow.ClientId flow.RedirectUri flow.Verifier code
-            match! grantAt flow.TokenUrl body with
+            let request =
+                BrokerFlow.exchangeRequest flow.Dialect flow.ClientId flow.RedirectUri flow.Verifier state code
+            match! grantAt flow.TokenUrl request with
             | Error e -> return Error e
             | Ok json ->
-                match BrokerFlow.decodeTokenResponse (now ()) flow.TokenUrl flow.ClientId json with
+                match BrokerFlow.decodeTokenResponse (now ()) flow.TokenUrl flow.ClientId flow.Dialect json with
                 | Error e -> return Error (sprintf "token response malformed: %s" e)
                 | Ok grant -> return! storeCredential flow.Target (BrokeredOAuth grant)
         }
@@ -127,7 +128,8 @@ let create
                       TokenUrl = request.TokenUrl
                       ClientId = request.ClientId
                       Scopes = request.Scopes
-                      RedirectUri = flowRedirect }
+                      RedirectUri = flowRedirect
+                      Dialect = request.TokenDialect }
                 return
                     Ok
                         { ControlWire.ConnectionBeginResponse.AuthorizeUrl =
@@ -140,7 +142,7 @@ let create
                 match pending.Take state with
                 | None -> return Error "unknown or expired sign-in flow"
                 | Some flow ->
-                    match! exchange flow code with
+                    match! exchange flow state code with
                     | Ok () -> return Ok flow.Target
                     | Error e -> return Error e
             }
@@ -152,7 +154,7 @@ let create
                 match pasted.Split '#' |> Array.toList with
                 | [ code; state ] | [ code; state; _ ] when state <> "" ->
                     match pending.Take state with
-                    | Some flow when flow.Target = target -> return! exchange flow code
+                    | Some flow when flow.Target = target -> return! exchange flow state code
                     | Some _ -> return Error "pasted code belongs to a different sign-in"
                     | None -> return Error "unknown or expired sign-in flow"
                 | _ -> return Error "expected a pasted code of the form code#state"
@@ -214,14 +216,14 @@ let create
                                 observe (Resolved (target, OAuthConnection, false))
                                 return Ok (OAuthConnection, grant.AccessToken)
                             | Some refreshToken ->
-                                match! grantAt grant.TokenUrl (BrokerFlow.refreshBody grant refreshToken) with
+                                match! grantAt grant.TokenUrl (BrokerFlow.refreshRequest grant refreshToken) with
                                 | Error e ->
                                     // Keep the old entry: the user can reconnect, and the
                                     // stale token may still be honored briefly.
                                     observe (RefreshFailed (target, e))
                                     return Error (sprintf "token refresh failed: %s" e)
                                 | Ok json ->
-                                    match BrokerFlow.decodeTokenResponse (now ()) grant.TokenUrl grant.ClientId json with
+                                    match BrokerFlow.decodeTokenResponse (now ()) grant.TokenUrl grant.ClientId grant.Dialect json with
                                     | Error e ->
                                         observe (RefreshFailed (target, e))
                                         return Error (sprintf "token refresh response malformed: %s" e)

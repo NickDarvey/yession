@@ -29,7 +29,8 @@ let private grant : OAuthGrant =
       RefreshToken = Some "rt-1"
       ExpiresAt = Some (DateTimeOffset.Parse "2026-07-28T12:00:00Z")
       TokenUrl = "http://token.example/oauth"
-      ClientId = "client-1" }
+      ClientId = "client-1"
+      Dialect = FormEncoded }
 
 // --- Pure: envelope codec ----------------------------------------------------------------
 
@@ -49,6 +50,17 @@ let private codecTests =
 
         testCase "unknown kind fails the decode" <| fun () ->
             Expect.isError (BrokeredCredentialCodec.fromString """{"kind":"planet"}""") "unknown kind rejected"
+
+        testCase "the dialect round-trips, and an envelope stored before dialects existed is form-encoded" <| fun () ->
+            let json = BrokeredOAuth { grant with Dialect = JsonEncoded }
+            Expect.equal (BrokeredCredentialCodec.toString json |> BrokeredCredentialCodec.fromString |> expect) json "json dialect survives"
+            // A grant written by an older Manager has no `dialect` field: it must keep
+            // decoding (and refreshing) as the standard rather than fail the whole store.
+            let legacy =
+                """{"kind":"oauth","grant":{"accessToken":"at","refreshToken":null,"expiresAt":null,"tokenUrl":"http://t","clientId":"c"}}"""
+            match BrokeredCredentialCodec.fromString legacy |> expect with
+            | BrokeredOAuth g -> Expect.equal g.Dialect FormEncoded "defaults to the standard"
+            | BrokeredStatic _ -> failwith "expected an oauth envelope"
     ]
 
 // --- Pure: flow logic ----------------------------------------------------------------------
@@ -71,24 +83,51 @@ let private flowTests =
             Expect.isTrue (bare.StartsWith "https://p.example/authorize?") "starts a query when none exists"
 
         testCase "grant bodies are standard form-encoded shapes" <| fun () ->
-            let body = BrokerFlow.exchangeBody "cid" "http://m/cb" "ver" "the-code"
-            Expect.isTrue (body.Contains "grant_type=authorization_code") "exchange grant"
-            Expect.isTrue (body.Contains "code_verifier=ver") "verifier"
-            let refresh = BrokerFlow.refreshBody grant "rt-1"
-            Expect.isTrue (refresh.Contains "grant_type=refresh_token") "refresh grant"
-            Expect.isTrue (refresh.Contains "refresh_token=rt-1") "token"
-            Expect.isTrue (refresh.Contains "client_id=client-1") "client id"
+            let exchange = BrokerFlow.exchangeRequest FormEncoded "cid" "http://m/cb" "ver" "st" "the-code"
+            Expect.equal exchange.ContentType "application/x-www-form-urlencoded" "RFC 6749 §4.1.3"
+            Expect.isTrue (exchange.Body.Contains "grant_type=authorization_code") "exchange grant"
+            Expect.isTrue (exchange.Body.Contains "code_verifier=ver") "verifier"
+            Expect.isFalse (exchange.Body.Contains "state=") "state is not a standard token-request parameter"
+            let refresh = BrokerFlow.refreshRequest grant "rt-1"
+            Expect.equal refresh.ContentType "application/x-www-form-urlencoded" "RFC 6749 §6"
+            Expect.isTrue (refresh.Body.Contains "grant_type=refresh_token") "refresh grant"
+            Expect.isTrue (refresh.Body.Contains "refresh_token=rt-1") "token"
+            Expect.isTrue (refresh.Body.Contains "client_id=client-1") "client id"
+
+        testCase "the json dialect posts a JSON body, with state replayed in it" <| fun () ->
+            // The shape Anthropic's `/v1/oauth/token` requires — a form body there comes
+            // back `invalid_request_error: "Invalid request format"`, which is what broke
+            // every Claude sign-in at the paste step.
+            let exchange = BrokerFlow.exchangeRequest JsonEncoded "cid" "http://m/cb" "ver" "st" "the-code"
+            Expect.equal exchange.ContentType "application/json" "JSON content type"
+            let decoded =
+                Thoth.Json.Decode.fromString
+                    (Thoth.Json.Decode.dict Thoth.Json.Decode.string)
+                    exchange.Body
+                |> expect
+            Expect.equal (Map.tryFind "grant_type" decoded) (Some "authorization_code") "exchange grant"
+            Expect.equal (Map.tryFind "code" decoded) (Some "the-code") "the code"
+            Expect.equal (Map.tryFind "redirect_uri" decoded) (Some "http://m/cb") "redirect repeated"
+            Expect.equal (Map.tryFind "client_id" decoded) (Some "cid") "client id"
+            Expect.equal (Map.tryFind "code_verifier" decoded) (Some "ver") "verifier"
+            Expect.equal (Map.tryFind "state" decoded) (Some "st") "state replayed in the body"
+            // Refresh follows the grant's recorded dialect: a provider that cannot parse
+            // the exchange cannot parse the renewal either.
+            let refresh = BrokerFlow.refreshRequest { grant with Dialect = JsonEncoded } "rt-1"
+            Expect.equal refresh.ContentType "application/json" "refresh matches the exchange"
+            Expect.isTrue (refresh.Body.StartsWith "{") "a JSON object, not a query string"
 
         testCase "token responses decode: full, minimal, and malformed" <| fun () ->
-            let full = BrokerFlow.decodeTokenResponse now "http://t" "cid" """{"access_token":"at","refresh_token":"rt","expires_in":3600}""" |> expect
+            let full = BrokerFlow.decodeTokenResponse now "http://t" "cid" FormEncoded """{"access_token":"at","refresh_token":"rt","expires_in":3600}""" |> expect
             Expect.equal full.AccessToken "at" "access"
             Expect.equal full.RefreshToken (Some "rt") "refresh"
             Expect.equal full.ExpiresAt (Some (now.AddSeconds 3600.0)) "expiry from expires_in"
             Expect.equal full.TokenUrl "http://t" "token url captured"
-            let minimal = BrokerFlow.decodeTokenResponse now "http://t" "cid" """{"access_token":"at"}""" |> expect
+            let minimal = BrokerFlow.decodeTokenResponse now "http://t" "cid" JsonEncoded """{"access_token":"at"}""" |> expect
             Expect.equal minimal.RefreshToken None "no refresh"
             Expect.equal minimal.ExpiresAt None "no expiry"
-            Expect.isError (BrokerFlow.decodeTokenResponse now "http://t" "cid" """{"token":"x"}""") "missing access_token"
+            Expect.equal minimal.Dialect JsonEncoded "the dialect is captured for later refreshes"
+            Expect.isError (BrokerFlow.decodeTokenResponse now "http://t" "cid" FormEncoded """{"token":"x"}""") "missing access_token"
 
         testCase "needsRefresh: due inside the 5-minute margin, never for static or refreshless" <| fun () ->
             let expiring margin = BrokeredOAuth { grant with ExpiresAt = Some (now.AddSeconds margin) }
@@ -108,7 +147,7 @@ let private flowTests =
         testCase "pending flows are single-use and expire" <| fun () ->
             let mutable clock = 0L
             let pending = PendingFlows (fun () -> clock)
-            let flow = { Verifier = "v"; Target = target (UserScope alice); TokenUrl = "t"; ClientId = "c"; Scopes = "s"; RedirectUri = "r" }
+            let flow = { Verifier = "v"; Target = target (UserScope alice); TokenUrl = "t"; ClientId = "c"; Scopes = "s"; RedirectUri = "r"; Dialect = FormEncoded }
             pending.Add "st" flow
             Expect.equal (pending.Take "st") (Some flow) "first take"
             Expect.equal (pending.Take "st") None "single-use"
@@ -126,7 +165,8 @@ let private beginRequest : ControlWire.ConnectionBeginRequest =
       TokenUrl = "https://p.example/token"
       ClientId = "cid"
       Scopes = "a b"
-      RedirectUri = None }
+      RedirectUri = None
+      TokenDialect = FormEncoded }
 
 let private wireTests =
     testList "connection wire codecs" [
@@ -136,6 +176,16 @@ let private wireTests =
             Expect.equal (ControlWire.toString ControlWire.connectionBeginRequest withRedirect |> ControlWire.fromString ControlWire.connectionBeginRequest |> expect) withRedirect "request with a provider redirect"
             let resp : ControlWire.ConnectionBeginResponse = { AuthorizeUrl = "https://u"; State = "st" }
             Expect.equal (ControlWire.toString ControlWire.connectionBeginResponse resp |> ControlWire.fromString ControlWire.connectionBeginResponse |> expect) resp "response"
+
+        testCase "the token dialect crosses the wire, and an older session still means the standard" <| fun () ->
+            let json = { beginRequest with TokenDialect = JsonEncoded }
+            Expect.equal (ControlWire.toString ControlWire.connectionBeginRequest json |> ControlWire.fromString ControlWire.connectionBeginRequest |> expect) json "json dialect survives"
+            // A session built before dialects existed sends no such field; it speaks the
+            // standard, so a newer Manager must read it that way rather than reject it.
+            let older =
+                """{"target":{"scope":{"kind":"user","sub":"alice"},"name":"claude-code"},"authorizeUrl":"https://p.example/authorize?code=true","tokenUrl":"https://p.example/token","clientId":"cid","scopes":"a b"}"""
+            let decoded = ControlWire.fromString ControlWire.connectionBeginRequest older |> expect
+            Expect.equal decoded.TokenDialect FormEncoded "defaults to the standard"
 
         testCase "complete/put/disconnect/resolve round-trip" <| fun () ->
             let complete : ControlWire.ConnectionCompleteRequest = { Target = target (SessionScope sessionA); Code = "c#st" }
@@ -188,6 +238,12 @@ let private claudeTests =
                 [ target (SessionScope sessionA); target (PeerScope peer1) ]
                 "peer actor"
             Expect.equal (ClaudeConnection.turnTargets sessionA ActorRef.Agent) [ target (SessionScope sessionA) ] "agent has no own scope"
+
+        testCase "the begin request declares Anthropic's JSON token dialect" <| fun () ->
+            // Anthropic's token endpoint rejects a standards-correct form body
+            // (`invalid_request_error: "Invalid request format"`), so the session must say
+            // so — the broker has no provider knowledge to fall back on.
+            Expect.equal (ClaudeConnection.beginRequest (target (UserScope alice))).TokenDialect JsonEncoded "json, declared session-side"
     ]
 
 // --- [Ports]: the broker service against a fake token endpoint ------------------------------
@@ -200,21 +256,25 @@ type private HttpReply =
 let private postControl (url: string) (secret: string) (body: string) : JS.Promise<HttpReply> = Util.jsNative
 
 /// A scripted token endpoint: answers every POST with the current `response` (400 when
-/// it is not JSON-shaped) and records the raw form bodies it saw.
+/// it is not JSON-shaped) and records the raw bodies it saw, each with the content type
+/// it arrived under — a real provider accepts only one, so the pairing is the contract.
 type private TokenEndpoint =
     { Url : string
       SetResponse : string -> unit
-      Requests : ResizeArray<string> }
+      Requests : ResizeArray<string>
+      ContentTypes : ResizeArray<string> }
 
 let private startTokenEndpoint () : Async<TokenEndpoint> =
     async {
         let mutable response = """{"access_token":"at-1","refresh_token":"rt-1","expires_in":3600}"""
         let requests = ResizeArray<string> ()
+        let contentTypes = ResizeArray<string> ()
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
             let mutable acc = ""
             req.on ("data", fun chunk -> acc <- acc + Interop.bufferToString chunk) |> ignore
             req.on ("end", fun _ ->
                 requests.Add acc
+                contentTypes.Add (Interop.headerOf req "content-type" |> Option.defaultValue "")
                 let status = if response.StartsWith "{" then 200 else 400
                 res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
                 res.``end`` response) |> ignore
@@ -224,7 +284,8 @@ let private startTokenEndpoint () : Async<TokenEndpoint> =
         return
             { Url = sprintf "http://127.0.0.1:%d/token" (Interop.serverPort listening)
               SetResponse = (fun r -> response <- r)
-              Requests = requests }
+              Requests = requests
+              ContentTypes = contentTypes }
     }
 
 let private openEphemeral () =
@@ -254,6 +315,40 @@ let private brokerTests =
                 Expect.equal (expect resolved) (OAuthConnection, "at-1") "resolves the access token"
                 let! replayed = broker.CompleteCallback began.State "another-code"
                 Expect.isError replayed "single-use state"
+            }
+
+        testCaseAsync "a json-dialect provider gets JSON on both the exchange and the refresh" <|
+            async {
+                // End to end through the broker: the dialect the session declared at begin
+                // decides the content type on the wire, survives into the stored grant, and
+                // still decides it when that grant renews.
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let request = { beginRequest with TokenUrl = endpoint.Url; TokenDialect = JsonEncoded }
+                let! began = broker.Begin request
+                let began = expect began
+                let! completed = broker.Complete request.Target (sprintf "the-code#%s" began.State)
+                expect completed
+                Expect.equal endpoint.ContentTypes.[0] "application/json" "the exchange went out as JSON"
+                Expect.isTrue ((endpoint.Requests.[0]).Contains "\"grant_type\":\"authorization_code\"") "a JSON grant"
+                Expect.isTrue ((endpoint.Requests.[0]).Contains (sprintf "\"state\":\"%s\"" began.State)) "state replayed in the body"
+
+                // Age the stored grant into the refresh margin and resolve: the renewal must
+                // speak the same dialect, or a working sign-in dies at its first expiry.
+                let stored =
+                    BrokeredOAuth
+                        { AccessToken = "at-stale"
+                          RefreshToken = Some "rt-stale"
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = JsonEncoded }
+                let! seeded = store.Set request.Target (BrokeredCredentialCodec.toString stored)
+                expect (seeded |> Result.map ignore)
+                let! resolved = broker.Resolve request.Target
+                Expect.equal (expect resolved) (OAuthConnection, "at-1") "refreshed"
+                Expect.equal endpoint.ContentTypes.[1] "application/json" "the refresh went out as JSON too"
             }
 
         testCaseAsync "a session-supplied redirect URI rides the authorize URL and the exchange (the provider-hosted code page path)" <|
@@ -339,7 +434,8 @@ let private brokerTests =
                           RefreshToken = Some "rt-stale"
                           ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
                           TokenUrl = endpoint.Url
-                          ClientId = "cid" }
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
                 let! _ = store.Set t (BrokeredCredentialCodec.toString stale)
                 endpoint.SetResponse """{"access_token":"at-fresh","expires_in":3600}"""
                 let! resolved = broker.Resolve t
@@ -368,7 +464,8 @@ let private brokerTests =
                           RefreshToken = Some "rt-stale"
                           ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
                           TokenUrl = endpoint.Url
-                          ClientId = "cid" }
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
                 let! _ = store.Set t (BrokeredCredentialCodec.toString stale)
                 endpoint.SetResponse "refused"
                 let! resolved = broker.Resolve t

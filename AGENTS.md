@@ -64,6 +64,13 @@ Every Yession build function lives in `tasks.fsx` — the complete, standalone b
 workflows, and the Nix `outputs` are thin wrappers over it — throw devenv and CI away and
 `dotnet fsi tasks.fsx <verb>` still drives everything.
 
+The derivations themselves (`nix/packages.nix`) have three consumers, and the difference
+between them is which SOURCE they build: `flake.nix` and `devenv.nix` both build a store copy
+of the repo (git-filtered for the flake, whole-directory for devenv), while
+`nix/worktree.nix` evaluates in place, against the tree as it stands — `nix build --file
+nix/worktree.nix nix|npm|staged|nugetDeps`. That last route is what `check Nix` drives and the
+only one that can catch a `src` filter that has stopped matching what git tracks.
+
 **No new helper scripts.** New build/dev/repo functionality is a `tasks.fsx` verb, not a shell
 script. Only glue that must run where `dotnet` cannot stays outside, and the one existing
 script is exactly that: `.claude/setup.sh` runs before Nix/devenv exist. Everything else —
@@ -178,8 +185,10 @@ check Browser                # + host-free rich-editor E2E. Needs only Chromium.
 check Ports Native           # + WebRTC/host suites. Need the node-datachannel addon.
 check Keyring                # + the OS-credential-manager suite. Headless, check re-execs
                              #   itself under a private D-Bus session + gnome-keyring.
-verify                       # == check Browser Ports Native Docker LiveAgent Keyring. Release
-                             #    gate; what CI runs on master.
+check Nix                    # + the build-source contract, then builds the installable from
+                             #   the WORKING TREE and boots it. Minutes; the only gate on it.
+verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix.
+                             #    Release gate; what CI runs on master.
 lint                         # actionlint over .github/workflows. Runs first in the PR gate.
 ```
 
@@ -195,11 +204,23 @@ Capabilities:
   Present under Nix (built from source, baked into the `nodeModules` derivation the dev shell
   symlinks in), so `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC
   data-channel E2E) RUN here. Outside Nix the addon is absent and they skip cleanly.
-- `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
+- `Docker` — a reachable daemon. Declaring it is not claiming it: `check` probes with
+  `docker info` and DROPS the cap when nothing answers, so a daemon-less `verify` reports
+  the Docker suites as skips rather than running them empty. `YESSION_REQUIRE_DOCKER`
+  (release.yml) keeps the cap regardless, so a gate promised a daemon fails instead.
+- `LiveAgent` — real model credentials.
 - `Keyring` — a usable OS credential manager (the secrets KEK lives there). On a desktop,
   `check Keyring` drives the genuine Keychain / Credential Manager / Secret Service; headless
   (this container, CI), it re-execs itself under a private D-Bus session + gnome-keyring
   unlocked with an empty password (both from devenv).
+- `Nix` — the nix CLI (probed like Docker, dropped when absent; `YESSION_REQUIRE_NIX` keeps
+  it). Covers the ONE thing no CI job can: the derivations built against the WORKING TREE.
+  Every CI route (`nix build .#yession`, darwin-package, package-nix) evaluates a flake, whose
+  source copy git already filtered — so a `src` filter that lets the dev shell's `node_modules`
+  symlink or 176MB of `obj/`/Fable output into the derivation is green everywhere in CI and
+  broken on the laptop. `check Nix` asserts the source contract (`NixSource.fs`), then builds
+  `nix/worktree.nix` and boot-smokes the result — which is also what re-checks the NuGet FOD
+  hash, the other thing a devenv-only `check` cannot see.
 
 To eyeball a rich-editor change in a real browser without any of the WebRTC machinery:
 `check Browser` (drives Chromium against `tests/browser/editor-harness.html`). The full

@@ -43,6 +43,11 @@ Every Docker session gets a named volume (= the session id) mounted at the worki
 by design; a crash-leftover container of the same name is force-removed before re-create.
 
 ### The gate is now hard in CI
+> Superseded: `Support.Docker.gate` is gone. The daemon gate is now the `Docker` capability
+> itself — `check` probes for a daemon and drops the cap when there is none, so the suites
+> report a Pyxpecto `ignored` skip through `Tag.needs [Docker]`. `YESSION_REQUIRE_DOCKER`
+> still keeps the cap (and so the hard failure) on the release gate. Original text below.
+
 `Support.Docker.gate` replaces the silent no-op: daemon present → run; absent under
 `YESSION_REQUIRE_DOCKER` (set on the `verify` job) → **fail**; absent otherwise → reported
 skip. The suite sits under `Tag.verify`, so the cheap PR tier never reaches it. The `verify`

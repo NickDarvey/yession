@@ -24,6 +24,14 @@ in
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
 
+  # devenv's CLI-vs-modules skew banner, printed on EVERY task invocation, can never be
+  # actionable here: the CLI always comes from the pinned nixpkgs (`nix profile install
+  # nixpkgs#devenv` in both workflows, and .claude/setup.sh does the same), so nobody in this
+  # repo picks a devenv version to keep in sync. Worse, it currently misfires — nixpkgs' devenv
+  # 2.2.0 source ships a stale `src/modules/latest-version` reading 2.1.2, so the banner fires
+  # against devenv's own source and `devenv update` cannot silence it.
+  devenv.warnOnNewVersion = false;
+
   # Point node_modules at the Nix-built tree (addon baked in). Idempotent; replaces a stale
   # symlink or a leftover npm-installed dir. `restore` then skips `npm install` (dir present).
   enterShell = ''
@@ -32,7 +40,14 @@ in
       ln -s ${yession.nodeModules}/node_modules node_modules
     fi
     export PATH="$PWD/node_modules/.bin:$PATH"
-    echo "yession — tasks: restore build start dev check verify lint package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring)"
+    # The task list orients someone who just landed in the shell. In front of a one-off
+    # `devenv shell -- <task>` it is pure noise, printed above every check, build and CI log.
+    # devenv says which this is: DEVENV_CMDLINE is a bare `shell` interactively, `shell -- …`
+    # for a task.
+    case "''${DEVENV_CMDLINE:-}" in
+      *" -- "*) ;;
+      *) echo "yession — tasks: restore build start dev check verify lint package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring Nix)" ;;
+    esac
   '';
 
   # --- build outputs (devenv build outputs.<name>) -------------------------------------------

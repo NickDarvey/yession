@@ -39,13 +39,20 @@ let private redirectUri = "https://console.anthropic.com/oauth/code/callback"
 let private scopes = "org:create_api_key user:profile user:inference"
 
 /// The broker request for one sign-in flow: Claude's endpoints as data.
+///
+/// `JsonEncoded` is one of those facts, not a broker default: Anthropic's token endpoint
+/// answers a standards-correct form body with
+/// `invalid_request_error: "Invalid request format"`, and its own clients (the Anthropic
+/// SDK's `userOAuthProvider`, `claude /login`) post JSON — with `state` replayed in the
+/// body, which the dialect carries.
 let beginRequest (target: SecretId) : ControlWire.ConnectionBeginRequest =
     { Target = target
       AuthorizeUrl = envOr "YESSION_CLAUDE_AUTHORIZE_URL" authorizeUrl
       TokenUrl = envOr "YESSION_CLAUDE_TOKEN_URL" tokenUrl
       ClientId = envOr "YESSION_CLAUDE_CLIENT_ID" clientId
       Scopes = scopes
-      RedirectUri = Some (envOr "YESSION_CLAUDE_REDIRECT_URI" redirectUri) }
+      RedirectUri = Some (envOr "YESSION_CLAUDE_REDIRECT_URI" redirectUri)
+      TokenDialect = JsonEncoded }
 
 /// Validate a pasted static credential: a `claude setup-token` token
 /// (`sk-ant-oat01-…`) or a Console API key (`sk-ant-…`). Anything else is a paste

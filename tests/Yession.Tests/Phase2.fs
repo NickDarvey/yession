@@ -609,11 +609,12 @@ let private acceptanceE2eTests =
                 do! m.Stop ()
             }
 
-        // The daemon gate replaces the old silent no-op: present -> run; required-but-absent
-        // -> fail; absent -> reported skip (see Support.Docker.gate). Richer coverage lives
-        // in the DockerIntegration suite.
-        Docker.gate "Docker adapter smoke (real container start/exec/stop)" (fun () ->
-            async {
+        // The one case in this suite that needs a real daemon, so it carries the `Docker` tag
+        // itself rather than the suite (everything above is cheap-tier). Absent a daemon the
+        // run drops that capability and this reports one skip. Richer coverage lives in the
+        // DockerIntegration suite.
+        Tag.needs "Docker adapter smoke" [ Tag.Docker ] (fun () ->
+            testCaseAsync "real container start/exec/stop" (async {
                 let registry = Authority.ContainerRegistry ()
                 let sessionId = SessionId.mint ()
                 let capabilities = Authority.grant registry (Backends.DockerBackend.create Yession.Host.SecretStore.SecretResolution.processEnv) sessionId
@@ -636,7 +637,7 @@ let private acceptanceE2eTests =
                     match! capabilities.StopContainer handle with
                     | ContainerStopped -> ()
                     | ContainerStopFailed reason -> failwithf "docker stop failed: %s" reason
-            })
+            }))
     ]
 
 // -----------------------------------------------------------------------------

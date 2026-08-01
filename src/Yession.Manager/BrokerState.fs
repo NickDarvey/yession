@@ -15,15 +15,45 @@ open Thoth.Json.Net
 /// and the pending-flow bookkeeping. Refresh tokens exist in `OAuthGrant` and nowhere a
 /// session process can reach — enforcement by placement.
 
-/// Tokens from a standard authorization-code or refresh grant, plus the two facts a
-/// later refresh needs (`TokenUrl`, `ClientId`) captured at exchange time, so refreshing
-/// never depends on session-supplied config again.
+/// How a provider's token endpoint wants a grant request encoded. RFC 6749 §4.1.3 says
+/// `application/x-www-form-urlencoded`, and that stays the default — but real providers
+/// deviate, and a broker that can only speak the standard cannot broker them. Anthropic's
+/// `/v1/oauth/token` is one: a form body comes back
+/// `invalid_request_error: "Invalid request format"`, and its own clients post JSON.
+///
+/// The SESSION declares which dialect its provider speaks, exactly like the endpoints and
+/// client id it already supplies as data — so the broker stays service-agnostic (it still
+/// never learns WHICH service it brokered) and provider knowledge stays session-side.
+type TokenRequestDialect =
+    | FormEncoded
+    | JsonEncoded
+
+module TokenRequestDialect =
+
+    let describe (dialect: TokenRequestDialect) : string =
+        match dialect with
+        | FormEncoded -> "form"
+        | JsonEncoded -> "json"
+
+    let ofString (raw: string) : TokenRequestDialect =
+        match raw with
+        | "json" -> JsonEncoded
+        | _ -> FormEncoded
+
+/// One grant request, ready to POST: the dialect decides both halves, so a caller can
+/// never pair a JSON body with a form content type.
+type TokenRequest = { ContentType : string; Body : string }
+
+/// Tokens from a standard authorization-code or refresh grant, plus the facts a later
+/// refresh needs (`TokenUrl`, `ClientId`, and the `Dialect` the provider speaks) captured
+/// at exchange time, so refreshing never depends on session-supplied config again.
 type OAuthGrant =
     { AccessToken : string
       RefreshToken : string option
       ExpiresAt : DateTimeOffset option
       TokenUrl : string
-      ClientId : string }
+      ClientId : string
+      Dialect : TokenRequestDialect }
 
 /// What the broker stores: brokered OAuth tokens it can refresh, or a pasted static
 /// token/key it returns verbatim and never touches.
@@ -41,14 +71,21 @@ module BrokeredCredentialCodec =
                       "refreshToken", Encode.option Encode.string g.RefreshToken
                       "expiresAt", Encode.option Codec.timestamp.Encode g.ExpiresAt
                       "tokenUrl", Encode.string g.TokenUrl
-                      "clientId", Encode.string g.ClientId ]
+                      "clientId", Encode.string g.ClientId
+                      "dialect", Encode.string (TokenRequestDialect.describe g.Dialect) ]
           Decode =
             Decode.object (fun get ->
                 { OAuthGrant.AccessToken = get.Required.Field "accessToken" Decode.string
                   OAuthGrant.RefreshToken = get.Required.Field "refreshToken" (Decode.option Decode.string)
                   OAuthGrant.ExpiresAt = get.Required.Field "expiresAt" (Decode.option Codec.timestamp.Decode)
                   OAuthGrant.TokenUrl = get.Required.Field "tokenUrl" Decode.string
-                  OAuthGrant.ClientId = get.Required.Field "clientId" Decode.string }) }
+                  OAuthGrant.ClientId = get.Required.Field "clientId" Decode.string
+                  // Optional: envelopes stored before dialects existed are form-encoded
+                  // by construction, and must keep refreshing rather than fail to decode.
+                  OAuthGrant.Dialect =
+                    get.Optional.Field "dialect" Decode.string
+                    |> Option.map TokenRequestDialect.ofString
+                    |> Option.defaultValue FormEncoded }) }
 
     let credential : Codec<BrokeredCredential> =
         { Encode =
@@ -100,19 +137,51 @@ module BrokerFlow =
               "code_challenge", challenge
               "code_challenge_method", "S256" ]
 
-    /// The `application/x-www-form-urlencoded` body of a standard authorization-code
-    /// grant (RFC 6749 §4.1.3 + RFC 7636 §4.5).
-    let exchangeBody (clientId: string) (redirectUri: string) (verifier: string) (code: string) : string =
-        query
-            [ "grant_type", "authorization_code"
-              "code", code
-              "redirect_uri", redirectUri
-              "client_id", clientId
-              "code_verifier", verifier ]
+    /// The same parameters in whichever dialect the provider speaks. The parameter NAMES
+    /// are the standard ones in both — only the envelope differs.
+    let private encoded (dialect: TokenRequestDialect) (parameters: (string * string) list) : TokenRequest =
+        match dialect with
+        | FormEncoded ->
+            { ContentType = "application/x-www-form-urlencoded"
+              Body = query parameters }
+        | JsonEncoded ->
+            { ContentType = "application/json"
+              Body =
+                parameters
+                |> List.map (fun (k, v) -> k, Encode.string v)
+                |> Encode.object
+                |> Encode.toString 0 }
 
-    /// The body of a standard refresh grant (RFC 6749 §6).
-    let refreshBody (grant: OAuthGrant) (refreshToken: string) : string =
-        query
+    /// An authorization-code grant (RFC 6749 §4.1.3 + RFC 7636 §4.5).
+    ///
+    /// `state` is NOT a standard token-request parameter and never rides the form dialect.
+    /// The JSON dialect carries it because the providers that need JSON also expect it
+    /// replayed here — it is why their code-display pages hand the human `code#state` at
+    /// all — and a JSON provider is already off-standard by definition.
+    let exchangeRequest
+        (dialect: TokenRequestDialect)
+        (clientId: string)
+        (redirectUri: string)
+        (verifier: string)
+        (state: string)
+        (code: string)
+        : TokenRequest =
+        encoded
+            dialect
+            [ yield "grant_type", "authorization_code"
+              yield "code", code
+              yield "redirect_uri", redirectUri
+              yield "client_id", clientId
+              yield "code_verifier", verifier
+              match dialect with
+              | JsonEncoded -> yield "state", state
+              | FormEncoded -> () ]
+
+    /// A refresh grant (RFC 6749 §6), in the dialect the grant recorded at exchange time —
+    /// a provider that would not parse the exchange will not parse the refresh either.
+    let refreshRequest (grant: OAuthGrant) (refreshToken: string) : TokenRequest =
+        encoded
+            grant.Dialect
             [ "grant_type", "refresh_token"
               "refresh_token", refreshToken
               "client_id", grant.ClientId ]
@@ -123,6 +192,7 @@ module BrokerFlow =
         (now: DateTimeOffset)
         (tokenUrl: string)
         (clientId: string)
+        (dialect: TokenRequestDialect)
         (json: string)
         : Result<OAuthGrant, string> =
         let decoder =
@@ -133,7 +203,8 @@ module BrokerFlow =
                     get.Optional.Field "expires_in" Decode.float
                     |> Option.map (fun seconds -> now.AddSeconds seconds)
                   OAuthGrant.TokenUrl = tokenUrl
-                  OAuthGrant.ClientId = clientId })
+                  OAuthGrant.ClientId = clientId
+                  OAuthGrant.Dialect = dialect })
         Decode.fromString decoder json
 
     /// A refresh response may omit `refresh_token`; the previous one stays valid then
@@ -180,7 +251,10 @@ type PendingFlow =
       TokenUrl : string
       ClientId : string
       Scopes : string
-      RedirectUri : string }
+      RedirectUri : string
+      /// The dialect the session declared at begin; the exchange (and every later
+      /// refresh, through the grant) speaks it.
+      Dialect : TokenRequestDialect }
 
 /// Flows redirected to a provider and not yet called back. Single-use and short-lived
 /// (10 minutes — the human is clicking through a consent screen, not parking a tab);

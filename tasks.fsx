@@ -215,11 +215,35 @@ let private defaultVersion () =
 
 // --- compile: F# -> JS (both entries), the browser client bundle, and the stylesheet --------
 
+// Fable copies each referenced package's `fable/` folder into `<out>/fable_modules/<pkg>`
+// verbatim, package.json included — and a package whose manifest omits `"type"` (Fable.Lit
+// 1.4.2 is the one) shadows the repo root's `"type": "module"` for everything beneath it. Node
+// then has to reparse each of those files to discover they are ESM after all, and says so:
+// eighteen five-line MODULE_TYPELESS_PACKAGE_JSON warnings per run, about a tree that is ESM
+// and always was. Stamp the field the manifest should have carried. Idempotent, and re-run
+// after every Fable invocation because a recompile restores the package's own copy.
+let private declareEsm (outDir: string) =
+    let modules = Path.Combine (repoRoot, outDir, "fable_modules")
+    if Directory.Exists modules then
+        for manifest in Directory.GetFiles (modules, "package.json", SearchOption.AllDirectories) do
+            let node = Text.Json.Nodes.JsonNode.Parse (File.ReadAllText manifest)
+            if isNull node.["type"] then
+                node.["type"] <- Text.Json.Nodes.JsonValue.Create "module"
+                let options = Text.Json.JsonSerializerOptions (WriteIndented = true)
+                File.WriteAllText (manifest, node.ToJsonString options + "\n")
+
+/// Compile an F# project to JS. `quiet` captures Fable's banner — the build verbs print their
+/// own one-line progress; `check` streams it.
+let private fable (quiet: bool) (project: string) (outDir: string) =
+    if quiet then run "dotnet" [ "fable"; project; "-o"; outDir ] |> ignore
+    else exec "dotnet" [ "fable"; project; "-o"; outDir ]
+    declareEsm outDir
+
 let compile () =
     printfn "compiling F# -> JS"
     run "dotnet" [ "build"; "Yession.slnx" ] |> ignore
-    run "dotnet" [ "fable"; "app/main/Yession.Host.Main.fsproj"; "-o"; "app/out" ] |> ignore
-    run "dotnet" [ "fable"; "app/browser/Yession.Browser.fsproj"; "-o"; "app/out/browser" ] |> ignore
+    fable true "app/main/Yession.Host.Main.fsproj" "app/out"
+    fable true "app/browser/Yession.Browser.fsproj" "app/out/browser"
     run esbuild [ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--minify"; "--outfile=app/out/public/client.js" ] |> ignore
     // Tailwind, built locally into a served stylesheet (no CDN); scans the F# sources.
     run tailwind [ "-i"; "app/tailwind.css"; "-o"; "app/out/public/app.css"; "--minify" ] |> ignore
@@ -451,22 +475,102 @@ let private runNodeSuite (target: string) (timeoutMs: int) =
         p.Kill true
         failwith "tests timed out"
 
-let private runCheckOnce (caps: string list) =
+// Ask the box whether it really has a capability, by running the cheapest command that can
+// only succeed if it does. A missing binary, a non-zero exit and a hang all answer false —
+// the caller drops the capability, and its suites report a skip instead of failing.
+let private probeSucceeds (command: string) (arguments: string list) =
+    try
+        let psi = ProcessStartInfo command
+        arguments |> List.iter psi.ArgumentList.Add
+        psi.WorkingDirectory <- repoRoot
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        use p = Process.Start psi
+        if p.WaitForExit 30000 then p.ExitCode = 0
+        else
+            p.Kill true
+            false
+    with _ -> false
+
+// `docker info` talks to the daemon over the same socket / DOCKER_HOST the dockerode backend
+// uses, so it answers the question the suites care about (not merely "is the socket file
+// there").
+let private dockerReachable () = probeSucceeds "docker" [ "info" ]
+
+// `Docker` is the one capability a run cannot know it has just by declaring it — `verify`
+// names the whole set, but a laptop or dev container has no daemon. Probe once and drop it
+// when absent, so the Docker suites report a real skip through `Tag.needs` instead of running
+// and passing empty. YESSION_REQUIRE_DOCKER (release.yml sets it) opts OUT of the drop: a gate
+// that was promised a daemon must fail loudly, never quietly skip its way to green.
+let private resolveDocker (caps: string list) : string list =
+    if not (List.contains "Docker" caps) then caps
+    elif not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "YESSION_REQUIRE_DOCKER")) then caps
+    elif dockerReachable () then caps
+    else
+        eprintfn "check: no Docker daemon reachable — dropping the Docker capability (its suites will report a skip)"
+        caps |> List.filter (fun c -> c <> "Docker")
+
+// For Nix the CLI being there is the whole question: the invocations below pass
+// `--extra-experimental-features nix-command` themselves, so a box that never opted into the
+// new CLI still runs the gate rather than failing on an unrecognised subcommand.
+let private nixAvailable () = probeSucceeds "nix" [ "--version" ]
+
+// Same shape as `resolveDocker`, and for the same reason: `verify` names the whole capability
+// set, but plenty of boxes have no Nix. YESSION_REQUIRE_NIX (release.yml) opts out of the drop.
+let private resolveNix (caps: string list) : string list =
+    if not (List.contains "Nix" caps) then caps
+    elif not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "YESSION_REQUIRE_NIX")) then caps
+    elif nixAvailable () then caps
+    else
+        eprintfn "check: no nix CLI on PATH — dropping the Nix capability (its suites will report a skip)"
+        caps |> List.filter (fun c -> c <> "Nix")
+
+// Build the installable from the WORKING TREE and boot it.
+//
+// Every nix build CI runs goes through a flake, and a flake source copy is what git tracks —
+// so no CI job has ever built the tree a developer actually has, and nothing outside this gate
+// notices when the two diverge (a `node_modules` symlink from the dev shell landing in the
+// derivation; a NuGet FOD hash that no longer matches what a restore produces). release.yml's
+// package-nix job stays the check of the pure consumer route; this is the check of yours.
+let private buildNixPackage () =
+    let out =
+        run "nix" [ "build"; "--extra-experimental-features"; "nix-command"
+                    "--file"; "nix/worktree.nix"; "nix"
+                    "--no-link"; "--print-out-paths"; "--print-build-logs" ]
+    let outPath = out.Split '\n' |> Array.last |> fun s -> s.Trim ()
+    // A build is not a boot: the wrapped bins resolve their runtime node_modules and the native
+    // addon out of the store paths this derivation assembled, and only running one proves it.
+    bootSmoke (Path.Combine (outPath, "bin/yession-manager")) []
+
+// A full `verify` spends its first ~80 seconds in restore, build, Fable and stage — tools that
+// are either silent or so chatty their own progress reads as scrollback, so the run looks
+// hung. One line per stage, named for the stage and not the tool, is enough to tell "working"
+// from "wedged"; the stages the caps skip never announce themselves.
+let private progress (label: string) = printfn "check: %s" label
+
+let private runCheckOnce (requested: string list) =
+    let caps = requested |> resolveDocker |> resolveNix
     let capSet = Set.ofList caps
     Environment.SetEnvironmentVariable ("YESSION_TEST_CAPS", String.concat " " caps)
+    progress (sprintf "capabilities: %s" (if List.isEmpty caps then "none (cheap tier)" else String.concat " " caps))
+    progress "building the solution"
     exec "dotnet" [ "build"; "Yession.slnx" ]
 
     // Browser output feeds both the host-spawning Node suites and the editor Browser E2E.
     if hasAny capSet [ "Ports"; "Native"; "Docker"; "LiveAgent"; "Browser" ] then
-        exec "dotnet" [ "fable"; "app/browser/Yession.Browser.fsproj"; "-o"; "app/out/browser" ]
+        progress "compiling the browser client"
+        fable false "app/browser/Yession.Browser.fsproj" "app/out/browser"
 
     // Host-spawning Node suites drive the assembled npm package — stage it (compile + bundle).
     // `test` names what this build is; the suites assert the bins report it back.
     if hasAny capSet [ "Ports"; "Native"; "Docker"; "LiveAgent" ] then
+        progress "staging the npm package"
         stage "test"
 
     // The Node (Fable/JS) path — always runs; self-skips suites whose caps/runtime don't match.
-    exec "dotnet" [ "fable"; "tests/Yession.Tests/Yession.Tests.fsproj"; "-o"; "tests/Yession.Tests/out" ]
+    progress "compiling the suite"
+    fable false "tests/Yession.Tests/Yession.Tests.fsproj" "tests/Yession.Tests/out"
+    progress "running the Node suite"
     runNodeSuite "tests/Yession.Tests/out/Main.js" 240000
 
     // The .NET CLR (Playwright) path — only when a Browser-tagged suite is enabled.
@@ -474,7 +578,16 @@ let private runCheckOnce (caps: string list) =
         ensureBrowser ()
         Directory.CreateDirectory (Path.Combine (repoRoot, "tests/browser/out")) |> ignore
         exec esbuild [ "app/out/browser/EditorHarness.js"; "--bundle"; "--format=esm"; "--outfile=tests/browser/out/harness.js" ]
+        progress "running the browser suite (.NET CLR)"
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
+
+    // Last, because it is the long pole (a cold NuGet FOD fetch plus the whole compile again,
+    // offline, inside the sandbox) and because the suites are the sharper signal. The Node run
+    // above already asserted what the derivation is allowed to SEE (NixSource.fs); this asserts
+    // that what it sees still builds and boots.
+    if capSet.Contains "Nix" then
+        progress "building the Nix package from the working tree"
+        buildNixPackage ()
 
 // The Keyring-tagged suites need a usable Secret Service. A desktop has one; a headless Linux
 // host (CI, dev containers) has no session bus at all, so `check` wraps ITSELF in a private
@@ -499,6 +612,14 @@ exec "$dbus_bin" --config-file="$session_conf" "\${args[@]}"
 SHIM
 chmod +x "$shim_dir/dbus-daemon-shim"
 
+# dbus-daemon always tries to raise RLIMIT_NOFILE to 65536 and says so when it cannot. Here it
+# never can — the container's hard limit is 4096 and raising it needs CAP_SYS_RESOURCE — and the
+# daemon carries on regardless, but the line lands third in every `check Keyring` looking like a
+# hard failure. Drop that ONE pattern and let every other word reach stderr.
+#
+# The filter sits out here, on dbus-run-session, and NOT inside the shim: a process substitution
+# in the shim would hand `grep` a copy of the fd dbus-daemon prints the bus address on, so
+# dbus-run-session would wait forever for an EOF that a live grep is holding open.
 exec dbus-run-session --dbus-daemon="$shim_dir/dbus-daemon-shim" -- bash -euo pipefail -c '
   # An isolated keyring home so runs never touch (or depend on) a real user keyring.
   export XDG_DATA_HOME="$(mktemp -d)"
@@ -509,7 +630,7 @@ exec dbus-run-session --dbus-daemon="$shim_dir/dbus-daemon-shim" -- bash -euo pi
   # creates + unlocks the login collection and its "default" alias on first run.
   eval "$(printf "\n" | gnome-keyring-daemon --unlock | sed "s/^/export /")"
   exec "$@"
-' -- "$@"
+' -- "$@" 2> >(grep --line-buffered -v 'Failed to set fd limit to' >&2)
 """
 
 let private needsKeyringWrap (caps: string list) =
@@ -539,7 +660,7 @@ let check (caps: string list) =
     restore ()
     runCheckOnce caps
 
-let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring" ]
+let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix" ]
 
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 
