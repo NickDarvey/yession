@@ -92,6 +92,15 @@ let private canRun (need: Need list) : bool =
     onDotnet = runsOnDotnet need
     && need |> List.forall (fun n -> Set.contains n caps)
 
+/// What this run actually has, for the skip line. A cap can be missing because it was never
+/// declared OR because the run declared it and then dropped it (no credentials, no daemon), so
+/// the reason reports the resolved set rather than claiming anything about `YESSION_TEST_CAPS`
+/// — a skip that said "not in YESSION_TEST_CAPS" about a cap that WAS in it sent one reader
+/// hunting a cap-propagation bug that did not exist.
+let private declared : string =
+    if Set.isEmpty caps then "none"
+    else caps |> Set.toList |> List.map (sprintf "%A") |> String.concat ", "
+
 let private reason (need: Need list) : string =
     if onDotnet <> runsOnDotnet need then
         if onDotnet then "runs on Node (Fable/JS), not the .NET CLR"
@@ -101,10 +110,15 @@ let private reason (need: Need list) : string =
         |> List.filter (fun n -> not (Set.contains n caps))
         |> List.map (sprintf "%A")
         |> String.concat ", "
-        |> sprintf "needs %s (not in YESSION_TEST_CAPS)"
+        |> fun missing -> sprintf "needs %s (this run has: %s)" missing declared
 
 /// Include a suite only when the current run can satisfy its needs; otherwise stand in one
 /// visible skip labelled with why. The suite thunk is forced only when it will run.
+///
+/// The stand-in is `ptestCase` (Pyxpecto `Pending`), NOT a passing no-op: it lands in the
+/// run's `ignored` count instead of inflating `passed`, so the tail of a run says how much of
+/// the suite never executed. A skip that reports itself as a pass is indistinguishable from
+/// coverage, which is how a daemon-less `verify` used to print `383 passed, 0 ignored`.
 let needs (label: string) (need: Need list) (suite: unit -> TestCase) : TestCase =
     if canRun need then suite ()
-    else testList label [ testCase (sprintf "skipped: %s" (reason need)) <| fun () -> () ]
+    else testList label [ ptestCase (sprintf "skipped: %s" (reason need)) <| fun () -> () ]

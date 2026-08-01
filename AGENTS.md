@@ -195,7 +195,11 @@ Capabilities:
   Present under Nix (built from source, baked into the `nodeModules` derivation the dev shell
   symlinks in), so `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC
   data-channel E2E) RUN here. Outside Nix the addon is absent and they skip cleanly.
-- `Docker` — a reachable daemon. `LiveAgent` — real model credentials.
+- `Docker` — a reachable daemon. Declaring it is not claiming it: `check` probes with
+  `docker info` and DROPS the cap when nothing answers, so a daemon-less `verify` reports
+  the Docker suites as skips rather than running them empty. `YESSION_REQUIRE_DOCKER`
+  (release.yml) keeps the cap regardless, so a gate promised a daemon fails instead.
+- `LiveAgent` — real model credentials.
 - `Keyring` — a usable OS credential manager (the secrets KEK lives there). On a desktop,
   `check Keyring` drives the genuine Keychain / Credential Manager / Secret Service; headless
   (this container, CI), it re-execs itself under a private D-Bus session + gnome-keyring
