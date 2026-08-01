@@ -23,9 +23,37 @@
   --color-blue: #1ba1e2;
   --color-green: #a8dd00;
   --color-err: #ff4a4a;
+  /* The rest of what the chrome wears, so no hex floats in Style.fs: the bordered
+     controls' rest border (a step brighter than hair), blue's hover lift, and the
+     agent avatar's dark ground. */
+  --color-edge: #2e2e2e;
+  --color-blue-bright: #7fd0f5;
+  --color-agent-ground: #0e1418;
 
   --font-sans: 'Segoe UI', 'Segoe UI Variable', 'Segoe WP', 'Frutiger', 'Helvetica Neue', system-ui, sans-serif;
   --font-mono: 'Cascadia Code', 'Consolas', monospace;
+
+  /* The type ramp, as size + line-height pairs on the 4px rhythm — `text-<step>` sets
+     both, so a size can never drift from its line box. `leading-*` still composes over
+     a step where a context needs a different box (e.g. roster rows at 13/20). */
+  --text-label: 11px;    --text-label--line-height: 16px;
+  --text-small: 13px;    --text-small--line-height: 16px;
+  --text-body: 15px;     --text-body--line-height: 24px;
+  --text-pivot: 19px;    --text-pivot--line-height: 24px;
+  --text-heading: 28px;  --text-heading--line-height: 32px;
+  --text-wordmark: 32px; --text-wordmark--line-height: 36px;
+  /* The mono ramp: command lines, and the smaller step for output/ids. */
+  --text-code: 12px;     --text-code--line-height: 16px;
+  --text-code-sm: 11px;  --text-code-sm--line-height: 16px;
+
+  /* The caps voice's one tracking (labels, statuses, buttons, authors). */
+  --tracking-caps: 0.16em;
+
+  /* Structural dimensions with names, so the layouts that must agree on them compose
+     one token instead of repeating a literal: the shared header band (`h-band`) and
+     the sidebar column (`w-side`). */
+  --spacing-band: 88px;
+  --spacing-side: 280px;
 
   --animate-pulse2: pulse2 1.1s ease-in-out infinite;
   --animate-blink: blink 1s steps(1) infinite;
@@ -42,7 +70,7 @@
 /* v4 has no `background-image` theme namespace, so the one custom gradient utility (the
    composer's focus edge, `Style.fs`) is defined explicitly. */
 @utility bg-grad {
-  background-image: linear-gradient(180deg, #1ba1e2, #a8dd00);
+  background-image: linear-gradient(180deg, var(--color-blue), var(--color-green));
 }
 
 /* Presence carets in a body editor (widget decorations built in `Editor.buildBodyDecorations`;
@@ -64,7 +92,7 @@
   font-size: 11px;
   line-height: 1.3;
   white-space: nowrap;
-  color: #fff;
+  color: var(--color-ink);
   pointer-events: none;
   user-select: none;
 }
