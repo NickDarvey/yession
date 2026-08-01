@@ -118,7 +118,7 @@ let private mountTests =
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx") (Some Shell) "and the bare mount"
 
         testCase "an unmounted session is unchanged" <| fun () ->
-            Expect.equal (SessionRoute.parseUnder "" "GET" "/client.abc123.js") (Some (ClientBundle "abc123")) "byte-identical to today"
+            Expect.equal (SessionRoute.parseUnder "" "GET" "/client.abc123.js") (Some (ClientBundle "abc123")) "an origin-root session claims the path as written"
             Expect.equal (SessionRoute.parseUnder "" "GET" "/") (Some Shell) "including its shell"
 
         testCase "what the browser asks for is what the session claims" <| fun () ->

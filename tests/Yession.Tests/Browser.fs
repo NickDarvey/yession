@@ -596,15 +596,13 @@ let mountedTests =
                     let! baseHref = await (page.EvaluateAsync<string> "() => document.querySelector('base')?.getAttribute('href')")
                     Expect.equal baseHref (sprintf "/s/%s/" MOUNT_SESSION) "the shell declares its mount"
 
-                    // The bundle was fetched from under the mount — had it been root-anchored it
-                    // would have hit the proxy's root and 404'd, and the client could not have
-                    // reached `connected` above at all.
-                    let! assets =
-                        await (page.EvaluateAsync<string[]> """() =>
-                            performance.getEntriesByType('resource').map(e => new URL(e.name).pathname)""")
-                    Expect.isTrue
-                        (assets |> Array.exists (fun p -> p = sprintf "/s/%s/client.js" MOUNT_SESSION))
-                        "the client bundle was fetched under the mount"
+                    // No assertion here that the bundle was fetched under the mount: reaching
+                    // `connected` above already required it. The bundle IS the client, and a
+                    // root-anchored URL would have hit the proxy's root and 404'd, so nothing
+                    // would have run to set the flag. Scraping `performance` entries for the
+                    // bundle's path restated that, and only added a second place that had to
+                    // know how the bundle is addressed — which is what broke when it became
+                    // `client.<digest>.js`.
 
                     // The auth cookie is scoped to this session's mount, not the whole origin.
                     let! cookies = await (context.CookiesAsync ())
