@@ -283,6 +283,12 @@ let private whenSynced (persistence: obj) : JS.Promise<unit> = jsNative
 })()""")>]
 let private persistenceKey () : string = jsNative
 
+/// A `<meta name>`'s content, or None when the tag is absent. `|| null` so a missing tag
+/// and a missing attribute both arrive as `None` rather than as `undefined` masquerading
+/// as a string.
+[<Emit("document.querySelector('meta[name=\"' + $0 + '\"]')?.getAttribute('content') || null")>]
+let private metaContent (name: string) : string option = jsNative
+
 // Resolved against the shell's `<base href>`, so a session mounted under a path signals
 // to its own prefix rather than the origin root.
 [<Emit("new URL($0, document.baseURI).href")>]
@@ -375,7 +381,21 @@ let private start () =
             | Error e -> failwith e
         let displayName = PeerName.random (Random ())
         let doc = Y.Doc.Create ()
-        let initial = ClientModel.init { PeerId = peerId; DisplayName = displayName }
+        // Seed from the shell. The session id was already SSR'd into the model
+        // (`Signalling.bootstrapHtml`) and then dropped on hydration, so `data-session-id`
+        // rendered on the server, blanked, and only came back once `PeerAccepted` landed.
+        // Plan 11 makes that load-bearing rather than cosmetic: the reconnect offer names
+        // the session to reopen, and it appears precisely when no `PeerAccepted` has
+        // happened.
+        let initial =
+            { ClientModel.init { PeerId = peerId; DisplayName = displayName } with
+                Session =
+                    metaContent Dom.sessionMetaName
+                    |> Option.bind (fun value ->
+                        match SessionId.create value with
+                        | Ok id -> Some id
+                        | Error _ -> None)
+                Manager = metaContent Dom.managerMetaName }
 
         // The connection is wired later (after persistence and signalling); the interrupt
         // control holds this ref so everything else works before — and without — the
@@ -605,7 +625,22 @@ let private start () =
                             token
                             false
               ClaudeDisconnect =
-                fun scope -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Disconnect)) scope "" "" false }
+                fun scope -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Disconnect)) scope "" "" false
+              ReopenSession =
+                fun () ->
+                    // A full navigation to the Manager, not a fetch: it launches the session
+                    // if it is stopped and then hands us on to wherever this deployment says
+                    // the session lives, which may be a different port entirely. Nothing is
+                    // lost by reloading — the doc is in IndexedDB and the log replays — and a
+                    // pinned port means we land back on the same origin, so what was written
+                    // offline is still here to sync.
+                    //
+                    // The anchor's href is the same URL, so this is an enhancement rather
+                    // than the mechanism: with no JS the link still works.
+                    match latestModel.Manager, latestModel.Session with
+                    | Some origin, Some sessionId ->
+                        navigateTo (sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId))
+                    | _ -> () }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.

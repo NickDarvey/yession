@@ -107,6 +107,9 @@ let private respond (res: ServerResponse) (status: int) (text: string) =
 let tryHandle
     (resolve: string -> ControlCaller option)
     (reportName: string -> string -> Async<Result<unit, string>>)
+    // Plan 11: the session's own report of whether it is in use, keyed by the per-launch
+    // secret exactly like the name report — so the report dies with the launch it describes.
+    (reportActivity: string -> bool -> Async<Result<unit, string>>)
     (subscribeNotifications: string -> Subscribe<SessionNotification>)
     (subscribeMcp: Subscribe<McpToolList>)
     (registerClient: string -> SessionId -> string -> RegisterClientResponse)
@@ -177,6 +180,17 @@ let tryHandle
                     Async.StartImmediate (
                         async {
                             match! reportName (Option.defaultValue "" secret) name with
+                            | Ok () -> respond res 200 "ok"
+                            | Error e -> respond res 400 e
+                        }))
+            | "POST", "/control/activity" ->
+                // Plan 11. Same shape as the name report — the secret names the session, the
+                // body is one fact about it — and the same discipline: no session content
+                // crosses the control channel, only supervision traffic.
+                decodeAnd (ControlWire.fromString ControlWire.sessionActivityReport) (fun busy ->
+                    Async.StartImmediate (
+                        async {
+                            match! reportActivity (Option.defaultValue "" secret) busy with
                             | Ok () -> respond res 200 "ok"
                             | Error e -> respond res 400 e
                         }))

@@ -528,6 +528,7 @@ let private startConnectionsServer (callers: (string * Control.ControlCaller) li
             if not (Control.tryHandle
                         (fun secret -> Map.tryFind secret table)
                         (fun _ _ -> async { return Ok () })
+                        (fun _ _ -> async { return Ok () })
                         (fun _ _ -> Subscription.none)
                         (fun _ -> Subscription.none)
                         dummyRegister

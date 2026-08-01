@@ -103,6 +103,35 @@ let nameReporter (baseUrl: string) (secret: string) : string -> Async<unit> =
   .then(async r => ({ status: r.status, body: await r.text() }))""")>]
 let private postJsonReply (url: string) (secret: string) (body: string) : JS.Promise<{| status: int; body: string |}> = jsNative
 
+/// Report whether this session is in use (Plan 11).
+///
+/// Deliberately NOT `nameReporter`'s error handling, and it uses the reply-carrying post
+/// for the same reason. A title that fails to arrive is cosmetic; a beat that fails to
+/// arrive gets this session STOPPED once the Manager's idle window elapses. That outcome is
+/// correct — a session which cannot reach its supervisor is already unsupervised, and the
+/// repeat-while-busy cadence means no single delivery has to succeed — but it must never be
+/// SILENT, or the reap minutes later has no visible cause.
+let activityReporter (baseUrl: string) (secret: string) : bool -> Async<unit> =
+    fun busy ->
+        async {
+            try
+                let! reply =
+                    postJsonReply
+                        (sprintf "%s/control/activity" baseUrl)
+                        secret
+                        (ControlWire.toString ControlWire.sessionActivityReport busy)
+                    |> Async.AwaitPromise
+                if reply.status <> 200 then
+                    eprintfn
+                        "[activity] the manager refused an activity report (HTTP %d: %s) — this session will be stopped when its idle window elapses"
+                        reply.status
+                        (reply.body.Trim ())
+            with e ->
+                eprintfn
+                    "[activity] could not reach the manager to report activity (%s) — this session will be stopped when its idle window elapses"
+                    e.Message
+        }
+
 /// The session's secrets capability (Plan 06), pre-bound to ITS OWN session scope —
 /// "capabilities are scoped, not ambient": this surface cannot even express another
 /// scope. Write/list/delete only; there is no read — a stored secret is USED by

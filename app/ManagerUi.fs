@@ -207,6 +207,56 @@ let private respond (res: ServerResponse) (status: int) (contentType: string) (b
 
 let private html (res: ServerResponse) (body: string) = respond res 200 "text/html; charset=utf-8" body
 
+/// A string as a JS literal, for the one inline script below — so a URL containing a quote
+/// is data rather than syntax.
+[<Fable.Core.Emit("JSON.stringify($0)")>]
+let private jsonLiteral (s: string) : string = Fable.Core.Util.jsNative
+
+/// The `/sessions/{id}/open` landing page (Plan 11).
+///
+/// Not a bare 302. A session that had to be launched is reachable at its own address only
+/// once the operator's proxy has a mapping for it, and a reconciler driven by
+/// `/sessions/stream` gets there in a few hundred milliseconds — quick, but a race against
+/// a redirect the browser follows immediately. So the page polls its own target and goes
+/// when it answers.
+///
+/// Bounded, and it says why it gave up. An `/open` that spins forever is indistinguishable
+/// from one that is about to work, which is the failure mode this whole feature is supposed
+/// to remove rather than add.
+let private openingPage (target: string) : string =
+    sprintf
+        """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Opening session</title>
+<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}p{color:#444}</style>
+</head><body>
+<h1>Opening your session…</h1>
+<p id="status">Waiting for it to answer.</p>
+<p><a id="target" href="%s">Open it directly</a></p>
+<script>
+  const target = %s
+  let attempts = 0
+  async function poll () {
+    attempts++
+    try {
+      await fetch(target, { mode: 'no-cors', cache: 'no-store' })
+      location.replace(target)
+      return
+    } catch (e) {
+      if (attempts >= 40) {
+        document.getElementById('status').textContent =
+          'The session started, but its address is still not answering after 20 seconds. ' +
+          'If this deployment maps session ports through a proxy, that mapping has not appeared.'
+        return
+      }
+      setTimeout(poll, 500)
+    }
+  }
+  poll()
+</script>
+</body></html>"""
+        (Ssr.escapeAttr target)
+        (jsonLiteral target)
+
 /// Handle a management-UI request against the Manager. Returns false for paths that
 /// are not the UI's (the composing server falls through — e.g. to the control routes).
 /// Every UI route is gated by `identify` — the Manager's authentication strategy
@@ -224,14 +274,18 @@ let tryHandle
         match pm.TryFind sessionId with
         | Some view -> sessionRow pm.Public view
         | None -> ""
-    let sessionAction (id: string) (action: SessionId -> Async<unit>) =
+    // An action's outcome is not discarded: a launch that fails leaves the session stopped,
+    // and answering with an ordinary row said nothing about why. The row still comes back on
+    // success (it is the swap unit); a failure answers with its reason.
+    let sessionAction (id: string) (action: SessionId -> Async<Result<unit, string>>) =
         match SessionId.create id with
         | Error e -> respond res 400 "text/plain" e
         | Ok sessionId ->
             Async.StartImmediate (
                 async {
-                    do! action sessionId
-                    html res (rowOf sessionId)
+                    match! action sessionId with
+                    | Ok () -> html res (rowOf sessionId)
+                    | Error reason -> respond res 500 "text/plain" reason
                 })
     // Route first (pure — did the UI claim this path?), authenticate second: the gate
     // runs once, ahead of every claimed route, and unclaimed paths fall through to the
@@ -280,9 +334,43 @@ let tryHandle
                 // published views, which is why the page renders them and the registry does not.
                 Some (fun () -> Sse.stream req res (sessionsTable pm.Public) pm.SubscribeSessions |> ignore)
             | "POST", [| id; "launch" |] ->
-                Some (fun () -> sessionAction id (fun sessionId -> pm.Launch sessionId |> Async.Ignore))
+                Some (fun () ->
+                    sessionAction id (fun sessionId ->
+                        async {
+                            let! outcome = pm.Launch sessionId
+                            return outcome |> Result.map ignore
+                        }))
             | "POST", [| id; "stop" |] ->
-                Some (fun () -> sessionAction id (fun sessionId -> pm.Stop sessionId |> Async.Ignore))
+                Some (fun () -> sessionAction id pm.Stop)
+            // The stable way back into a session (Plan 11). A session's own address changes
+            // whenever it is relaunched, and under idle reaping that is routine rather than
+            // rare — so THIS is the URL to bookmark and the one the session client's
+            // reconnect offer points at. Launch it if it is stopped, then hand the browser
+            // to wherever this deployment says the session lives.
+            | "GET", [| id; "open" |] ->
+                Some (fun () ->
+                    match SessionId.create id with
+                    | Error e -> respond res 400 "text/plain" e
+                    | Ok sessionId ->
+                        Async.StartImmediate (
+                            async {
+                                match pm.TryFind sessionId with
+                                | None -> respond res 404 "text/plain" (sprintf "unknown session %s" id)
+                                | Some view ->
+                                    // Already running is the common case once a client has
+                                    // reconnected on its own; asking for the port it already
+                                    // has is not a relaunch.
+                                    let! port =
+                                        match view.Status with
+                                        | ProcessManager.Running (port, _) -> async { return Ok port }
+                                        | ProcessManager.NotRunning
+                                        | ProcessManager.Exited _ -> pm.Launch sessionId
+                                    match port with
+                                    | Error reason -> respond res 500 "text/plain" reason
+                                    | Ok port ->
+                                        let address = PublicAccess.sessionAddress sessionId port pm.Public
+                                        html res (openingPage (sprintf "%s/" address.Url))
+                            }))
             | _ -> None
         | _ -> None
     match route with

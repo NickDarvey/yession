@@ -52,7 +52,11 @@ type ViewActions =
       /// Store the pasted setup-token/API key from the panel's token input.
       ClaudePasteToken : unit -> unit
       /// Disconnect the credential stored for a scope choice ("session" | "mine").
-      ClaudeDisconnect : string -> unit }
+      ClaudeDisconnect : string -> unit
+      /// Ask the Manager to bring this session back and take the browser to it (Plan 11).
+      /// Imperative because it is a navigation, and a navigation is not a state change this
+      /// document survives to fold.
+      ReopenSession : unit -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -67,7 +71,8 @@ module ViewActions =
           ClaudeConnect = ignore
           ClaudeComplete = ignore
           ClaudePasteToken = ignore
-          ClaudeDisconnect = ignore }
+          ClaudeDisconnect = ignore
+          ReopenSession = ignore }
 
 module View =
 
@@ -132,7 +137,40 @@ module View =
 
     // --- Sidebar ------------------------------------------------------------------------
 
-    let private connectionSection (model: ClientModel) : TemplateResult =
+    /// The offer to bring a stopped session back (Plan 11), in place of the connection
+    /// status word — the same move `peopleSection` makes for a missing agent: when the
+    /// thing being reported is not a state you can wait out, a status word is the wrong
+    /// shape, and what belongs there is what is wrong plus the button that fixes it.
+    ///
+    /// TOTAL over the model, which is what makes the failure modes structural rather than
+    /// defensive. The offer needs a settled disconnection (a session still reconnecting has
+    /// nothing to reopen), a Manager to ask, and a session to ask for; absent any of them
+    /// the ordinary status renders. The view never reads the DOM, so there is no path that
+    /// produces a button with nowhere to go — the shell omitting the meta tag is enough.
+    let private reconnectOffer (actions: ViewActions) (model: ClientModel) : TemplateResult option =
+        match model.Connection, model.Manager, model.Session with
+        | Disconnected (Some reason), Some origin, Some sessionId ->
+            let target = sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId)
+            Some (
+                html
+                    $"""
+                    <div class="{Style.noAgentBlock}" data-session-gone>
+                      <span class="{Style.syncRow}"><span class="{Style.syncDot} bg-err"></span><span class="{Style.statusErr}">session stopped</span></span>
+                      <div class="{Style.noAgentPrompt}">
+                        <span class="{Style.noAgentEdge}"></span>
+                        <div class="{Style.noAgentBody}">
+                          <span class="{Style.small}">{reason}. Your work is saved here and syncs when it comes back.</span>
+                          <a class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}"
+                             href="{target}"
+                             data-session-reopen="{target}"
+                             @click={Ev(fun _ -> actions.ReopenSession ())}>{Dom.Text.reopenSession}</a>
+                        </div>
+                      </div>
+                    </div>"""
+            )
+        | _ -> None
+
+    let private connectionSection (actions: ViewActions) (model: ClientModel) : TemplateResult =
         let consumer = model.EventConsumer
         // The two legs are reported separately because they fail separately: `data-connection`
         // is the data channel (collaborative state), `data-feed` (on the section, always
@@ -167,10 +205,20 @@ module View =
             | FeedRetrying (attempt, reason) ->
                 html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying · {reason} ({attempt})</span>"""
             | FeedStalled reason -> html $"""<span class="{Style.statusErr}">history paused · {reason}</span>"""
+        // The offer REPLACES the sync row and the reason line rather than sitting under
+        // them: a red dot reading "Disconnected", its reason, and a button to fix it would
+        // be saying the same thing three times. The feed line stays — the history leg is a
+        // separate leg, and it says something the offer does not.
+        let statusOrOffer =
+            match reconnectOffer actions model with
+            | Some offer -> offer
+            | None ->
+                html $"""
+                  <span class="{Style.syncRow}">{dot}<span class="{connClass}" data-connection>{connectionLabel model.Connection}</span>{catchUp}</span>
+                  {connectionReason}"""
         html $"""
             <section class="{Style.cls [ Style.sideSectionFirst; Style.navLane1 ]}" data-feed="{feedToken consumer.Feed}">
-              <span class="{Style.syncRow}">{dot}<span class="{connClass}" data-connection>{connectionLabel model.Connection}</span>{catchUp}</span>
-              {connectionReason}
+              {statusOrOffer}
               {feedLine}
             </section>"""
 
@@ -333,7 +381,7 @@ module View =
                 <span class="{Style.wordmark}">yession<span class="text-green">.</span></span>
                 <button type="button" class="{Style.navChevronBack}" aria-label="Collapse sidebar" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.left}</button>
               </div>
-              {connectionSection model}
+              {connectionSection actions model}
               {peopleSection actions model}
               {environmentSection model.Environment}
               {commandsSection model.Commands}

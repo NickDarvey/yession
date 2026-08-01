@@ -32,7 +32,8 @@ let private record (id: string) (name: string) : SessionRecord =
     { SessionId = SessionId.create id |> expect
       DisplayName = name
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
-      DataDir = sprintf "sessions/%s" id }
+      DataDir = sprintf "sessions/%s" id
+      Port = None }
 
 let private twoSessions : ManagerState =
     { Version = ManagerState.currentVersion
@@ -241,7 +242,7 @@ let private startControlServer (secrets: (string * SessionId * SessionEnvironmen
         let registerClient _ (sessionId: SessionId) _ : Yession.Oidc.RegisterClientResponse =
             { ClientId = SessionId.value sessionId; ClientSecret = "unused"; Issuer = "http://unused" }
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
-            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> Subscription.none) ignore req res) then
+            if not (Control.tryHandle (fun secret -> Map.tryFind secret table) (fun _ _ -> async { return Ok () }) (fun _ _ -> async { return Ok () }) hub.Register mcp.Register registerClient None None (fun _ _ -> Subscription.none) ignore req res) then
                 res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
                 res.``end`` "not found"
         let server = Interop.createServer handler
@@ -367,7 +368,8 @@ let private uiRecord : SessionRecord =
     { SessionId = SessionId.create "ui-render" |> expect
       DisplayName = "UI <Render>"
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
-      DataDir = "sessions/ui-render" }
+      DataDir = "sessions/ui-render"
+      Port = None }
 
 let private uiRenderTests =
     testList "Management UI rendering (Step 25)" [
@@ -442,6 +444,11 @@ let private themeContrastTests =
 
 [<Emit("fetch($0, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: $1 }).then(async r => ({ status: r.status, cacheControl: '', body: await r.text() }))")>]
 let private postForm (url: string) (body: string) : JS.Promise<obj> = Fable.Core.Util.jsNative
+
+/// A GET that keeps its status. `Interop.getText` discards it, and a route whose whole job
+/// is to distinguish "here it is" from "no such session" needs the number.
+[<Emit("fetch($0).then(async r => ({ status: r.status, cacheControl: '', body: await r.text() }))")>]
+let private getReply (url: string) : JS.Promise<obj> = Fable.Core.Util.jsNative
 
 [<Emit("$0.status")>]
 let private statusOfReply (reply: obj) : int = Fable.Core.Util.jsNative
@@ -528,6 +535,50 @@ let private uiFlowTests =
                         |> Seq.skip beforeCrash
                         |> Seq.exists (fun t -> t.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusExited)))
                 cancelRows.Stop ()
+
+                do! pm.StopAll ()
+            }
+
+        // Plan 11's stable way back in. A session's own address changes on every relaunch,
+        // and under idle reaping that is routine — so this route, on the Manager's fixed
+        // port, is what a bookmark and the client's reconnect offer point at.
+        testCaseAsync "GET /sessions/{id}/open launches a stopped session and lands on its address" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/open-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let! pm =
+                    ProcessManager.createWithUi
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost }
+                        (Some ManagerUi.tryHandle)
+                let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+                let sessionId = SessionId.create "open-1" |> expect
+
+                let! _ = postForm (baseUrl + "/sessions") "id=open-1&name=Open+One" |> Async.AwaitPromise
+
+                // Stopped: /open has to start it before there is any address to give.
+                Expect.equal (pm.TryFind sessionId).Value.Status ProcessManager.NotRunning "created, not launched"
+                let! opened = Interop.getText (baseUrl + "/sessions/open-1/open") |> Async.AwaitPromise
+                let launchedPort =
+                    match (pm.TryFind sessionId).Value.Status with
+                    | ProcessManager.Running (port, _) -> port
+                    | other -> failwithf "expected /open to have launched it, got %A" other
+                Expect.isTrue
+                    (opened.Contains (sprintf "http://127.0.0.1:%d/" launchedPort))
+                    "the landing page names the session's own address"
+
+                // Already running: /open is not a relaunch — it hands back the same address,
+                // which is what makes the URL safe to keep clicking.
+                let! again = Interop.getText (baseUrl + "/sessions/open-1/open") |> Async.AwaitPromise
+                match (pm.TryFind sessionId).Value.Status with
+                | ProcessManager.Running (port, _) ->
+                    Expect.equal port launchedPort "the running session was not restarted"
+                    Expect.isTrue (again.Contains (sprintf "http://127.0.0.1:%d/" port)) "same address"
+                | other -> failwithf "expected it to still be running, got %A" other
+
+                // An unknown session is a 404, not a launch attempt.
+                let! missing = getReply (baseUrl + "/sessions/nope-nope/open") |> Async.AwaitPromise
+                Expect.equal (statusOfReply missing) 404 "unknown sessions are not created by asking to open them"
 
                 do! pm.StopAll ()
             }
@@ -622,7 +673,6 @@ let private compositionTests =
                     sprintf "tests/Yession.Tests/out/.data/composed-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
                 let env =
                     [ "YESSION_DATA_DIR", dataDir
-                      "YESSION_PORT", "0"
                       "YESSION_MANAGER_PORT", "0"
                       // Children inherit this: the built-in diagnostic agent exercises
                       // the control RPC on the shipped binaries, credential-free.

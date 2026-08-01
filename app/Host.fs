@@ -9,6 +9,14 @@ open Yjs
 open Yession.Domain
 open Yession.SessionProcess
 
+[<Fable.Core.Emit("setInterval($1, $0)")>]
+let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
+
+/// How often a busy session repeats its activity report (Plan 11). Comfortably shorter
+/// than any sane idle window, so a Manager reaping on silence needs several missed beats
+/// in a row before it acts — one dropped request never costs a session.
+let private activityBeatMs = 30000
+
 type SessionHost =
     { SessionId : SessionId
       /// Mint an unattributed peer token valid for this process — what tests/headless
@@ -57,6 +65,9 @@ let startFull
     (baseLog: EventLog<SessionEvent> option)
     (docStore: DocStore.DocStore option)
     (reportName: (string -> Async<unit>) option)
+    // Plan 11: report whether this session is in use, so the Manager can stop it when it
+    // is not. Absent for a session with no Manager — nothing would be listening.
+    (reportActivity: (bool -> Async<unit>) option)
     // Telemetry sink (Plan 04): the completed-turn usage emitter, threaded to the
     // scheduler. `ignore` in the layered helpers below and whenever telemetry is off.
     (emitUsage: AgentTurnId -> AgentUsage -> unit)
@@ -68,6 +79,10 @@ let startFull
     (auth: SessionAuth.Auth option)
     // The path this session is served under (`""` at an origin root, docs/plans/09).
     (mount: string)
+    // The Manager's public origin, baked into the shell so a disconnected client knows
+    // where to ask for this session back (Plan 11). None for a Manager-less session:
+    // there is then nothing to ask.
+    (managerOrigin: string option)
     (port: int)
     : Async<SessionHost> =
     async {
@@ -214,6 +229,49 @@ let startFull
         // durable facts (only their send is) — so a new draft appearing needs no append.
         DocSync.onAnyUpdate doc (fun () -> drain ())
 
+        // --- Is this session in use? (Plan 11) ---------------------------------------
+        //
+        // Three conditions, and the second is the one an outside observer cannot get
+        // right: a turn running with nobody watching is a session very much in use, and
+        // it can go minutes without appending anything (a long tool call), so any
+        // file-mtime proxy would reap it mid-work. The first covers a human reading with
+        // the tab open — also silent, also in use. The third closes the window between a
+        // message being accepted and the turn for it starting.
+        //
+        // Drafts and presence are deliberately NOT inputs: they belong to a connected
+        // peer, so they are already covered by the first condition.
+        let isBusy () =
+            not (Map.isEmpty connections)
+            || Option.isSome (scheduler.RunningTurn ())
+            || (match SyncedStateSync.ofDoc doc with
+                | Ok synced -> not (Map.isEmpty synced.Queue)
+                | // A doc that will not decode is a session in trouble, and stopping it
+                  // out from under its owner is the wrong response to that. Hold it busy
+                  // and let something that understands the failure deal with it.
+                  Error _ -> true)
+
+        // Transitions go out at once, so idleness starts counting the moment the last peer
+        // leaves and a returning one cancels the countdown without waiting for a tick. The
+        // repeat is what makes the mechanism robust rather than merely prompt: the Manager
+        // reaps on SILENCE, so no single delivery has to succeed. Idle is reported once per
+        // transition and then left alone; busy repeats, because busy is the claim that
+        // needs renewing.
+        let notifyActivity : unit -> unit =
+            match reportActivity with
+            | None -> ignore
+            | Some report ->
+                let mutable lastReported : bool option = None
+                fun () ->
+                    let busy = isBusy ()
+                    if busy || lastReported <> Some busy then
+                        lastReported <- Some busy
+                        Async.StartImmediate (report busy)
+
+        if Option.isSome reportActivity then
+            notifyActivity ()
+            setInterval activityBeatMs notifyActivity |> ignore
+            DocSync.onAnyUpdate doc notifyActivity
+
         // Report the collaborative title to the Manager (metadata, not an event) so the
         // session list reflects it. Last-value debounced: only a changed, non-empty title
         // is reported, and Yjs already coalesces keystrokes into transactions. Inert when
@@ -283,6 +341,10 @@ let startFull
                     fun peerId ch ->
                         async {
                             connections <- Map.add connectionId ch connections
+                            // Plan 11: an arriving peer makes this session busy NOW. A
+                            // client that reconnects into an idle window must cancel the
+                            // countdown without waiting up to a beat for it.
+                            notifyActivity ()
                             do! ch.Send (State (StateSync (DocSync.fullState doc)))
                             return
                                 fun () ->
@@ -290,6 +352,10 @@ let startFull
                                     // Clear this peer's cursor on every remaining peer.
                                     broadcastPresenceExcept connectionId
                                         { PeerId = peerId; DisplayName = ""; Focus = None }
+                                    // ...and the last one leaving starts it, which is the
+                                    // whole point: a closed tab should not cost a full beat
+                                    // of idle time before it counts.
+                                    notifyActivity ()
                         } }
             Async.StartImmediate(
                 async {
@@ -316,7 +382,7 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint mount port
+        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -373,7 +439,7 @@ let startWithCapabilities
     (port: int)
     : Async<SessionHost> =
     // No mount: these helpers serve an unfronted, origin-root session.
-    startFull (fun () -> runAgent) environmentCapabilities None baseLog None None (fun _ _ -> ()) None None None sessionId None "" port
+    startFull (fun () -> runAgent) environmentCapabilities None baseLog None None None (fun _ _ -> ()) None None None sessionId None "" None port
 
 /// `startWithCapabilities` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

@@ -16,10 +16,22 @@ in
   languages.dotnet.enable = true;
   languages.dotnet.package = pkgs.dotnet-sdk_10;
 
-  # dbus + gnome-keyring back the `Keyring` test capability on headless hosts:
+  # dbus + gnome-keyring back the `Keyring` test capability on headless LINUX hosts:
   # `check Keyring` re-execs itself under a private, empty-password-unlocked Secret
   # Service when no session bus exists (see tasks.fsx keyringWrapper).
-  packages = [ pkgs.git pkgs.dbus pkgs.gnome-keyring pkgs.actionlint ];
+  #
+  # Linux-only, and not as a preference — gnome-keyring has no darwin build, so listing it
+  # unconditionally made the whole shell fail to EVALUATE on macOS ("Refusing to evaluate
+  # package 'gnome-keyring' … not available on the requested hostPlatform"). Not a broken
+  # test: `nix develop` could not be entered at all, so nothing on a Mac could reach the
+  # toolchain through the documented path.
+  #
+  # Nothing is lost there. `needsKeyringWrap` (tasks.fsx) is gated on `IsLinux`, because a
+  # desktop already has a Secret Service — the real Keychain — and `check Keyring` drives
+  # that instead. The wrapper exists for hosts with no session bus, which macOS never is.
+  packages =
+    [ pkgs.git pkgs.actionlint ]
+    ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.dbus pkgs.gnome-keyring ];
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";

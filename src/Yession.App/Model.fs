@@ -87,9 +87,19 @@ type RemotePresence = { DisplayName : string; Focus : Focus }
 type ClientModel =
     { Peer          : PeerState
       Connection    : ConnectionState
-      /// The serving session's id, learned from `PeerAccepted`; shown as the header's
-      /// secondary identifier beside the editable title.
+      /// The serving session's id: seeded from the shell (so it is known before — and
+      /// without — any connection) and re-learned from `PeerAccepted`. Shown as the
+      /// header's secondary identifier beside the editable title, and it names the session
+      /// the reconnect offer asks the Manager for, which is a moment at which no
+      /// `PeerAccepted` has happened by definition.
       Session       : SessionId option
+      /// The Manager's public origin as the SHELL was told it (Plan 11): where to ask for
+      /// this session back once it has stopped. `None` when the shell carried none — a
+      /// Manager-less session — and then there is nothing to offer.
+      ///
+      /// Static for the life of the page. Never a message, never folded: it is a fact
+      /// about the deployment that served this document, not part of the session's state.
+      Manager       : string option
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
       EventConsumer : EventConsumerState
@@ -185,6 +195,7 @@ module ClientModel =
         { Peer = peer
           Connection = Disconnected None
           Session = None
+          Manager = None
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
           EventConsumer =

@@ -38,18 +38,37 @@ let private parseReadyLine (line: string) : int option = jsNative
 [<Emit("(() => { try { const p = JSON.parse($0); return (p && typeof p.version === 'string') ? p.version : null } catch { return null } })()")>]
 let parseReadyVersion (line: string) : string option = jsNative
 
-/// Warn when the Manager and the session it just launched are from different MAJOR versions —
-/// the one difference that says their control protocol may genuinely disagree. Diagnostic only:
-/// a launch is never failed over version, and a build that cannot state a release version
-/// (`dev`, `test`) is never compared.
-let private warnOnMajorSkew (pid: int) (sessionVersion: string option) =
+/// Refuse a session from a different MAJOR version — the one difference that says their
+/// control protocol may genuinely disagree.
+///
+/// This used to be a warning that launched anyway, which was defensible while the session
+/// binary was whatever shipped beside the Manager. It is not defensible once a deployment
+/// points `YESSION_SESSION_BIN` at a floating path (Plan 11), because then a major bump
+/// upstream silently pairs two processes that no longer agree, and the symptom surfaces
+/// later as something else entirely.
+///
+/// Refusing is also self-correcting where it matters: no session can start, the running set
+/// drains to empty, and an operator whose promotion rule waits for quiescence restarts the
+/// Manager on its own. A build that cannot state a release version (`dev`, `test`) is never
+/// compared — those are the local and test paths, where the two halves are built together.
+/// Both versions explicit, so the rule is testable: `Version.current` is `test` under the
+/// suite, whose major is `None`, and a comparison against it could never fire.
+let majorSkewBetween (managerVersion: string) (sessionVersion: string option) : string option =
     match sessionVersion with
-    | None -> ()
+    | None -> None
     | Some session ->
-        match Version.majorOf Version.current, Version.majorOf session with
+        match Version.majorOf managerVersion, Version.majorOf session with
         | Some ours, Some theirs when ours <> theirs ->
-            eprintfn "[session %d] version skew: manager %s, session %s" pid Version.current session
-        | _ -> ()
+            Some (
+                sprintf
+                    "version skew: this manager is %s and the session binary is %s — their control protocol may disagree, so the launch was refused. Restart the manager on the matching build."
+                    managerVersion
+                    session
+            )
+        | _ -> None
+
+let majorSkew (sessionVersion: string option) : string option =
+    majorSkewBetween Version.current sessionVersion
 
 [<Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = jsNative
@@ -131,7 +150,16 @@ let launch
                 match parseReadyLine line with
                 | Some port ->
                     clearTimeout timer
-                    warnOnMajorSkew child.pid (parseReadyVersion line)
-                    settle (Ok (running, port))
+                    // The version arrives on the readiness line, so this is the first
+                    // moment the pairing can be checked — and the last moment before the
+                    // Manager starts treating the child as a working session.
+                    match majorSkew (parseReadyVersion line) with
+                    | Some reason ->
+                        // Settle first: killing the child fires its exit handler, which
+                        // would otherwise settle this launch with "exited before ready" and
+                        // bury the actual reason.
+                        settle (Error reason)
+                        running.Kill ()
+                    | None -> settle (Ok (running, port))
                 | None ->
                     if line.Trim().Length > 0 then printfn "[session %d] %s" child.pid line))

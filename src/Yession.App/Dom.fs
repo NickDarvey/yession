@@ -22,6 +22,11 @@ module Dom =
     /// doc store by session before (and without) any connection.
     let sessionMetaName = "yession-session"
 
+    /// The `<meta name>` carrying the Manager's public origin (Plan 11), so a client whose
+    /// session has stopped knows where to ask for it back. Absent — never blank — when
+    /// this session has no Manager.
+    let managerMetaName = "yession-manager"
+
     /// `data-*` hooks on the session client shell (`View`) and its browser delegation.
     module Hooks =
         // Header — the collaborative session title and its secondary id.
@@ -99,6 +104,10 @@ module Dom =
         let agentPresence = "data-agent-presence"
         let noAgent = "data-no-agent"
         let noAgentConnect = "data-no-agent-connect"
+        // The reconnect offer (Plan 11): shown in place of the connection status word when
+        // the session has stopped and this deployment can bring it back.
+        let sessionGone = "data-session-gone"
+        let sessionReopen = "data-session-reopen"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
@@ -119,6 +128,8 @@ module Dom =
         // Session-leg tokens for the same strip: the transport itself, not its history feed.
         let degradedOffline = "offline"
         let degradedReconnecting = "reconnecting"
+        // The reconnect offer's button (Plan 11).
+        let reopenSession = "Reopen session"
         /// What every degraded state promises: this is a local-first client, so a lost leg
         /// costs sync, not the ability to work.
         let localFallback = "You can keep writing — everything is saved locally and syncs when the session is back."
