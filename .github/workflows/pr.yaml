@@ -64,6 +64,16 @@ jobs:
       # github:NickDarvey/yession` path a user actually takes, and it must stay pure.
       - name: Build the installable package
         run: nix build .#yession --print-build-logs
+      # The other darwin blind spot, and the same shape as the one above: `nix build`
+      # evaluates nix/packages.nix, never `devShells`, so nothing on any runner had ever
+      # evaluated the DEV SHELL on macOS. A package with no darwin build could therefore sit
+      # in devenv.nix's `packages` with every job green while `devenv shell` — the documented
+      # way in — could not be entered on a Mac at all. It could and it did: gnome-keyring,
+      # which nixpkgs refuses to evaluate off Linux, so the failure was at evaluation and no
+      # test had to run to be affected. Entering it is the check; the Linux job above is what
+      # actually runs the suite.
+      - name: The dev shell is enterable on darwin
+        run: DEVENV_ROOT="$PWD" nix develop --impure --command bash -c 'dotnet --version && node --version'
       # A successful link is not a successful load. `-undefined dynamic_lookup` defers every
       # napi_* symbol to load time, so the link above would still pass if the addon were
       # unloadable. Require it to load and construct a peer connection for real.

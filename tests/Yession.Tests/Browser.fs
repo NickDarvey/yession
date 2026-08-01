@@ -207,6 +207,31 @@ let tests =
                 do! await (pageB.WaitForFunctionAsync hasDraft) |> Async.Ignore
             }
 
+        // Plan 11. THE discriminating check for the manager origin: this fixture sets no
+        // YESSION_MANAGER_URL, so `PublicAccess.managerUrl` alone answers None here and an
+        // implementation that used it would emit no tag and silently drop the client's
+        // offer to reopen a stopped session on every single-machine deployment. Only the
+        // fallback to the Manager's own endpoint makes this pass — and it has to be a real
+        // origin, so the test fetches it.
+        testCaseAsync "the shell carries a manager origin that actually answers" <|
+            async {
+                let! origin =
+                    await (pageA.EvaluateAsync<string> ("""() => document.querySelector('meta[name="yession-manager"]')?.getAttribute('content')"""))
+                Expect.isFalse (String.IsNullOrEmpty origin) "the bootstrap page must embed the Manager's origin"
+                Expect.isTrue (origin.StartsWith "http") (sprintf "expected an origin, got: %s" origin)
+                // The client appends `/sessions/{id}/open` to this, so it must be an origin
+                // root with no trailing slash — otherwise the URL it builds has a double one.
+                Expect.isFalse (origin.EndsWith "/") "no trailing slash: the client concatenates a path onto it"
+                let! sessionId =
+                    await (pageA.EvaluateAsync<string> ("""() => document.querySelector('meta[name="yession-session"]')?.getAttribute('content')"""))
+                // And it is the Manager, not something else that happens to answer: its
+                // management page lists this very session.
+                let! page = await (pageA.Context.APIRequest.GetAsync origin)
+                Expect.equal page.Status 200 "the embedded origin serves the management UI"
+                let! body = await (page.TextAsync ())
+                Expect.isTrue (body.Contains sessionId) "and it knows the session whose shell pointed here"
+            }
+
         testCaseAsync "the doc store is keyed by session" <|
             async {
                 // The store is keyed by SESSION (embedded in the served page), not by address.

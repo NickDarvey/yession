@@ -810,9 +810,27 @@ let createWithUi
                          launchUsers <- Map.remove secret launchUsers
                          launchPeers <- Map.remove secret launchPeers
                      | None -> ())
+                // Plan 11: the idle clock starts BEFORE the spawn, not after it resolves.
+                //
+                // A session posts its first activity report from inside its own boot, which
+                // completes before it prints the readiness line — so that report reaches the
+                // Manager while `Spawn.launch` is still pending. Recording the launch after
+                // the spawn resolved meant the first report arrived for a launch this map
+                // did not know about yet, was dropped, and `EverReported` stayed false: a
+                // session that DID report was then reaped as `never-reported`. The reap was
+                // right and its reason was a lie, which is worse than no reason at all.
+                //
+                // Seeding here also keeps `LastBusyAt` honest — a session is in use from the
+                // moment it is asked for, not from the moment it finishes booting.
+                activity <-
+                    Map.add
+                        key
+                        { SessionId = record.SessionId; LastBusyAt = clock (); EverReported = false }
+                        activity
                 match! Spawn.launch options.SessionCommand options.SessionArgs env options.LaunchTimeoutMs with
                 | Error reason ->
                     revokeSecret ()
+                    activity <- Map.remove key activity
                     // Name the port when one was pinned. A child that cannot bind exits
                     // before readiness, and "exited before ready" alone sends the reader
                     // hunting through session logs for what is nearly always something
@@ -828,14 +846,6 @@ let createWithUi
                 | Ok (child, port) ->
                     children <- Map.add key (child, port) children
                     lastExit <- Map.remove key lastExit
-                    // Plan 11: a session is in use the moment it starts, so the idle clock
-                    // begins here. A launch therefore always gets the whole window before
-                    // it can be reaped, whether or not it ever reports.
-                    activity <-
-                        Map.add
-                            key
-                            { SessionId = record.SessionId; LastBusyAt = clock (); EverReported = false }
-                            activity
                     publishSessions ()
                     // The Manager emits its own lifecycle telemetry directly (session launched).
                     options.OnEvent "session launched"

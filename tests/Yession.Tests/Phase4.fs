@@ -585,6 +585,82 @@ let private uiFlowTests =
     ]
 
 // -----------------------------------------------------------------------------
+// Plan 11 — reaping across the process boundary.
+//
+// `Reaper.plan` is unit-tested over virtual time and `POST /control/activity` has a codec
+// test, but neither can see the thing that actually broke: a session reports from inside
+// its own boot, so its first report reaches the Manager BEFORE `Spawn.launch` resolves.
+// The Manager recorded the launch after that, dropped the early report, and reaped a
+// session that had reported as `never-reported` — the reap was right and its reason was a
+// lie. Only a real child process shows that, so this is the one E2E the feature needs.
+// -----------------------------------------------------------------------------
+
+let private reapingTests =
+    testList "Idle reaping over the process boundary (Plan 11)" [
+        testCaseAsync "an idle session is reaped for the RIGHT reason, and comes back on the same pinned port" <|
+            async {
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/reap-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                // Every lifecycle event the Manager emits, so the reap's REASON is read from
+                // the telemetry that operators read, not inferred from the session being gone.
+                let events = ResizeArray<string * (string * obj) list> ()
+                let! pm =
+                    ProcessManager.createWithUi
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.localhost
+                            SessionPorts = SessionPorts.create 0 "8430-8439" |> expect
+                            IdleTimeout = Some (TimeSpan.FromSeconds 3.0)
+                            OnEvent = fun name attrs -> lock events (fun () -> events.Add (name, attrs)) }
+                        (Some ManagerUi.tryHandle)
+                let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+                let sessionId = SessionId.create "reap-1" |> expect
+                let! _ = postForm (baseUrl + "/sessions") "id=reap-1&name=Reap+One" |> Async.AwaitPromise
+
+                // Pinned at creation, from the configured range.
+                let pinned =
+                    match (pm.TryFind sessionId).Value.Record.Port with
+                    | Some port -> port
+                    | None -> failwith "a pinned deployment must give the session an address"
+                Expect.isTrue (pinned >= 8430 && pinned <= 8439) (sprintf "port %d should come from the range" pinned)
+
+                let! launched = pm.Launch sessionId
+                Expect.equal launched (Ok pinned) "the session listens on its pinned port"
+
+                // Nobody connects, so it is idle from the moment it boots. It reports that,
+                // and the Manager stops it once the window elapses.
+                do! waitUntil "the idle session to be reaped" (fun () ->
+                        match (pm.TryFind sessionId).Value.Status with
+                        | ProcessManager.NotRunning -> true
+                        | _ -> false)
+
+                // THE assertion. `idle` means the session's report crossed the control
+                // channel and was recorded against this launch; `never-reported` would mean
+                // it was dropped — which is exactly what used to happen, and which no unit
+                // test can see because it is an ordering fact about two processes.
+                let reason =
+                    lock events (fun () ->
+                        events
+                        |> Seq.filter (fun (name, _) -> name = "session exited")
+                        |> Seq.tryLast
+                        |> Option.bind (fun (_, attrs) ->
+                            attrs |> List.tryPick (fun (k, v) -> if k = "yession.session.stop_reason" then Some (string v) else None)))
+                Expect.equal reason (Some "idle") "a session that reports must be reaped as idle, never as never-reported"
+
+                // And the way back returns it to the SAME address — the property the whole
+                // pinning half exists for, since the browser partitions storage by origin.
+                let! reopened = Interop.getText (baseUrl + "/sessions/reap-1/open") |> Async.AwaitPromise
+                Expect.isTrue
+                    (reopened.Contains (sprintf "http://127.0.0.1:%d/" pinned))
+                    "reopening lands on the same origin the reaped session had"
+                match (pm.TryFind sessionId).Value.Status with
+                | ProcessManager.Running (port, _) -> Expect.equal port pinned "relaunched on its pinned port"
+                | other -> failwithf "expected /open to have relaunched it, got %A" other
+
+                do! pm.StopAll ()
+            }
+    ]
+
+// -----------------------------------------------------------------------------
 // Step 27/28 — the composition E2E: the SHIPPED npm bundles (`dist/npm/manager.js`
 // + `session.js`, produced by `dotnet fsi tasks.fsx` inside `verify`), composed for
 // real — the packaged manager spawns the packaged session,
@@ -1111,6 +1187,28 @@ let private publicAccessTests =
                 { Url = "http://127.0.0.1:54321"; Mount = "" }
                 "the pre-Plan-09 loopback address, at an origin root"
 
+        // Plan 11. One statement of the precedence, reused by the Manager's OIDC issuer and
+        // by the origin a session publishes to its clients — so the two provably agree, and
+        // a client's offer to reopen a stopped session cannot point somewhere the login
+        // bounce does not.
+        testCase "managerUrlOr: a configured public origin always beats the caller's endpoint" <| fun () ->
+            let fronted = PublicAccess.create "https://yession.example.com" "" |> expect
+            Expect.equal
+                (PublicAccess.managerUrlOr (Some "http://127.0.0.1:8321") fronted)
+                (Some "https://yession.example.com")
+                "a loopback endpoint is unreachable from a browser that is not on this machine"
+
+        testCase "managerUrlOr: loopback falls back to the endpoint the caller knows" <| fun () ->
+            let loopback = PublicAccess.create "" "" |> expect
+            Expect.equal
+                (PublicAccess.managerUrlOr (Some "http://127.0.0.1:8321") loopback)
+                (Some "http://127.0.0.1:8321")
+                "on a single machine the Manager's own endpoint IS its public origin"
+
+        testCase "managerUrlOr: with neither there is nothing to offer" <| fun () ->
+            let loopback = PublicAccess.create "" "" |> expect
+            Expect.equal (PublicAccess.managerUrlOr None loopback) None "a session with no Manager has nowhere to send anyone"
+
         testCase "a fronted Manager with loopback sessions is a legal deployment" <| fun () ->
             let access = PublicAccess.create "https://yession.example.com/" "" |> expect
             Expect.equal (PublicAccess.managerUrl access) (Some "https://yession.example.com") "trailing slash normalised"
@@ -1340,6 +1438,7 @@ let tests =
         Tag.needs "MCP tool stream over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
+        Tag.needs "Idle reaping over the process boundary (Plan 11)" [ Tag.Ports; Tag.Native ] (fun () -> reapingTests)
         Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports; Tag.Native ] (fun () -> compositionTests)
         Tag.needs "Telemetry over the process boundary (Plan 04)" [ Tag.Ports; Tag.Native ] (fun () -> telemetryTests)
     ]
