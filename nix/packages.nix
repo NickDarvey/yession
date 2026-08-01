@@ -40,39 +40,44 @@ let
        else if rev != null then "0.0.0-g${rev}"
        else "0.0.0-gdirty";
 
-  # Only the files the build consumes, so editing devenv config / CI / docs doesn't invalidate
-  # the (slow) F#/Fable build. README.md is kept — tasks.fsx copies it into the package.
+  # The build's source: the TRACKED tree, minus the tracked files the build does not consume.
+  # Two filters, both load-bearing.
   #
-  # node_modules is excluded for a second, harder reason: in a dev shell it is a SYMLINK to
-  # ${nodeModules}/node_modules (enterShell), and that store path is also a build input of
-  # `staged` — so an unfiltered copy lands a live symlink to a read-only directory at the exact
-  # path `staged` then copies onto, and `cp -a ... ./node_modules` descends into it and dies with
-  # `cannot create directory './node_modules/node_modules'`. Invisible in CI, which builds from a
-  # fresh checkout with no dev shell entered. The `.devenv` state dir and the sandbox-only
-  # devenv.local.yaml go for the first reason: both move constantly and neither is a build input.
+  # 1. `.gitignore`, compiled to a filter from the repo's own file (`nix-gitignore`, pure — it
+  #    reads the patterns, it never shells out to git). What git ignores is by construction not
+  #    source, and this is the ONLY filter that makes a build off a working tree equal a build
+  #    off a fresh checkout. Without it a local build carried ~176MB of the dev shell's output —
+  #    dotnet `obj/`/`bin/`, Fable's `.js` emitted beside the F# sources, `app/out`, `dist/`,
+  #    `.devenv` — which invalidated the (slow) F#/Fable build on every local `check` and let
+  #    stale emitted JS into a derivation that then regenerates it. Worst of it: `node_modules`
+  #    is a SYMLINK to ${nodeModules}/node_modules in a dev shell (devenv's enterShell), and that
+  #    store path is also a build input of `staged` — so the copy landed a live symlink to a
+  #    read-only directory exactly where `staged` copies, and the build died on
+  #      cp: cannot create directory './node_modules/node_modules'
+  #    No CI job can see any of this: every one of them builds a flake source copy, which git
+  #    already filtered. It reproduces only where a working tree reaches the derivation —
+  #    `nix build --file nix/worktree.nix …`, `devenv build outputs.…`, `nix build path:.#…`.
+  #    `check Nix` is the gate that now covers exactly that route (tasks.fsx).
+  #
+  # 2. The tracked-but-not-consumed list below, so editing devenv config / CI / docs doesn't
+  #    invalidate the build. README.md is kept — tasks.fsx copies it into the package.
   src =
-    let root = ./..;
+    let
+      root = ./..;
+      unignored = pkgs.nix-gitignore.gitignoreFilter (builtins.readFile ../.gitignore) root;
+      notConsumed = [
+        "nix" ".github" "docs" ".claude" ".agents"
+        "flake.nix" "flake.lock" "devenv.nix" "devenv.yaml" ".gitignore" "AGENTS.md" "CLAUDE.md"
+      ];
+      # A directory is matched as itself, not only through its contents: returning false for the
+      # directory prunes the walk there and leaves no empty `nix/` and `docs/` behind to suggest
+      # the filter half-worked.
+      isNotConsumed = rel: lib.any (entry: rel == entry || lib.hasPrefix (entry + "/") rel) notConsumed;
     in lib.cleanSourceWith {
       src = lib.cleanSource root;
-      filter = path: _type:
+      filter = path: type:
         let rel = lib.removePrefix (toString root + "/") (toString path);
-        in !(
-          lib.hasPrefix "nix/" rel
-          || lib.hasPrefix ".github/" rel
-          || lib.hasPrefix "docs/" rel
-          || lib.hasPrefix ".claude/" rel
-          || rel == "node_modules"
-          || rel == ".devenv"
-          || rel == "devenv.local.yaml"
-          || rel == "flake.nix"
-          || rel == "flake.lock"
-          || rel == "devenv.nix"
-          || rel == "devenv.yaml"
-          || rel == "devenv.lock"
-          || rel == ".gitignore"
-          || rel == "AGENTS.md"
-          || rel == "CLAUDE.md"
-        );
+        in unignored path type && !(isNotConsumed rel);
     };
 
   dotnetEnv = ''
