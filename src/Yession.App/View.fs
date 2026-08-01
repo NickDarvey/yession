@@ -193,8 +193,11 @@ module View =
                     <div class="{Style.noAgentBlock}" data-agent-presence="absent" data-no-agent>
                       <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span><span class="{Style.statusRun} ml-auto">no agent</span></div>
                       <div class="{Style.noAgentPrompt}">
-                        <span class="{Style.small}">messages still send — they go unanswered until Claude is connected.</span>
-                        <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="prompt" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
+                        <span class="{Style.noAgentEdge}"></span>
+                        <div class="{Style.noAgentBody}">
+                          <span class="{Style.small}">messages still send — they go unanswered until Claude is connected.</span>
+                          <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="prompt" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
+                        </div>
                       </div>
                     </div>"""
             | None ->
@@ -269,7 +272,7 @@ module View =
                 html $"""<span class="{Style.statusRun}" data-claude-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
             | ClaudeAwaitingCode (url, _) ->
                 html $"""
-                    <a class="{Style.btnPrimary} text-center" href="{url}" target="_blank" rel="noreferrer" data-claude-authorize>Approve on claude.ai</a>
+                    <a class="{Style.btnPrimary}" href="{url}" target="_blank" rel="noreferrer" data-claude-authorize>Approve on claude.ai</a>
                     <span class="{Style.small}">a code appears after you approve — paste it here</span>
                     <input type="text" class="{Style.field}" data-claude-code placeholder="code#state" />
                     <div class="flex gap-2">
@@ -576,7 +579,7 @@ module View =
                     {author}
                     <div class="{Style.draftCommit}">
                       {discard}
-                      <button type="button" class="{Style.btnPrimary} flex items-center gap-2" data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send{Icon.send}</button>
+                      <button type="button" class="{Style.btnPrimary} gap-2" data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send{Icon.send}</button>
                     </div>
                   </div>
                 </article>"""
