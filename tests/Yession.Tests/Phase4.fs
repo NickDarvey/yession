@@ -472,7 +472,14 @@ let private uiFlowTests =
                 // The page serves, self-contained.
                 let! page = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
                 Expect.isTrue (page.Contains Dom.Manager.createSession) "the create form is served"
-                let! css = Interop.getText (baseUrl + "/app.css") |> Async.AwaitPromise
+                // Fetch the stylesheet the PAGE names rather than a path spelled here: it is
+                // addressed by a digest of its own bytes, so a hardcoded URL would be a second
+                // spelling of it, wrong the moment the stylesheet changes. Following the link
+                // is also the stronger assertion — it proves the page and the route agree.
+                let styleSheetUrl =
+                    System.Text.RegularExpressions.Regex.Match(page, "href=\"(app[^\"]*\\.css)\"").Groups.[1].Value
+                Expect.notEqual styleSheetUrl "" "the page names a stylesheet"
+                let! css = Interop.getText (baseUrl + "/" + styleSheetUrl) |> Async.AwaitPromise
                 Expect.isTrue (css.Length > 500) "the shared local stylesheet serves from the endpoint (no CDN)"
 
                 // Create over the form endpoint.
