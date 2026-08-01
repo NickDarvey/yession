@@ -46,7 +46,7 @@ in
     # for a task.
     case "''${DEVENV_CMDLINE:-}" in
       *" -- "*) ;;
-      *) echo "yession — tasks: restore build start dev check verify lint package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring)" ;;
+      *) echo "yession — tasks: restore build start dev check verify lint package clean  (check <caps>: Browser Ports Native Docker LiveAgent Keyring Nix)" ;;
     esac
   '';
 

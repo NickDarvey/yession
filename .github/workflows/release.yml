@@ -36,6 +36,12 @@ jobs:
           # Testing-scoped credential; enables the live agent smoke tests.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           YESSION_REQUIRE_DOCKER: "1"
+          # Same contract for Nix: this runner installed it, so a `check` that quietly dropped
+          # the capability would take the package build out of the release gate without saying
+          # so. It overlaps package-nix below in CONTENT (a clean checkout is the working tree)
+          # but not in ROUTE — that job proves the pure `nix build .#yession` a consumer runs,
+          # this one proves the same `verify` a developer runs before pushing is the whole gate.
+          YESSION_REQUIRE_NIX: "1"
         # On this headless runner `check` self-wraps in a private D-Bus session +
         # gnome-keyring (both provided by devenv) to stand in for a desktop Secret
         # Service, so the OS-credential-manager suite runs for real.
