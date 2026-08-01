@@ -183,6 +183,9 @@ let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Uti
 [<Fable.Core.Emit("setInterval($1, $0)")>]
 let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
 
+[<Fable.Core.Emit("clearInterval($0)")>]
+let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
+
 let private clock () = DateTimeOffset.UtcNow
 
 /// How often to look for sessions to reap, derived from the window rather than configured
@@ -383,6 +386,8 @@ let createWithUi
     // exit, and cleared again if the stop fails — a reason must never outlive its attempt
     // and mislabel the next ordinary stop.
     let mutable reaping : Map<string, ReapReason> = Map.empty
+    // The reaper's sweep timer, so `StopAll` can clear it. See where it is set.
+    let mutable reapSweep : obj option = None
 
     // The control endpoint (Step 24): per-launch secrets resolve to the capabilities
     // the Manager granted that launch — the RPC equivalent of the Step 11 closure. A
@@ -922,7 +927,12 @@ let createWithUi
                                 reaping <- Map.remove key reaping
                                 eprintfn "[reaper] could not stop idle session %s: %s" key e
                         }))
-        setInterval (sweepIntervalMsFor timeout) sweep |> ignore
+        // Kept, not discarded, so `StopAll` can clear it. A sweep that keeps firing after
+        // shutdown is a Manager still deciding to stop sessions it no longer supervises —
+        // and the interval is a live event-loop handle besides. Neither shows up in the
+        // product, where the Manager runs until the machine stops it; both are wrong for an
+        // in-process one, whose `StopAll` is documented to leave nothing behind.
+        reapSweep <- Some (setInterval (sweepIntervalMsFor timeout) sweep)
 
     let pm =
         { CreateSession = createSession
@@ -954,6 +964,10 @@ let createWithUi
           StopAll =
             fun () ->
                 async {
+                    // Before stopping anything: a sweep that fires mid-shutdown would try to
+                    // reap sessions this loop is already stopping.
+                    reapSweep |> Option.iter clearInterval
+                    reapSweep <- None
                     for record in state.Sessions do
                         if Map.containsKey (SessionId.value record.SessionId) children then
                             let! _ = stop record.SessionId
