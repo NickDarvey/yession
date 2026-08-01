@@ -236,33 +236,6 @@ let tests =
                 do! await (pageB.WaitForFunctionAsync inTimeline) |> Async.Ignore
             }
 
-        testCaseAsync "a browser-persisted draft survives a full server wipe" <|
-            async {
-                // Client-side persistence (Step 20): A types a NEW draft (its composer cleared
-                // when the first one sent), then the server is killed and its data wiped. After
-                // A reloads against the fresh server, the draft can only have come back from the
-                // browser's IndexedDB — and it re-syncs to B via the server.
-                let! _ = await (pageA.WaitForFunctionAsync """document.querySelectorAll('[data-rich-readonly="false"] .ProseMirror').length === 1""")
-                do! awaitU (pageA.ClickAsync composer)
-                do! awaitU (pageA.Keyboard.TypeAsync "persisted in the browser")
-                let hasDraft =
-                    """[...document.querySelectorAll('.ProseMirror')].some(p => p.textContent === 'persisted in the browser')"""
-                let! _ = await (pageA.WaitForFunctionAsync hasDraft)
-
-                host.Kill true
-                host.WaitForExit ()
-                if Directory.Exists dataDir then Directory.Delete (dataDir, true)
-                startHost ()
-
-                let! _ = await (pageA.ReloadAsync ())
-                let! _ = await (pageA.WaitForFunctionAsync connected)
-                let! _ = await (pageA.WaitForFunctionAsync hasDraft)
-
-                let! _ = await (pageB.ReloadAsync ())
-                let! _ = await (pageB.WaitForFunctionAsync connected)
-                do! await (pageB.WaitForFunctionAsync hasDraft) |> Async.Ignore
-            }
-
         // Plan 11. THE discriminating check for the manager origin: this fixture sets no
         // YESSION_MANAGER_URL, so `PublicAccess.managerUrl` alone answers None here and an
         // implementation that used it would emit no tag and silently drop the client's
@@ -484,7 +457,12 @@ let private mountDataDir = "tests/browser/.data-mounted"
 /// the session's loopback port with the PATH UNCHANGED, so the session sees — and strips —
 /// its own `/s/<id>` prefix. That is exactly the contract Plan 10 states, and the reason
 /// this test can exist without depending on any proxy's rewriting behaviour.
-let private startMountProxy (publicPort: int) (sessionPort: int) : HttpListener =
+/// `sessionPort` is a THUNK, read per request rather than captured: a session that is
+/// killed and relaunched keeps its public path and gets a new loopback port, and the whole
+/// point of path-mounting is that the address does not move when that happens. A proxy that
+/// captured the port would forward to a dead one, which is the operator's reconciler bug in
+/// miniature.
+let private startMountProxy (publicPort: int) (sessionPort: unit -> int) : HttpListener =
     let listener = new HttpListener ()
     listener.Prefixes.Add (sprintf "http://127.0.0.1:%d/" publicPort)
     listener.Start ()
@@ -507,7 +485,7 @@ let private startMountProxy (publicPort: int) (sessionPort: int) : HttpListener 
                 Async.Start (
                     async {
                         try
-                            let target = sprintf "http://127.0.0.1:%d%s" sessionPort ctx.Request.RawUrl
+                            let target = sprintf "http://127.0.0.1:%d%s" (sessionPort ()) ctx.Request.RawUrl
                             use request = new HttpRequestMessage (HttpMethod ctx.Request.HttpMethod, target)
                             if ctx.Request.HasEntityBody then
                                 use buffer = new MemoryStream ()
@@ -579,7 +557,7 @@ let mountedTests =
             async {
                 if Directory.Exists mountDataDir then Directory.Delete (mountDataDir, true)
                 startMountedHost ()
-                let proxy = startMountProxy MOUNT_PROXY_PORT mountSessionPort
+                let proxy = startMountProxy MOUNT_PROXY_PORT (fun () -> mountSessionPort)
                 // Teardown in `finally`: a failing assertion used to skip it and leave the
                 // Manager, its session child and the proxy holding ports 8186-8188, so one
                 // red run could poison whatever ran next (the failing CI run showed exactly
@@ -633,6 +611,33 @@ let mountedTests =
                     | None -> failwith "no session auth cookie was set"
                     | Some cookie ->
                         Expect.equal cookie.Path (sprintf "/s/%s/" MOUNT_SESSION) "scoped to the mount, not shared with siblings"
+
+                    // Client-side persistence across a full server wipe (Step 20), which is
+                    // only observable where the ADDRESS survives the restart. This used to
+                    // live in the unmounted fixture and passed because that fixture pinned
+                    // the session's port; Plan 12 deleted the pinning, so the property now
+                    // belongs where it actually holds — and proving it here is the point of
+                    // path-mounting rather than an accident of it.
+                    let composerSel = """[data-rich-readonly="false"] .ProseMirror"""
+                    let! _ = await (page.WaitForSelectorAsync composerSel)
+                    do! awaitU (page.ClickAsync composerSel)
+                    do! awaitU (page.Keyboard.TypeAsync "persisted across the wipe")
+                    let hasDraft =
+                        """[...document.querySelectorAll('.ProseMirror')].some(p => p.textContent === 'persisted across the wipe')"""
+                    let! _ = await (page.WaitForFunctionAsync hasDraft)
+
+                    mountedHost.Kill true
+                    mountedHost.WaitForExit ()
+                    if Directory.Exists mountDataDir then Directory.Delete (mountDataDir, true)
+                    startMountedHost ()
+
+                    // The SAME url — the session came back on a different loopback port and
+                    // the proxy followed it, which the browser never saw. So the origin is
+                    // unchanged, its IndexedDB is still this session's, and the draft can
+                    // only have come from there: the server's copy was deleted.
+                    let! _ = await (page.ReloadAsync ())
+                    let! _ = await (page.WaitForFunctionAsync connected)
+                    do! await (page.WaitForFunctionAsync hasDraft) |> Async.Ignore
                 finally
                     browserToClose |> Option.iter (fun b -> b.CloseAsync () |> ignore)
                     playwrightToDispose |> Option.iter (fun p -> p.Dispose ())
