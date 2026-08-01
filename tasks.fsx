@@ -445,17 +445,6 @@ let installSmoke (tgz: string) =
 
 // --- check: capability-gated test orchestration ----------------------------------------------
 
-// Install the Playwright chromium the browser E2Es drive — idempotent, and skipped when
-// PLAYWRIGHT_BROWSERS_PATH already carries one (the sandbox preinstalls it there).
-let private ensureBrowser () =
-    let path = Environment.GetEnvironmentVariable "PLAYWRIGHT_BROWSERS_PATH"
-    let hasChromium =
-        not (String.IsNullOrEmpty path)
-        && Directory.Exists path
-        && (Directory.GetDirectories path |> Array.exists (fun d -> (Path.GetFileName d).StartsWith "chromium"))
-    if not hasChromium then
-        exec "npx" [ "--yes"; "playwright@1.61.1"; "install"; "--with-deps"; "chromium" ]
-
 let private hasAny (caps: Set<string>) names = names |> List.exists caps.Contains
 
 // Run the Fable-compiled test bundle on Node with a hard timeout, so a hung WebRTC connection
@@ -574,7 +563,11 @@ let private runCheckOnce (requested: string list) =
 
     // The .NET CLR (Playwright) path — only when a Browser-tagged suite is enabled.
     if capSet.Contains "Browser" then
-        ensureBrowser ()
+        // No browser install step: Chromium comes from the environment
+        // (PLAYWRIGHT_BROWSERS_PATH, set by devenv.nix from nixpkgs' playwright-driver), like
+        // every other tool the suite needs. `check` used to shell out to `npx playwright
+        // install --with-deps`, which fetched from the network and installed system packages
+        // as root — mid-test-run, and only ever workable on a CI image.
         Directory.CreateDirectory (Path.Combine (repoRoot, "tests/browser/out")) |> ignore
         exec esbuild [ "app/out/browser/EditorHarness.js"; "--bundle"; "--format=esm"; "--outfile=tests/browser/out/harness.js" ]
         progress "running the browser suite (.NET CLR)"
