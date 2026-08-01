@@ -33,7 +33,27 @@ let private PORT = 8180
 let private BASE = sprintf "http://127.0.0.1:%d/" PORT
 let private dataDir = "tests/browser/.data"
 
-// --- Chromium discovery (ported from browser-e2e.fsx) ----------------------------------
+// --- Chromium discovery -----------------------------------------------------------------
+//
+// The browser comes from `PLAYWRIGHT_BROWSERS_PATH` — nixpkgs' playwright-driver, pinned by
+// the same lock as the toolchain (devenv.nix) — and its layout is Playwright's, which differs
+// per platform and has changed name across builds:
+//
+//   x86_64-linux    chrome-linux64/chrome
+//   aarch64-linux   chrome-linux/chrome
+//   aarch64-darwin  chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/…
+//
+// So the executable is found by NAME, from a known set, under the `chromium-<revision>`
+// directory. Nothing here may hardcode a revision: it moves with every Playwright bump, and a
+// stale one would fail as "no Chromium" long after the browser arrived.
+//
+// There is deliberately no fallback to a system Chrome. The revision is pinned so the browser
+// matches the client driving it; silently launching whatever `/usr/bin/google-chrome` happens
+// to be would make the suite's meaning depend on the host, which is the opposite of what
+// pinning is for. `CHROMIUM_PATH` remains as the explicit override for someone who means it.
+let private chromiumExecutableNames =
+    set [ "chrome"; "Google Chrome for Testing"; "Chromium" ]
+
 let private chromiumPath () : string =
     let env name =
         match Environment.GetEnvironmentVariable name with
@@ -42,16 +62,41 @@ let private chromiumPath () : string =
     match env "CHROMIUM_PATH" with
     | Some p -> p
     | None ->
-        let root = env "PLAYWRIGHT_BROWSERS_PATH" |> Option.defaultValue "/opt/pw-browsers"
-        let fromRoot =
-            if Directory.Exists root then
-                try Directory.EnumerateFiles (root, "chrome", SearchOption.AllDirectories) |> Seq.toList
-                with _ -> []
-            else []
-        let candidates = fromRoot @ [ "/usr/bin/chromium"; "/usr/bin/chromium-browser"; "/usr/bin/google-chrome" ]
-        match candidates |> List.tryFind File.Exists with
-        | Some c -> c
-        | None -> failwith "no Chromium found; set CHROMIUM_PATH"
+        match env "PLAYWRIGHT_BROWSERS_PATH" with
+        | None ->
+            failwith
+                "no Chromium: PLAYWRIGHT_BROWSERS_PATH is unset (devenv.nix sets it; outside \
+                 the dev shell, set CHROMIUM_PATH)"
+        | Some root ->
+            // `chromium-*` and not `chromium*`: `chromium_headless_shell-<rev>` sits beside it
+            // and is a different, cut-down browser. The underscore is what separates them.
+            let revisions =
+                if Directory.Exists root then
+                    try Directory.GetDirectories (root, "chromium-*") |> Array.toList |> List.sort
+                    with _ -> []
+                else []
+            // Each revision directory is a symlink into the store, and .NET's recursive
+            // enumeration does not descend one — resolve it rather than depend on that.
+            let resolve (dir: string) =
+                match Directory.ResolveLinkTarget (dir, true) with
+                | null -> dir
+                | target -> target.FullName
+            let executables =
+                revisions
+                |> List.collect (fun dir ->
+                    try
+                        Directory.EnumerateFiles (resolve dir, "*", SearchOption.AllDirectories)
+                        |> Seq.filter (fun f -> chromiumExecutableNames.Contains (Path.GetFileName f))
+                        |> Seq.toList
+                    with _ -> [])
+            match executables |> List.tryFind File.Exists with
+            | Some c -> c
+            | None ->
+                failwithf
+                    "no Chromium under %s (looked in %d chromium-* revision(s) for %s); set CHROMIUM_PATH"
+                    root
+                    (List.length revisions)
+                    (String.Join (", ", chromiumExecutableNames))
 
 // --- Host spawn / readiness (ported): the real product entry on a test port -------------
 let mutable private host : Process = null
@@ -388,7 +433,11 @@ let editorTests =
                 // `reportFocus`, which the harness stashes.
                 do! awaitU (page.ClickAsync ".ProseMirror")
                 do! awaitU (page.Keyboard.TypeAsync "hello world")
-                do! awaitU (page.Keyboard.PressAsync "Control+a")
+                // `ControlOrMeta`, not `Control`: select-all is Cmd+A on macOS, where Ctrl+A is
+                // the emacs "start of line" binding instead — so this selected nothing, the
+                // range stayed empty, and the highlight this test waits for never rendered.
+                // Invisible until the Browser tier could run on a Mac at all.
+                do! awaitU (page.Keyboard.PressAsync "ControlOrMeta+a")
 
                 // Replay that selection as a REMOTE peer's cursor. The decorations are built from
                 // its relative positions: a caret widget + name label at `head`, and a translucent

@@ -36,6 +36,27 @@ in
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
 
+  # The Chromium the Browser-tier E2Es drive, from nixpkgs — so it is pinned by the same lock
+  # as every other tool here, present before the suite starts, and fetched by Nix rather than
+  # by the test run.
+  #
+  # `browsers-chromium`, not `browsers`: this repo launches Chromium and nothing else, and the
+  # full set adds Firefox and WebKit — about a gigabyte no suite here ever opens.
+  #
+  # It replaces `npx playwright install --with-deps chromium`, and the improvement is not
+  # tidiness. That command reached outside the build: `--with-deps` installs SYSTEM packages
+  # (apt, as root) as a side effect of running tests, which works on a CI image and on nothing
+  # else. nixpkgs instead patchelfs the same upstream build against an explicit X/GTK/NSS
+  # closure and wraps it with SSL_CERT_FILE and FONTCONFIG_FILE, so on Linux it needs neither
+  # apt nor root; on darwin it is the same app bundle Playwright would have downloaded, where
+  # `--with-deps` was never anything but a no-op.
+  #
+  # Same browser either way: this nixpkgs pins playwright-driver 1.61.1 — the exact version
+  # tasks.fsx pinned for npx, and the pair Microsoft.Playwright 1.61.0 expects. That agreement
+  # is the point of pinning a revision at all, and it is why the test may not fall back to
+  # some other Chromium that happens to be installed.
+  env.PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers-chromium}";
+
   # devenv's CLI-vs-modules skew banner, printed on EVERY task invocation, can never be
   # actionable here: the CLI always comes from the pinned nixpkgs (`nix profile install
   # nixpkgs#devenv` in both workflows, and .claude/setup.sh does the same), so nobody in this
