@@ -6,8 +6,8 @@ module Yession.Tests.Agent
 // runners — the full lifecycle (streamed deltas -> completed | failed) is exercised
 // through the orchestrator, the projection, and the real WebRTC stack (E2E-5) without
 // any dependence on live model output. The real Claude Agent SDK adapter is verified by
-// a smoke test that runs whenever ANTHROPIC_API_KEY is present and reports itself as
-// skipped otherwise.
+// a smoke test carrying the `LiveAgent` capability — it runs in any tier that asks for
+// one, and stands in a visible skip in the tiers that do not.
 
 open System
 open Fable.Core
@@ -283,121 +283,124 @@ let private e2eTests =
     ]
 
 // -----------------------------------------------------------------------------
-// Live SDK smoke — runs the real Claude Agent SDK adapter when credentials exist.
-// Gated so the suite stays deterministic without them (reported, not hidden).
+// Live SDK smoke — drives the real Claude Agent SDK adapter. Gated by the
+// `LiveAgent` capability alone (see the `Tag.needs` at the bottom of this file):
+// a tier that asks for it has credentials, because `check` refuses to start
+// otherwise. There is deliberately no second credential check here — a suite that
+// re-gates itself turns a missing credential back into a silent skip.
 // -----------------------------------------------------------------------------
 
 let private liveTests =
-    if Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> "" then
-        testList "Agent live SDK" [
-            testCaseAsync "the real adapter completes a turn with a non-empty streamed body" <|
-                async {
-                    let log = newLog ()
-                    let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
-                    let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                    do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
-                    let! events = eventsOf log
-                    match List.last events with
-                    | AgentMessageCompleted completed ->
-                        Expect.isTrue (completed.Body.Length > 0) "the live response has a body"
-                    | AgentTurnFailed f -> failwithf "live agent turn failed: %s" f.Reason
-                    | other -> failwithf "expected a completed agent message, got %A" other
-                }
+    testList "Agent live SDK" [
+        testCaseAsync "the real adapter completes a turn with a non-empty streamed body" <|
+            async {
+                let log = newLog ()
+                let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
+                let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
+                do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
+                let! events = eventsOf log
+                match List.last events with
+                | AgentMessageCompleted completed ->
+                    Expect.isTrue (completed.Body.Length > 0) "the live response has a body"
+                | AgentTurnFailed f -> failwithf "live agent turn failed: %s" f.Reason
+                | other -> failwithf "expected a completed agent message, got %A" other
+            }
 
-            testCaseAsync "the SDK accepts a RESOLVED credential through the env override (Plan 08 dispatch path)" <|
-                async {
-                    // Run the ambient credential through `Agent.runWith (Some ...)` — the
-                    // exact shape a broker-resolved token takes — proving the spawned
-                    // CLI honors options.env with the ambient variables displaced.
-                    let credential =
-                        match Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "" with
-                        | "" -> "ANTHROPIC_API_KEY", Interop.envOr "ANTHROPIC_API_KEY" ""
-                        | token -> "CLAUDE_CODE_OAUTH_TOKEN", token
-                    let log = newLog ()
-                    let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
-                    let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                    do! AgentTurn.run log (Agent.runWith (Some credential)) AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
-                    let! events = eventsOf log
-                    match List.last events with
-                    | AgentMessageCompleted completed ->
-                        Expect.isTrue (completed.Body.Length > 0) "the resolved-credential turn has a body"
-                    | AgentTurnFailed f -> failwithf "resolved-credential turn failed: %s" f.Reason
-                    | other -> failwithf "expected a completed agent message, got %A" other
-                }
+        testCaseAsync "the SDK accepts a RESOLVED credential through the env override (Plan 08 dispatch path)" <|
+            async {
+                // Run the ambient credential through `Agent.runWith (Some ...)` — the
+                // exact shape a broker-resolved token takes — proving the spawned
+                // CLI honors options.env with the ambient variables displaced.
+                let credential =
+                    match Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "" with
+                    | "" -> "ANTHROPIC_API_KEY", Interop.envOr "ANTHROPIC_API_KEY" ""
+                    | token -> "CLAUDE_CODE_OAUTH_TOKEN", token
+                let log = newLog ()
+                let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
+                let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
+                do! AgentTurn.run log (Agent.runWith (Some credential)) AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] trigger
+                let! events = eventsOf log
+                match List.last events with
+                | AgentMessageCompleted completed ->
+                    Expect.isTrue (completed.Body.Length > 0) "the resolved-credential turn has a body"
+                | AgentTurnFailed f -> failwithf "resolved-credential turn failed: %s" f.Reason
+                | other -> failwithf "expected a completed agent message, got %A" other
+            }
 
-            testCaseAsync "the live agent runs a real command through its MCP tools" <|
-                async {
-                    let m =
-                        Manager.create
-                            (Some Agent.run)
-                            (Some (fun sid -> Sandboxes.forBackend HostBackend (SessionId.value sid) EnvironmentSpec.defaults |> expect))
-                            8135
-                    let! _ =
-                        m.StartSession
-                            { SessionLaunchRequest.SessionId = SessionId.create "live-tools" |> expect }
-                    let managed = (m.Registered ()) |> List.head
-                    let! a = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "ada" "Ada"
-                    do! compose a a.Hello.PeerId "Use your execute_command tool to run the executable `node` with arguments `-e` and `console.log(6*7)`, then reply with just the number it printed."
-                    a.Connection.SendDraft a.Hello.PeerId
+        testCaseAsync "the live agent runs a real command through its MCP tools" <|
+            async {
+                let m =
+                    Manager.create
+                        (Some Agent.run)
+                        (Some (fun sid -> Sandboxes.forBackend HostBackend (SessionId.value sid) EnvironmentSpec.defaults |> expect))
+                        8135
+                let! _ =
+                    m.StartSession
+                        { SessionLaunchRequest.SessionId = SessionId.create "live-tools" |> expect }
+                let managed = (m.Registered ()) |> List.head
+                let! a = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "ada" "Ada"
+                do! compose a a.Hello.PeerId "Use your execute_command tool to run the executable `node` with arguments `-e` and `console.log(6*7)`, then reply with just the number it printed."
+                a.Connection.SendDraft a.Hello.PeerId
 
-                    do! a.Runner.WaitFor (fun model ->
-                            model.Conversation.Items
-                            |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "42"))
+                do! a.Runner.WaitFor (fun model ->
+                        model.Conversation.Items
+                        |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "42"))
 
-                    // The command ran through the scoped capability: its lifecycle is
-                    // in the event log and the environment started lazily for it.
-                    let! page = managed.Host.Log.Read None Int32.MaxValue
-                    let sawCommand =
-                        page.Events
-                        |> List.exists (fun e ->
-                            match e.Event with
-                            | CommandCompleted c -> c.Result = CommandSucceeded 0
-                            | _ -> false)
-                    let sawEnvironment =
-                        page.Events
-                        |> List.exists (fun e -> match e.Event with EnvironmentStarted _ -> true | _ -> false)
-                    Expect.isTrue sawCommand "the command lifecycle is events"
-                    Expect.isTrue sawEnvironment "the environment started lazily for the tool call"
+                // The command ran through the scoped capability: its lifecycle is
+                // in the event log and the environment started lazily for it.
+                let! page = managed.Host.Log.Read None Int32.MaxValue
+                let sawCommand =
+                    page.Events
+                    |> List.exists (fun e ->
+                        match e.Event with
+                        | CommandCompleted c -> c.Result = CommandSucceeded 0
+                        | _ -> false)
+                let sawEnvironment =
+                    page.Events
+                    |> List.exists (fun e -> match e.Event with EnvironmentStarted _ -> true | _ -> false)
+                Expect.isTrue sawCommand "the command lifecycle is events"
+                Expect.isTrue sawEnvironment "the environment started lazily for the tool call"
 
-                    do! a.Channel.Close ()
-                    do! m.Stop ()
-                }
+                do! a.Channel.Close ()
+                do! m.Stop ()
+            }
 
-            testCaseAsync "the built-in tools are gone: the live agent cannot read a host file" <|
-                async {
-                    // The turn's tool surface is exactly the five `yession` MCP tools
-                    // (`tools: []` in the adapter drops every built-in), and these
-                    // capabilities are `none`, so `execute_command` cannot run either.
-                    // A nonce no model can guess is therefore unreachable — a body that
-                    // contains it means a built-in file/shell tool came back.
-                    let nonce = sprintf "yession-nonce-%s" (string (Guid.NewGuid ()))
-                    let dir = "tests/Yession.Tests/out/.data"
-                    // Absolute, so the probe would succeed if a built-in file tool were
-                    // back — whatever cwd the spawned CLI runs in.
-                    let path = resolvePath nodePath (sprintf "%s/%s.txt" dir nonce)
-                    mkdirSync nodeFs dir
-                    writeFileSync nodeFs path nonce
-                    let body = sprintf "Read the file at %s and reply with its exact contents." path
-                    let probe = { trigger with Body = body }
-                    let probeItem = { triggerItem with Body = body }
-                    let log = newLog ()
-                    let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
-                    let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                    do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ probeItem ] probe
-                    let! events = eventsOf log
-                    match List.last events with
-                    | AgentMessageCompleted completed ->
-                        // A completed turn also proves `tools: []` leaves the query working.
-                        Expect.isFalse (completed.Body.Contains nonce) "no built-in tool could read the host file"
-                    | AgentTurnFailed f -> failwithf "tool-surface probe turn failed: %s" f.Reason
-                    | other -> failwithf "expected a completed agent message, got %A" other
-                }
-        ]
-    else
-        testList "Agent live SDK" [
-            testCase "skipped: no agent credentials (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN) in this environment" <| fun () ->
-                Expect.isTrue true "gated live test skipped"
-        ]
+        testCaseAsync "the built-in tools are gone: the live agent cannot read a host file" <|
+            async {
+                // The turn's tool surface is exactly the five `yession` MCP tools
+                // (`tools: []` in the adapter drops every built-in), and these
+                // capabilities are `none`, so `execute_command` cannot run either.
+                // A nonce no model can guess is therefore unreachable — a body that
+                // contains it means a built-in file/shell tool came back.
+                //
+                // The nonce lives ONLY in the file's CONTENTS, never in its name: a
+                // nonce in the path is in the prompt, and a correct refusal that
+                // quotes the path back ("I have no tool that can read
+                // /…/<nonce>.txt") then reads as a leak. That false positive is what
+                // failed the first release this suite ever actually ran in.
+                let nonce = sprintf "yession-nonce-%s" (string (Guid.NewGuid ()))
+                let dir = "tests/Yession.Tests/out/.data"
+                // Absolute, so the probe would succeed if a built-in file tool were
+                // back — whatever cwd the spawned CLI runs in.
+                let path = resolvePath nodePath (sprintf "%s/tool-surface-probe-%s.txt" dir (string (Guid.NewGuid ())))
+                mkdirSync nodeFs dir
+                writeFileSync nodeFs path nonce
+                let body = sprintf "Read the file at %s and reply with its exact contents." path
+                let probe = { trigger with Body = body }
+                let probeItem = { triggerItem with Body = body }
+                let log = newLog ()
+                let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
+                let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
+                do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ probeItem ] probe
+                let! events = eventsOf log
+                match List.last events with
+                | AgentMessageCompleted completed ->
+                    // A completed turn also proves `tools: []` leaves the query working.
+                    Expect.isFalse (completed.Body.Contains nonce) "no built-in tool could read the host file"
+                | AgentTurnFailed f -> failwithf "tool-surface probe turn failed: %s" f.Reason
+                | other -> failwithf "expected a completed agent message, got %A" other
+            }
+    ]
 
 let tests =
     testList "Agent" [
