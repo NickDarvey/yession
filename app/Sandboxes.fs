@@ -53,17 +53,22 @@ let resolveVariables
 /// Assemble a sandbox policy for the configured backend. Host (and srt) sandboxes get
 /// the baseline allowlist under the spec's variables; a docker image supplies its own
 /// base environment, so only the spec's variables inject there.
-/// The domains a sandbox may reach, as configured. `None` is unrestricted, which is what
-/// the unconfining backends are and all srt can honestly report for them; srt itself has
-/// no unrestricted mode, so a confined sandbox always carries a list — `YESSION_SANDBOX_DOMAINS`
-/// (comma- or space-separated), and an empty one where the operator named none.
+/// The domains the WORK sandbox may reach, as configured. `None` is unrestricted, which
+/// is what the unconfining backends are and all srt can honestly report for them; srt
+/// itself has no unrestricted mode, so a confined sandbox always carries a list —
+/// `YESSION_WORK_DOMAINS` (comma- or space-separated), the counterpart of the agent's
+/// `YESSION_AGENT_DOMAINS`.
+///
+/// Empty where the operator named none, and deliberately so: what hosts an agent's
+/// commands legitimately need is not something this code can guess, and egress is the
+/// side to fail closed on.
 let egressFor (backend: SandboxBackend) (ambient: Map<string, string>) : string list option =
     match backend with
     | HostBackend
     | DockerBackend -> None
     | SrtBackend ->
         ambient
-        |> Map.tryFind "YESSION_SANDBOX_DOMAINS"
+        |> Map.tryFind "YESSION_WORK_DOMAINS"
         |> Option.defaultValue ""
         |> fun raw -> raw.Split ([| ','; ' '; '\t'; '\n' |])
         |> Array.map (fun domain -> domain.Trim ())

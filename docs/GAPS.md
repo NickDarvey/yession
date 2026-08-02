@@ -97,9 +97,14 @@ discovers it in production. Items are roughly ordered by how much they matter.
   session id (a Crockford base32 id, always a valid Docker object name), and `EnvironmentSpec`
   is fully interpreted — image/build, mounts (incl. the persistent workspace volume),
   working directory, env-var refs, and secret refs (resolved at sandbox spawn). The
-  container drops all capabilities and sets `no-new-privileges`; it still runs the
-  image's default (usually root) user with no resource limits — deliberate until a
-  config surface exists. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
+  container drops all capabilities and sets `no-new-privileges`. It runs the image's
+  default (usually root) user, and that is a DECISION rather than an omission: without
+  `CAP_DAC_OVERRIDE` that root does not bypass file permissions — the mount suite proved
+  it by failing to write into a `0700` host directory — so the main thing a non-root user
+  buys is already bought, while running as one breaks the named workspace volume Docker
+  creates root-owned. What remains is that files written through a BIND mount are owned by
+  root on the host, which is a nuisance rather than an escape. Resource limits are
+  likewise absent, as they are for every backend. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
   where a daemon exists; on the CI `verify` runner `YESSION_REQUIRE_DOCKER=1` makes a
   missing daemon a hard failure rather than a silent skip. The dev container has no
   daemon, so local runs still report a skip.
