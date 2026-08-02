@@ -196,7 +196,7 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" ambientRun) (Some "ambient-token") "so does the ambient token"
 
         testCase "egress: only a confined backend carries an allowlist, and it is opt-in" <| fun () ->
-            let ambient = Map.ofList [ "YESSION_SANDBOX_DOMAINS", "api.example.com, cdn.example.com" ]
+            let ambient = Map.ofList [ "YESSION_WORK_DOMAINS", "api.example.com, cdn.example.com" ]
             Expect.equal (Sandboxes.egressFor HostBackend ambient) None "an unconfined backend is unrestricted"
             Expect.equal (Sandboxes.egressFor DockerBackend ambient) None "so is docker"
             Expect.equal
