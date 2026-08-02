@@ -11,9 +11,9 @@ namespace Yession.Domain
 /// configuration — so an invalid choice fails the session loudly at start, never
 /// silently mid-turn.
 type SandboxBackend =
-    /// Explicitly unsandboxed: plain child processes of the Session Process. The
-    /// default for now; switching the default to a confined backend is a later,
-    /// deliberate flip.
+    /// Explicitly unsandboxed: plain child processes of the Session Process. No longer
+    /// the default — it has to be asked for, and it is honest about what it is: the env
+    /// allowlist still holds, the filesystem and the network do not.
     | HostBackend
     /// OS-level confinement via `@anthropic-ai/sandbox-runtime` (bubblewrap on Linux,
     /// Seatbelt on macOS): wrapped spawn, millisecond start, enforced egress filtering.

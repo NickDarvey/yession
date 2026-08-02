@@ -39,22 +39,26 @@ let private controlChannel =
     | url, secret -> Some (url, secret)
 
 // The session-owned WorkSandbox (the sandbox seam): the backend comes from
-// `YESSION_WORK_SANDBOX` (default host — explicitly unsandboxed for now), parsed
-// fail-closed at boot — a typo refuses the start rather than silently dropping
-// isolation.
+// `YESSION_WORK_SANDBOX`, parsed fail-closed at boot — a typo refuses the start rather
+// than silently dropping isolation.
+//
+// The default is `srt`: agent-issued commands are confined unless an operator says
+// otherwise. That is the point of the seam, and a default of `host` meant every
+// deployment that never read the documentation ran them unconfined. `host` is still
+// there, and still honest about what it is — it just has to be asked for now.
 let private workBackend =
-    match SandboxBackend.parse (Interop.envOr "YESSION_WORK_SANDBOX" "host") with
+    match SandboxBackend.parse (Interop.envOr "YESSION_WORK_SANDBOX" "srt") with
     | Ok backend -> backend
     | Error e -> failwith e
 
 // The AgentSandbox backend (`YESSION_AGENT_SANDBOX`): where the agent CLI process
 // runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
 // the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
-// (Agent.fs); srt adds the OS-level confinement around it. Parsed HERE, at boot, so a
-// bad value fails the session at start rather than mid-turn. Fail closed, never a
-// silent fallback.
+// (Agent.fs); srt adds the OS-level confinement around it. Defaults to `srt` for the
+// same reason the WorkSandbox does. Parsed HERE, at boot, so a bad value fails the
+// session at start rather than mid-turn. Fail closed, never a silent fallback.
 let private agentBackend =
-    match SandboxBackend.parseAgent (Interop.envOr "YESSION_AGENT_SANDBOX" "host") with
+    match SandboxBackend.parseAgent (Interop.envOr "YESSION_AGENT_SANDBOX" "srt") with
     | Ok backend -> backend
     | Error e -> failwithf "agent sandbox: %s" e
 

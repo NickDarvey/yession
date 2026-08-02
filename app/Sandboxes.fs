@@ -202,9 +202,9 @@ module private Children =
 
 // --- Host: explicitly unsandboxed --------------------------------------------------------
 
-/// Plain child processes of the Session Process. No confinement — the documented
-/// default for now — but the env discipline still holds: the child sees exactly the
-/// policy env plus the request's, never the parent's.
+/// Plain child processes of the Session Process. No confinement — chosen deliberately
+/// now that srt is the default — but the env discipline still holds: the child sees
+/// exactly the policy env plus the request's, never the parent's.
 module HostSandbox =
 
     let create () : CreateSandbox =

@@ -50,22 +50,27 @@ discovers it in production. Items are roughly ordered by how much they matter.
   outcome is a 401 on every UI route, and the default `--auth none` denies everything.
   Under `--auth localhost` anyone with local access can still manage sessions — that
   is the localhost trust rule working as stated, not an oversight.
-- **The `host` sandbox backend provides no OS isolation — and it is still the default.**
-  Sandboxes are session-owned (the `CreateSandbox` seam): agent-issued commands run as
-  child processes of the Session Process. The host backend passes an allowlisted env
-  (never the process's own — the credential-leak regression test pins this), but file
-  system and network are unconfined. Both confining backends now exist —
-  `YESSION_WORK_SANDBOX=srt` (bubblewrap/Seatbelt, sub-second) and `=docker` (a full
-  userland) — so what remains is the DEFAULT: flipping it is a behaviour change for
-  every existing deployment, and deliberately separate from shipping the backends.
+- **Sandboxes confine by default; `host` is the opt-out.** Both sandboxes default to
+  `srt` (bubblewrap on Linux, Seatbelt on macOS): agent-issued commands and the agent CLI
+  are OS-confined unless an operator asks for something else. `YESSION_WORK_SANDBOX=host`
+  is still there and still honest about what it is — no filesystem or network confinement,
+  only the env allowlist (which the credential-leak regression test pins) — it just has to
+  be chosen now. `=docker` remains the full-userland option for the WorkSandbox.
+  - **A Linux host without the confinement tools cannot start a session.** srt needs
+    bubblewrap, socat and ripgrep; the Nix installable names all three, but an
+    `npm i -g yession` on a bare box does not have them, and the session fails when its
+    sandbox is created rather than starting unconfined. That is the intended trade — the
+    fix is to install them, or to choose `host` deliberately.
+  - **An unprivileged container needs `YESSION_SANDBOX_NESTED=weak`** (below), which is
+    now on the default path rather than an opt-in one.
 - **The agent CLI runs through the `spawnClaudeCodeProcess` seam with a policy env**
   (AgentSandbox): allowlisted baseline + proxy passthrough, a per-session scratch HOME
   (`<data>/agent-home` — `~/.claude` state lives and dies with the session), exactly one
   credential, and a process-group kill on the SDK's forwarded abort signal.
-  `YESSION_AGENT_SANDBOX=srt` adds OS confinement around it: the CLI reads and writes
-  only its scratch HOME of the operator's files, and reaches only `AgentSandbox`'s
-  domains (`YESSION_AGENT_DOMAINS`). On `host` — still the default — the file system and
-  network stay open to the CLI. Docker is BY DESIGN not an agent backend: a container
+  srt — the default — adds OS confinement around it: the CLI reads and writes only its
+  scratch HOME of the operator's files, and reaches only `AgentSandbox`'s domains
+  (`YESSION_AGENT_DOMAINS`). `YESSION_AGENT_SANDBOX=host` opts out, leaving the file
+  system and network open to the CLI. Docker is BY DESIGN not an agent backend: a container
   per session boot is the opposite of the sub-second start the agent needs, and the
   WorkSandbox keeps it.
   - The SDK's spawn seam is SYNCHRONOUS and srt's wrap is not, so the srt tier hands the
