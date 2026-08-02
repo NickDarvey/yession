@@ -112,6 +112,19 @@ as `outputs.{staged,nix,npm}`. To pin it in a system, add the flake as an input 
 `yession.packages.<system>.default` in a NixOS `environment.systemPackages` / home-manager
 `home.packages` list.
 
+### Addressing
+
+Out of the box the Manager and its sessions answer on loopback. To reach them from anywhere
+else, tell the Manager where it and its sessions are publicly reachable:
+
+```sh
+YESSION_MANAGER_URL=https://example.com          # the Manager: scheme + host, no path
+YESSION_SESSION_URL=https://example.com/s/{id}   # sessions: a template over {id} / {port}
+```
+
+[`docs/addressing.md`](docs/addressing.md) covers the template, why `{id}` keeps a session's
+browser storage across restarts and `{port}` cannot, and a worked Tailscale binding.
+
 ### Cloud sessions (Claude Code on the web)
 
 Set the environment's **setup script** to `bash .claude/setup.sh`. It installs single-user
