@@ -105,7 +105,7 @@ let renderModel (model: ClientModel) : string =
 /// `assets` carries the digests of the bundle and the stylesheet this shell is rendered
 /// against, so the document names the exact bytes the server will hand out. That pairing is
 /// what makes the assets cacheable forever and the shell the only thing that has to be fresh.
-let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (assets: AssetDigests) (model: ClientModel) : string =
+let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (ephemeralStorage: bool) (assets: AssetDigests) (model: ClientModel) : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -119,6 +119,9 @@ let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (
         (match managerOrigin with
          | Some origin -> sprintf "<meta name=\"%s\" content=\"%s\">" Dom.managerMetaName (escapeAttr origin)
          | None -> "")
+        // Said only when it is true, so the shell of a path-mounted deployment carries
+        // nothing about storage at all.
+        (if ephemeralStorage then sprintf "<meta name=\"%s\" content=\"1\">" Dom.ephemeralStorageMetaName else "")
         "<title>Yession</title>"
         Style.headTags (SessionRoute.relative (AppCss assets.Css))
         // The ONE inline script in the shell, and the only thing that has to run before first

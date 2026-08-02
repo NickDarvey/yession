@@ -32,6 +32,8 @@ let private representativeModel : ClientModel =
       // present, which is the interesting case: the offer must be gated on the CONNECTION,
       // not merely on whether a Manager is known.
       Manager = Some "http://127.0.0.1:8321"
+      // Path-mounted unless a case says otherwise: the address survives a restart.
+      EphemeralStorage = false
       Synced =
         // Draft/queue bodies are rich-text `Y.XmlFragment`s mounted by the browser editor,
         // not fields on the model — so the SSR fixture carries only the slot's identity; the
@@ -259,6 +261,31 @@ let private reconnectOfferTests =
                         Manager = Some "http://127.0.0.1:8321" }
             Expect.isFalse (html.Contains Dom.Hooks.sessionGone) "reconnecting is not stopped"
 
+        // Plan 12: the card promises what the deployment can actually deliver. Nothing
+        // asserted this sentence before, which is how it came to claim work was safe on a
+        // deployment that strands it.
+        testCase "a stable-address deployment promises the work comes back" <| fun () ->
+            let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
+            Expect.isTrue (html.Contains "saved here and syncs") "the promise is kept where it can be"
+            Expect.isFalse (html.Contains "new address") "and no warning where none is due"
+
+        testCase "an ephemeral-address deployment warns instead of promising" <| fun () ->
+            let html =
+                Support.render
+                    { stopped (Some "http://127.0.0.1:8321") (Some sessionId) with EphemeralStorage = true }
+            Expect.isTrue (html.Contains "reopens at a new address") "it says what reopening costs"
+            Expect.isFalse (html.Contains "saved here and syncs") "and never both"
+
+        // The banner and the card both render for a settled disconnection. The card is the
+        // more specific message, so the banner must not restate the promise underneath it.
+        testCase "the degraded banner does not repeat the promise while the offer shows" <| fun () ->
+            let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
+            Expect.equal
+                ((html.Split "saved here and syncs" |> Array.length) - 1)
+                1
+                "stated once, by the card"
+            Expect.isFalse (html.Contains Dom.Text.localFallback) "the banner's own promise stays out of it"
+
         testCase "a connected session shows no offer" <| fun () ->
             Expect.isFalse
                 ((Support.render representativeModel).Contains Dom.Hooks.sessionGone)
@@ -275,8 +302,10 @@ let private shellTests =
         // manager meta tag, so any pair does.
         let assets : AssetDigests = { Bundle = "testbundle01"; Css = "testcss0001" }
 
-        let page (managerOrigin: string option) =
-            Yession.Host.Ssr.page sessionId "" managerOrigin assets representativeModel
+        let pageWith (managerOrigin: string option) (ephemeralStorage: bool) =
+            Yession.Host.Ssr.page sessionId "" managerOrigin ephemeralStorage assets representativeModel
+
+        let page (managerOrigin: string option) = pageWith managerOrigin false
 
         testCase "a manager origin is emitted as its meta tag" <| fun () ->
             Expect.isTrue
@@ -299,6 +328,18 @@ let private shellTests =
             let html = page (Some "http://x\"onload=alert(1)")
             Expect.isFalse (html.Contains "\"onload=alert(1)") "the quote must not close the attribute"
             Expect.isTrue (html.Contains "&quot;onload=alert(1)") "it is escaped in place"
+
+        // Plan 12. The tag says the one thing worth saying, and only when it is true, so a
+        // path-mounted shell carries nothing about storage at all.
+        testCase "an ephemeral-storage deployment marks its shell" <| fun () ->
+            Expect.isTrue
+                ((pageWith None true).Contains (sprintf """<meta name="%s" content="1">""" Dom.ephemeralStorageMetaName))
+                "a deployment whose sessions move must say so"
+
+        testCase "a stable-address deployment says nothing about storage" <| fun () ->
+            Expect.isFalse
+                ((pageWith None false).Contains Dom.ephemeralStorageMetaName)
+                "absence is the good case, so the client reads false"
     ]
 
 let tests =

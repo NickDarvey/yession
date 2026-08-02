@@ -98,12 +98,6 @@ type Options =
       /// product, `node <SessionMain.js>` in development and tests.
       SessionCommand : string
       SessionArgs : string list
-      /// How a launched session's port is chosen (Plan 11). `Ephemeral` is the default and
-      /// the historical behaviour: the OS assigns one per launch. `Pinned` draws a port
-      /// from a reserved range at CREATION and reuses it for the life of the session, so
-      /// the session's origin — and the client-side storage a browser partitions by it —
-      /// survives a stop, a reap, and a resume.
-      SessionPorts : SessionPorts
       /// How long a child may take to print its readiness line.
       LaunchTimeoutMs : int
       /// SIGTERM → SIGKILL escalation grace.
@@ -156,7 +150,6 @@ module Options =
         { DataDir = dataDir
           SessionCommand = sessionCommand
           SessionArgs = sessionArgs
-          SessionPorts = Ephemeral
           LaunchTimeoutMs = 15000
           StopGraceMs = 3000
           ManagerPort = None
@@ -344,34 +337,6 @@ let createWithUi
   async {
     let statePath = sprintf "%s/manager.json" options.DataDir
     let mutable state = ManagerStore.load statePath
-
-    // Plan 11, before anything can launch. Two sessions holding one port is a registry
-    // that cannot work — the second to launch fails to bind, and until then the first
-    // answers for both — so it fails the boot where the cause is still visible, rather
-    // than at whichever launch happens to come second.
-    match ManagerState.duplicatePorts state with
-    | [] -> ()
-    | clashes ->
-        let describe (port, ids) =
-            sprintf "%d (%s)" port (ids |> List.map SessionId.value |> String.concat ", ")
-        failwithf
-            "manager state %s claims one port for several sessions: %s"
-            statePath
-            (clashes |> List.map describe |> String.concat "; ")
-
-    // Give any session that has no address one. Covers both the registry written before
-    // this Manager pinned ports and a deployment that has just turned pinning on. Durable
-    // before anything uses it, exactly like every other registry write.
-    match ManagerState.assignMissingPorts options.SessionPorts state with
-    | Error e -> failwithf "session ports: %s" e
-    | Ok (_, []) -> ()
-    | Ok (assigned, allocations) ->
-        state <- assigned
-        ManagerStore.save statePath state
-        for sessionId, port in allocations do
-            options.OnEvent
-                "session port assigned"
-                [ "yession.session.id", box (SessionId.value sessionId); "yession.session.port", box port ]
 
     // Runtime-only: the child handle per running session, and the last observed exit
     // for sessions that died without a Stop.
@@ -737,28 +702,18 @@ let createWithUi
         match SessionId.create sessionId with
         | Error e -> Error e
         | Ok id ->
-            // The address is decided HERE, once, and never again for this session — that is
-            // the whole point of pinning. A range with nothing left is a refused creation:
-            // a session with no address is worse than no session.
-            let allocated =
-                match options.SessionPorts with
-                | Ephemeral -> Ok None
-                | Pinned range -> ManagerState.nextPort range state |> Result.map Some
-            allocated
-            |> Result.bind (fun port ->
-                let record =
-                    { SessionId = id
-                      DisplayName = if displayName.Trim().Length > 0 then displayName.Trim () else sessionId
-                      CreatedAt = clock ()
-                      DataDir = sprintf "sessions/%s" (SessionId.value id)
-                      Port = port }
-                match ManagerState.addSession record state with
-                | Error e -> Error e
-                | Ok next ->
-                    // Durable before visible: the registry write precedes any use.
-                    ManagerStore.save statePath next
-                    state <- next
-                    Ok record)
+            let record =
+                { SessionId = id
+                  DisplayName = if displayName.Trim().Length > 0 then displayName.Trim () else sessionId
+                  CreatedAt = clock ()
+                  DataDir = sprintf "sessions/%s" (SessionId.value id) }
+            match ManagerState.addSession record state with
+            | Error e -> Error e
+            | Ok next ->
+                // Durable before visible: the registry write precedes any use.
+                ManagerStore.save statePath next
+                state <- next
+                Ok record
 
     let launch (sessionId: SessionId) : Async<Result<int, string>> =
         async {
@@ -796,10 +751,10 @@ let createWithUi
                 let env =
                     [ "YESSION_SESSION", SessionId.value record.SessionId
                       "YESSION_SESSION_DATA", sprintf "%s/%s" options.DataDir record.DataDir
-                      // The session's own pinned address, or 0 for "ask the OS" under
-                      // `Ephemeral`. Read off the RECORD, not the options: the port belongs
-                      // to the session, not to this launch.
-                      "YESSION_PORT", string (defaultArg record.Port 0)
+                      // OS-assigned, always. Set explicitly rather than omitted: `Spawn`
+                      // merges over `process.env`, so an operator's stray YESSION_PORT would
+                      // otherwise reach the child and pin every session to one port.
+                      "YESSION_PORT", "0"
                       // The child watches its stdin and exits when this Manager dies.
                       "YESSION_PARENT_GUARD", "1" ]
                     @ fst controlEnv
@@ -843,18 +798,7 @@ let createWithUi
                 | Error reason ->
                     revokeSecret ()
                     activity <- Map.remove key activity
-                    // Name the port when one was pinned. A child that cannot bind exits
-                    // before readiness, and "exited before ready" alone sends the reader
-                    // hunting through session logs for what is nearly always something
-                    // else holding the address. Never fall back to an OS-assigned port:
-                    // moving the session is precisely the data-losing behaviour pinning
-                    // exists to prevent.
-                    return
-                        Error (
-                            match record.Port with
-                            | Some port -> sprintf "%s (pinned port %d)" reason port
-                            | None -> reason
-                        )
+                    return Error reason
                 | Ok (child, port) ->
                     children <- Map.add key (child, port) children
                     lastExit <- Map.remove key lastExit

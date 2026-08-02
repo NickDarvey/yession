@@ -30,18 +30,6 @@ let private dataDir = Interop.envOr "YESSION_DATA_DIR" ".yession"
 // Manager instance must choose its own port (bind conflicts fail loudly).
 let private managerPort = Interop.envOr "YESSION_MANAGER_PORT" "8321" |> int
 
-// How session ports are chosen (Plan 11). Unset = `Ephemeral`, the historical behaviour:
-// the OS assigns one per launch and a session's address changes every time it resumes.
-// A range (`8400-8499`) pins one port per session for life, which is what keeps the
-// browser's origin — and the storage partitioned by it — intact across a reap.
-//
-// Parsed HERE, at boot, against the Manager's own port, so a range that would swallow the
-// management UI is a refused start rather than a bind failure weeks later.
-let private sessionPorts =
-    match Yession.Manager.SessionPorts.create managerPort (Interop.envOr "YESSION_SESSION_PORTS" "") with
-    | Ok ports -> ports
-    | Error e -> failwith e
-
 // How long a session may go unused before the Manager stops it (Plan 11). Unset = never,
 // which is the default: reaping trades a launch on the next visit for everything an idle
 // session holds, and on a deployment that tracks a fast-moving build, for sessions that
@@ -102,7 +90,6 @@ Async.StartImmediate(
         let! manager =
             ProcessManager.createWithUi
                 { ProcessManager.Options.defaults dataDir sessionCommand sessionArgs with
-                    SessionPorts = sessionPorts
                     IdleTimeout = idleTimeout
                     ManagerPort = Some managerPort
                     // Behind an authenticating proxy the issuer must be the proxy's

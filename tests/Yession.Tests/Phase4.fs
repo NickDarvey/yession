@@ -32,8 +32,7 @@ let private record (id: string) (name: string) : SessionRecord =
     { SessionId = SessionId.create id |> expect
       DisplayName = name
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
-      DataDir = sprintf "sessions/%s" id
-      Port = None }
+      DataDir = sprintf "sessions/%s" id }
 
 let private twoSessions : ManagerState =
     { Version = ManagerState.currentVersion
@@ -301,8 +300,7 @@ let private uiRecord : SessionRecord =
     { SessionId = SessionId.create "ui-render" |> expect
       DisplayName = "UI <Render>"
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
-      DataDir = "sessions/ui-render"
-      Port = None }
+      DataDir = "sessions/ui-render" }
 
 let private uiRenderTests =
     testList "Management UI rendering (Step 25)" [
@@ -537,18 +535,28 @@ let private uiFlowTests =
 
 let private reapingTests =
     testList "Idle reaping over the process boundary (Plan 11)" [
-        testCaseAsync "an idle session is reaped for the RIGHT reason, and comes back on the same pinned port" <|
+        testCaseAsync "an idle session is reaped for the RIGHT reason, and comes back at the same address" <|
             async {
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/reap-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
                 // Every lifecycle event the Manager emits, so the reap's REASON is read from
                 // the telemetry that operators read, not inferred from the session being gone.
                 let events = ResizeArray<string * (string * obj) list> ()
+                // A free port rather than a fixed one, like the fronted registry test below:
+                // the Manager must actually ANSWER on the origin it declares, because a
+                // launched session fetches OIDC discovery against it (docs/plans/10).
+                // Declaring one it does not answer on fails the launch, not the assertion.
+                let! managerPort = freePort ()
+                let origin = sprintf "http://127.0.0.1:%d" managerPort
                 let! pm =
                     ProcessManager.createWithUi
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
                             Strategy = Some Strategy.localhost
-                            SessionPorts = SessionPorts.create 0 "8430-8439" |> expect
+                            // Path-mounted: a session's address is derived from its ID, so it
+                            // is the same string before and after a reap however the OS
+                            // reassigns ports. That is the guarantee that replaced pinning.
+                            ManagerPort = Some managerPort
+                            Public = PublicAccess.create origin (origin + "/s/{id}") |> expect
                             IdleTimeout = Some (TimeSpan.FromSeconds 3.0)
                             OnEvent = fun name attrs -> lock events (fun () -> events.Add (name, attrs)) }
                         (Some ManagerUi.tryHandle)
@@ -556,15 +564,13 @@ let private reapingTests =
                 let sessionId = SessionId.create "reap-1" |> expect
                 let! _ = postForm (baseUrl + "/sessions") "id=reap-1&name=Reap+One" |> Async.AwaitPromise
 
-                // Pinned at creation, from the configured range.
-                let pinned =
-                    match (pm.TryFind sessionId).Value.Record.Port with
-                    | Some port -> port
-                    | None -> failwith "a pinned deployment must give the session an address"
-                Expect.isTrue (pinned >= 8430 && pinned <= 8439) (sprintf "port %d should come from the range" pinned)
+                // The address this deployment publishes for the session, before it has ever
+                // run: derived from the id alone, which is why it needs no port to compute.
+                let address () = (PublicAccess.sessionAddress sessionId 0 pm.Public).Url
+                Expect.equal (address ()) (origin + "/s/reap-1") "addressed by id, not by port"
 
                 let! launched = pm.Launch sessionId
-                Expect.equal launched (Ok pinned) "the session listens on its pinned port"
+                Expect.isTrue (Result.isOk launched) "the session launches"
 
                 // Nobody connects, so it is idle from the moment it boots. It reports that,
                 // and the Manager stops it once the window elapses.
@@ -586,14 +592,18 @@ let private reapingTests =
                             attrs |> List.tryPick (fun (k, v) -> if k = "yession.session.stop_reason" then Some (string v) else None)))
                 Expect.equal reason (Some "idle") "a session that reports must be reaped as idle, never as never-reported"
 
-                // And the way back returns it to the SAME address — the property the whole
-                // pinning half exists for, since the browser partitions storage by origin.
+                // And the way back returns it to the SAME address. This is the property that
+                // replaced port pinning: the browser partitions storage by origin, so an
+                // address that survives a reap is what lets a client keep what it wrote.
+                // Under a `{id}` template that holds by construction rather than by
+                // bookkeeping — the address never mentioned the port to begin with.
                 let! reopened = Interop.getText (baseUrl + "/sessions/reap-1/open") |> Async.AwaitPromise
                 Expect.isTrue
-                    (reopened.Contains (sprintf "http://127.0.0.1:%d/" pinned))
-                    "reopening lands on the same origin the reaped session had"
+                    (reopened.Contains (origin + "/s/reap-1/"))
+                    "reopening lands on the address the reaped session had"
+                Expect.equal (address ()) (origin + "/s/reap-1") "and it is unchanged by the reap"
                 match (pm.TryFind sessionId).Value.Status with
-                | ProcessManager.Running (port, _) -> Expect.equal port pinned "relaunched on its pinned port"
+                | ProcessManager.Running _ -> ()
                 | other -> failwithf "expected /open to have relaunched it, got %A" other
 
                 do! pm.StopAll ()
@@ -1192,6 +1202,24 @@ let private publicAccessTests =
             Expect.isTrue
                 ((errorOf "https://example.com" "https://example.com/p/{port}").Contains "{port} in its path")
                 "a mount that needed the port would not be knowable at boot"
+
+        // Plan 12. This one predicate decides whether the client may promise that local
+        // work survives a restart, so it has to answer for every template shape rather than
+        // for the two anyone had in mind.
+        testCase "a session keeps its address exactly when the template never names a port" <| fun () ->
+            let stableOf sessionUrl =
+                PublicAccess.create "https://example.com" sessionUrl
+                |> Result.map PublicAccess.sessionAddressIsStable
+            Expect.equal (stableOf "https://example.com/s/{id}") (Ok true) "path-mounted: derived from the id"
+            Expect.equal (stableOf "https://{id}.example.com") (Ok true) "a subdomain per session is stable too"
+            Expect.equal (stableOf "https://example.com:{port}") (Ok false) "port mirroring moves every launch"
+            Expect.equal (stableOf "https://example.com:{port}/s/{id}") (Ok false) "and naming both is still a moving port"
+            // The zero-config default is the one that most needs to say so, because it is
+            // what someone gets without having thought about addressing at all.
+            Expect.isFalse (PublicAccess.sessionAddressIsStable Loopback) "loopback is 127.0.0.1:{port}"
+            Expect.isFalse
+                (PublicAccess.sessionAddressIsStable (PublicAccess.create "https://example.com" "" |> expect))
+                "a fronted Manager with unfronted sessions still serves them on loopback ports"
 
         testCase "the auth cookie is scoped to the path the session is served under" <| fun () ->
             // A real narrowing where sessions share a host: a path-mounted session's

@@ -448,7 +448,7 @@ let private docPersistenceTests =
                 // First life: a held turn consumes e1; e2 stays pending; a plain draft
                 // is typed but never sent.
                 let runner1, _release1 = heldAgent ()
-                let! h1 = Host.startFull (fun () -> Some runner1) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None 0
+                let! h1 = Host.startFull (fun () -> Some runner1) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None false 0
                 let o = offlinePeer 21.0 "olive" "Olive"
                 let q1 = enqueue o "d-1" "q-1" "consumed before crash"
                 deliver o.Doc h1.Doc
@@ -464,7 +464,7 @@ let private docPersistenceTests =
                 // Second life: replay doc + log. The boot drain consumes e2 exactly
                 // once; the draft is intact.
                 let runner2, release2 = heldAgent ()
-                let! h2 = Host.startFull (fun () -> Some runner2) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None 0
+                let! h2 = Host.startFull (fun () -> Some runner2) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None false 0
                 let! secondLife = sentMessages h2.Log
                 Expect.equal
                     (secondLife |> List.map (fun m -> m.QueueId, m.Body))
@@ -495,7 +495,7 @@ let private docPersistenceTests =
                 let sessionId = SessionId.create "phase3-emptydraft" |> expect
                 let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
 
-                let! h1 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None 0
+                let! h1 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None false 0
                 // Two peers, exactly as a pre-`DraftSlot` build left them in the doc: one published
                 // a slot when its composer mounted and never typed (the garbage that put an empty
                 // draft box on every peer's composer for every peer that ever opened the session),
@@ -512,7 +512,7 @@ let private docPersistenceTests =
                 do! h1.Stop ()
 
                 // Second life: the replay sweeps the empty slot, and only that.
-                let! h2 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None 0
+                let! h2 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None false 0
                 let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
                 Expect.isFalse (Map.containsKey idlePeer synced.Drafts) "the empty slot is gone after the replay"
                 Expect.equal
@@ -528,7 +528,7 @@ let private docPersistenceTests =
                 let sessionId = SessionId.create "phase3-torn" |> expect
                 let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
 
-                let! h1 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None 0
+                let! h1 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None false 0
                 let o = offlinePeer 22.0 "olive" "Olive"
                 let oPeer = (o.Runner.Model ()).Peer.PeerId
                 Body.author o.Registry o.Runner oPeer "acknowledged"
@@ -538,7 +538,7 @@ let private docPersistenceTests =
                 // A crash tore the final append: an unparseable half-line, no newline.
                 appendFileSync nodeFs docPath "////////"
 
-                let! h2 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None 0
+                let! h2 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None false 0
                 let synced = SyncedStateSync.ofDoc h2.Doc |> Result.mapError (sprintf "%A") |> expect
                 Expect.equal
                     (synced.Drafts |> Map.tryFind oPeer |> Option.map (fun _ -> SyncedStateSync.draftBodyMarkdown h2.Doc oPeer))
@@ -553,7 +553,7 @@ let private docPersistenceTests =
                 let sessionId = SessionId.create "phase3-corrupt" |> expect
                 let openLog () = EventStore.openLog logPath sessionId (fun () -> DateTimeOffset.UtcNow)
 
-                let! h1 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None 0
+                let! h1 = Host.startFull (fun () -> None) None None (Some (openLog ())) (Some (DocStore.openStore docPath)) None None (fun _ _ -> ()) None None None sessionId None "" None false 0
                 do! h1.Stop ()
                 // A garbage line WITH a trailing newline claims to be acknowledged:
                 // that is corruption, and it must never be silently dropped.

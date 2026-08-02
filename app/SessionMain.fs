@@ -118,6 +118,11 @@ let private sessionMount = PublicAccess.sessionMount sessionId publicAccess
 /// URL, and that endpoint is the same HTTP server as the management UI, so it is precisely
 /// the origin that serves `/sessions/{id}/open`. Same precedence as the Manager's OIDC
 /// issuer, and by construction the same value.
+/// Whether this deployment's sessions keep their address across launches (Plan 12). The
+/// shell carries the negative so the client can qualify its local-first promise — which is
+/// otherwise a lie on any deployment addressing sessions by port, including the default.
+let private ephemeralStorage = not (PublicAccess.sessionAddressIsStable publicAccess)
+
 let private managerOrigin =
     PublicAccess.managerUrlOr (controlChannel |> Option.map fst) publicAccess
 
@@ -302,7 +307,7 @@ Async.StartImmediate (
                         (fun () -> envCreds || connectedSomewhere ())
                         sessionMount)
             | _ -> None
-        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin port
+        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

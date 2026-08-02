@@ -218,3 +218,19 @@ module PublicAccess =
     /// incoming requests. `""` unless the deployment path-mounts its sessions.
     let sessionMount (sessionId: SessionId) (access: PublicAccess) : string =
         sessions access |> SessionTemplate.mount sessionId
+
+    /// Does a session keep its address across launches?
+    ///
+    /// True when the template addresses sessions by `{id}` alone. The address is then
+    /// derived from the session rather than from whatever port it happened to bind, so it
+    /// is the same string before and after a stop, a reap, or a resume — and a browser's
+    /// storage, which is partitioned by ORIGIN, survives with it.
+    ///
+    /// False wherever `{port}` appears, including the loopback default: the OS assigns a
+    /// fresh port per launch, so the session returns to an origin the browser has never
+    /// seen, with whatever its user wrote offline stranded in a database nothing will open
+    /// again. That is a real constraint of not path-mounting rather than a defect — the
+    /// server still has everything that reached it — but it is the deployment the product
+    /// most needs to say so on, because it is the one you get with no configuration at all.
+    let sessionAddressIsStable (access: PublicAccess) : bool =
+        sessions access |> SessionTemplate.value |> fun template -> not (template.Contains "{port}")

@@ -21,14 +21,14 @@ open Yession.App
 /// randomly in the browser, so the server-rendered placeholder is left blank. The page
 /// embeds the serving session's id, so the browser can key its local doc store by
 /// session before (and without) any connection.
-let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) (assets: AssetDigests) =
+let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) (ephemeralStorage: bool) (assets: AssetDigests) =
     let placeholderPeer =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
         | Error e -> failwith e
     // Seed the serving session id so the secondary identifier renders on first paint (the
     // browser re-learns it from `PeerAccepted` once connected).
-    Ssr.page sessionId mount managerOrigin assets { ClientModel.init placeholderPeer with Session = Some sessionId }
+    Ssr.page sessionId mount managerOrigin ephemeralStorage assets { ClientModel.init placeholderPeer with Session = Some sessionId }
 
 let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
 let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
@@ -117,6 +117,9 @@ let start
     // page: this is a deployment fact, fixed at boot, not something that varies per
     // request — which is why the shell stays a single cached string.
     (managerOrigin: string option)
+    // Whether this deployment's sessions change address between launches (Plan 12). A
+    // deployment fact, fixed at boot like the mount and the origin beside it.
+    (ephemeralStorage: bool)
     (port: int)
     : Async<HttpServer * (unit -> Async<unit>)> =
     // Read and address the assets ONCE, here, rather than per request. Three things follow,
@@ -127,7 +130,7 @@ let start
     let bundle = readBundle ()
     let css = readCss ()
     let assets = { Bundle = contentDigest bundle; Css = contentDigest css }
-    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin assets
+    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin ephemeralStorage assets
     // The shell is a pure function of the session id, the mount, the Manager origin, and the
     // assets it names — all fixed at boot — so its validator is too, and a reload costs a 304
     // instead of the whole document.

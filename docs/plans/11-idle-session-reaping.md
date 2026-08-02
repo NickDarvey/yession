@@ -1,7 +1,7 @@
 # Plan 11 — Pinned session ports, idle reaping, and a stable way back in
 
-> **Status: implemented, not yet merged** (branch `feat/idle-session-reaping`). The
-> [tracker](TODO.md) row lands with the merge.
+> **Status: implemented.** The port-pinning half was superseded by
+> [Plan 12](12-path-mounted-by-default.md); what remains here is the reaping design.
 >
 > Addresses [GAPS.md](../GAPS.md) § Runtime & topology on two fronts: *"children die with
 > the Manager … a Manager restart stops every running session"*, and *"session ports are
@@ -34,47 +34,16 @@ open. On a multi-session host that is the larger prize.
 `persistenceKey` (`app/browser/Browser.fs`) keys the browser's IndexedDB store
 `yession/session/<id>`, and its comment claimed a session "keeps its store wherever it is
 served from". That holds only *within* one origin. **IndexedDB is partitioned by origin,
-and a port is part of the origin**, so a session that comes back on a new port comes back
-to an empty database, with whatever its user wrote offline stranded in one nothing will
-open again. On reconnect the client pushes full state from that empty replica and the
-server's copy wins.
+and a port is part of the origin**, so a session that comes back on a new port comes back to
+an empty database, with whatever its user wrote offline stranded in one nothing will open
+again.
 
-This was already broken on every stop/resume. Reaping would have promoted it from rare to
-routine, so it is fixed first, and everything else depends on it.
-
-`SessionPorts` (`src/Yession.Manager/Ports.fs`) is one validated value, in the shape
-`PublicAccess` established:
-
-```
-YESSION_SESSION_PORTS unset      -> Ephemeral      (the default; today's behaviour exactly)
-YESSION_SESSION_PORTS=8400-8499  -> Pinned <range> (one address per session, for life)
-```
-
-`PortRange` has no public constructor and `SessionPorts.create` is the only way to obtain
-one, so a caller holding `Pinned` holds a range validated at boot, and no code path can ask
-for a pinned port and find none configured. `create` takes the Manager's own port and
-refuses a range containing it — a deployment that works until the day a session is
-allocated 8321 belongs in a refused boot, not a support thread.
-
-Three rules protect the address once assigned:
-
-- **A stored port is authoritative even outside the current range.** Shrinking a range must
-  not silently relocate a session; out-of-range ports stay excluded from new allocations so
-  the two can never collide.
-- **A pinned port that will not bind fails the launch, naming the port.** Never a silent
-  fallback to an OS-assigned one — moving the session is the data-losing behaviour this
-  exists to prevent.
-- **Duplicate stored ports fail at load**, where the cause is still visible, rather than at
-  whichever launch happens to come second.
-
-`Ephemeral` assigns nothing and discards nothing, so turning pinning off and on again
-restores the same addresses. This supersedes the Manager's `YESSION_PORT`, which pinned one
-port for *every* session and was already wrong for more than one.
-
-**Path-mounting (Plan 10) is the intended end state** and removes per-session ports
-entirely: one origin, `…/s/{id}`, so storage survives by construction. Pinning is the
-near-term fix that makes reaping safe without also rewriting an operator's proxy
-reconciliation.
+This plan originally solved that by pinning a port per session from a reserved range.
+[Plan 12](12-path-mounted-by-default.md) replaced that with the addressing itself: a `{id}`
+template gives every session an address derived from the session rather than from whatever
+port it bound, so the guarantee holds by construction and the range is gone. Where a
+deployment still addresses sessions by port — including the zero-config loopback default —
+the constraint is real and the client now says so rather than promising otherwise.
 
 ## What "in use" means, and who gets to say
 
