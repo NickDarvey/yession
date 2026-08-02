@@ -534,6 +534,10 @@ let private srtAvailable () =
         let named name = Environment.GetEnvironmentVariable name
         let bwrap = match named "YESSION_BWRAP_PATH" with null | "" -> "bwrap" | path -> path
         let socat = match named "YESSION_SOCAT_PATH" with null | "" -> "socat" | path -> path
+        // EVERY dependency srt refuses to start without, not just the interesting one: the
+        // first CI run of these suites had bubblewrap and socat and no ripgrep, and because
+        // the probe did not ask, six suites failed where they should have reported one skip.
+        let ripgrep = match named "YESSION_RIPGREP_PATH" with null | "" -> "rg" | path -> path
         let weak = (match named "YESSION_SANDBOX_NESTED" with null -> "" | v -> v.Trim().ToLowerInvariant ()) = "weak"
         let confines =
             if weak then
@@ -543,7 +547,7 @@ let private srtAvailable () =
                 probeSucceeds bwrap [ "--ro-bind"; "/"; "/"; "--dev"; "/dev"; "--unshare-net"; "--unshare-pid"
                                       "--unshare-user"; "--cap-drop"; "ALL"; "--proc"; "/proc"; "--"
                                       bwrap; "--ro-bind"; "/"; "/"; "--unshare-user"; "true" ]
-        probeSucceeds socat [ "-V" ] && confines
+        probeSucceeds socat [ "-V" ] && probeSucceeds ripgrep [ "--version" ] && confines
 
 // Same shape as `resolveDocker`/`resolveNix`. YESSION_REQUIRE_SRT (release.yml) opts out of
 // the drop, so the gate that was promised confinement fails rather than skipping to green.
@@ -552,7 +556,7 @@ let private resolveSrt (caps: string list) : string list =
     elif not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "YESSION_REQUIRE_SRT")) then caps
     elif srtAvailable () then caps
     else
-        eprintfn "check: no working bubblewrap/socat — dropping the Srt capability (its suites will report a skip)"
+        eprintfn "check: no working sandbox confinement (bubblewrap, socat, ripgrep, and a nested user namespace under the strict profile) — dropping the Srt capability (its suites will report a skip)"
         caps |> List.filter (fun c -> c <> "Srt")
 
 // Build the installable from the WORKING TREE and boot it.

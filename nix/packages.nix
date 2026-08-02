@@ -231,15 +231,18 @@ let
     dontStrip = true;
   };
 
-  # The srt backend confines with bubblewrap and reaches its filtering proxy through socat
-  # (the network namespace is unshared, so a Unix-socket bridge is the only way out). Both are
-  # NAMED rather than left to PATH: srt treats an explicit path as a directive and reports it
-  # missing, where a PATH lookup would silently pick up someone else's build. macOS confines
-  # with Seatbelt, which ships with the OS and needs neither — hence Linux only.
+  # The srt backend confines with bubblewrap, reaches its filtering proxy through socat (the
+  # network namespace is unshared, so a Unix-socket bridge is the only way out), and finds the
+  # files it must deny outright with ripgrep. All three are NAMED rather than left to PATH: srt
+  # treats an explicit path as a directive and reports it missing, where a PATH lookup would
+  # silently pick up someone else's build — or find nothing, and fail a sandbox that had no
+  # business depending on the host's incidental tools. macOS confines with Seatbelt, which ships
+  # with the OS and needs none of them — hence Linux only.
   srtToolFlags = lib.optionalString pkgs.stdenv.isLinux ''
     \
         --set-default YESSION_BWRAP_PATH ${pkgs.bubblewrap}/bin/bwrap \
-        --set-default YESSION_SOCAT_PATH ${pkgs.socat}/bin/socat'';
+        --set-default YESSION_SOCAT_PATH ${pkgs.socat}/bin/socat \
+        --set-default YESSION_RIPGREP_PATH ${pkgs.ripgrep}/bin/rg'';
 
   # nix — the installable: two wrapped Node bins over tasks.fsx's shims, the runtime
   # node_modules, and the Nix node-datachannel addon, with the agent pointed at claude-code.
