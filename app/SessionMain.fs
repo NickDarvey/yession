@@ -47,6 +47,18 @@ let private workBackend =
     | Ok backend -> backend
     | Error e -> failwith e
 
+// The AgentSandbox backend (`YESSION_AGENT_SANDBOX`): where the agent CLI process
+// runs — host or srt, never docker (a work-sandbox-only backend). The host tier is
+// implemented (allowlisted env + scratch HOME through the SDK's
+// `spawnClaudeCodeProcess` seam, wired in Agent.fs); srt refuses until it lands.
+// Fail closed, never a silent fallback.
+do
+    match SandboxBackend.parseAgent (Interop.envOr "YESSION_AGENT_SANDBOX" "host") with
+    | Ok HostBackend -> ()
+    | Ok other ->
+        failwithf "agent sandbox: the %s backend is not implemented yet — set host" (SandboxBackend.describe other)
+    | Error e -> failwithf "agent sandbox: %s" e
+
 // Secret references in the sandbox spec resolve over the control channel at sandbox
 // spawn — the values go straight into the sandbox policy env and are dropped. Without
 // a Manager there is nothing to resolve against; plain values still work.
@@ -337,7 +349,7 @@ Async.StartImmediate (
             onStdinClosed (fun () ->
                 Async.StartImmediate (
                     async {
-                        do! telemetry.Shutdown () |> Async.AwaitPromise
+                        do! telemetry.Shutdown () |> Interop.awaitPromise
                         Interop.exit 0
                     }))
         // The one readiness line of the spawn contract — last, so the Manager can

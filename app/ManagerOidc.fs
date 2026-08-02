@@ -72,8 +72,8 @@ let create
     : Async<Provider> =
     async {
         // Ed25519 via WebCrypto; the `false` here is the non-extractability invariant.
-        let! keys = Fable.Jose.generateKeyPair "EdDSA" (createObj [ "extractable" ==> false ]) |> Async.AwaitPromise
-        let! publicJwk = Fable.Jose.exportJWK keys.publicKey |> Async.AwaitPromise
+        let! keys = Fable.Jose.generateKeyPair "EdDSA" (createObj [ "extractable" ==> false ]) |> Interop.awaitPromise
+        let! publicJwk = Fable.Jose.exportJWK keys.publicKey |> Interop.awaitPromise
         let kid = randomSecret ()
 
         let registry = ClientRegistry (randomSecret)
@@ -157,7 +157,7 @@ let create
                                     .setIssuedAt()
                                     .setExpirationTime("10m")
                                     .sign keys.privateKey
-                                |> Async.AwaitPromise
+                                |> Interop.awaitPromise
                             respond
                                 res
                                 200

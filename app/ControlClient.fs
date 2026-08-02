@@ -75,7 +75,7 @@ let nameReporter (baseUrl: string) (secret: string) : string -> Async<unit> =
                         (sprintf "%s/control/name" baseUrl)
                         secret
                         (ControlWire.toString ControlWire.sessionNameReport name)
-                    |> Async.AwaitPromise
+                    |> Interop.awaitPromise
                 return ()
             with _ -> return ()
         }
@@ -101,7 +101,7 @@ let activityReporter (baseUrl: string) (secret: string) : bool -> Async<unit> =
                         (sprintf "%s/control/activity" baseUrl)
                         secret
                         (ControlWire.toString ControlWire.sessionActivityReport busy)
-                    |> Async.AwaitPromise
+                    |> Interop.awaitPromise
                 if reply.status <> 200 then
                     eprintfn
                         "[activity] the manager refused an activity report (HTTP %d: %s) — this session will be stopped when its idle window elapses"
@@ -130,7 +130,7 @@ let secretsCapabilities (baseUrl: string) (secret: string) (sessionId: SessionId
     let post (route: string) (body: string) (decode: string -> Result<'a, string>) : Async<Result<'a, string>> =
         async {
             try
-                let! reply = postJsonReply (sprintf "%s/control/secrets/%s" baseUrl route) secret body |> Async.AwaitPromise
+                let! reply = postJsonReply (sprintf "%s/control/secrets/%s" baseUrl route) secret body |> Interop.awaitPromise
                 if reply.status = 200 then return decode reply.body
                 else return Error (sprintf "secrets %s refused (%d): %s" route reply.status reply.body)
             with e ->
@@ -164,7 +164,7 @@ let resolveSecret (baseUrl: string) (secret: string) : SecretName -> Async<Resul
                         (sprintf "%s/control/secrets/resolve" baseUrl)
                         secret
                         (ControlWire.toString ControlWire.resolveSecretRequest { Name = name })
-                    |> Async.AwaitPromise
+                    |> Interop.awaitPromise
                 if reply.status = 200 then
                     return
                         ControlWire.fromString ControlWire.resolveSecretResponse reply.body
@@ -189,7 +189,7 @@ let connections (baseUrl: string) (secret: string) : SessionConnections =
     let post (route: string) (body: string) (decode: string -> Result<'a, string>) : Async<Result<'a, string>> =
         async {
             try
-                let! reply = postJsonReply (sprintf "%s/control/connections/%s" baseUrl route) secret body |> Async.AwaitPromise
+                let! reply = postJsonReply (sprintf "%s/control/connections/%s" baseUrl route) secret body |> Interop.awaitPromise
                 if reply.status = 200 then return decode reply.body
                 else return Error (sprintf "connections %s refused (%d): %s" route reply.status reply.body)
             with e ->
@@ -243,7 +243,7 @@ let registerClient (baseUrl: string) (secret: string) (redirectUri: string) : As
                     (sprintf "%s/control/register-client" baseUrl)
                     secret
                     (Wire.toString Wire.registerClientRequest { RedirectUri = redirectUri })
-                |> Async.AwaitPromise
+                |> Interop.awaitPromise
             return Wire.fromString Wire.registerClientResponse text
         with e ->
             return Error (sprintf "control unreachable: %s" e.Message)

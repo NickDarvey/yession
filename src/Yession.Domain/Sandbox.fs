@@ -39,6 +39,15 @@ module SandboxBackend =
         | SrtBackend -> "srt"
         | DockerBackend -> "docker"
 
+    /// Parse the AgentSandbox backend: the agent CLI runs on host or under srt. Docker
+    /// is BY DESIGN not an agent backend — a container per session boot is the
+    /// opposite of the sub-second start the agent needs; the WorkSandbox keeps it.
+    let parseAgent (raw: string) : Result<SandboxBackend, string> =
+        parse raw
+        |> Result.bind (function
+            | DockerBackend -> Error "docker is a work-sandbox backend only — the agent sandbox is host or srt"
+            | backend -> Ok backend)
+
 /// Everything a sandbox needs to know at creation. `Env` is the sandbox's WHOLE base
 /// environment — backends pass it verbatim and must never merge the parent process's
 /// env over or under it (that merge is exactly the credential leak this seam removes).

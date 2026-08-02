@@ -58,9 +58,15 @@ discovers it in production. Items are roughly ordered by how much they matter.
   flipping the default to a confining backend (srt — bubblewrap/Seatbelt via
   `@anthropic-ai/sandbox-runtime` — is the planned sub-second tier) is deliberate
   future work.
-- **The agent CLI itself still runs unconfined in the Session Process** (`tools: []`
-  bounds the model's tool surface, not the process). Moving the CLI behind the sandbox
-  seam via the SDK's `spawnClaudeCodeProcess` is the next planned step (AgentSandbox).
+- **The agent CLI runs through the `spawnClaudeCodeProcess` seam with a policy env**
+  (AgentSandbox, host tier): allowlisted baseline + proxy passthrough, a per-session
+  scratch HOME (`<data>/agent-home` — `~/.claude` state lives and dies with the
+  session), exactly one credential, and a process-group kill on the SDK's forwarded
+  abort signal. Still no OS confinement — file system and network are open to the CLI
+  — until the srt tier lands. `YESSION_AGENT_SANDBOX` is `host | srt` (srt refuses
+  until implemented); docker is BY DESIGN not an agent backend — a container per
+  session boot is the opposite of the sub-second start the agent needs, and the
+  WorkSandbox keeps it.
 - **The Docker backend runs through the `dockerode` SDK and is integration-tested in the
   verify gate.** Containers and a per-sandbox named workspace volume are named by the
   session id (a Crockford base32 id, always a valid Docker object name), and `EnvironmentSpec`

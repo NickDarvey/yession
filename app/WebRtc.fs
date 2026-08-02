@@ -154,7 +154,7 @@ let connect (signalUrl: string) : Async<FrameChannel<string>> =
         let dc = pc.createDataChannel "session"
         let opened = onceOpen dc
         let! offer = offerReady
-        let! answerText = postText signalUrl offer |> Async.AwaitPromise
+        let! answerText = postText signalUrl offer |> Interop.awaitPromise
         let answer = parseSdp answerText
         pc.setRemoteDescription (answer.sdp, answer.``type``)
         do! opened

@@ -17,12 +17,12 @@
     <Compile Include="Ssr.fs" />
     <Compile Include="SessionAuth.fs" />
     <Compile Include="Signalling.fs" />
-    <Compile Include="Agent.fs" />
     <Compile Include="Telemetry.fs" />
     <Compile Include="EventStore.fs" />
     <Compile Include="DocStore.fs" />
     <Compile Include="Fs.fs" />
     <Compile Include="Sandboxes.fs" />
+    <Compile Include="Agent.fs" />
     <Compile Include="ManagerStore.fs" />
     <Compile Include="SecretsCipher.fs" />
     <Compile Include="KeyStore.fs" />

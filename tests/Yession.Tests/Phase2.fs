@@ -105,6 +105,49 @@ let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNat
 [<Fable.Core.Emit("delete process.env[$0]")>]
 let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
+// A promise that is already rejected when the workflow gets to it — the shape every
+// backend produces routinely (a docker 404 for a container that is not there).
+[<Fable.Core.Emit("Promise.reject(new Error($0))")>]
+let private rejectedPromise (message: string) : JS.Promise<unit> = Fable.Core.Util.jsNative
+
+// Count Node's unhandled-rejection reports. Registering a listener is also what stops
+// Node from killing the process over one, so the count is observable rather than fatal.
+[<Fable.Core.Emit("(() => { const w = { count: 0 }; const on = () => { w.count++ }; process.on('unhandledRejection', on); w.stop = () => process.off('unhandledRejection', on); return w })()")>]
+let private watchUnhandledRejections () : obj = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("$0.count")>]
+let private unhandledCount (watch: obj) : int = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("$0.stop()")>]
+let private stopWatching (watch: obj) : unit = Fable.Core.Util.jsNative
+
+let private promiseAwaitTests =
+    testList "Awaiting a promise (Node interop)" [
+        testCaseAsync "a rejection is handled at the call, so reaching it late is caught, not fatal" <|
+            async {
+                let watch = watchUnhandledRejections ()
+                // Build the await now and run it later. Fable's async trampoline hijacks a
+                // workflow onto a `setTimeout` every 2000 steps, so a real await lands here:
+                // after Node has already decided whether the rejection was handled. Nothing
+                // the workflow does later can undo that verdict, so the handler has to be
+                // attached by now.
+                let awaiting = Interop.awaitPromise (rejectedPromise "boom")
+                do! Async.Sleep 10
+                let! caught =
+                    async {
+                        try
+                            do! awaiting
+                            return "no error"
+                        with ex -> return ex.Message
+                    }
+                do! Async.Sleep 10
+                let unhandled = unhandledCount watch
+                stopWatching watch
+                Expect.equal caught "boom" "the rejection arrives as a catchable exception"
+                Expect.equal unhandled 0 "and Node never reports it unhandled — which would kill the process"
+            }
+    ]
+
 let private sandboxPolicyTests =
     testList "Sandbox policy (pure)" [
         testCase "backend parsing accepts exactly host, srt, and docker — and fails closed" <| fun () ->
@@ -113,6 +156,8 @@ let private sandboxPolicyTests =
             Expect.equal (SandboxBackend.parse " Docker ") (Ok DockerBackend) "case/space tolerant"
             Expect.isError (SandboxBackend.parse "podman") "an unknown backend is a loud error, never a fallback"
             Expect.isError (SandboxBackend.parse "") "blank is not a choice"
+            Expect.equal (SandboxBackend.parseAgent "srt") (Ok SrtBackend) "the agent sandbox accepts srt"
+            Expect.isError (SandboxBackend.parseAgent "docker") "docker is a work-sandbox backend only, by design"
 
         testCase "the host baseline is an allowlist: credentials never pass it" <| fun () ->
             let ambient =
@@ -128,6 +173,27 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" baseline) None "credentials do not"
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" baseline) None "no credential survives"
             Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" baseline) None "the launch secret does not"
+
+        testCase "the agent CLI's env: one credential, scratch HOME, never the raw process env" <| fun () ->
+            let ambient =
+                Map.ofList
+                    [ "PATH", "/usr/bin"
+                      "HOME", "/home/u"
+                      "HTTPS_PROXY", "http://proxy:3128"
+                      "ANTHROPIC_API_KEY", "ambient-key"
+                      "CLAUDE_CODE_OAUTH_TOKEN", "ambient-token"
+                      "YESSION_CONTROL_SECRET", "launch-secret" ]
+            // A resolved per-turn credential displaces BOTH ambient credential vars.
+            let resolved = Sandboxes.AgentSandbox.envFor ambient "/data/agent-home" (Some ("CLAUDE_CODE_OAUTH_TOKEN", "turn-token"))
+            Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" resolved) (Some "turn-token") "the turn's credential is set"
+            Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" resolved) None "the ambient key never rides along"
+            Expect.equal (Map.tryFind "HOME" resolved) (Some "/data/agent-home") "the CLI gets the scratch HOME"
+            Expect.equal (Map.tryFind "HTTPS_PROXY" resolved) (Some "http://proxy:3128") "proxy config passes through"
+            Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" resolved) None "the launch secret never reaches the CLI"
+            // The documented ambient last resort passes exactly the two credential vars.
+            let ambientRun = Sandboxes.AgentSandbox.envFor ambient "/data/agent-home" None
+            Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" ambientRun) (Some "ambient-key") "the ambient key passes when nothing displaces it"
+            Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" ambientRun) (Some "ambient-token") "so does the ambient token"
 
         testCase "policy assembly: spec variables win over the baseline; docker takes no baseline" <| fun () ->
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
@@ -693,6 +759,7 @@ let private persistenceTests =
 let tests =
     testList "Phase2" [
         // Cheap tier: pure policy/parse, folds, host-sandbox child-process integration.
+        promiseAwaitTests
         sandboxPolicyTests
         environmentProjectionTests
         commandFoldTests

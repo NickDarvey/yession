@@ -7,6 +7,38 @@ module Yession.Host.Interop
 open Fable.Core
 open Fable.Core.JsInterop
 
+// --- Awaiting a promise ------------------------------------------------------
+//
+// Fable's async trampoline hijacks a workflow onto a `setTimeout` every 2000 steps, and
+// `Async.AwaitPromise` attaches its rejection handler only once the workflow reaches the
+// await. A promise that rejects inside that window has no handler when Node checks at the
+// end of the turn, so Node kills the process — and a `try/with` around the await cannot
+// help, because its handler is not attached yet. That is how a routine "no such
+// container" 404, caught and ignored on every other run, killed the whole suite (the
+// unhandled rejection of verify run 30725449198).
+//
+// `awaitPromise` settles the promise in JS, at creation, so both outcomes are a value the
+// workflow may take as long as it likes to read. Every await in the Node host goes
+// through it: one answer to the hazard rather than one per call site. (The browser keeps
+// `Async.AwaitPromise` — an unhandled rejection there is a console warning, not a dead
+// process, and this module is Node-only.)
+
+[<Emit("$0.then(value => [value, null], error => [null, error ?? new Error('promise rejected')])")>]
+let private settled (promise: JS.Promise<'a>) : JS.Promise<'a * exn> = jsNative
+
+/// Await a promise; a rejection surfaces as an ordinary exception inside the workflow.
+let awaitPromise (promise: JS.Promise<'a>) : Async<'a> =
+    // Settle HERE, not inside the workflow below: this call runs in the same tick that
+    // created the promise, which is the only tick in which attaching a handler is
+    // guaranteed to beat Node's check. Deferring it into the `async` would reproduce the
+    // very gap this exists to close.
+    let outcome = settled promise
+    async {
+        // `outcome` never rejects, so this await is safe whenever the workflow reaches it.
+        let! value, error = outcome |> Async.AwaitPromise
+        if isNull (box error) then return value else return raise error
+    }
+
 // --- node-datachannel --------------------------------------------------------
 
 type [<AllowNullLiteral>] LocalDescription =
