@@ -216,7 +216,10 @@ let private sandboxPolicyTests =
                     AllowedDomains = Some [ "api.example.com" ] }
             let config =
                 Sandboxes.SrtSandbox.configFor
-                    { Bwrap = Some "/usr/bin/bwrap"; Socat = Some "/usr/bin/socat"; Nesting = Sandboxes.StrictNesting }
+                    { Bwrap = Some "/usr/bin/bwrap"
+                      Socat = Some "/usr/bin/socat"
+                      Ripgrep = Some "/usr/bin/rg"
+                      Nesting = Sandboxes.StrictNesting }
                     (Some "/home/operator")
                     policy
             Expect.equal config.DenyRead [ "/home/operator" ] "the operator's home is the denied region"
@@ -225,10 +228,11 @@ let private sandboxPolicyTests =
             Expect.isTrue (List.contains Sandboxes.SrtSandbox.tmpDir config.AllowWrite) "and the temp dir srt redirects TMPDIR to"
             Expect.equal config.AllowedDomains [ "api.example.com" ] "the egress allowlist rides through"
             Expect.equal config.Bwrap (Some "/usr/bin/bwrap") "the named confinement tool rides through"
+            Expect.equal config.Ripgrep (Some "/usr/bin/rg") "and so does the scanner srt will not start without"
             Expect.isFalse config.WeakNesting "the strict profile is what a configured host gets"
             let unrestricted =
                 Sandboxes.SrtSandbox.configFor
-                    { Bwrap = None; Socat = None; Nesting = Sandboxes.StrictNesting }
+                    { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
                     None
                     Support.emptyPolicy
             Expect.equal unrestricted.AllowedDomains [] "a policy naming no domains gets no egress, never all of it"
@@ -236,9 +240,13 @@ let private sandboxPolicyTests =
         testCase "the confinement tools: named, blank is absent, and weakening is never a guess" <| fun () ->
             let tools =
                 Sandboxes.SrtSandbox.toolsFrom
-                    (Map.ofList [ "YESSION_BWRAP_PATH", " /nix/store/x/bin/bwrap "; "YESSION_SOCAT_PATH", "" ])
+                    (Map.ofList
+                        [ "YESSION_BWRAP_PATH", " /nix/store/x/bin/bwrap "
+                          "YESSION_SOCAT_PATH", ""
+                          "YESSION_RIPGREP_PATH", "/nix/store/x/bin/rg" ])
                 |> expect
             Expect.equal tools.Bwrap (Some "/nix/store/x/bin/bwrap") "a named tool is trimmed and used"
+            Expect.equal tools.Ripgrep (Some "/nix/store/x/bin/rg") "every dependency is named, not left to PATH"
             Expect.equal tools.Socat None "a blank one is absent (darwin sets neither), not a path of empty string"
             Expect.equal tools.Nesting Sandboxes.StrictNesting "unconfigured means the strict profile"
             Expect.equal

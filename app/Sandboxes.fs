@@ -448,6 +448,11 @@ type SandboxNesting =
 type SrtTools =
     { Bwrap : string option
       Socat : string option
+      /// srt scans for the files it must deny outright (keys, shell rc files, git hooks)
+      /// with ripgrep. It is as much a dependency as bubblewrap — a sandbox does not start
+      /// without one — and naming it is what stops a host's incidental `rg` from deciding
+      /// how a session confines.
+      Ripgrep : string option
       Nesting : SandboxNesting }
 
 /// The srt runtime configuration a policy becomes. Assembled as data so the mapping is
@@ -463,6 +468,7 @@ type SrtConfig =
       AllowedDomains : string list
       Bwrap : string option
       Socat : string option
+      Ripgrep : string option
       WeakNesting : bool }
 
 /// OS-level confinement via `@anthropic-ai/sandbox-runtime` (bubblewrap on Linux,
@@ -504,6 +510,7 @@ module SrtSandbox =
           AllowedDomains = policy.AllowedDomains |> Option.defaultValue []
           Bwrap = tools.Bwrap
           Socat = tools.Socat
+          Ripgrep = tools.Ripgrep
           WeakNesting = (tools.Nesting = WeakNesting) }
 
     /// How this host confines, as configured. A blank tool path is an absent one: the dev
@@ -527,9 +534,12 @@ module SrtSandbox =
                     Error (sprintf "unknown sandbox nesting '%s' (expected strict, or weak for an unprivileged container)" other)
         nesting
         |> Result.map (fun nesting ->
-            { Bwrap = named "YESSION_BWRAP_PATH"; Socat = named "YESSION_SOCAT_PATH"; Nesting = nesting })
+            { Bwrap = named "YESSION_BWRAP_PATH"
+              Socat = named "YESSION_SOCAT_PATH"
+              Ripgrep = named "YESSION_RIPGREP_PATH"
+              Nesting = nesting })
 
-    [<Emit("({ network: { allowedDomains: $0, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: $1, allowRead: $2, allowWrite: $3, denyWrite: [] }, ...($4 ? { bwrapPath: $4 } : {}), ...($5 ? { socatPath: $5 } : {}), ...($6 ? { enableWeakerNestedSandbox: true } : {}) })")>]
+    [<Emit("({ network: { allowedDomains: $0, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: $1, allowRead: $2, allowWrite: $3, denyWrite: [] }, ...($4 ? { bwrapPath: $4 } : {}), ...($5 ? { socatPath: $5 } : {}), ...($6 ? { ripgrep: { command: $6 } } : {}), ...($7 ? { enableWeakerNestedSandbox: true } : {}) })")>]
     let private configObject
         (allowedDomains: string array)
         (denyRead: string array)
@@ -537,6 +547,7 @@ module SrtSandbox =
         (allowWrite: string array)
         (bwrap: string)
         (socat: string)
+        (ripgrep: string)
         (weakNesting: bool)
         : obj = jsNative
 
@@ -548,6 +559,7 @@ module SrtSandbox =
             (List.toArray config.AllowWrite)
             (config.Bwrap |> Option.defaultValue "")
             (config.Socat |> Option.defaultValue "")
+            (config.Ripgrep |> Option.defaultValue "")
             config.WeakNesting
 
     // The package is loaded on demand: it pulls a proxy stack and a TLS library, and a

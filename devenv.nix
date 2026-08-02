@@ -30,13 +30,15 @@ in
   # desktop already has a Secret Service — the real Keychain — and `check Keyring` drives
   # that instead. The wrapper exists for hosts with no session bus, which macOS never is.
   #
-  # bubblewrap + socat are the srt backend's confinement tools (and back the `Srt` test
-  # capability), Linux-only for the same reason: they have no darwin build, and macOS confines
-  # with Seatbelt, which ships with the OS.
+  # bubblewrap + socat + ripgrep are the srt backend's Linux dependencies (and back the `Srt`
+  # test capability). bubblewrap and socat are Linux-only for the same reason gnome-keyring is:
+  # no darwin build, and macOS confines with Seatbelt, which ships with the OS. ripgrep is
+  # listed with them because it is the same story — srt scans for its mandatory denies with it,
+  # on Linux only.
   packages =
     [ pkgs.git pkgs.actionlint ]
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux
-         [ pkgs.dbus pkgs.gnome-keyring pkgs.bubblewrap pkgs.socat ];
+         [ pkgs.dbus pkgs.gnome-keyring pkgs.bubblewrap pkgs.socat pkgs.ripgrep ];
 
   # Name the confinement tools for the srt backend exactly as the installable's wrappers do
   # (nix/packages.nix), so a dev-shell run and an installed run confine through the same
@@ -46,6 +48,8 @@ in
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.bubblewrap}/bin/bwrap";
   env.YESSION_SOCAT_PATH =
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.socat}/bin/socat";
+  env.YESSION_RIPGREP_PATH =
+    lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.ripgrep}/bin/rg";
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
