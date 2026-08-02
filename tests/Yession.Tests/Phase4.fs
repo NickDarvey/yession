@@ -274,12 +274,17 @@ let private controlRpcTests =
                 a.Connection.SendDraft a.Hello.PeerId
 
                 // Everything below happened ACROSS process boundaries: the child created
-                // its own host sandbox (no Manager grant exists any more), ran the
-                // command in it, and streamed the events back to a client.
+                // its own sandbox (no Manager grant exists any more), ran the command in
+                // it, and streamed the events back to a client.
+                //
+                // The running environment's ref is `srt`, which is the DEFAULT asserted
+                // rather than the configuration: nothing here sets YESSION_WORK_SANDBOX,
+                // so this is what a session gets when nobody chose — and a revert to an
+                // unconfined default would fail here instead of passing quietly.
                 do! a.Runner.WaitFor (fun m ->
                         (m.Conversation.Items
                          |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "diagnostic-ok"))
-                        && (match m.Environment with EnvironmentRunning _ -> true | _ -> false)
+                        && (match m.Environment with EnvironmentRunning ref -> ref = "srt" | _ -> false)
                         && (m.Commands.Entries
                             |> List.exists (fun e ->
                                 e.Status = CommandFinished (CommandSucceeded 0)
