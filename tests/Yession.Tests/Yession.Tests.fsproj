@@ -35,6 +35,7 @@
     <Compile Include="Client.fs" />
     <Compile Include="Phase2.fs" />
     <Compile Include="DockerIntegration.fs" />
+    <Compile Include="SrtIntegration.fs" />
     <Compile Include="Phase3.fs" />
     <Compile Include="EventsHttp.fs" />
     <Compile Include="Resilience.fs" />

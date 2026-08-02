@@ -145,6 +145,14 @@ let private claudePath () = Interop.envOr "YESSION_CLAUDE_PATH" ""
 let private agentHome () =
     sprintf "%s/agent-home" (Interop.envOr "YESSION_SESSION_DATA" ".yession")
 
+/// Where the CLI process runs (`YESSION_AGENT_SANDBOX`): host or srt, never docker.
+/// SessionMain parses this at boot and fails the session on anything else, so by the
+/// time a turn runs the value is known good — this reads it back, it does not re-decide.
+let private agentBackend () =
+    match SandboxBackend.parseAgent (Interop.envOr "YESSION_AGENT_SANDBOX" "host") with
+    | Ok backend -> backend
+    | Error e -> failwithf "agent sandbox: %s" e
+
 [<Emit("Object.fromEntries($0)")>]
 let private toEnvObj (entries: (string * string) array) : obj = jsNative
 
@@ -269,7 +277,8 @@ let runWith (credential: (string * string) option) : RunAgent =
         async {
             let home = agentHome ()
             Fs.ensureDir home
-            let env = Sandboxes.AgentSandbox.envFor (Sandboxes.ambientEnv ()) home credential
+            let ambient = Sandboxes.ambientEnv ()
+            let env = Sandboxes.AgentSandbox.envFor ambient home credential
             let! outcome =
                 runQuery
                     {| system = context.SystemPrompt; prompt = promptOf context |}
@@ -282,7 +291,7 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (setSecretFor capabilities)
                     (listSecretsFor capabilities)
                     (deleteSecretFor capabilities)
-                    (Sandboxes.AgentSandbox.hostClaudeSpawner ())
+                    (Sandboxes.AgentSandbox.claudeSpawnerFor (agentBackend ()) ambient home env)
                 |> Interop.awaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens

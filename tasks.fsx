@@ -268,11 +268,13 @@ let dev () =
 
 // node-datachannel (native addon) and @anthropic-ai/claude-agent-sdk (resolves its own native
 // `claude` sibling via import.meta.url) MUST NOT be bundled — they only work from their real
-// node_modules. zod is a dynamic import shared with the SDK; dockerode is pure JS but pulls
-// ssh2 (with an optional native addon), so it resolves from node_modules too. Everything else
-// (yjs, lib0, Thoth, prosemirror, …) inlines.
+// node_modules. @anthropic-ai/sandbox-runtime is the same shape: it reaches for vendored
+// helper binaries beside its own module. zod is a dynamic import shared with the SDK; dockerode
+// is pure JS but pulls ssh2 (with an optional native addon), so it resolves from node_modules
+// too. Everything else (yjs, lib0, Thoth, prosemirror, …) inlines.
 let private externals =
-    [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "zod"; "dockerode"; "@napi-rs/keyring" ]
+    [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "@anthropic-ai/sandbox-runtime"
+      "zod"; "dockerode"; "@napi-rs/keyring" ]
     |> List.map (sprintf "--external:%s")
 
 // The OTel SDK does a dynamic `require('util')`; esbuild's ESM output can't satisfy a runtime
@@ -329,6 +331,7 @@ let private packageJson (version: string) =
   "engines": { "node": ">=24" },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "%s",
+    "@anthropic-ai/sandbox-runtime": "%s",
     "@napi-rs/keyring": "%s",
     "dockerode": "%s",
     "node-datachannel": "%s",
@@ -338,6 +341,7 @@ let private packageJson (version: string) =
 """
         version
         (depVersion "@anthropic-ai/claude-agent-sdk")
+        (depVersion "@anthropic-ai/sandbox-runtime")
         (depVersion "@napi-rs/keyring")
         (depVersion "dockerode")
         (depVersion "node-datachannel")
@@ -513,6 +517,44 @@ let private resolveNix (caps: string list) : string list =
         eprintfn "check: no nix CLI on PATH — dropping the Nix capability (its suites will report a skip)"
         caps |> List.filter (fun c -> c <> "Nix")
 
+// The srt backend confines with bubblewrap on Linux and Seatbelt on macOS. Seatbelt is part
+// of the OS, so darwin always has the capability; on Linux it is bubblewrap and socat (the
+// bridge into the unshared network namespace) that have to be there — and, since bwrap needs
+// unprivileged user namespaces, being installed is not the same as WORKING. Run it, rather
+// than look for it: a kernel with user namespaces disabled fails here, where the reason is one
+// line, instead of inside a suite.
+// The probe runs the profile the suites will actually run under: with
+// YESSION_SANDBOX_NESTED=weak, plain bubblewrap is the whole requirement; under the
+// default strict profile, srt's seccomp helper additionally creates a NESTED user
+// namespace inside bwrap's, which an unprivileged container refuses — so the strict probe
+// nests a second bwrap to ask exactly that question.
+let private srtAvailable () =
+    if OperatingSystem.IsMacOS () then true
+    else
+        let named name = Environment.GetEnvironmentVariable name
+        let bwrap = match named "YESSION_BWRAP_PATH" with null | "" -> "bwrap" | path -> path
+        let socat = match named "YESSION_SOCAT_PATH" with null | "" -> "socat" | path -> path
+        let weak = (match named "YESSION_SANDBOX_NESTED" with null -> "" | v -> v.Trim().ToLowerInvariant ()) = "weak"
+        let confines =
+            if weak then
+                probeSucceeds bwrap [ "--ro-bind"; "/"; "/"; "--dev"; "/dev"; "--unshare-net"; "--unshare-pid"
+                                      "--unshare-user"; "--bind"; "/proc"; "/proc"; "true" ]
+            else
+                probeSucceeds bwrap [ "--ro-bind"; "/"; "/"; "--dev"; "/dev"; "--unshare-net"; "--unshare-pid"
+                                      "--unshare-user"; "--cap-drop"; "ALL"; "--proc"; "/proc"; "--"
+                                      bwrap; "--ro-bind"; "/"; "/"; "--unshare-user"; "true" ]
+        probeSucceeds socat [ "-V" ] && confines
+
+// Same shape as `resolveDocker`/`resolveNix`. YESSION_REQUIRE_SRT (release.yml) opts out of
+// the drop, so the gate that was promised confinement fails rather than skipping to green.
+let private resolveSrt (caps: string list) : string list =
+    if not (List.contains "Srt" caps) then caps
+    elif not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "YESSION_REQUIRE_SRT")) then caps
+    elif srtAvailable () then caps
+    else
+        eprintfn "check: no working bubblewrap/socat — dropping the Srt capability (its suites will report a skip)"
+        caps |> List.filter (fun c -> c <> "Srt")
+
 // Build the installable from the WORKING TREE and boot it.
 //
 // Every nix build CI runs goes through a flake, and a flake source copy is what git tracks —
@@ -537,7 +579,7 @@ let private buildNixPackage () =
 let private progress (label: string) = printfn "check: %s" label
 
 let private runCheckOnce (requested: string list) =
-    let caps = requested |> resolveDocker |> resolveNix
+    let caps = requested |> resolveDocker |> resolveNix |> resolveSrt
     let capSet = Set.ofList caps
     Environment.SetEnvironmentVariable ("YESSION_TEST_CAPS", String.concat " " caps)
     progress (sprintf "capabilities: %s" (if List.isEmpty caps then "none (cheap tier)" else String.concat " " caps))
@@ -652,7 +694,7 @@ let check (caps: string list) =
     restore ()
     runCheckOnce caps
 
-let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix" ]
+let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt" ]
 
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 

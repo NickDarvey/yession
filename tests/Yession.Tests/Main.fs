@@ -39,6 +39,7 @@ let all =
         Tag.needs "Client shell E2E" [ Tag.Ports; Tag.Native ] (fun () -> Client.tests)
         Tag.needs "Phase2" [] (fun () -> Phase2.tests)
         Tag.needs "Docker integration" [ Tag.Docker ] (fun () -> DockerIntegration.tests)
+        Tag.needs "Srt integration" [ Tag.Srt ] (fun () -> SrtIntegration.tests)
         Tag.needs "Phase3" [] (fun () -> Phase3.tests)
         Tag.needs "EventsHttp" [] (fun () -> EventsHttp.tests)
         Tag.needs "Transport resilience" [] (fun () -> Resilience.tests)

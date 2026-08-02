@@ -195,6 +195,80 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" ambientRun) (Some "ambient-key") "the ambient key passes when nothing displaces it"
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" ambientRun) (Some "ambient-token") "so does the ambient token"
 
+        testCase "egress: only a confined backend carries an allowlist, and it is opt-in" <| fun () ->
+            let ambient = Map.ofList [ "YESSION_SANDBOX_DOMAINS", "api.example.com, cdn.example.com" ]
+            Expect.equal (Sandboxes.egressFor HostBackend ambient) None "an unconfined backend is unrestricted"
+            Expect.equal (Sandboxes.egressFor DockerBackend ambient) None "so is docker"
+            Expect.equal
+                (Sandboxes.egressFor SrtBackend ambient)
+                (Some [ "api.example.com"; "cdn.example.com" ])
+                "srt carries exactly the configured domains"
+            Expect.equal
+                (Sandboxes.egressFor SrtBackend Map.empty)
+                (Some [])
+                "and none where none were configured — srt has no unrestricted mode, so it fails closed"
+
+        testCase "the srt config: the home is denied, the policy's paths are the holes in it" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with
+                    ReadPaths = [ "/opt/tools" ]
+                    WritePaths = [ "/data/workspace" ]
+                    AllowedDomains = Some [ "api.example.com" ] }
+            let config =
+                Sandboxes.SrtSandbox.configFor
+                    { Bwrap = Some "/usr/bin/bwrap"; Socat = Some "/usr/bin/socat"; Nesting = Sandboxes.StrictNesting }
+                    (Some "/home/operator")
+                    policy
+            Expect.equal config.DenyRead [ "/home/operator" ] "the operator's home is the denied region"
+            Expect.equal config.AllowRead [ "/opt/tools"; "/data/workspace" ] "read paths, and everything writable"
+            Expect.isTrue (List.contains "/data/workspace" config.AllowWrite) "the policy's write paths"
+            Expect.isTrue (List.contains Sandboxes.SrtSandbox.tmpDir config.AllowWrite) "and the temp dir srt redirects TMPDIR to"
+            Expect.equal config.AllowedDomains [ "api.example.com" ] "the egress allowlist rides through"
+            Expect.equal config.Bwrap (Some "/usr/bin/bwrap") "the named confinement tool rides through"
+            Expect.isFalse config.WeakNesting "the strict profile is what a configured host gets"
+            let unrestricted =
+                Sandboxes.SrtSandbox.configFor
+                    { Bwrap = None; Socat = None; Nesting = Sandboxes.StrictNesting }
+                    None
+                    Support.emptyPolicy
+            Expect.equal unrestricted.AllowedDomains [] "a policy naming no domains gets no egress, never all of it"
+
+        testCase "the confinement tools: named, blank is absent, and weakening is never a guess" <| fun () ->
+            let tools =
+                Sandboxes.SrtSandbox.toolsFrom
+                    (Map.ofList [ "YESSION_BWRAP_PATH", " /nix/store/x/bin/bwrap "; "YESSION_SOCAT_PATH", "" ])
+                |> expect
+            Expect.equal tools.Bwrap (Some "/nix/store/x/bin/bwrap") "a named tool is trimmed and used"
+            Expect.equal tools.Socat None "a blank one is absent (darwin sets neither), not a path of empty string"
+            Expect.equal tools.Nesting Sandboxes.StrictNesting "unconfigured means the strict profile"
+            Expect.equal
+                (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_SANDBOX_NESTED", "weak" ])
+                 |> expect
+                 |> fun t -> t.Nesting)
+                Sandboxes.WeakNesting
+                "an unprivileged container asks for the weaker profile explicitly"
+            Expect.isError
+                (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_SANDBOX_NESTED", "off" ]))
+                "and anything else is a loud error, not a guess at which way to err"
+
+        testCase "an argv survives the shell srt wraps it in" <| fun () ->
+            // srt's Linux/macOS wrapper takes a command STRING, so anything an argv can hold
+            // has to come back out the other side of a shell intact.
+            Expect.equal
+                (Sandboxes.SrtSandbox.commandLine "/bin/echo" [ "two words"; "it's"; "$HOME"; "a;b" ])
+                "'/bin/echo' 'two words' 'it'\\''s' '$HOME' 'a;b'"
+                "spaces, quotes, expansions and separators are all inert"
+
+        testCase "the agent's egress: a known default, replaceable wholesale" <| fun () ->
+            Expect.equal
+                (Sandboxes.AgentSandbox.domainsFrom Map.empty)
+                Sandboxes.AgentSandbox.defaultDomains
+                "unconfigured, the CLI reaches the API and the console it refreshes a credential against"
+            Expect.equal
+                (Sandboxes.AgentSandbox.domainsFrom (Map.ofList [ "YESSION_AGENT_DOMAINS", "gateway.internal" ]))
+                [ "gateway.internal" ]
+                "a deployment that fronts the API elsewhere replaces the list, it does not add to it"
+
         testCase "policy assembly: spec variables win over the baseline; docker takes no baseline" <| fun () ->
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
             let resolved = Map.ofList [ "HOME", "/workspace-home"; "TOKEN", "t" ]
