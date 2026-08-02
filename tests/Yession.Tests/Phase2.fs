@@ -113,6 +113,8 @@ let private sandboxPolicyTests =
             Expect.equal (SandboxBackend.parse " Docker ") (Ok DockerBackend) "case/space tolerant"
             Expect.isError (SandboxBackend.parse "podman") "an unknown backend is a loud error, never a fallback"
             Expect.isError (SandboxBackend.parse "") "blank is not a choice"
+            Expect.equal (SandboxBackend.parseAgent "srt") (Ok SrtBackend) "the agent sandbox accepts srt"
+            Expect.isError (SandboxBackend.parseAgent "docker") "docker is a work-sandbox backend only, by design"
 
         testCase "the host baseline is an allowlist: credentials never pass it" <| fun () ->
             let ambient =

@@ -63,9 +63,10 @@ discovers it in production. Items are roughly ordered by how much they matter.
   scratch HOME (`<data>/agent-home` — `~/.claude` state lives and dies with the
   session), exactly one credential, and a process-group kill on the SDK's forwarded
   abort signal. Still no OS confinement — file system and network are open to the CLI
-  — and `YESSION_AGENT_SANDBOX` accepts only `host` until the srt tier lands
-  (docker-agent is deliberately unimplemented: it is not the sub-second path and adds
-  little over srt).
+  — until the srt tier lands. `YESSION_AGENT_SANDBOX` is `host | srt` (srt refuses
+  until implemented); docker is BY DESIGN not an agent backend — a container per
+  session boot is the opposite of the sub-second start the agent needs, and the
+  WorkSandbox keeps it.
 - **The Docker backend runs through the `dockerode` SDK and is integration-tested in the
   verify gate.** Containers and a per-sandbox named workspace volume are named by the
   session id (a Crockford base32 id, always a valid Docker object name), and `EnvironmentSpec`
