@@ -126,14 +126,50 @@ One listener carries everything: the Manager at `/`, each session at `/s/<id>`.
 
 #### Authorizing
 
-**TBD.** `tailscale serve` asserts `Tailscale-User-Login` / `Tailscale-User-Name` /
-`Tailscale-User-Profile-Pic` but cannot rename headers, so reaching `--auth trusted-headers`
-needs a small rewriting proxy between it and the Manager. Not yet written up against a running
-deployment.
+On a single-machine install, `--auth localhost` is the honest setting: the tailnet's own
+device authorization is the perimeter, and every request arrives over loopback anyway.
 
-Until then, `--auth localhost` is the honest setting for a single-machine install: the
-tailnet's own device authorization is the perimeter, and every request still arrives over
-loopback.
+To attribute work to real users, `tailscale serve` asserts the identity of the calling tailnet
+node —
+
+```
+Tailscale-User-Login        the user's login name
+Tailscale-User-Name         display name
+Tailscale-User-Profile-Pic  avatar URL
+```
+
+— but it cannot rename headers, and Yession reads only its own canonical set. So a small
+rewriting proxy sits between them. With Caddy:
+
+```caddyfile
+:9000 {
+    reverse_proxy 127.0.0.1:8321 {
+        header_up x-yession-user         {header.Tailscale-User-Login}
+        header_up x-yession-user-name    {header.Tailscale-User-Name}
+        header_up x-yession-user-picture {header.Tailscale-User-Profile-Pic}
+        header_up -tailscale-*
+    }
+}
+```
+
+Point the Manager's own mapping at Caddy rather than at the Manager, leaving session paths
+untouched — sessions authenticate through the Manager as OIDC issuer, not by header:
+
+```sh
+tailscale serve --bg --http=8321 9000     # / -> caddy -> manager
+```
+
+and start the Manager with `--auth trusted-headers`.
+
+Two details are load-bearing. `header_up -tailscale-*` strips the upstream headers after
+translating them, so nothing downstream can read an identity Yession did not sanction. And the
+Manager must be reachable **only** through the proxy — an exposed `127.0.0.1:8321` on a shared
+box lets anyone local set `x-yession-user` to whatever they like, because under
+`trusted-headers` that header *is* the subject.
+
+> Untested here. The header names and the Caddy directives come from
+> [plan 07](plans/07-byo-user-authorization.md); the composition with path-mounted sessions
+> above has not been stood up against a running tailnet.
 
 #### Addressing
 

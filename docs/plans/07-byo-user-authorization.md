@@ -41,24 +41,10 @@ x-yession-user-claims     optional JSON object of additional claims, carried opa
                           (e.g. Tailscale app capabilities) — recorded, not yet policy
 ```
 
-Example — Tailscale: `tailscale serve` adds `Tailscale-User-Login` /
-`Tailscale-User-Name` / `Tailscale-User-Profile-Pic` but cannot rename headers, so a
-small rewriting proxy sits between it and the Manager. Caddy:
-
-```caddyfile
-:9000 {
-    reverse_proxy 127.0.0.1:8321 {
-        header_up x-yession-user         {header.Tailscale-User-Login}
-        header_up x-yession-user-name    {header.Tailscale-User-Name}
-        header_up x-yession-user-picture {header.Tailscale-User-Profile-Pic}
-        header_up -tailscale-*
-    }
-}
-```
-
-with `tailscale serve --bg 9000`, and the Manager started with
-`--auth trusted-headers` and `YESSION_MANAGER_URL` set to the tailnet origin (see
-"Public issuer" below).
+The worked Tailscale example — `tailscale serve` asserts `Tailscale-User-*` but cannot
+rename headers, so a small rewriting proxy sits between it and the Manager — has moved
+to [docs/deployment.md](../deployment.md), which is where a deployment is configured
+rather than decided.
 
 ### Attributed vs unattributed
 
