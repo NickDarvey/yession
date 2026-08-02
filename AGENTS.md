@@ -185,9 +185,11 @@ check Browser                # + host-free rich-editor E2E. Needs only Chromium.
 check Ports Native           # + WebRTC/host suites. Need the node-datachannel addon.
 check Keyring                # + the OS-credential-manager suite. Headless, check re-execs
                              #   itself under a private D-Bus session + gnome-keyring.
+check Srt                    # + the sandbox escape probes: read/write/egress denial through
+                             #   real bubblewrap. See Srt below for this container's profile.
 check Nix                    # + the build-source contract, then builds the installable from
                              #   the WORKING TREE and boots it. Minutes; the only gate on it.
-verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix.
+verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix Srt.
                              #    Release gate; what CI runs on master.
 lint                         # actionlint over .github/workflows. Runs first in the PR gate.
 ```
@@ -213,6 +215,12 @@ Capabilities:
   `check Keyring` drives the genuine Keychain / Credential Manager / Secret Service; headless
   (this container, CI), it re-execs itself under a private D-Bus session + gnome-keyring
   unlocked with an empty password (both from devenv).
+- `Srt` — OS-level confinement: bubblewrap + socat on Linux, Seatbelt on macOS. Probed by
+  RUNNING it, not by looking for it — installed is not the same as permitted. This
+  container cannot create the nested user namespace the strict profile needs, so the
+  suites run here only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, the probe
+  drops the capability and they report a skip. Never set that variable to make a session
+  pass — weaker confinement is the operator's decision, and production defaults to strict.
 - `Nix` — the nix CLI (probed like Docker, dropped when absent; `YESSION_REQUIRE_NIX` keeps
   it). Covers the ONE thing no CI job can: the derivations built against the WORKING TREE.
   Every CI route (`nix build .#yession`, darwin-package, package-nix) evaluates a flake, whose

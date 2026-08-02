@@ -50,23 +50,43 @@ discovers it in production. Items are roughly ordered by how much they matter.
   outcome is a 401 on every UI route, and the default `--auth none` denies everything.
   Under `--auth localhost` anyone with local access can still manage sessions — that
   is the localhost trust rule working as stated, not an oversight.
-- **The `host` sandbox backend provides no OS isolation — and it is the default.**
+- **The `host` sandbox backend provides no OS isolation — and it is still the default.**
   Sandboxes are session-owned (the `CreateSandbox` seam): agent-issued commands run as
   child processes of the Session Process. The host backend passes an allowlisted env
   (never the process's own — the credential-leak regression test pins this), but file
-  system and network are unconfined. `YESSION_WORK_SANDBOX=docker` opts into isolation;
-  flipping the default to a confining backend (srt — bubblewrap/Seatbelt via
-  `@anthropic-ai/sandbox-runtime` — is the planned sub-second tier) is deliberate
-  future work.
+  system and network are unconfined. Both confining backends now exist —
+  `YESSION_WORK_SANDBOX=srt` (bubblewrap/Seatbelt, sub-second) and `=docker` (a full
+  userland) — so what remains is the DEFAULT: flipping it is a behaviour change for
+  every existing deployment, and deliberately separate from shipping the backends.
 - **The agent CLI runs through the `spawnClaudeCodeProcess` seam with a policy env**
-  (AgentSandbox, host tier): allowlisted baseline + proxy passthrough, a per-session
-  scratch HOME (`<data>/agent-home` — `~/.claude` state lives and dies with the
-  session), exactly one credential, and a process-group kill on the SDK's forwarded
-  abort signal. Still no OS confinement — file system and network are open to the CLI
-  — until the srt tier lands. `YESSION_AGENT_SANDBOX` is `host | srt` (srt refuses
-  until implemented); docker is BY DESIGN not an agent backend — a container per
-  session boot is the opposite of the sub-second start the agent needs, and the
+  (AgentSandbox): allowlisted baseline + proxy passthrough, a per-session scratch HOME
+  (`<data>/agent-home` — `~/.claude` state lives and dies with the session), exactly one
+  credential, and a process-group kill on the SDK's forwarded abort signal.
+  `YESSION_AGENT_SANDBOX=srt` adds OS confinement around it: the CLI reads and writes
+  only its scratch HOME of the operator's files, and reaches only `AgentSandbox`'s
+  domains (`YESSION_AGENT_DOMAINS`). On `host` — still the default — the file system and
+  network stay open to the CLI. Docker is BY DESIGN not an agent backend: a container
+  per session boot is the opposite of the sub-second start the agent needs, and the
   WorkSandbox keeps it.
+  - The SDK's spawn seam is SYNCHRONOUS and srt's wrap is not, so the srt tier hands the
+    SDK a stand-in process whose streams are live immediately and joins the real child to
+    them when the wrap resolves. It is plumbing, not policy, and the `Srt` suite drives it
+    end to end (stdin in, stdout out, exit code) rather than trusting it.
+- **srt's egress allowlist is per PROCESS, not per sandbox.** `SandboxManager` is a
+  singleton with one filtering proxy pair, so a session whose AgentSandbox and WorkSandbox
+  are both srt confines their FILES exactly (the profile rides each spawn) but can only
+  UNION their allowlists — the work sandbox can reach the agent's API hosts, without any
+  credential for them. Splitting it needs either a manager instance per sandbox (srt does
+  not offer one) or a Session Process per sandbox.
+- **The strict confinement profile needs a nested user namespace, which an unprivileged
+  container refuses.** srt's seccomp helper creates one inside bubblewrap's to drop
+  capabilities and mount a fresh `/proc`; Docker's default (and this repo's dev container)
+  denies it. `YESSION_SANDBOX_NESTED=weak` is srt's documented answer — the host's `/proc`
+  stays visible and capabilities are not dropped, so it is genuinely weaker confinement,
+  and it is therefore CONFIGURED rather than fallen back to: an unset value means strict,
+  and a session on a host that cannot host it fails at boot instead of quietly running
+  wide open. `check` probes whichever profile the run configures before declaring the
+  `Srt` capability.
 - **The Docker backend runs through the `dockerode` SDK and is integration-tested in the
   verify gate.** Containers and a per-sandbox named workspace volume are named by the
   session id (a Crockford base32 id, always a valid Docker object name), and `EnvironmentSpec`
@@ -102,11 +122,13 @@ discovers it in production. Items are roughly ordered by how much they matter.
     gated to the caller's readable scopes; refresh tokens still never leave the
     Manager, and no agent-facing tool wraps either.
   - **Secret-token-injection is future work.** A resolved secret enters the sandbox
-    as a plain env var, so anything the agent runs inside can read it. The srt
-    backend's enforced egress allowlist will bound where a read value can be *sent*
-    — most of the practical risk — and the real fix is egress substitution (a
+    as a plain env var, so anything the agent runs inside can read it. Under the srt
+    backend the enforced egress allowlist now bounds where a read value can be *sent*,
+    which is most of the practical risk. The real fix is egress substitution — a
     placeholder inside the sandbox, the real value substituted at the proxy toward
-    declared hosts); srt's mandatory proxy is the natural host for that.
+    declared hosts — and srt implements exactly that (`credentials.envVars` with
+    `mode: "mask"` and `injectHosts`), so what remains is wiring `SecretRef` injection
+    through it instead of through the policy env.
   - **No KEK rotation/recovery** (a lost credential entry orphans the store loudly;
     the operator deletes the file), and multi-user same-name injection precedence is
     unresolved until a real multi-user strategy lands.

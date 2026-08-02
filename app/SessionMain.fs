@@ -48,16 +48,25 @@ let private workBackend =
     | Error e -> failwith e
 
 // The AgentSandbox backend (`YESSION_AGENT_SANDBOX`): where the agent CLI process
-// runs — host or srt, never docker (a work-sandbox-only backend). The host tier is
-// implemented (allowlisted env + scratch HOME through the SDK's
-// `spawnClaudeCodeProcess` seam, wired in Agent.fs); srt refuses until it lands.
-// Fail closed, never a silent fallback.
-do
+// runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
+// the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
+// (Agent.fs); srt adds the OS-level confinement around it. Parsed HERE, at boot, so a
+// bad value fails the session at start rather than mid-turn. Fail closed, never a
+// silent fallback.
+let private agentBackend =
     match SandboxBackend.parseAgent (Interop.envOr "YESSION_AGENT_SANDBOX" "host") with
-    | Ok HostBackend -> ()
-    | Ok other ->
-        failwithf "agent sandbox: the %s backend is not implemented yet — set host" (SandboxBackend.describe other)
+    | Ok backend -> backend
     | Error e -> failwithf "agent sandbox: %s" e
+
+// srt's own configuration — the confinement tools and how far the nesting can go — is
+// parsed here too, whenever either sandbox will use it. It would otherwise first be read
+// where the sandbox is created: for the WorkSandbox that is the agent's first
+// `ensure_environment`, minutes into a session, which is no place to discover a typo.
+do
+    if agentBackend = SrtBackend || workBackend = SrtBackend then
+        match Sandboxes.SrtSandbox.toolsFrom (Sandboxes.ambientEnv ()) with
+        | Ok _ -> ()
+        | Error e -> failwithf "sandbox: %s" e
 
 // Secret references in the sandbox spec resolve over the control channel at sandbox
 // spawn — the values go straight into the sandbox policy env and are dropped. Without
