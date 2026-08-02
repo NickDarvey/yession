@@ -126,11 +126,8 @@ One listener carries everything: the Manager at `/`, each session at `/s/<id>`.
 
 #### Authorizing
 
-On a single-machine install, `--auth localhost` is the honest setting: the tailnet's own
-device authorization is the perimeter, and every request arrives over loopback anyway.
-
-To attribute work to real users, `tailscale serve` asserts the identity of the calling tailnet
-node —
+**Use `--auth trusted-headers`.** `tailscale serve` already knows who is calling — it asserts
+the identity of the calling tailnet node on every request —
 
 ```
 Tailscale-User-Login        the user's login name
@@ -138,7 +135,12 @@ Tailscale-User-Name         display name
 Tailscale-User-Profile-Pic  avatar URL
 ```
 
-— but it cannot rename headers, and Yession reads only its own canonical set. So a small
+and it **overwrites** these on inbound requests, so a client that sends its own
+`Tailscale-User-Login` does not get to choose who it is. That is what makes them safe to trust,
+and it is the whole reason this integration can attribute work to real people rather than to a
+shared subject.
+
+Yession reads only its own canonical set and `serve` cannot rename headers, so a small
 rewriting proxy sits between them. With Caddy:
 
 ```caddyfile
@@ -167,9 +169,24 @@ Manager must be reachable **only** through the proxy — an exposed `127.0.0.1:8
 box lets anyone local set `x-yession-user` to whatever they like, because under
 `trusted-headers` that header *is* the subject.
 
-> Untested here. The header names and the Caddy directives come from
-> [plan 07](plans/07-byo-user-authorization.md); the composition with path-mounted sessions
-> above has not been stood up against a running tailnet.
+> The identity headers and the overwrite behaviour above are verified against a live tailnet
+> (Tailscale 1.98, plain HTTP). The Caddy composition is not: the directives come from
+> [plan 07](plans/07-byo-user-authorization.md) and have not been stood up end to end.
+
+##### What `--auth localhost` costs here
+
+It is tempting on a single-machine install, and it is the one setting whose failure mode is
+silent.
+
+`serve` terminates on loopback, so **every** tailnet visitor reaches the Manager over
+`127.0.0.1` — which is exactly what the `localhost` rule trusts. The device authorization that
+let them onto the tailnet is real, but Yession never sees it: every visitor becomes the single
+**unattributed** subject `local`. Nothing errors. Sessions open, work is saved, and all of it
+is attributed to one shared identity.
+
+On a personal tailnet that is coherent — there is one human, and `local` is their name. On a
+tailnet with anyone else on it, it means the audit trail says `local` for work several people
+did, and there is no way to tell afterwards which of them did what.
 
 #### Addressing
 
@@ -189,8 +206,12 @@ with the Manager started as:
 ```sh
 YESSION_MANAGER_URL=http://host.example.ts.net:8321 \
 YESSION_SESSION_URL=http://host.example.ts.net:8321/s/{id} \
-  yession-manager --auth localhost
+  yession-manager --auth trusted-headers
 ```
+
+Both URLs name the tailnet origin, not loopback. The Manager is the OIDC issuer its sessions
+bounce users through, so a loopback issuer here sends every remote login to an address only
+this machine can resolve.
 
 **The mount appears twice on purpose.** `--set-path` *strips* its prefix before proxying, but
 a Yession session serves **under** its mount — it answers at `/s/<id>/…` and 404s at `/`.
