@@ -349,7 +349,7 @@ Async.StartImmediate (
             onStdinClosed (fun () ->
                 Async.StartImmediate (
                     async {
-                        do! telemetry.Shutdown () |> Async.AwaitPromise
+                        do! telemetry.Shutdown () |> Interop.awaitPromise
                         Interop.exit 0
                     }))
         // The one readiness line of the spawn contract — last, so the Manager can

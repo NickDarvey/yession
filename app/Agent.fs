@@ -283,7 +283,7 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (listSecretsFor capabilities)
                     (deleteSecretFor capabilities)
                     (Sandboxes.AgentSandbox.hostClaudeSpawner ())
-                |> Async.AwaitPromise
+                |> Interop.awaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens
                   OutputTokens = outcome.outputTokens

@@ -105,6 +105,49 @@ let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNat
 [<Fable.Core.Emit("delete process.env[$0]")>]
 let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
+// A promise that is already rejected when the workflow gets to it — the shape every
+// backend produces routinely (a docker 404 for a container that is not there).
+[<Fable.Core.Emit("Promise.reject(new Error($0))")>]
+let private rejectedPromise (message: string) : JS.Promise<unit> = Fable.Core.Util.jsNative
+
+// Count Node's unhandled-rejection reports. Registering a listener is also what stops
+// Node from killing the process over one, so the count is observable rather than fatal.
+[<Fable.Core.Emit("(() => { const w = { count: 0 }; const on = () => { w.count++ }; process.on('unhandledRejection', on); w.stop = () => process.off('unhandledRejection', on); return w })()")>]
+let private watchUnhandledRejections () : obj = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("$0.count")>]
+let private unhandledCount (watch: obj) : int = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("$0.stop()")>]
+let private stopWatching (watch: obj) : unit = Fable.Core.Util.jsNative
+
+let private promiseAwaitTests =
+    testList "Awaiting a promise (Node interop)" [
+        testCaseAsync "a rejection is handled at the call, so reaching it late is caught, not fatal" <|
+            async {
+                let watch = watchUnhandledRejections ()
+                // Build the await now and run it later. Fable's async trampoline hijacks a
+                // workflow onto a `setTimeout` every 2000 steps, so a real await lands here:
+                // after Node has already decided whether the rejection was handled. Nothing
+                // the workflow does later can undo that verdict, so the handler has to be
+                // attached by now.
+                let awaiting = Interop.awaitPromise (rejectedPromise "boom")
+                do! Async.Sleep 10
+                let! caught =
+                    async {
+                        try
+                            do! awaiting
+                            return "no error"
+                        with ex -> return ex.Message
+                    }
+                do! Async.Sleep 10
+                let unhandled = unhandledCount watch
+                stopWatching watch
+                Expect.equal caught "boom" "the rejection arrives as a catchable exception"
+                Expect.equal unhandled 0 "and Node never reports it unhandled — which would kill the process"
+            }
+    ]
+
 let private sandboxPolicyTests =
     testList "Sandbox policy (pure)" [
         testCase "backend parsing accepts exactly host, srt, and docker — and fails closed" <| fun () ->
@@ -716,6 +759,7 @@ let private persistenceTests =
 let tests =
     testList "Phase2" [
         // Cheap tier: pure policy/parse, folds, host-sandbox child-process integration.
+        promiseAwaitTests
         sandboxPolicyTests
         environmentProjectionTests
         commandFoldTests

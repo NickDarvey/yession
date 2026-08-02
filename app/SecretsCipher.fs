@@ -52,14 +52,14 @@ let aadFor (scope: SecretScope) (name: SecretName) : string =
 /// Import a raw KEK as a NON-EXTRACTABLE AES-GCM key and return the cipher over it.
 let importKey (kekB64u: string) : Async<Cipher> =
     async {
-        let! key = importRaw kekB64u |> Async.AwaitPromise
+        let! key = importRaw kekB64u |> Interop.awaitPromise
         return
-            { Encrypt = fun aad plaintext -> encryptImpl key aad plaintext |> Async.AwaitPromise
+            { Encrypt = fun aad plaintext -> encryptImpl key aad plaintext |> Interop.awaitPromise
               Decrypt =
                 fun aad iv ciphertext ->
                     async {
                         try
-                            let! plaintext = decryptImpl key aad iv ciphertext |> Async.AwaitPromise
+                            let! plaintext = decryptImpl key aad iv ciphertext |> Interop.awaitPromise
                             return Ok plaintext
                         with _ ->
                             return Error "decryption failed (tampered, transplanted, or sealed by a different key)"

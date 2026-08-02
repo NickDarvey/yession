@@ -258,7 +258,7 @@ module DockerSandbox =
             let client = DK.create ()
             let! arr =
                 client.listContainers (createObj [ "all", box true; "filters", box (createObj [ "label", box [| label |] ]) ])
-                |> Async.AwaitPromise
+                |> Interop.awaitPromise
             return arr.Length
         }
 
@@ -280,7 +280,7 @@ module DockerSandbox =
                                     |> createObj
                                 let! stream =
                                     client.buildImage (createObj [ "context", box build.ContextPath; "src", box src ], opts)
-                                    |> Async.AwaitPromise
+                                    |> Interop.awaitPromise
                                 let! drained = drainProgress client stream
                                 return drained |> Result.map (fun () -> tag)
                             | None ->
@@ -291,13 +291,13 @@ module DockerSandbox =
                                 let! present =
                                     async {
                                         try
-                                            do! client.getImage(image).inspect () |> Async.AwaitPromise |> Async.Ignore
+                                            do! client.getImage(image).inspect () |> Interop.awaitPromise |> Async.Ignore
                                             return true
                                         with _ -> return false
                                     }
                                 if present then return Ok image
                                 else
-                                    let! stream = client.pull image |> Async.AwaitPromise
+                                    let! stream = client.pull image |> Interop.awaitPromise
                                     let! drained = drainProgress client stream
                                     return drained |> Result.map (fun () -> image)
                         }
@@ -319,9 +319,9 @@ module DockerSandbox =
                             policy.Env |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> List.toArray
                         // The named volume persists across container restarts by design;
                         // the label lets cleanup find it (see the workflow teardown).
-                        do! client.createVolume (createObj [ "Name", box name; "Labels", box (createObj [ "yession-session", box name ]) ]) |> Async.AwaitPromise |> Async.Ignore
+                        do! client.createVolume (createObj [ "Name", box name; "Labels", box (createObj [ "yession-session", box name ]) ]) |> Interop.awaitPromise |> Async.Ignore
                         // Clear a same-named crash leftover so `createContainer` can reuse the name.
-                        try do! client.getContainer(name).remove (createObj [ "force", box true ]) |> Async.AwaitPromise |> Async.Ignore
+                        try do! client.getContainer(name).remove (createObj [ "force", box true ]) |> Interop.awaitPromise |> Async.Ignore
                         with _ -> ()
                         let! container =
                             client.createContainer (
@@ -341,8 +341,8 @@ module DockerSandbox =
                                                 // privilege escalation.
                                                 "CapDrop", box [| "ALL" |]
                                                 "SecurityOpt", box [| "no-new-privileges" |] ]) ])
-                            |> Async.AwaitPromise
-                        do! container.start () |> Async.AwaitPromise |> Async.Ignore
+                            |> Interop.awaitPromise
+                        do! container.start () |> Interop.awaitPromise |> Async.Ignore
 
                         let spawn (exec: SandboxExec) (onChunk: OutputStream * string -> unit) =
                             async {
@@ -355,10 +355,10 @@ module DockerSandbox =
                                           "Env", box (exec.Env |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> List.toArray) ]
                                         @ (match exec.WorkingDirectory with Some w -> [ "WorkingDir", box w ] | None -> [])
                                         |> createObj
-                                    let! started = container.exec execOpts |> Async.AwaitPromise
+                                    let! started = container.exec execOpts |> Interop.awaitPromise
                                     // Hijack the connection so stdin rides the same socket the
                                     // output is demuxed from.
-                                    let! stream = started.start (createObj [ "hijack", box true; "stdin", box true ]) |> Async.AwaitPromise
+                                    let! stream = started.start (createObj [ "hijack", box true; "stdin", box true ]) |> Interop.awaitPromise
                                     let stdout = DK.createPassThrough ()
                                     let stderr = DK.createPassThrough ()
                                     client.modem.demuxStream (stream, stdout, stderr)
@@ -369,7 +369,7 @@ module DockerSandbox =
                                         Async.StartImmediate (
                                             async {
                                                 try
-                                                    let! inspect = started.inspect () |> Async.AwaitPromise
+                                                    let! inspect = started.inspect () |> Interop.awaitPromise
                                                     ended.Settle (SandboxExited (exitCodeOf inspect))
                                                 with ex -> ended.Settle (SandboxRunFailed ex.Message)
                                             })
@@ -395,7 +395,7 @@ module DockerSandbox =
                                     fun () ->
                                         async {
                                             try
-                                                do! client.getContainer(container.id).remove (createObj [ "force", box true ]) |> Async.AwaitPromise |> Async.Ignore
+                                                do! client.getContainer(container.id).remove (createObj [ "force", box true ]) |> Interop.awaitPromise |> Async.Ignore
                                             with ex ->
                                                 eprintfn "[sandbox %s] docker remove failed: %s" name ex.Message
                                         } }
