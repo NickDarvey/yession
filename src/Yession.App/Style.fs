@@ -561,10 +561,11 @@ module Style =
     /// The empty state, when no terminal is open.
     let terminalEmpty = "flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center"
 
-    /// Reopens the column once it is shut (the mirror of `navReopen`).
-    let terminalReopen =
-        "absolute right-0 top-0 h-band flex items-end pb-5 pr-5 opacity-0 pointer-events-none "
-        + "[.term-closed_&]:opacity-100 [.term-closed_&]:pointer-events-auto"
+    /// Reopens the column once it is shut — the mirror of the sidebar's reopen chevron,
+    /// leaning the way the column travels. Rendered from the model rather than hidden by a
+    /// variant: whether the control exists is a fact about the model, and a button that is
+    /// merely invisible is still in the tab order.
+    let terminalReopen = navChevronBack + " shrink-0"
 
     // --- ANSI styling ---------------------------------------------------------------------------
     // Turning a parsed `AnsiStyle` into what a span wears. Split in two on purpose:

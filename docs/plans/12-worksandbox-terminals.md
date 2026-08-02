@@ -341,6 +341,9 @@ end-to-end scenarios through the real Host in `InMemory.fs` (a peer opens a term
 runs a command with both peers seeing the block and its output; the agent's command waits
 for a human and one approval releases it), and the panel pinned in the SSR checklist.
 
-**Known gap:** the browser-side input binding (`syncTerminalInputs` — value push, minimal-diff
-write-back, caret preservation) has no browser E2E. It is the one piece of PR 1 that only a
-real browser can exercise, and it should get one before PR 2 builds live mode on top of it.
+The browser E2E earned itself immediately. The input binding's `[<Emit>]` template declared
+`const el = $0`, and Fable substitutes `$0` with the ARGUMENT'S OWN IDENTIFIER — so against
+an F# value also called `el` it emitted `let el = el`, a temporal-dead-zone self-reference
+that threw on the first keystroke and took the whole render with it. Every cheap-tier test
+passed throughout: the composer was simply broken in every real browser. The templates now
+use `__y`-prefixed locals that no F# binding will collide with.

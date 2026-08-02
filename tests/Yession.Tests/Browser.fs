@@ -225,6 +225,63 @@ let tests =
                 do! await (pageB.WaitForFunctionAsync inTimeline) |> Async.Ignore
             }
 
+        // Terminals (Plan 12) in a real browser: the one part of the panel that only a
+        // browser can exercise — the `<input>` bound to a `Y.Text` root. Everything under it
+        // (the slot rule, the queue, the approval gate, the drain, the transcript) is covered
+        // in the cheap tier; what is under test here is the binding itself, and that the
+        // command really runs in the session's sandbox.
+        testCaseAsync "a command typed in the terminal composer converges, runs in the sandbox, and both peers see the block" <|
+            async {
+                // The column starts shut, so the header control is the way back in — and
+                // that this can find it is the test that one exists at all.
+                do! awaitU (pageA.Locator("[data-terminal-toggle='show']").First.ClickAsync ())
+                // `.First`: a session with no terminal open offers "new" twice — in the tab
+                // strip and in the empty state — and either will do.
+                do! awaitU (pageA.Locator("[data-terminal-new]").First.ClickAsync ())
+
+                // Opening is a command; the terminal reaches BOTH peers as an event, so B
+                // learns about it without having asked for anything.
+                let hasTab = """!!document.querySelector('[data-terminal-tab]')"""
+                let! _ = await (pageA.WaitForFunctionAsync hasTab)
+                let! _ = await (pageB.WaitForFunctionAsync hasTab)
+
+                // A types a command with REAL key events, so the input's binding is what
+                // writes the CRDT — one minimal edit per keystroke, not a wholesale replace.
+                let composerInput = "[data-terminal-input^='term-draft:']:not([readonly])"
+                let! _ = await (pageA.WaitForSelectorAsync composerInput)
+                do! awaitU (pageA.ClickAsync composerInput)
+                do! awaitU (pageA.Keyboard.TypeAsync "echo hello-terminal")
+
+                // B sees A writing it — the terminal's version of watching a draft, and the
+                // proof that the binding pushes a remote edit back into the input's value.
+                let mirrored =
+                    """[...document.querySelectorAll('[data-terminal-input]')].some(i => i.value === 'echo hello-terminal')"""
+                let! _ = await (pageB.WaitForFunctionAsync mirrored)
+
+                // Sending runs it: a human's command needs no approval under the default
+                // mode, so the drain takes it straight away and the sandbox really runs it.
+                do! awaitU (pageA.ClickAsync "[data-terminal-send]")
+                let blockRan =
+                    """[...document.querySelectorAll('[data-terminal-block]')]
+                         .some(b => b.textContent.includes('echo hello-terminal')
+                                 && b.getAttribute('data-terminal-block-status') === 'ok')"""
+                let! _ = await (pageA.WaitForFunctionAsync blockRan)
+                let! _ = await (pageB.WaitForFunctionAsync blockRan)
+
+                // And its OUTPUT arrived — over the terminal frames on A, and (for B, whose
+                // panel was never opened) through the same fold either way.
+                let hasOutput =
+                    """[...document.querySelectorAll('[data-terminal-output]')].some(o => o.textContent.includes('hello-terminal'))"""
+                let! _ = await (pageA.WaitForFunctionAsync hasOutput)
+                do! await (pageB.WaitForFunctionAsync hasOutput) |> Async.Ignore
+
+                // The composer emptied on send, so the next command starts from a clean line.
+                do!
+                    await (pageA.WaitForFunctionAsync
+                            "document.querySelector(\"[data-terminal-input^='term-draft:']:not([readonly])\")?.value === ''")
+                    |> Async.Ignore
+            }
+
         testCaseAsync "a browser-persisted draft survives a full server wipe" <|
             async {
                 // Client-side persistence (Step 20): A types a NEW draft (its composer cleared

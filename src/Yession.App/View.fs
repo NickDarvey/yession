@@ -499,6 +499,15 @@ module View =
             html $"""<button type="button" class="{Style.headerNoAgent}" data-settings-toggle="prompt" @click={Ev(fun _ -> actions.ToggleSettings ())}>no agent</button>"""
         | _ -> Lit.nothing
 
+    /// The way back into the terminals column once it is shut. Present only while it IS
+    /// shut, so there are never two controls for the one column on screen at once.
+    let private terminalsReopen (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        if model.TerminalsOpen then Lit.nothing
+        else
+            html $"""
+                <button type="button" class="{Style.terminalReopen}" aria-label="Show terminals"
+                        data-terminal-toggle="show" @click={Ev(fun _ -> dispatch ToggleTerminalsMsg)}>{Icon.left}terminals</button>"""
+
     let private header (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         let titleStr = Ylmish.Text.toString model.Synced.Title
         let sessionIdText = model.Session |> Option.map SessionId.value |> Option.defaultValue ""
@@ -528,6 +537,7 @@ module View =
               <div class="{Style.headerAside}">
                 {agentAbsence actions model.Claude}
                 {headerStatus model}
+                {terminalsReopen dispatch model}
               </div>
             </header>"""
 

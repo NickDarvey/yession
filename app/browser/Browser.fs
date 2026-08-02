@@ -293,16 +293,21 @@ let private inputValue (el: obj) : string = jsNative
 /// re-renders the value under a focused input, and `el.value = …` resets the selection to
 /// the end — which is a collaborator's keystroke throwing your cursor across the line.
 /// Offsets are clamped, so a shorter value cannot leave the caret past the end.
+// The locals are `__y`-prefixed for a reason that cost an afternoon: Fable substitutes
+// `$0` with the ARGUMENT'S OWN IDENTIFIER, so a template that declares `const el = $0`
+// against an F# value also called `el` emits `let el = el` — a temporal-dead-zone
+// self-reference that throws at the first call. Names that no F# binding will ever have
+// make the substitution safe whatever the call site is called.
 [<Emit("""(() => {
-  const el = $0, next = $1;
-  if (el.value === next) return;
-  const focused = document.activeElement === el;
-  const start = focused ? el.selectionStart : null;
-  const end = focused ? el.selectionEnd : null;
-  el.value = next;
-  if (focused && start !== null) {
-    const limit = next.length;
-    el.setSelectionRange(Math.min(start, limit), Math.min(end, limit));
+  const __yInput = $0, __yNext = $1;
+  if (__yInput.value === __yNext) return;
+  const __yFocused = document.activeElement === __yInput;
+  const __yStart = __yFocused ? __yInput.selectionStart : null;
+  const __yEnd = __yFocused ? __yInput.selectionEnd : null;
+  __yInput.value = __yNext;
+  if (__yFocused && __yStart !== null) {
+    const __yLimit = __yNext.length;
+    __yInput.setSelectionRange(Math.min(__yStart, __yLimit), Math.min(__yEnd, __yLimit));
   }
 })()""")>]
 let private setInputValue (el: obj) (value: string) : unit = jsNative
@@ -311,15 +316,15 @@ let private setInputValue (el: obj) (value: string) : unit = jsNative
 /// same element does not stack a second handler on it — and one that creates a fresh element
 /// gets its own.
 [<Emit("""(() => {
-  const el = $0;
-  if (el.__yessionBound) return false;
-  el.__yessionBound = true;
-  el.addEventListener('input', $1);
-  el.addEventListener('keyup', $2);
-  el.addEventListener('click', $2);
-  el.addEventListener('select', $2);
-  el.addEventListener('focus', $2);
-  el.addEventListener('blur', $3);
+  const __yBind = $0;
+  if (__yBind.__yessionBound) return false;
+  __yBind.__yessionBound = true;
+  __yBind.addEventListener('input', $1);
+  __yBind.addEventListener('keyup', $2);
+  __yBind.addEventListener('click', $2);
+  __yBind.addEventListener('select', $2);
+  __yBind.addEventListener('focus', $2);
+  __yBind.addEventListener('blur', $3);
   return true;
 })()""")>]
 let private bindTerminalInput (el: obj) (onInput: unit -> unit) (onSelect: unit -> unit) (onBlur: unit -> unit) : bool = jsNative
