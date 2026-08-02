@@ -301,6 +301,21 @@ discovers it in production. Items are roughly ordered by how much they matter.
   schedule, not a minimal one.
 - Load/scale characteristics (many peers, large logs, long drafts) are unmeasured.
 
+## Sync boundary
+
+- **A remote doc update can silently revert a message Elmish has not yet processed.**
+  `withYlmish` (Ylmish 1.0.0-beta0219) decodes against a snapshot taken when the Yjs
+  observer fired and dispatches `Set` carrying it; `update` returns that payload instead of
+  the live model. Pinned by `tests/Yession.Tests/YlmishRace.fs`, which asserts the CURRENT
+  behaviour so it goes red when upstream fixes it.
+
+  Mitigated for state a re-read can rebuild (`ConnectOptions.ReadPosition` + a doc-update
+  re-arm: the conversation, the terminal projection and the read offset converge back
+  instead of stopping for good). NOT mitigated for state that cannot be re-derived — the
+  composer's open draft, the terminals column's open/closed bit, a Claude sign-in flow's
+  progress — which a racing update reverts with no symptom beyond the UI moving under you.
+  The fix is upstream: decode at processing time, against the model `update` is handed.
+
 ## Terminals (Plan 12)
 
 - **A queued command whose terminal closes stays queued for ever.** Nothing runs it and

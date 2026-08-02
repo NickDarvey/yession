@@ -28,6 +28,7 @@
     <Compile Include="OtlpStub.fs" />
     <Compile Include="Sync.fs" />
     <Compile Include="Terminals.fs" />
+    <Compile Include="YlmishRace.fs" />
     <Compile Include="Editor.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="Telemetry.fs" />
