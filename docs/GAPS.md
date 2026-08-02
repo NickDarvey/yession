@@ -105,9 +105,9 @@ discovers it in production. Items are roughly ordered by how much they matter.
   creates root-owned. What remains is that files written through a BIND mount are owned by
   root on the host, which is a nuisance rather than an escape. Resource limits are
   likewise absent, as they are for every backend. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
-  where a daemon exists; on the CI `verify` runner `YESSION_REQUIRE_DOCKER=1` makes a
-  missing daemon a hard failure rather than a silent skip. The dev container has no
-  daemon, so local runs still report a skip.
+  where a daemon exists; asking for the capability requires it, so a `verify` on a
+  daemon-less runner fails rather than skipping. The dev container has no daemon, so
+  `check Docker` refuses to start there — run a tier that does not ask for it.
 - **Secrets are a real Manager-owned store now** ([Plan 06](plans/06-secrets-and-abac.md)):
   AES-256-GCM per-entry ciphertext in `<DataDir>/secrets.json`, the KEK in the OS
   credential manager (`@napi-rs/keyring`, imported non-extractably each start), a

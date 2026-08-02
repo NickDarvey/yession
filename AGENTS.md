@@ -199,6 +199,16 @@ workflow file when it RUNS, and `release.yml` runs on master — after a merge �
 error there is invisible to PR CI and lands already broken. The PR gate runs `lint` first to
 catch that class of break in seconds.
 
+**Asking for a capability requires it.** A tier names what it wants, and `check` refuses to
+start — naming every missing one and how to get it — when this box cannot host something it
+was asked for. It does NOT quietly drop the capability and let its suites report a skip: that
+reads as prudence and behaves as a blind spot (a release workflow naming a secret this
+repository does not have shipped every version up to v5.0.0-beta.0 with the live agent suite
+skipped, green, and never once a real agent turn). So `check Docker` on a daemon-less box is
+an error, not a skip, and `verify` runs only where the whole gate can run — which is what a
+release gate means. What is still a skip is the capability a tier never asked for, and the
+RUNTIME partition (a Node suite on the .NET CLR and vice versa).
+
 Capabilities:
 - `Browser` — Chromium via the .NET Playwright driver. Pins the .NET CLR runtime.
 - `Ports` — binds TCP ports / spawns processes.
@@ -206,23 +216,23 @@ Capabilities:
   Present under Nix (built from source, baked into the `nodeModules` derivation the dev shell
   symlinks in), so `Native`-tagged suites (all host-spawning ones, incl. the real WebRTC
   data-channel E2E) RUN here. Outside Nix the addon is absent and they skip cleanly.
-- `Docker` — a reachable daemon. Declaring it is not claiming it: `check` probes with
-  `docker info` and DROPS the cap when nothing answers, so a daemon-less `verify` reports
-  the Docker suites as skips rather than running them empty. `YESSION_REQUIRE_DOCKER`
-  (release.yml) keeps the cap regardless, so a gate promised a daemon fails instead.
-- `LiveAgent` — real model credentials.
+- `Docker` — a reachable daemon, probed with `docker info` (the same socket / DOCKER_HOST the
+  backend uses, so it answers the question the suites care about rather than "is the socket
+  file there"). The dev container has none, so ask for `Docker` here and the run refuses.
+- `LiveAgent` — real model credentials: `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`.
+  release.yml passes the repository secret; absent, a tier that asked for it fails.
 - `Keyring` — a usable OS credential manager (the secrets KEK lives there). On a desktop,
   `check Keyring` drives the genuine Keychain / Credential Manager / Secret Service; headless
   (this container, CI), it re-execs itself under a private D-Bus session + gnome-keyring
   unlocked with an empty password (both from devenv).
 - `Srt` — OS-level confinement: bubblewrap + socat on Linux, Seatbelt on macOS. Probed by
   RUNNING it, not by looking for it — installed is not the same as permitted. This
-  container cannot create the nested user namespace the strict profile needs, so the
-  suites run here only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, the probe
-  drops the capability and they report a skip. Never set that variable to make a session
-  pass — weaker confinement is the operator's decision, and production defaults to strict.
-- `Nix` — the nix CLI (probed like Docker, dropped when absent; `YESSION_REQUIRE_NIX` keeps
-  it). Covers the ONE thing no CI job can: the derivations built against the WORKING TREE.
+  container cannot create the nested user namespace the strict profile needs, so the suites
+  run here only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, `check Srt` refuses to
+  start. Never set that variable to make a session pass — weaker confinement is the
+  operator's decision, and production defaults to strict.
+- `Nix` — the nix CLI (probed like Docker). Covers the ONE thing no CI job can: the
+  derivations built against the WORKING TREE.
   Every CI route (`nix build .#yession`, darwin-package, package-nix) evaluates a flake, whose
   source copy git already filtered — so a `src` filter that lets the dev shell's `node_modules`
   symlink or 176MB of `obj/`/Fable output into the derivation is green everywhere in CI and
