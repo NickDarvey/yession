@@ -31,6 +31,12 @@ jobs:
       # directly. YESSION_REQUIRE_DOCKER makes a missing daemon a hard failure inside `verify`
       # (not a silent skip), so no separate fail-fast step is needed. `verify` (check … Browser)
       # provisions Chromium itself, so no separate Chromium step is needed either.
+      # The confining sandbox backend needs a NESTED user namespace for its strict profile, and
+      # Ubuntu 24.04's `kernel.apparmor_restrict_unprivileged_userns=1` forbids one — without
+      # this the release gate drops the `Srt` capability and the escape probes never run. The
+      # runner is an ephemeral VM; nothing about the product changes.
+      - name: Permit nested user namespaces (the sandbox escape probes need them)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Full verification gate
         env:
           # Testing-scoped credential; enables the live agent smoke tests.
