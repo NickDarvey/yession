@@ -363,7 +363,14 @@ let private themeContrastTests =
     testList "Theme contrast (WCAG 2.0 AA floor)" [
         testCase "every text colour keeps >= 4.5:1 on every surface" <| fun () ->
             let colour = themeColour (readFileSync nodeFs "app/tailwind.css")
-            for fg in [ "ink"; "ink-dim"; "ink-faint"; "blue"; "green"; "err" ] do
+            // The terminal palette (Plan 12) is text like any other: output sits on the
+            // same surfaces, so it answers to the same floor. Listing all sixteen is the
+            // point — raw ANSI would fail here, which is why the theme names its own.
+            let terminalPalette =
+                [ for name in [ "black"; "red"; "green"; "yellow"; "blue"; "magenta"; "cyan"; "white" ] do
+                    yield "term-" + name
+                    yield "term-" + name + "-bright" ]
+            for fg in [ "ink"; "ink-dim"; "ink-faint"; "blue"; "green"; "err" ] @ terminalPalette do
                 for bg in [ "bg"; "panel"; "surface"; "surface-2" ] do
                     let ratio = contrast (colour fg) (colour bg)
                     Expect.isTrue (ratio >= 4.5) (sprintf "--color-%s on --color-%s is %.2f:1 — the AA floor is 4.5:1" fg bg ratio)

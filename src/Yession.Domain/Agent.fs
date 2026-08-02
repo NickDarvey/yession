@@ -59,6 +59,26 @@ type ListSessionSecrets = unit -> Async<Result<SecretMetadata list, string>>
 /// Delete one of the session's secrets; false = it did not exist.
 type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 
+/// What queueing a terminal command did (Plan 12).
+type QueuedTerminalCommand =
+    { Terminal : TerminalId
+      /// Whether the terminal's approval mode is holding it for a human. The agent is
+      /// TOLD this rather than left to infer it from silence: "your command is waiting for
+      /// someone to approve it" is the difference between a useful answer and a model
+      /// deciding its command failed and trying something else.
+      AwaitingApproval : bool }
+
+/// Put a command in a terminal's queue (Plan 12). Named for what it does: the agent does
+/// NOT get to run a command in a terminal — it queues one, exactly as a person does, and
+/// the terminal's approval mode decides what happens next.
+///
+/// It returns as soon as the command is queued, and deliberately does not wait for the
+/// command to run. Waiting would make an agent turn block on a human pressing Approve,
+/// which turns a review gate into a deadlock whenever nobody is looking.
+///
+/// `TerminalId option`: `None` means "whichever terminal is open", opening one if none is.
+type QueueTerminalCommand = TerminalId option -> string -> Async<Result<QueuedTerminalCommand, string>>
+
 /// The typed capabilities an agent turn may use. No raw Docker, no handles, no session
 /// ids — everything is already scoped by the Session Process and, beneath it, the
 /// Session Manager.
@@ -67,7 +87,10 @@ type AgentCapabilities =
       ExecuteCommand : ExecuteCommand
       SetSecret : SetSessionSecret
       ListSecrets : ListSessionSecrets
-      DeleteSecret : DeleteSessionSecret }
+      DeleteSecret : DeleteSessionSecret
+      /// Queue a command in a terminal (Plan 12), where people can see it, edit it, and —
+      /// depending on the terminal's mode — approve it before it runs.
+      QueueTerminalCommand : QueueTerminalCommand }
 
 module AgentCapabilities =
 
@@ -77,7 +100,8 @@ module AgentCapabilities =
           ExecuteCommand = fun _ _ -> async { return CommandExecutionFailed "no environment capability" }
           SetSecret = fun _ _ -> async { return Error "no secrets capability" }
           ListSecrets = fun () -> async { return Error "no secrets capability" }
-          DeleteSecret = fun _ -> async { return Error "no secrets capability" } }
+          DeleteSecret = fun _ -> async { return Error "no secrets capability" }
+          QueueTerminalCommand = fun _ _ -> async { return Error "no terminal capability" } }
 
 /// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
 /// Session Process owns the signal; the runner observes it — poll `IsAborted` at

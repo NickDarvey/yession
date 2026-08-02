@@ -1,8 +1,12 @@
 # Plan 12 — Terminals on the WorkSandbox
 
-> **Status: draft** — not implemented. Builds directly on the sandbox seam from
+> **Status: PR 1 of 3 implemented** (blocks, no pty). PRs 2 (pty + live mode) and 3
+> (polish) remain. Builds directly on the sandbox seam from
 > [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
+>
+> Deviations taken while implementing PR 1 are recorded in
+> [What PR 1 actually shipped](#what-pr-1-actually-shipped) at the foot of this document.
 
 Humans and the agent get zero-to-many terminals against the session's WorkSandbox, on a
 new right panel that behaves like the conversation column: everyone sees everyone's
@@ -275,3 +279,68 @@ Protocol note: terminals extend the Session↔Browser frame protocol and session
 the Manager↔Session control protocol is untouched, so no major bump — each PR is a
 `feat:` with `+semver: minor` on its branch commit body only if it lands user-facing
 capability (PR 1 and 2 do).
+
+---
+
+## What PR 1 actually shipped
+
+Blocks, no pty — the whole collaborative half, with zero native dependencies. Five
+deviations from the plan above, each forced by something the plan did not know.
+
+**xterm.js is not in PR 1.** The plan had the panel render blocks through xterm.js. It
+renders them through a pure-F# SGR parser instead (`Yession.Domain/Ansi.fs`), and the
+sixteen named ANSI colours are theme tokens held to the same WCAG AA floor as every other
+text colour (`app/tailwind.css`, pinned by the Phase4 contrast test — raw ANSI would fail
+it outright: the classic blue is `#000080`, 1.3:1 on this ground). Three reasons. PR 1 is
+meant to have no new dependencies, and an npm dependency here also means rebuilding the
+Nix `nodeModules` derivation's fixed-output hash. Block output is a *stream to read*, not
+a *screen to maintain* — a parser answers it exactly, and half an emulator would be a
+worse emulator and a worse parser. And PR 2 needs a real emulator anyway (`@xterm/headless`
+server-side for snapshots and mode detection, `@xterm/xterm` in the browser), so that is
+where the dependency belongs and where it earns itself.
+
+**The agent's command appears queued, not typed.** The plan hoped to show the agent
+drafting into its own composer slot. A tool call delivers a whole command in one go, not
+keystrokes, so "watch it type" would be a single flash — theatre. `queue_terminal_command`
+puts the command straight into the terminal's queue, where it is visible, editable, and
+(under the default mode) waiting for a human. That is the part that mattered.
+
+**`ExecuteCommand` is not re-pointed at a terminal.** The plan put that in PR 1 and the
+old command log's retirement in PR 3. Doing the first without the second would change the
+agent's existing tool from "runs and returns output" to "blocks until a human approves",
+which turns a review gate into a deadlock whenever nobody is looking. The agent gets a new
+tool that queues and returns; re-pointing and retiring now belong together, in PR 3.
+
+**Presence in a terminal composer renders as chips, not carets.** Focus is reported and
+relayed end to end (`FocusField.TerminalDraftBody`/`TerminalQueuedBody`), and the composer
+shows who is in it, coloured by peer. Pixel-positioned remote carets need per-input
+measurement in the browser shell; the title and the ProseMirror bodies each solve that
+their own way, and a third measurement path is its own change.
+
+**One bug found and fixed outside the plan's scope.** `withYlmish` applies a remote doc
+update by SETTING the model from a decode, and a `Set` replaces every non-synced field
+with the snapshot that decode was built from. A doc update landing just after an event
+page was folded therefore rolled the fold back — conversation, terminal projection and
+read offset all reverted — while the read loop's private cursor stayed where it got to, so
+consumption stopped permanently and silently. The terminal drain makes this reproducible
+(it removes a queue entry between two event appends); the message drain has always been
+able to hit it and evidently sometimes did. Fixed by making the MODEL the read position
+(`ConnectOptions.ReadPosition`) and re-arming on doc updates, so a rolled-back fold is
+visibly behind and simply re-read — while a settled feed failure still parks rather than
+being hammered (`parked`, pinned by the existing resilience test that caught the first
+attempt at this).
+
+### Verification
+
+`check` 410/410, `check Ports Native` 473/473, `check Browser Ports Native` 473 + 9
+browser, all green. New coverage: 47 cheap-tier cases in `tests/Yession.Tests/Terminals.fs`
+(the approval policy, the drain's decision, the projection's fold and idempotence, the ANSI
+parser, transcript chunking and the asciicast wire shape, every terminal codec, per-terminal
+queue ordering, and the terminal manager and scheduler over a scripted sandbox), two
+end-to-end scenarios through the real Host in `InMemory.fs` (a peer opens a terminal and
+runs a command with both peers seeing the block and its output; the agent's command waits
+for a human and one approval releases it), and the panel pinned in the SSR checklist.
+
+**Known gap:** the browser-side input binding (`syncTerminalInputs` — value push, minimal-diff
+write-back, caret preservation) has no browser E2E. It is the one piece of PR 1 that only a
+real browser can exercise, and it should get one before PR 2 builds live mode on top of it.

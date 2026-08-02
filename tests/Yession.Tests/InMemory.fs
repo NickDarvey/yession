@@ -15,6 +15,7 @@ open Ylmish
 open Yession.Domain
 open Yession.App
 open Yession.Host
+open Yession.SessionProcess
 open Yession.Tests.Support
 
 let private sid () = SessionId.create "in-memory-session" |> expect
@@ -176,6 +177,134 @@ let tests =
                 do! host.Stop ()
             }
 
+        // Terminals (Plan 12), end to end through the real Host: the command a peer types
+        // in the composer, the `OpenTerminal` command frame, the drain, the block events,
+        // and the transcript records broadcast back as `Terminal` frames. The sandbox is
+        // scripted (a `SessionEnvironment` record), so this stays in the cheap tier while
+        // exercising every seam between the browser client and the Session Process.
+        testCaseAsync "a peer opens a terminal, runs a command, and both peers see the block and its output" <|
+            async {
+                let environment : SessionEnvironment.SessionEnvironment =
+                    { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+                      Execute = fun _ _ -> async { return CommandExecutionFailed "not used here" }
+                      Spawn =
+                        fun _ onChunk ->
+                            async {
+                                onChunk (Stdout, "hello from the sandbox\n")
+                                return
+                                    Ok
+                                        { WriteStdin = ignore
+                                          CloseStdin = ignore
+                                          Kill = ignore
+                                          Exited = async { return SandboxExited 0 } }
+                            }
+                      Stop = fun () -> async { return () }
+                      CurrentRef = fun () -> Some "scripted" }
+                let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                let! b = connectInMemoryClient host "bob" "Bob"
+
+                // Opening is a COMMAND — the terminal's id is the Process's to mint — and it
+                // arrives at every peer as an event, which is why B learns about it too.
+                a.Connection.OpenTerminal "build"
+                let hasOpenTerminal (m: ClientModel) = not (List.isEmpty (TerminalProjection.openTerminals m.Terminals))
+                do! a.Runner.WaitFor hasOpenTerminal
+                do! b.Runner.WaitFor hasOpenTerminal
+                let terminal =
+                    (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
+
+                // The publication rule, wired per open terminal exactly as the browser wires
+                // it: Ada's slot appears when her command line has content and goes when it
+                // empties. Without it a composer would never publish, and nobody could send.
+                TerminalDraftSlot.follow a.Doc a.Texts terminal a.Hello.PeerId (user >> a.Runner.Dispatch) |> ignore
+
+                // Ada types a command. The composer is a `Y.Text` root, exactly as the
+                // browser's input writes it, and the slot publishes off its content.
+                TerminalText.setTo a.Texts (BodyKey.terminalDraft terminal a.Hello.PeerId) "echo hello"
+                do! b.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalDrafts terminal m)))
+                Expect.equal
+                    (TerminalText.read b.Texts (BodyKey.terminalDraft terminal a.Hello.PeerId))
+                    "echo hello"
+                    "Bob watches Ada write the command, exactly as he watches her write a message"
+
+                // Sending enqueues it; a human's command needs no approval under the default
+                // mode, so the drain runs it straight away.
+                a.Connection.SendTerminalDraft terminal a.Hello.PeerId
+                let ranSuccessfully (m: ClientModel) =
+                    match TerminalProjection.tryFind terminal m.Terminals with
+                    | Some view ->
+                        view.Blocks
+                        |> List.exists (fun b -> b.Command = "echo hello" && b.Status = BlockFinished (CommandSucceeded 0))
+                    | None -> false
+                do! a.Runner.WaitFor ranSuccessfully
+                do! b.Runner.WaitFor ranSuccessfully
+
+                // The OUTPUT arrived over the terminal frames, keyed by transcript sequence —
+                // and the block's recorded range is what selects it, on both peers.
+                let outputOf (client: Client) =
+                    let m = client.Runner.Model ()
+                    let view = TerminalProjection.tryFind terminal m.Terminals |> Option.get
+                    let block = view.Blocks |> List.find (fun b -> b.Command = "echo hello")
+                    TerminalFeed.outputText block.FromSeq (Option.defaultValue 0 block.ToSeq) (ClientModel.terminalFeed terminal m)
+                Expect.equal (outputOf a) "hello from the sandbox\n" "Ada sees the output"
+                Expect.equal (outputOf b) "hello from the sandbox\n" "and so does Bob"
+
+                // The composer emptied on send, and the queue is clear again.
+                Expect.equal
+                    (TerminalText.read a.Texts (BodyKey.terminalDraft terminal a.Hello.PeerId))
+                    ""
+                    "the composer clears on send"
+                Expect.isTrue (Map.isEmpty (a.Runner.Model ()).Synced.TerminalQueue) "and the entry was consumed"
+                do! host.Stop ()
+            }
+
+        testCaseAsync "the agent's queued command waits for a human, and running it is one approval away" <|
+            async {
+                let spawns = ref 0
+                let environment : SessionEnvironment.SessionEnvironment =
+                    { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+                      Execute = fun _ _ -> async { return CommandExecutionFailed "not used here" }
+                      Spawn =
+                        fun _ _ ->
+                            async {
+                                spawns.Value <- spawns.Value + 1
+                                return
+                                    Ok
+                                        { WriteStdin = ignore
+                                          CloseStdin = ignore
+                                          Kill = ignore
+                                          Exited = async { return SandboxExited 0 } }
+                            }
+                      Stop = fun () -> async { return () }
+                      CurrentRef = fun () -> Some "scripted" }
+                let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                a.Connection.OpenTerminal "build"
+                do! a.Runner.WaitFor (fun m -> not (List.isEmpty (TerminalProjection.openTerminals m.Terminals)))
+                let terminal =
+                    (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
+
+                // The agent queues through its capability, which writes the same doc state a
+                // person's send writes — so Ada sees it appear in her queue, awaiting her.
+                let! queued = host.QueueTerminalCommand (Some terminal) "rm -rf build"
+                let queued = queued |> expect
+                Expect.isTrue queued.AwaitingApproval "the agent is told it is waiting, not that it ran"
+                do! a.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalQueue terminal m)))
+                let entry = ClientModel.terminalQueue terminal (a.Runner.Model ()) |> List.head
+                Expect.isTrue (ClientModel.awaitsApproval entry (a.Runner.Model ())) "and Ada sees it waiting"
+                Expect.equal spawns.Value 0 "nothing has run"
+
+                // Approving is a plain CRDT write from the client — no command, no round trip.
+                a.Runner.Dispatch (user (ApproveTerminalQueuedMsg (entry.QueueId, a.Hello.PeerId)))
+                let ran (m: ClientModel) =
+                    match TerminalProjection.tryFind terminal m.Terminals with
+                    | Some view -> view.Blocks |> List.exists (fun b -> b.Command = "rm -rf build")
+                    | None -> false
+                do! a.Runner.WaitFor ran
+                Expect.equal spawns.Value 1 "the approval is what let it run"
+                do! host.Stop ()
+            }
+
         testCaseAsync "the settled title is reported to the Manager hook" <|
             async {
                 // One-shot: the report continuation is registered (via StartChild) BEFORE the
@@ -184,7 +313,7 @@ let tests =
                 let awaitReport = Async.FromContinuations (fun (cont, _, _) -> reportCont <- Some cont)
                 let report (name: string) = async { match reportCont with Some c -> reportCont <- None; c name | None -> () }
 
-                let! host = Host.startFull (fun () -> None) None None None None (Some report) None (fun _ _ -> ()) None None None (sid ()) None "" None 0
+                let! host = Host.startFull (fun () -> None) None None None None None (Some report) None (fun _ _ -> ()) None None None (sid ()) None "" None 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 let! reportWaiter = Async.StartChild awaitReport
                 a.Runner.Dispatch (user (EditTitleMsg (Text.insert 0 "ship it" (a.Runner.Model ()).Synced.Title)))
@@ -217,7 +346,7 @@ let tests =
                 let report (busy: bool) = async { reports.Add busy }
 
                 let! host =
-                    Host.startFull (fun () -> None) None None None None None (Some report) (fun _ _ -> ()) None None None (sid ()) None "" None 0
+                    Host.startFull (fun () -> None) None None None None None None (Some report) (fun _ _ -> ()) None None None (sid ()) None "" None 0
 
                 // A session nobody has attached to is idle from the moment it boots — which
                 // is what lets the Manager's window start at launch rather than at first

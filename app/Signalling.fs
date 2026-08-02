@@ -85,6 +85,18 @@ type EventsEndpoint =
       /// full (and therefore immutable).
       ReadChunk : int -> Async<string list * bool> }
 
+/// The same surface for a terminal's transcript (Plan 12) — separate because the resource
+/// is a terminal's, not the session's, so a read can legitimately answer "no such
+/// terminal". A missing transcript is a 404 and an empty one is an empty 200: a client
+/// catching up must be able to tell "this terminal has printed nothing yet" from "this
+/// terminal does not exist".
+type TranscriptEndpoint =
+    { ValidateToken : string -> bool
+      /// The raw terminal segment off the path, deliberately unvalidated here — parsing it
+      /// into a `TerminalId` is the endpoint's job, and an unparseable one is simply a
+      /// terminal that does not exist.
+      ReadChunk : string -> int -> Async<(string list * bool) option> }
+
 /// Start the HTTP bootstrap + signalling server. For each offer posted to `/signal`, an
 /// answering peer connection is created; when its data channel opens, the resulting frame
 /// channel is handed to `onConnection`. When `events` is given, `GET /events/{n}` serves
@@ -105,6 +117,9 @@ let start
     (sessionId: SessionId)
     (onConnection: FrameChannel<string> -> unit)
     (events: EventsEndpoint option)
+    // `GET /terminals/{id}/{n}`, when this session has terminals (Plan 12). Gated by the
+    // same cookie-or-token check the event chunks use, and cached on the same argument.
+    (transcripts: TranscriptEndpoint option)
     (auth: SessionAuth.Auth option)
     (extraRoutes: (IncomingMessage -> ServerResponse -> bool) option)
     (mintPeerToken: PeerAttribution -> string)
@@ -142,21 +157,50 @@ let start
          | Some a -> a.IsAuthenticated req
          | None -> false)
         || (queryOf url "token" |> Option.map validateToken |> Option.defaultValue false)
+    let unauthorized (res: ServerResponse) =
+        res.writeHead (401, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
+        res.``end`` "unauthorized"
+
+    let notFound (res: ServerResponse) =
+        res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
+        res.``end`` "not found"
+
+    /// Write a JSONL chunk with the cache policy its fullness implies. Shared by the event
+    /// log and the transcripts, because the caching argument is identical: fixed bounds
+    /// over an append-only sequence make a full chunk immutable for ever.
+    let writeChunk (cacheControl: bool -> string) (lines: string list) (isFull: bool) (res: ServerResponse) =
+        res.writeHead (
+            200,
+            createObj
+                [ "content-type", box "application/x-ndjson; charset=utf-8"
+                  "cache-control", box (cacheControl isFull) ])
+        |> ignore
+        res.``end`` (lines |> List.map (fun l -> l + "\n") |> String.concat "")
+
     let serveChunk (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (index: int) (res: ServerResponse) =
-        if not (authorized req url endpoint.ValidateToken) then
-            res.writeHead (401, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
-            res.``end`` "unauthorized"
+        if not (authorized req url endpoint.ValidateToken) then unauthorized res
         else
             Async.StartImmediate (
                 async {
                     let! lines, isFull = endpoint.ReadChunk index
-                    res.writeHead (
-                        200,
-                        createObj
-                            [ "content-type", box "application/x-ndjson; charset=utf-8"
-                              "cache-control", box (EventChunk.cacheControl isFull) ])
-                    |> ignore
-                    res.``end`` (lines |> List.map (fun l -> l + "\n") |> String.concat "")
+                    writeChunk EventChunk.cacheControl lines isFull res
+                })
+
+    let serveTranscript
+        (endpoint: TranscriptEndpoint)
+        (req: IncomingMessage)
+        (url: string)
+        (terminal: string)
+        (index: int)
+        (res: ServerResponse)
+        =
+        if not (authorized req url endpoint.ValidateToken) then unauthorized res
+        else
+            Async.StartImmediate (
+                async {
+                    match! endpoint.ReadChunk terminal index with
+                    | Some (lines, isFull) -> writeChunk TranscriptChunk.cacheControl lines isFull res
+                    | None -> notFound res
                 })
 
     // The routes this server owns, dispatched by one match over `SessionRoute` — so the
@@ -211,9 +255,11 @@ let start
         | Some (Events index) ->
             match events with
             | Some endpoint -> serveChunk endpoint req req.url index res
-            | None ->
-                res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
-                res.``end`` "not found"
+            | None -> notFound res
+        | Some (TerminalTranscript (terminal, index)) ->
+            match transcripts with
+            | Some endpoint -> serveTranscript endpoint req req.url terminal index res
+            | None -> notFound res
         | Some Login ->
             // Begin the authorization-code + PKCE dance: 302 to the Manager's authorize
             // endpoint. The BROWSER navigates here (renavigation on a 401 from `/me`) —

@@ -95,3 +95,58 @@ module DraftSlot =
         settle doc registry peer dispatch
         observeDeep fragment handler
         Subscription.ofStop (fun () -> unobserveDeep fragment handler)
+
+/// The same publication rule for a terminal composer (Plan 12). Identical in shape and in
+/// reasoning — a slot exists exactly while its command line has content — over a plain
+/// `Y.Text` instead of a rich body, so emptiness is a string test rather than a Markdown
+/// serialize.
+module TerminalDraftSlot =
+
+    [<Emit("$0.observe($1)")>]
+    let private observe (text: Y.Text) (handler: unit -> unit) : unit = jsNative
+
+    [<Emit("$0.unobserve($1)")>]
+    let private unobserve (text: Y.Text) (handler: unit -> unit) : unit = jsNative
+
+    [<Emit("$0.toString()")>]
+    let private textString (text: Y.Text) : string = jsNative
+
+    let private mintQueueId () : QueueId =
+        match QueueId.create (string (System.Guid.NewGuid ())) with
+        | Ok id -> id
+        | Error e -> failwithf "queue id invariant violated: %s" e
+
+    /// Bring the local peer's slot in this terminal into agreement with its command line.
+    /// Both facts are read from the doc, never from a model snapshot, so the rule cannot
+    /// act on a stale pair.
+    let settle
+        (doc: Y.Doc)
+        (registry: TextRegistry)
+        (terminal: TerminalId)
+        (peer: PeerId)
+        (dispatch: Sink<ClientMsg>)
+        : unit =
+        let content =
+            if (textString (registry.Text (BodyKey.terminalDraft terminal peer))).Trim () = ""
+            then DraftSlot.Empty
+            else DraftSlot.HasContent
+        let slot =
+            if SyncedStateSync.hasTerminalDraft doc terminal peer then DraftSlot.Published else DraftSlot.Unpublished
+        match DraftSlot.reconcile content slot with
+        | DraftSlot.Publish -> dispatch (EnsureTerminalDraftMsg (terminal, peer, mintQueueId ()))
+        | DraftSlot.Retract -> dispatch (DiscardTerminalDraftMsg (terminal, peer))
+        | DraftSlot.Agreed -> ()
+
+    /// Keep the local peer's slot in step with its own command line, in one terminal.
+    let follow
+        (doc: Y.Doc)
+        (registry: TextRegistry)
+        (terminal: TerminalId)
+        (peer: PeerId)
+        (dispatch: Sink<ClientMsg>)
+        : Subscription =
+        let text = registry.Text (BodyKey.terminalDraft terminal peer)
+        let handler () = settle doc registry terminal peer dispatch
+        settle doc registry terminal peer dispatch
+        observe text handler
+        Subscription.ofStop (fun () -> unobserve text handler)

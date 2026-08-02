@@ -349,6 +349,87 @@ module Codec =
                 { CommandCompleted.CommandId = get.Required.Field "commandId" commandId.Decode
                   CommandCompleted.Result = get.Required.Field "result" commandResult.Decode }) }
 
+    let terminalId : Codec<TerminalId> =
+        { Encode = TerminalId.value >> Encode.string
+          Decode = viaSmartCtor TerminalId.create Decode.string }
+
+    let blockId : Codec<BlockId> =
+        { Encode = BlockId.value >> Encode.string
+          Decode = viaSmartCtor BlockId.create Decode.string }
+
+    let private terminalOpened : Codec<TerminalOpened> =
+        { Encode =
+            fun (p: TerminalOpened) ->
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "openedBy", actor.Encode p.OpenedBy
+                      "title", Encode.string p.Title ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalOpened.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalOpened.OpenedBy = get.Required.Field "openedBy" actor.Decode
+                  TerminalOpened.Title = get.Required.Field "title" Decode.string }) }
+
+    let private terminalClosed : Codec<TerminalClosed> =
+        { Encode =
+            fun (p: TerminalClosed) ->
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "reason", Encode.string p.Reason ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalClosed.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalClosed.Reason = get.Required.Field "reason" Decode.string }) }
+
+    let private terminalBlockStarted : Codec<TerminalBlockStarted> =
+        { Encode =
+            fun (p: TerminalBlockStarted) ->
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "blockId", blockId.Encode p.BlockId
+                      "queueId", Encode.option queueId.Encode p.QueueId
+                      "author", actor.Encode p.Author
+                      "approvedBy", Encode.option actor.Encode p.ApprovedBy
+                      "command", Encode.string p.Command
+                      "fromSeq", Encode.int p.FromSeq ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalBlockStarted.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalBlockStarted.BlockId = get.Required.Field "blockId" blockId.Decode
+                  TerminalBlockStarted.QueueId = get.Required.Field "queueId" (Decode.option queueId.Decode)
+                  TerminalBlockStarted.Author = get.Required.Field "author" actor.Decode
+                  TerminalBlockStarted.ApprovedBy = get.Required.Field "approvedBy" (Decode.option actor.Decode)
+                  TerminalBlockStarted.Command = get.Required.Field "command" Decode.string
+                  TerminalBlockStarted.FromSeq = get.Required.Field "fromSeq" Decode.int }) }
+
+    let private terminalBlockCompleted : Codec<TerminalBlockCompleted> =
+        { Encode =
+            fun (p: TerminalBlockCompleted) ->
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "blockId", blockId.Encode p.BlockId
+                      "result", commandResult.Encode p.Result
+                      "toSeq", Encode.int p.ToSeq ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalBlockCompleted.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalBlockCompleted.BlockId = get.Required.Field "blockId" blockId.Decode
+                  TerminalBlockCompleted.Result = get.Required.Field "result" commandResult.Decode
+                  TerminalBlockCompleted.ToSeq = get.Required.Field "toSeq" Decode.int }) }
+
+    let private terminalTranscriptTruncated : Codec<TerminalTranscriptTruncated> =
+        { Encode =
+            fun (p: TerminalTranscriptTruncated) ->
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "blockId", Encode.option blockId.Encode p.BlockId
+                      "droppedBytes", Encode.int p.DroppedBytes ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalTranscriptTruncated.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalTranscriptTruncated.BlockId = get.Required.Field "blockId" (Decode.option blockId.Decode)
+                  TerminalTranscriptTruncated.DroppedBytes = get.Required.Field "droppedBytes" Decode.int }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -394,7 +475,17 @@ module Codec =
                 | CommandOutputReceived p ->
                     Encode.object [ "type", Encode.string "commandOutputReceived"; "payload", commandOutputReceived.Encode p ]
                 | CommandCompleted p ->
-                    Encode.object [ "type", Encode.string "commandCompleted"; "payload", commandCompleted.Encode p ])
+                    Encode.object [ "type", Encode.string "commandCompleted"; "payload", commandCompleted.Encode p ]
+                | TerminalOpened p ->
+                    Encode.object [ "type", Encode.string "terminalOpened"; "payload", terminalOpened.Encode p ]
+                | TerminalClosed p ->
+                    Encode.object [ "type", Encode.string "terminalClosed"; "payload", terminalClosed.Encode p ]
+                | TerminalBlockStarted p ->
+                    Encode.object [ "type", Encode.string "terminalBlockStarted"; "payload", terminalBlockStarted.Encode p ]
+                | TerminalBlockCompleted p ->
+                    Encode.object [ "type", Encode.string "terminalBlockCompleted"; "payload", terminalBlockCompleted.Encode p ]
+                | TerminalTranscriptTruncated p ->
+                    Encode.object [ "type", Encode.string "terminalTranscriptTruncated"; "payload", terminalTranscriptTruncated.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -420,6 +511,12 @@ module Codec =
                 | "commandStarted" -> Decode.field "payload" commandStarted.Decode |> Decode.map CommandStarted
                 | "commandOutputReceived" -> Decode.field "payload" commandOutputReceived.Decode |> Decode.map CommandOutputReceived
                 | "commandCompleted" -> Decode.field "payload" commandCompleted.Decode |> Decode.map CommandCompleted
+                | "terminalOpened" -> Decode.field "payload" terminalOpened.Decode |> Decode.map TerminalOpened
+                | "terminalClosed" -> Decode.field "payload" terminalClosed.Decode |> Decode.map TerminalClosed
+                | "terminalBlockStarted" -> Decode.field "payload" terminalBlockStarted.Decode |> Decode.map TerminalBlockStarted
+                | "terminalBlockCompleted" -> Decode.field "payload" terminalBlockCompleted.Decode |> Decode.map TerminalBlockCompleted
+                | "terminalTranscriptTruncated" ->
+                    Decode.field "payload" terminalTranscriptTruncated.Decode |> Decode.map TerminalTranscriptTruncated
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.
@@ -467,16 +564,101 @@ module Codec =
 
     let sessionEventPage : Codec<EventPage<SessionEvent>> = eventPage sessionEvent
 
+    /// One asciicast line. Deliberately NOT this file's usual tagged-object shape: the
+    /// format is asciinema's, and matching it exactly is the point — a transcript is only
+    /// worth calling an audit artifact if something other than Yession can read it. So the
+    /// header is a bare object with `version: 2` and a record is a bare three-element
+    /// array, `[time, code, data]`.
+    let transcriptLine : Codec<TranscriptLine> =
+        let encodeHeader (h: TranscriptHeader) =
+            Encode.object
+                [ "version", Encode.int 2
+                  "width", Encode.int h.Width
+                  "height", Encode.int h.Height
+                  "timestamp", Encode.int64 h.Timestamp ]
+        let encodeRecord (r: TranscriptRecord) =
+            [ Encode.float r.At; Encode.string (TranscriptKind.code r.Kind); Encode.string r.Data ]
+            |> Encode.list
+        let decodeHeader : Decoder<TranscriptLine> =
+            Decode.object (fun get ->
+                { Width = get.Required.Field "width" Decode.int
+                  Height = get.Required.Field "height" Decode.int
+                  Timestamp = get.Required.Field "timestamp" Decode.int64 })
+            |> Decode.map TranscriptHeaderLine
+        let decodeRecord : Decoder<TranscriptLine> =
+            Decode.map3
+                (fun at code data -> at, code, data)
+                (Decode.index 0 Decode.float)
+                (Decode.index 1 Decode.string)
+                (Decode.index 2 Decode.string)
+            |> Decode.andThen (fun (at, code, data) ->
+                match TranscriptKind.parse code with
+                | Some kind -> Decode.succeed (TranscriptRecordLine { At = at; Kind = kind; Data = data })
+                | None -> Decode.fail (sprintf "Unknown transcript record kind: %s" code))
+        { Encode =
+            (fun line ->
+                match line with
+                | TranscriptHeaderLine h -> encodeHeader h
+                | TranscriptRecordLine r -> encodeRecord r)
+          // The header is tried first because it is the one shape with a discriminator of
+          // its own; a record is anything array-shaped.
+          Decode = Decode.oneOf [ decodeHeader; decodeRecord ] }
+
+    let transcriptRecord : Codec<TranscriptRecord> =
+        { Encode = fun r -> transcriptLine.Encode (TranscriptRecordLine r)
+          Decode =
+            transcriptLine.Decode
+            |> Decode.andThen (function
+                | TranscriptRecordLine r -> Decode.succeed r
+                | TranscriptHeaderLine _ -> Decode.fail "expected a transcript record, found the header") }
+
+    let private terminalFrame : Codec<TerminalFrame> =
+        { Encode =
+            (fun f ->
+                match f with
+                | TerminalRecord (id, seq, record) ->
+                    Encode.object
+                        [ "kind", Encode.string "record"
+                          "terminalId", terminalId.Encode id
+                          "seq", Encode.int seq
+                          "record", transcriptRecord.Encode record ]
+                | TerminalTranscriptAvailable (id, nextSeq) ->
+                    Encode.object
+                        [ "kind", Encode.string "available"
+                          "terminalId", terminalId.Encode id
+                          "nextSeq", Encode.int nextSeq ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "record" ->
+                    Decode.map3
+                        (fun id seq record -> TerminalRecord (id, seq, record))
+                        (Decode.field "terminalId" terminalId.Decode)
+                        (Decode.field "seq" Decode.int)
+                        (Decode.field "record" transcriptRecord.Decode)
+                | "available" ->
+                    Decode.map2
+                        (fun id nextSeq -> TerminalTranscriptAvailable (id, nextSeq))
+                        (Decode.field "terminalId" terminalId.Decode)
+                        (Decode.field "nextSeq" Decode.int)
+                | other -> Decode.fail (sprintf "Unknown terminal frame: %s" other)) }
+
     let private sessionCommand : Codec<SessionCommand> =
         { Encode =
             (fun c ->
                 match c with
                 | InterruptAgentTurn t ->
-                    Encode.object [ "kind", Encode.string "interruptAgentTurn"; "agentTurnId", agentTurnId.Encode t ])
+                    Encode.object [ "kind", Encode.string "interruptAgentTurn"; "agentTurnId", agentTurnId.Encode t ]
+                | OpenTerminal title ->
+                    Encode.object [ "kind", Encode.string "openTerminal"; "title", Encode.string title ]
+                | CloseTerminal id ->
+                    Encode.object [ "kind", Encode.string "closeTerminal"; "terminalId", terminalId.Encode id ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "interruptAgentTurn" -> Decode.field "agentTurnId" agentTurnId.Decode |> Decode.map InterruptAgentTurn
+                | "openTerminal" -> Decode.field "title" Decode.string |> Decode.map OpenTerminal
+                | "closeTerminal" -> Decode.field "terminalId" terminalId.Decode |> Decode.map CloseTerminal
                 | other -> Decode.fail (sprintf "Unknown session command: %s" other)) }
 
     let private sessionCommandResult : Codec<SessionCommandResult> =
@@ -612,13 +794,26 @@ module Codec =
                 match f with
                 | Title -> Encode.object [ "kind", Encode.string "title" ]
                 | DraftBody p -> Encode.object [ "kind", Encode.string "draft"; "peerId", peerId.Encode p ]
-                | QueueBody q -> Encode.object [ "kind", Encode.string "queue"; "queueId", queueId.Encode q ])
+                | QueueBody q -> Encode.object [ "kind", Encode.string "queue"; "queueId", queueId.Encode q ]
+                | TerminalDraftBody (t, p) ->
+                    Encode.object
+                        [ "kind", Encode.string "terminalDraft"
+                          "terminalId", terminalId.Encode t
+                          "peerId", peerId.Encode p ]
+                | TerminalQueuedBody q ->
+                    Encode.object [ "kind", Encode.string "terminalQueued"; "queueId", queueId.Encode q ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "title" -> Decode.succeed Title
                 | "draft" -> Decode.field "peerId" peerId.Decode |> Decode.map DraftBody
                 | "queue" -> Decode.field "queueId" queueId.Decode |> Decode.map QueueBody
+                | "terminalDraft" ->
+                    Decode.map2
+                        (fun t p -> TerminalDraftBody (t, p))
+                        (Decode.field "terminalId" terminalId.Decode)
+                        (Decode.field "peerId" peerId.Decode)
+                | "terminalQueued" -> Decode.field "queueId" queueId.Decode |> Decode.map TerminalQueuedBody
                 | other -> Decode.fail (sprintf "Unknown focus field: %s" other)) }
 
     let private cursorPos : Codec<CursorPos> =
@@ -659,7 +854,8 @@ module Codec =
                 | Command c -> Encode.object [ "tag", Encode.string "command"; "payload", commandFrame.Encode c ]
                 | EventLog e -> Encode.object [ "tag", Encode.string "eventLog"; "payload", eventLogFrame.Encode e ]
                 | Control c -> Encode.object [ "tag", Encode.string "control"; "payload", controlFrame.Encode c ]
-                | Presence p -> Encode.object [ "tag", Encode.string "presence"; "payload", presencePayload.Encode p ])
+                | Presence p -> Encode.object [ "tag", Encode.string "presence"; "payload", presencePayload.Encode p ]
+                | Terminal t -> Encode.object [ "tag", Encode.string "terminal"; "payload", terminalFrame.Encode t ])
           Decode =
             Decode.field "tag" Decode.string
             |> Decode.andThen (function
@@ -668,6 +864,7 @@ module Codec =
                 | "eventLog" -> Decode.field "payload" eventLogFrame.Decode |> Decode.map EventLog
                 | "control" -> Decode.field "payload" controlFrame.Decode |> Decode.map Control
                 | "presence" -> Decode.field "payload" presencePayload.Decode |> Decode.map Presence
+                | "terminal" -> Decode.field "payload" terminalFrame.Decode |> Decode.map Terminal
                 | other -> Decode.fail (sprintf "Unknown session frame: %s" other)) }
 
     /// Serialize a value to a compact JSON string.

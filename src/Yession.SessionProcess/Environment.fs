@@ -19,6 +19,15 @@ module SessionEnvironment =
           /// log and to the caller (Step 13). The whole lifecycle is events; per-command
           /// output ordering is preserved.
           Execute : CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult>
+          /// Spawn a process in the running environment WITHOUT the command-event
+          /// lifecycle — the caller records what happened in its own terms.
+          ///
+          /// Terminals (Plan 12) need this: a block's output belongs in that terminal's
+          /// transcript, and its lifecycle in the block events, so routing it through
+          /// `Execute` would write every printed byte into the event log a second time.
+          /// The environment is still the one gate — a spawn with nothing running is an
+          /// error here exactly as it is there.
+          Spawn : SandboxExec -> (OutputStream * string -> unit) -> Async<Result<SandboxProcessHandle, string>>
           /// Stop the environment if it is running (recorded as events).
           Stop : unit -> Async<unit>
           /// The running sandbox's backend reference, if any.
@@ -29,6 +38,7 @@ module SessionEnvironment =
     let unavailable : SessionEnvironment =
         { Ensure = fun _ _ -> async { return EnvironmentUnavailable "this session has no environment" }
           Execute = fun _ _ -> async { return CommandExecutionFailed "this session has no environment" }
+          Spawn = fun _ _ -> async { return Error "this session has no environment" }
           Stop = fun () -> async { return () }
           CurrentRef = fun () -> None }
 
@@ -164,7 +174,15 @@ module SessionEnvironment =
                     do! append (EnvironmentStopped { EnvironmentId = environmentId })
             }
 
+        let spawn (exec: SandboxExec) (onChunk: OutputStream * string -> unit) =
+            async {
+                match running with
+                | None -> return Error "no running environment"
+                | Some sandbox -> return! sandbox.Spawn exec onChunk
+            }
+
         { Ensure = ensure
           Execute = execute
+          Spawn = spawn
           Stop = stop
           CurrentRef = fun () -> running |> Option.map (fun s -> s.Ref) }

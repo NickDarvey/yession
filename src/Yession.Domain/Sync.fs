@@ -19,9 +19,29 @@ type AdaptiveSyncedState =
     { Drafts : cmap<string, DraftState>
       Queue : cmap<string, QueuedMessage>
       Title : cval<Text>
-      SharedBrief : cval<SharedBrief option> }
+      SharedBrief : cval<SharedBrief option>
+      TerminalDrafts : cmap<string, TerminalDraft>
+      TerminalQueue : cmap<string, TerminalQueued>
+      TerminalModes : cmap<string, TerminalApprovalMode> }
 
 module SyncedStateSync =
+
+    /// The doc key of a terminal composer slot. A composite because the slot is keyed by a
+    /// PAIR in the model and by a string in the doc; `:` is safe as the separator because a
+    /// `TerminalId` is Crockford base32 and can never contain one, so the split is
+    /// unambiguous from the left.
+    module TerminalDraftKey =
+
+        let make (terminal: TerminalId) (author: PeerId) : string =
+            TerminalId.value terminal + ":" + PeerId.value author
+
+        let parse (key: string) : (TerminalId * PeerId) option =
+            let idx = key.IndexOf ':'
+            if idx <= 0 then None
+            else
+                match TerminalId.create (key.Substring (0, idx)), PeerId.create (key.Substring (idx + 1)) with
+                | Ok terminal, Ok author -> Some (terminal, author)
+                | _ -> None
 
     let private draftsByKey (m: SyncedSessionState) : HashMap<string, DraftState> =
         m.Drafts |> Map.toSeq |> Seq.map (fun (k, v) -> PeerId.value k, v) |> HashMap.ofSeq
@@ -29,12 +49,27 @@ module SyncedStateSync =
     let private queueByKey (m: SyncedSessionState) : HashMap<string, QueuedMessage> =
         m.Queue |> Map.toSeq |> Seq.map (fun (k, v) -> QueueId.value k, v) |> HashMap.ofSeq
 
+    let private terminalDraftsByKey (m: SyncedSessionState) : HashMap<string, TerminalDraft> =
+        m.TerminalDrafts
+        |> Map.toSeq
+        |> Seq.map (fun ((terminal, author), v) -> TerminalDraftKey.make terminal author, v)
+        |> HashMap.ofSeq
+
+    let private terminalQueueByKey (m: SyncedSessionState) : HashMap<string, TerminalQueued> =
+        m.TerminalQueue |> Map.toSeq |> Seq.map (fun (k, v) -> QueueId.value k, v) |> HashMap.ofSeq
+
+    let private terminalModesByKey (m: SyncedSessionState) : HashMap<string, TerminalApprovalMode> =
+        m.TerminalModes |> Map.toSeq |> Seq.map (fun (k, v) -> TerminalId.value k, v) |> HashMap.ofSeq
+
     /// `Create` for Ylmish's options: build the adaptive companion from a model.
     let create (m: SyncedSessionState) : AdaptiveSyncedState =
         { Drafts = cmap (draftsByKey m)
           Queue = cmap (queueByKey m)
           Title = cval m.Title
-          SharedBrief = cval m.SharedBrief }
+          SharedBrief = cval m.SharedBrief
+          TerminalDrafts = cmap (terminalDraftsByKey m)
+          TerminalQueue = cmap (terminalQueueByKey m)
+          TerminalModes = cmap (terminalModesByKey m) }
 
     /// `Update` for Ylmish's options: fold the next model into the companion. Setting
     /// `cmap.Value` yields keyed deltas, so only changed entries re-encode.
@@ -43,6 +78,9 @@ module SyncedStateSync =
         a.Queue.Value <- queueByKey m
         a.Title.Value <- m.Title
         a.SharedBrief.Value <- m.SharedBrief
+        a.TerminalDrafts.Value <- terminalDraftsByKey m
+        a.TerminalQueue.Value <- terminalQueueByKey m
+        a.TerminalModes.Value <- terminalModesByKey m
 
     /// Per-draft encoding: the map key *is* the author (one draft per client), so `author` is
     /// re-stated only because an empty object would write no Yjs key at all (Ylmish creates a
@@ -68,6 +106,31 @@ module SyncedStateSync =
     let private encodeBrief (b: aval<SharedBrief>) : Encoded =
         Encode.object [ "body", Encode.string (b |> AVal.map (fun x -> x.Body)) ]
 
+    /// A terminal composer slot. Both ids are restated even though the key carries them,
+    /// for the same reason `encodeDraft` restates its author: an entry that writes no field
+    /// creates no Yjs key, and a slot that materializes nothing is a slot no collaborator
+    /// ever sees. The command text is a sibling `Y.Text` root (`BodyKey.terminalDraft`).
+    let private encodeTerminalDraft (d: TerminalDraft) : Encoded =
+        Encode.object
+            [ "terminal", Encode.string (AVal.constant (TerminalId.value d.Terminal))
+              "author", Encode.string (AVal.constant (PeerId.value d.Author))
+              "queueId", Encode.string (AVal.constant (QueueId.value d.QueueId)) ]
+
+    /// A queued terminal command. `author` is an actor TOKEN, not a peer id, because the
+    /// agent queues commands too and "who wrote this" is what the approval policy reads.
+    /// `approvedBy` is the approval itself — an LWW register, so two peers approving at
+    /// once settle on one of them rather than on a conflict.
+    let private encodeTerminalQueued (q: TerminalQueued) : Encoded =
+        Encode.object
+            [ "terminal", Encode.string (AVal.constant (TerminalId.value q.Terminal))
+              "author", Encode.string (AVal.constant (ActorRef.token q.Author))
+              "order", Encode.float (AVal.constant q.Order)
+              "approvedBy",
+              Encode.string (AVal.constant (q.ApprovedBy |> Option.map PeerId.value |> Option.defaultValue "")) ]
+
+    let private encodeTerminalMode (m: TerminalApprovalMode) : Encoded =
+        Encode.object [ "mode", Encode.string (AVal.constant (TerminalApprovalMode.describe m)) ]
+
     /// Which parts of the session sync, and how each merges. Everything else in the
     /// models — the conversation projection above all — is app-only by omission. Rich bodies
     /// are deliberately absent: they live as sibling `Y.XmlFragment` roots the app manages
@@ -79,7 +142,10 @@ module SyncedStateSync =
               // A top-level collaborative text: anchors to a named `title` Y.Text root, so
               // two peers naming the session offline merge rather than clobber.
               "title", Encode.text a.Title
-              "sharedBrief", Encode.option encodeBrief a.SharedBrief ]
+              "sharedBrief", Encode.option encodeBrief a.SharedBrief
+              "terminalDrafts", Encode.map encodeTerminalDraft (a.TerminalDrafts :> amap<_, _>)
+              "terminalQueue", Encode.map encodeTerminalQueued (a.TerminalQueue :> amap<_, _>)
+              "terminalModes", Encode.map encodeTerminalMode (a.TerminalModes :> amap<_, _>) ]
 
     /// The doc-side field shapes, before identifier validation. Bodies are omitted here: they
     /// are top-level `Y.XmlFragment` roots the app resolves via the `BodyRegistry`, never part
@@ -111,6 +177,40 @@ module SyncedStateSync =
             return { SharedBrief.Body = body }
         }
 
+    /// The doc-side terminal-queue entry, before validation.
+    type private TerminalQueuedFields =
+        { Terminal : string
+          Author : string
+          Order : float
+          ApprovedBy : string }
+
+    /// A terminal draft entry: the queue key it becomes when sent. Both ids come from the
+    /// map key, so only this crosses.
+    let private decodeTerminalDraft<'m> : Decoder<'m, string option> =
+        Decode.object {
+            let! queueId = Decode.object.optional "queueId" Decode.string
+            return queueId
+        }
+
+    let private decodeTerminalQueued<'m> : Decoder<'m, TerminalQueuedFields> =
+        Decode.object {
+            let! terminal = Decode.object.required "terminal" Decode.string
+            let! author = Decode.object.required "author" Decode.string
+            let! order = Decode.object.optional "order" Decode.float
+            let! approvedBy = Decode.object.optional "approvedBy" Decode.string
+            return
+                { Terminal = terminal
+                  Author = author
+                  Order = defaultArg order 0.0
+                  ApprovedBy = defaultArg approvedBy "" }
+        }
+
+    let private decodeTerminalMode<'m> : Decoder<'m, string> =
+        Decode.object {
+            let! mode = Decode.object.required "mode" Decode.string
+            return mode
+        }
+
     /// Entries whose identifiers fail the smart constructors are skipped rather than
     /// failing the decode: the doc is shared with peers we don't control, and a decode
     /// must stay total.
@@ -133,6 +233,44 @@ module SyncedStateSync =
                 acc |> Map.add id { QueueId = id; Author = author; Order = f.Order }
             | _ -> acc)
 
+    let private terminalDraftsToDomain
+        (h: HashMap<string, string option>)
+        : Map<TerminalId * PeerId, TerminalDraft> =
+        (Map.empty, HashMap.toSeq h)
+        ||> Seq.fold (fun acc (key, queueId) ->
+            // Same totality rule as the message drafts: an unparseable key or a slot with no
+            // sendable queue key is skipped, never fatal.
+            match TerminalDraftKey.parse key, queueId |> Option.map QueueId.create with
+            | Some (terminal, author), Some (Ok queueId) ->
+                acc |> Map.add (terminal, author) { Terminal = terminal; Author = author; QueueId = queueId }
+            | _ -> acc)
+
+    let private terminalQueueToDomain (h: HashMap<string, TerminalQueuedFields>) : Map<QueueId, TerminalQueued> =
+        (Map.empty, HashMap.toSeq h)
+        ||> Seq.fold (fun acc (key, f) ->
+            match QueueId.create key, TerminalId.create f.Terminal, ActorRef.ofToken f.Author with
+            | Ok id, Ok terminal, Some author ->
+                // An empty/invalid approver reads as "not approved". Never as an approval:
+                // failing OPEN on a value we could not read would run an agent's command
+                // that nobody signed off, which is the one direction this must not fail in.
+                let approvedBy =
+                    if f.ApprovedBy = "" then None
+                    else match PeerId.create f.ApprovedBy with Ok p -> Some p | Error _ -> None
+                acc
+                |> Map.add
+                    id
+                    { QueueId = id; Terminal = terminal; Author = author; Order = f.Order; ApprovedBy = approvedBy }
+            | _ -> acc)
+
+    let private terminalModesToDomain (h: HashMap<string, string>) : Map<TerminalId, TerminalApprovalMode> =
+        (Map.empty, HashMap.toSeq h)
+        ||> Seq.fold (fun acc (key, raw) ->
+            match TerminalId.create key, TerminalApprovalMode.parse raw with
+            | Ok terminal, Some mode -> acc |> Map.add terminal mode
+            // An unreadable mode is dropped, which reads back as the DEFAULT
+            // (`ApproveAgent`) rather than as no gate — the safe direction again.
+            | _ -> acc)
+
     /// Decode the synced state out of a doc. Total, and decode-empty = init: on an empty
     /// doc every optional comes back `None` and this returns `SyncedSessionState.empty`.
     let decode<'m> : Decoder<'m, SyncedSessionState> =
@@ -141,11 +279,20 @@ module SyncedStateSync =
             let! queue = Decode.object.optional "queue" (Decode.map decodeQueued)
             let! title = Decode.object.optional "title" Decode.text
             let! brief = Decode.object.optional "sharedBrief" decodeBrief
+            let! terminalDrafts = Decode.object.optional "terminalDrafts" (Decode.map decodeTerminalDraft)
+            let! terminalQueue = Decode.object.optional "terminalQueue" (Decode.map decodeTerminalQueued)
+            let! terminalModes = Decode.object.optional "terminalModes" (Decode.map decodeTerminalMode)
             return
                 { Drafts = drafts |> Option.map draftsToDomain |> Option.defaultValue Map.empty
                   Queue = queue |> Option.map queueToDomain |> Option.defaultValue Map.empty
                   Title = defaultArg title Text.empty
-                  SharedBrief = brief }
+                  SharedBrief = brief
+                  TerminalDrafts =
+                    terminalDrafts |> Option.map terminalDraftsToDomain |> Option.defaultValue Map.empty
+                  TerminalQueue =
+                    terminalQueue |> Option.map terminalQueueToDomain |> Option.defaultValue Map.empty
+                  TerminalModes =
+                    terminalModes |> Option.map terminalModesToDomain |> Option.defaultValue Map.empty }
         }
 
     open Fable.Core
@@ -168,6 +315,25 @@ module SyncedStateSync =
         // The title is a named `Y.Text` root, not a map — type it as text before reading.
         if shareHas doc "title" then (doc.getText "title" : Yjs.Y.Text) |> ignore
         if shareHas doc "sharedBrief" then (doc.getMap "sharedBrief" : Yjs.Y.Map<obj>) |> ignore
+        if shareHas doc "terminalDrafts" then (doc.getMap "terminalDrafts" : Yjs.Y.Map<obj>) |> ignore
+        if shareHas doc "terminalQueue" then (doc.getMap "terminalQueue" : Yjs.Y.Map<obj>) |> ignore
+        if shareHas doc "terminalModes" then (doc.getMap "terminalModes" : Yjs.Y.Map<obj>) |> ignore
+
+    /// Read one string field off a keyed-map entry, `""` when absent — the shape every
+    /// structural read below repeats.
+    let private entryString (entry: Yjs.Y.Map<obj>) (field: string) : string =
+        entry.get field |> Option.map (unbox<string>) |> Option.defaultValue ""
+
+    /// Fold every entry of a named root map through `read`. Absent root = empty.
+    let private foldRoot (doc: Yjs.Y.Doc) (root: string) (read: Yjs.Y.Map<obj> -> 'a) : HashMap<string, 'a> =
+        if not (shareHas doc root) then HashMap.empty
+        else
+            let m : Yjs.Y.Map<obj> = doc.getMap root
+            (HashMap.empty, mapKeys m)
+            ||> Array.fold (fun acc k ->
+                match m.get k with
+                | Some entryObj when not (isNull entryObj) -> HashMap.add k (read (unbox<Yjs.Y.Map<obj>> entryObj)) acc
+                | _ -> acc)
 
     /// Read the synced state currently in a doc (the decode direction alone — used by the
     /// Session Process, which observes the doc without running its own Ylmish binding).
@@ -212,11 +378,23 @@ module SyncedStateSync =
                 | Some b when not (isNull b) -> Some { SharedBrief.Body = unbox<string> b }
                 | _ -> None
             else None
+        let terminalDraftsH =
+            foldRoot doc "terminalDrafts" (fun entry -> entry.get "queueId" |> Option.map (unbox<string>))
+        let terminalQueueH =
+            foldRoot doc "terminalQueue" (fun entry ->
+                { Terminal = entryString entry "terminal"
+                  Author = entryString entry "author"
+                  Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
+                  ApprovedBy = entryString entry "approvedBy" })
+        let terminalModesH = foldRoot doc "terminalModes" (fun entry -> entryString entry "mode")
         Ok
             { Drafts = draftsToDomain draftsH
               Queue = queueToDomain queueH
               Title = title
-              SharedBrief = brief }
+              SharedBrief = brief
+              TerminalDrafts = terminalDraftsToDomain terminalDraftsH
+              TerminalQueue = terminalQueueToDomain terminalQueueH
+              TerminalModes = terminalModesToDomain terminalModesH }
 
     /// The origin tag on the Session Process's own doc writes (the drain's removals),
     /// distinct from the remote-apply origin so they broadcast like any local update.
@@ -270,6 +448,108 @@ module SyncedStateSync =
                     | Ok id -> Some id
                     | Error _ -> None)
             | _ -> None
+
+    // --- Terminals (Plan 12) -----------------------------------------------------------
+    //
+    // The same three moves the message queue needs, over the terminal roots: read a
+    // command's text, remove consumed entries, and answer the publication rule's two
+    // questions from ONE doc state. Commands are plain `Y.Text` roots, so a read is
+    // `toString` rather than a Markdown serialize.
+
+    /// The text of a queued terminal command, read straight from its root — what the drain
+    /// snapshots into the durable `TerminalBlockStarted`. Never written = empty string.
+    let terminalQueuedText (doc: Yjs.Y.Doc) (id: QueueId) : string =
+        textString (doc.getText (BodyKey.terminalQueued id))
+
+    /// The text of a terminal composer slot.
+    let terminalDraftText (doc: Yjs.Y.Doc) (terminal: TerminalId) (author: PeerId) : string =
+        textString (doc.getText (BodyKey.terminalDraft terminal author))
+
+    /// Whether the doc announces this author's composer slot in this terminal.
+    let hasTerminalDraft (doc: Yjs.Y.Doc) (terminal: TerminalId) (author: PeerId) : bool =
+        shareHas doc "terminalDrafts"
+        && (doc.getMap "terminalDrafts" : Yjs.Y.Map<obj>).has (TerminalDraftKey.make terminal author)
+
+    /// The queue key an author's terminal draft becomes when sent — the same value for every
+    /// co-editor, which is what makes concurrent sends merge into one entry.
+    let terminalDraftQueueId (doc: Yjs.Y.Doc) (terminal: TerminalId) (author: PeerId) : QueueId option =
+        if not (shareHas doc "terminalDrafts") then None
+        else
+            match (doc.getMap "terminalDrafts" : Yjs.Y.Map<obj>).get (TerminalDraftKey.make terminal author) with
+            | Some entryObj when not (isNull entryObj) ->
+                (unbox<Yjs.Y.Map<obj>> entryObj).get "queueId"
+                |> Option.map (unbox<string>)
+                |> Option.bind (fun value ->
+                    match QueueId.create value with
+                    | Ok id -> Some id
+                    | Error _ -> None)
+            | _ -> None
+
+    /// Put a command in a terminal's queue, from the Session Process, in ONE transaction:
+    /// the command's text root and the entry that names it (Plan 12).
+    ///
+    /// This is the Process's one CREATING doc write, and it earns the exception the same way
+    /// the drain's removals do: the terminal queue is collaborative state, and the agent is
+    /// a participant in it. Writing the command anywhere else would give the agent a private
+    /// execution path — the exact thing this design removes, because a command nobody can
+    /// see is a command nobody can approve.
+    ///
+    /// One transaction for the send's reason: the terminal drain wakes on the entry's
+    /// arrival, so an entry that arrived without its text would be snapshotted as an empty
+    /// command.
+    let enqueueTerminalCommand
+        (doc: Yjs.Y.Doc)
+        (id: QueueId)
+        (terminal: TerminalId)
+        (author: ActorRef)
+        (order: float)
+        (command: string)
+        : unit =
+        doc.transact (
+            (fun _ ->
+                (doc.getText (BodyKey.terminalQueued id)).insert (0, command)
+                let queue : Yjs.Y.Map<obj> = doc.getMap "terminalQueue"
+                let entry : Yjs.Y.Map<obj> = Yjs.Y.Map.Create ()
+                queue.set (QueueId.value id, box entry) |> ignore
+                entry.set ("terminal", box (TerminalId.value terminal)) |> ignore
+                entry.set ("author", box (ActorRef.token author)) |> ignore
+                entry.set ("order", box order) |> ignore
+                // Never approved on arrival: whether an approval is REQUIRED is the mode's
+                // question, and pre-answering it here would let the agent approve itself.
+                entry.set ("approvedBy", box "") |> ignore),
+            processOrigin)
+
+    /// Remove consumed terminal-queue entries in one transaction under the process origin —
+    /// the terminal drain's counterpart of `removeQueued`, and the Process's only other
+    /// structural doc write.
+    let removeTerminalQueued (doc: Yjs.Y.Doc) (ids: QueueId list) : unit =
+        if not (List.isEmpty ids) then
+            doc.transact (
+                (fun _ ->
+                    let queue : Yjs.Y.Map<obj> = doc.getMap "terminalQueue"
+                    ids |> List.iter (fun id -> queue.delete (QueueId.value id))),
+                processOrigin)
+
+    /// Remove every terminal composer slot whose command line is empty, returning the keys
+    /// dropped. The boot-time repair `removeEmptyDrafts` performs for message drafts, for
+    /// the same reason and under the same safety argument: at boot no peer is connected, so
+    /// an empty command cannot be one being typed.
+    let removeEmptyTerminalDrafts (doc: Yjs.Y.Doc) : (TerminalId * PeerId) list =
+        materializeRoots doc
+        if not (shareHas doc "terminalDrafts") then []
+        else
+            let drafts : Yjs.Y.Map<obj> = doc.getMap "terminalDrafts"
+            let empty =
+                mapKeys drafts
+                |> Array.choose (fun key ->
+                    match TerminalDraftKey.parse key with
+                    | Some (terminal, author) when (terminalDraftText doc terminal author).Trim () = "" ->
+                        Some (key, (terminal, author))
+                    | _ -> None)
+                |> List.ofArray
+            if not (List.isEmpty empty) then
+                doc.transact ((fun _ -> empty |> List.iter (fst >> drafts.delete)), processOrigin)
+            empty |> List.map snd
 
     /// Remove every draft slot whose body has no content, returning the authors dropped.
     /// A slot is published on its author's first keystroke and retracted when their body empties

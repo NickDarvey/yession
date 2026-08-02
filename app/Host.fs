@@ -32,6 +32,12 @@ type SessionHost =
       Doc : Y.Doc
       /// The session's lazily-started environment (Step 12).
       Environment : SessionEnvironment.SessionEnvironment
+      /// The session's terminals (Plan 12) — opening one starts the environment.
+      Terminals : SessionTerminals.SessionTerminals
+      /// The agent's terminal capability, exposed so a test can drive the agent's HALF of
+      /// the approval flow without a model in the loop. Production reaches it through
+      /// `AgentCapabilities`, which is built from this same value.
+      QueueTerminalCommand : QueueTerminalCommand
       /// Resolves when the next peer session ends. Register (call) it *before* triggering
       /// the disconnect you want to observe, then await it — this avoids any reliance on
       /// timing to see the resulting `PeerLeft`.
@@ -64,6 +70,9 @@ let startFull
     (secretsCapabilities: ControlClient.SessionSecretsCapabilities option)
     (baseLog: EventLog<SessionEvent> option)
     (docStore: DocStore.DocStore option)
+    // Terminal transcripts (Plan 12). `None` = an in-memory store, so terminals behave
+    // identically in a test host and the only thing missing is what outlives the process.
+    (transcriptStore: TranscriptStore.TranscriptStore option)
     (reportName: (string -> Async<unit>) option)
     // Plan 11: report whether this session is in use, so the Manager can stop it when it
     // is not. Absent for a session with no Manager — nothing would be listening.
@@ -173,6 +182,13 @@ let startFull
         replayed.Events |> List.iter (fun e -> recordAttribution e.Event)
         let initialConsumed =
             replayed.Events |> List.choose (fun e -> QueueDrain.consumedOf e.Event) |> Set.ofList
+        // The terminal drain's own exactly-once anchor, and the terminals a previous
+        // process left open — both folded from the same durable replay.
+        let initialTerminalConsumed =
+            replayed.Events |> List.choose (fun e -> TerminalQueueDrain.consumedOf e.Event) |> Set.ofList
+        let replayedTerminals =
+            replayed.Events
+            |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) TerminalProjection.empty
 
         // The session's environment: the session-owned WorkSandbox, lazily created on
         // first need; absent a composition, needs are recorded as unavailable.
@@ -189,9 +205,90 @@ let startFull
             match MessageId.create (string (Guid.NewGuid ())) with
             | Ok id -> id
             | Error e -> failwithf "message id invariant violated: %s" e
+        // --- Terminals (Plan 12) -----------------------------------------------------
+        //
+        // A second consumer over a second queue, sharing nothing with the agent scheduler
+        // but the doc updates that wake both. That independence is the design: a build
+        // running in a terminal must not stop the agent answering, and a long agent turn
+        // must not stop someone running `git status`.
+        let transcripts = transcriptStore |> Option.defaultWith TranscriptStore.inMemory
+        let mintBlockId () =
+            match BlockId.create (string (Guid.NewGuid ())) with
+            | Ok id -> id
+            | Error e -> failwithf "block id invariant violated: %s" e
+
+        // A record is broadcast only AFTER the transcript has it (the store appends before
+        // returning the seq), so a dropped frame costs latency and never the record. A peer
+        // that misses one re-reads it over HTTP; nothing here is the only copy.
+        let broadcastTerminalRecord (terminal: TerminalId) (seq: int) (record: TranscriptRecord) =
+            connections
+            |> Map.iter (fun _ channel ->
+                Async.StartImmediate (channel.Send (Terminal (TerminalRecord (terminal, seq, record)))))
+
+        let terminals =
+            SessionTerminals.create
+                log
+                environment
+                transcripts.Open
+                SessionTerminals.TerminalShell.posix
+                (fun () -> DateTimeOffset.UtcNow)
+                TerminalId.mint
+                mintBlockId
+                broadcastTerminalRecord
+                (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
+
+        // The agent's terminal capability (Plan 12): it QUEUES a command where people can
+        // see it, and returns. It does not wait for the command to run — waiting would make
+        // the turn block on a human pressing Approve, and a review gate that deadlocks when
+        // nobody is looking is not a review gate.
+        let queueTerminalCommand : QueueTerminalCommand =
+            fun requested command ->
+                async {
+                    let command = command.Trim ()
+                    if command = "" then return Error "a terminal command cannot be empty"
+                    else
+                        let synced = SyncedStateSync.ofDoc doc
+                        // Whichever terminal was asked for, else whichever is open, else a
+                        // new one — opening it starts the environment, exactly as a person
+                        // opening one does.
+                        let! terminal =
+                            async {
+                                match requested with
+                                | Some id when terminals.IsOpen id -> return Ok id
+                                | Some _ -> return Error "that terminal is not open"
+                                | None ->
+                                    match terminals.Lengths () |> List.map fst with
+                                    | id :: _ -> return Ok id
+                                    | [] -> return! terminals.Open ActorRef.Agent "agent"
+                            }
+                        match terminal, synced with
+                        | Error reason, _ -> return Error reason
+                        | Ok _, Error _ -> return Error "the session's collaborative state could not be read"
+                        | Ok terminal, Ok synced ->
+                            let queueId =
+                                match QueueId.create (string (Guid.NewGuid ())) with
+                                | Ok id -> id
+                                | Error e -> failwithf "queue id invariant violated: %s" e
+                            SyncedStateSync.enqueueTerminalCommand
+                                doc
+                                queueId
+                                terminal
+                                ActorRef.Agent
+                                (TerminalQueueOrder.nextFor terminal synced.TerminalQueue)
+                                command
+                            return
+                                Ok
+                                    { Terminal = terminal
+                                      AwaitingApproval =
+                                        TerminalApprovalMode.requiresApproval
+                                            (SyncedSessionState.modeOf terminal synced)
+                                            ActorRef.Agent }
+                }
+
         let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
             { EnsureEnvironment = environment.Ensure (Some turnId)
               ExecuteCommand = environment.Execute
+              QueueTerminalCommand = queueTerminalCommand
               SetSecret =
                 match secretsCapabilities with
                 | Some secrets -> secrets.SetSecret
@@ -213,6 +310,9 @@ let startFull
         let drain () = scheduler.Drain ()
         let requestInterrupt = scheduler.RequestInterrupt
 
+        let terminalScheduler = TerminalScheduler.create doc terminals initialTerminalConsumed
+        let drainTerminals () = terminalScheduler.Drain ()
+
         // Process-originated doc writes (the drain's queue removals) broadcast to every
         // peer; peer payloads are relayed by the receiving connection.
         DocSync.onLocalUpdate doc (fun payload ->
@@ -223,6 +323,8 @@ let startFull
         // single-flight guard). Drafts are ephemeral WIP in the synced state — never
         // durable facts (only their send is) — so a new draft appearing needs no append.
         DocSync.onAnyUpdate doc (fun () -> drain ())
+        // The terminal queue re-arms on the same signal, for the same liveness reason.
+        DocSync.onAnyUpdate doc (fun () -> drainTerminals ())
 
         // --- Is this session in use? (Plan 11) ---------------------------------------
         //
@@ -238,8 +340,12 @@ let startFull
         let isBusy () =
             not (Map.isEmpty connections)
             || Option.isSome (scheduler.RunningTurn ())
+            // A command running in a terminal is a session in use even with nobody
+            // watching — a long build is exactly the case an outside observer would get
+            // wrong, and reaping the session would kill the build.
+            || not (Set.isEmpty (terminals.Busy ()))
             || (match SyncedStateSync.ofDoc doc with
-                | Ok synced -> not (Map.isEmpty synced.Queue)
+                | Ok synced -> not (Map.isEmpty synced.Queue) || not (Map.isEmpty synced.TerminalQueue)
                 | // A doc that will not decode is a session in trouble, and stopping it
                   // out from under its owner is the wrong response to that. Hold it busy
                   // and let something that understands the failure deal with it.
@@ -311,10 +417,17 @@ let startFull
             mcpTools <- Some (subscribe handle)
         | None -> ()
 
+        // Terminals a previous process left open belong to a sandbox that died with it, so
+        // the log is describing something that no longer exists. Close them before anything
+        // reads the projection — and before the terminal drain, which must not try to run a
+        // command in a terminal that is gone.
+        do! terminals.ReconcileAtBoot ()
+
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the
         // crash window — the log-anchored dedup repairs them without re-consuming).
         drain ()
+        drainTerminals ()
 
         let mutable endWaiters : (unit -> unit) list = []
         let signalSessionEnded () =
@@ -330,7 +443,7 @@ let startFull
                     fun payload ->
                         DocSync.applyRemote doc payload
                         broadcastExcept connectionId payload
-                  OnCommand = SessionCommands.handle requestInterrupt
+                  OnCommand = SessionCommands.handle requestInterrupt terminals.Open terminals.Close actorFor
                   OnPresence = fun payload -> broadcastPresenceExcept connectionId payload
                   OnAccepted =
                     fun peerId ch ->
@@ -341,6 +454,11 @@ let startFull
                             // countdown without waiting up to a beat for it.
                             notifyActivity ()
                             do! ch.Send (State (StateSync (DocSync.fullState doc)))
+                            // How much terminal history exists, per open terminal. A hint,
+                            // exactly like `PeerAccepted.LatestOffset`: the client decides
+                            // whether it is behind and reads the transcript itself.
+                            for (terminal, length) in terminals.Lengths () do
+                                do! ch.Send (Terminal (TerminalTranscriptAvailable (terminal, length)))
                             return
                                 fun () ->
                                     connections <- Map.remove connectionId connections
@@ -377,7 +495,21 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin port
+        // The HTTP-cacheable transcript read surface (Plan 12) — the history leg of the
+        // terminal feed, on the same immutability argument as the event chunks.
+        let transcriptEndpoint : Signalling.TranscriptEndpoint =
+            { ValidateToken = peerTokens.Validate >> Option.isSome
+              ReadChunk =
+                fun terminal index ->
+                    async {
+                        // An unparseable id is a terminal that does not exist, which is
+                        // exactly what an unknown one is — same answer, one code path.
+                        match TerminalId.create terminal with
+                        | Ok id -> return transcripts.ReadChunk id index
+                        | Error _ -> return None
+                    } }
+
+        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) (Some transcriptEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -408,6 +540,8 @@ let startFull
               Log = log
               Doc = doc
               Environment = environment
+              Terminals = terminals
+              QueueTerminalCommand = queueTerminalCommand
               WaitForNextSessionEnd = waitForNextSessionEnd
               Connect = onConnection
               Stop =
@@ -436,8 +570,10 @@ let startWithEnvironment
     (sessionId: SessionId)
     (port: int)
     : Async<SessionHost> =
-    // No mount: these helpers serve an unfronted, origin-root session.
-    startFull (fun () -> runAgent) makeEnvironment None baseLog None None None (fun _ _ -> ()) None None None sessionId None "" None port
+    // No mount: these helpers serve an unfronted, origin-root session. No transcript store
+    // either — terminals fall back to the in-memory one, which is the right default for a
+    // host with no data directory.
+    startFull (fun () -> runAgent) makeEnvironment None baseLog None None None None (fun _ _ -> ()) None None None sessionId None "" None port
 
 /// `startWithEnvironment` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

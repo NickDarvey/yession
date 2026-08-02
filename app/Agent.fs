@@ -2,7 +2,8 @@ module Yession.Host.Agent
 
 // The real agent runner: an adapter from the `RunAgent` capability to the Claude Agent
 // SDK. The turn's typed capabilities are exposed to the model as MCP tools —
-// `ensure_environment` and `execute_command` — so a live agent can lazily start the
+// `ensure_environment`, `execute_command` and `queue_terminal_command` — so a live agent
+// can lazily start the
 // session environment and run commands, exactly like the scripted agents in the
 // deterministic suite. Requires ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN; the
 // deterministic tests never call this, and the live smoke test is gated on credentials,
@@ -63,6 +64,12 @@ type private RunOutcome =
           'Delete one of this session\'s stored secrets by name.',
           { name: z.string().describe('the secret name to delete') },
           async (args) => ({ content: [{ type: 'text', text: await $9(args.name) }] })
+        ),
+        sdk.tool(
+          'queue_terminal_command',
+          'Put a shell command in a terminal queue, where the people in this session can read it, edit it, and (depending on the terminal) approve it before it runs. Returns as soon as it is queued — it does NOT wait for the command to run or return its output. Prefer this over execute_command whenever a human should see what you are about to run.',
+          { command: z.string().describe('the shell command line to queue') },
+          async (args) => ({ content: [{ type: 'text', text: await $10(args.command) }] })
         )
       ]
     })
@@ -74,14 +81,14 @@ type private RunOutcome =
         settingSources: [],
         includePartialMessages: true,
         mcpServers: { yession },
-        // The turn's ONLY tools are the five above. `tools: []` drops every built-in
+        // The turn's ONLY tools are the six above. `tools: []` drops every built-in
         // (Bash/Read/Glob/Grep/WebFetch/Agent/Skill) from the model's context; MCP
         // servers ride a separate channel, so `yession`'s tools survive it.
         // `allowedTools` is NOT a restriction — it is the auto-approve list, and on its
         // own it left the read-only built-ins reachable (a session could list the host
         // filesystem). It stays so our tools run without a permission round-trip.
         tools: [],
-        allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret'],
+        allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__queue_terminal_command'],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
         ...($1 ? { env: $1 } : {})
@@ -131,6 +138,7 @@ let private runQuery
     (setSecret: string -> string -> JS.Promise<string>)
     (listSecrets: unit -> JS.Promise<string>)
     (deleteSecret: string -> JS.Promise<string>)
+    (queueTerminalCommand: string -> JS.Promise<string>)
     : JS.Promise<RunOutcome> =
     jsNative
 
@@ -250,6 +258,28 @@ let private deleteSecretFor (capabilities: AgentCapabilities) : string -> JS.Pro
         }
         |> Async.StartAsPromise
 
+/// The `queue_terminal_command` tool body (Plan 12). It reports the queue's OUTCOME, not
+/// the command's: the command has not run yet, and telling a model "queued" when it is
+/// actually waiting for a human would have it conclude, after a silent pause, that its
+/// command failed and try something else.
+let private queueTerminalCommandFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+    fun command ->
+        async {
+            match! capabilities.QueueTerminalCommand None command with
+            | Ok queued when queued.AwaitingApproval ->
+                return
+                    sprintf
+                        "queued in terminal %s, WAITING FOR A HUMAN TO APPROVE IT. It has not run. Do not wait for output — say what you queued and why, and let them approve it."
+                        (TerminalId.value queued.Terminal)
+            | Ok queued ->
+                return
+                    sprintf
+                        "queued in terminal %s and will run shortly. It has not run yet, so no output is available in this turn."
+                        (TerminalId.value queued.Terminal)
+            | Error reason -> return sprintf "could not queue the command: %s" reason
+        }
+        |> Async.StartAsPromise
+
 /// The Claude Agent SDK–backed `RunAgent`, parameterized by the turn's credential:
 /// `None` = the ambient process env (the documented last resort — the pre-Plan-08
 /// behaviour); `Some (envVar, value)` = the spawned CLI runs with exactly that
@@ -275,6 +305,7 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (setSecretFor capabilities)
                     (listSecretsFor capabilities)
                     (deleteSecretFor capabilities)
+                    (queueTerminalCommandFor capabilities)
                 |> Async.AwaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens

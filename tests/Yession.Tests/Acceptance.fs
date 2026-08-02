@@ -19,6 +19,10 @@ let private draftQueueId = QueueId.create "queue-ui-draft" |> expect
 let private ada = PeerId.create "ada" |> expect
 let private bob = PeerId.create "bob" |> expect
 let private sessionId = SessionId.create "demo-session" |> expect
+let private terminalId = TerminalId.create "term-ui" |> expect
+let private blockId = BlockId.create "block-ui" |> expect
+let private terminalDraftQueueId = QueueId.create "queue-ui-term-draft" |> expect
+let private terminalQueueId = QueueId.create "queue-ui-term" |> expect
 
 /// A model exercising every UI element at once: connected, mid catch-up, one draft
 /// (sendable), one queued message (editable/reorderable/deletable), a completed human
@@ -40,7 +44,21 @@ let private representativeModel : ClientModel =
         { Drafts = Map.ofList [ ada, { Author = ada; QueueId = draftQueueId } ]
           Queue = Map.ofList [ queueId, { QueueId = queueId; Author = ada; Order = 1.0 } ]
           Title = Ylmish.Text.ofString "planning the launch"
-          SharedBrief = None }
+          SharedBrief = None
+          // A terminal composer slot, and one queued command the AGENT wrote — which under
+          // the default mode is the interesting case: it is the entry the approval gate
+          // holds, so the panel must render it as waiting rather than as ready.
+          TerminalDrafts =
+            Map.ofList [ (terminalId, ada), { Terminal = terminalId; Author = ada; QueueId = terminalDraftQueueId } ]
+          TerminalQueue =
+            Map.ofList
+                [ terminalQueueId,
+                  { QueueId = terminalQueueId
+                    Terminal = terminalId
+                    Author = ActorRef.Agent
+                    Order = 1.0
+                    ApprovedBy = None } ]
+          TerminalModes = Map.empty }
       Conversation =
         { Items =
             [ { MessageId = MessageId.create "msg-1" |> expect
@@ -64,6 +82,35 @@ let private representativeModel : ClientModel =
       Composer = Unchosen
       Environment = EnvironmentNotStarted
       Commands = CommandLog.empty
+      Terminals =
+        { Terminals =
+            [ { TerminalId = terminalId
+                Title = "build"
+                OpenedBy = PeerRef ada
+                IsOpen = true
+                ClosedReason = None
+                Blocks =
+                  [ { BlockId = blockId
+                      Author = PeerRef ada
+                      ApprovedBy = None
+                      Command = "ls -la"
+                      FromSeq = 0
+                      ToSeq = Some 2
+                      Status = BlockFinished (CommandSucceeded 0) } ]
+                DroppedBytes = 0 } ] }
+      // The transcript this client has: one coloured line, so the SSR render exercises the
+      // ANSI path rather than only the plain one.
+      TerminalFeeds =
+        Map.ofList
+            [ terminalId,
+              { Records =
+                  Map.ofList
+                      [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\n" }
+                        1, { At = 0.1; Kind = TranscriptOutput; Data = "\u001b[32mtotal 0\u001b[0m\n" } ]
+                KnownLength = 2
+                ReadThrough = 2 } ]
+      TerminalChoice = None
+      TerminalsOpen = true
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
           Flow = ClaudeIdle } }
@@ -119,6 +166,26 @@ let private uiChecklistTests =
                   "queue reorder up", Dom.attr Dom.Hooks.queueUp "queue-ui"
                   "queue reorder down", Dom.attr Dom.Hooks.queueDown "queue-ui"
                   "queue delete", Dom.attr Dom.Hooks.queueDelete "queue-ui"
+                  // Terminals (Plan 12): the panel, the terminal it is showing, the block
+                  // that ran with its exit status, and the composer that queues the next
+                  // command. The queued entry is the AGENT's, so it must render as waiting
+                  // for an approval — that state is the whole point of the surface.
+                  "terminals panel", Dom.Hooks.terminalPanel
+                  "terminal tab", Dom.attr Dom.Hooks.terminalTab "term-ui"
+                  "new terminal", Dom.Hooks.terminalNew
+                  "terminal block", Dom.attr Dom.Hooks.terminalBlock "block-ui"
+                  "terminal block status", Dom.attr Dom.Hooks.terminalBlockStatus Dom.Text.blockOk
+                  "terminal block command", "ls -la"
+                  "terminal output", Dom.Hooks.terminalOutput
+                  // The output is ANSI-coloured, and the colour is a THEME token — a raw
+                  // ANSI colour would not clear the contrast floor on this ground.
+                  "terminal output colour is a theme token", "text-term-green"
+                  "terminal output text", "total 0"
+                  "queued terminal command", Dom.attr Dom.Hooks.terminalQueued "queue-ui-term"
+                  "queued command awaits approval", Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingApproval
+                  "approve button", Dom.attr Dom.Hooks.terminalApprove "queue-ui-term"
+                  "terminal composer input", Dom.attr Dom.Hooks.terminalInput "term-draft:term-ui:ada"
+                  "terminal approval mode", Dom.attr Dom.Hooks.terminalMode "approve-agent"
                   // Settings + agent presence (Plan 08 pass): the model has no agent, so
                   // the sidebar row says absent, the prompt strip renders with its
                   // connect call-to-action, and the drawer holds the Claude panel.

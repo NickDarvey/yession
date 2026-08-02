@@ -55,6 +55,15 @@ module Connection =
                         // A collaborator's caret moved (or cleared) in the title.
                         dispatch (RemotePresenceMsg payload)
                         return! pump ()
+                    | Some (Terminal (TerminalRecord (terminal, seq, record))) ->
+                        // Live terminal output. Durable before it was sent, and keyed by
+                        // seq, so folding it is idempotent against the history fetched
+                        // over HTTP — the two legs need no coordination.
+                        dispatch (TerminalRecordMsg (terminal, seq, record))
+                        return! pump ()
+                    | Some (Terminal (TerminalTranscriptAvailable (terminal, nextSeq))) ->
+                        dispatch (TerminalAvailableMsg (terminal, nextSeq))
+                        return! pump ()
                     | Some _ ->
                         // Anything else (e.g. inbound command requests) is not part of
                         // the client's protocol surface and is drained.

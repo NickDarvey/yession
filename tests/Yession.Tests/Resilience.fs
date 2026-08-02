@@ -510,6 +510,7 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
                                 { App.ConnectOptions.defaults with ResumeAfter = resumeAfter }
                                 doc
                                 registry
+                                (TextRegistry doc)
                                 hello
                                 dispatch
                                 channel

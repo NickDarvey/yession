@@ -44,6 +44,11 @@ type SessionRoute =
     /// after `EventChunk` — that module already exists in the domain, and one identifier
     /// meaning two things is what makes F# symbols hard to find.
     | Events of index: int
+    /// Immutable chunk `index` of a terminal's transcript (Plan 12) — the history leg of
+    /// the terminal feed, cacheable on exactly the same argument as `Events`. The terminal
+    /// is carried as a raw string because a route is a PATH, and validating it into a
+    /// `TerminalId` is the server's job at dispatch, not the router's at parse.
+    | TerminalTranscript of terminal: string * index: int
     /// The Claude panel's current credential status.
     | ClaudeStatus
     /// One of the Claude panel's write actions.
@@ -96,6 +101,7 @@ module SessionRoute =
         | Login -> "login"
         | Callback -> "callback"
         | Events index -> sprintf "events/%d" index
+        | TerminalTranscript (terminal, index) -> sprintf "terminals/%s/%d" terminal index
         | ClaudeStatus -> "claude"
         | Claude action -> "claude/" + claudeSegment action
 
@@ -121,6 +127,10 @@ module SessionRoute =
         | "GET", [ "events"; index ] ->
             match System.Int32.TryParse index with
             | true, parsed when parsed >= 0 -> Some (Events parsed)
+            | _ -> None
+        | "GET", [ "terminals"; terminal; index ] ->
+            match System.Int32.TryParse index with
+            | true, parsed when parsed >= 0 && terminal <> "" -> Some (TerminalTranscript (terminal, parsed))
             | _ -> None
         | "GET", [ "claude" ] -> Some ClaudeStatus
         | "POST", [ "claude"; "begin" ] -> Some (Claude ClaudeAction.Begin)

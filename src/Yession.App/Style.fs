@@ -1,5 +1,7 @@
 namespace Yession.App
 
+open Yession.Domain
+
 /// The client's visual language, authored entirely in F# by composing Tailwind's own
 /// utility classes into typed, named values. Tailwind supplies the utilities; F# supplies
 /// the composition; the TOKENS — palette, type ramp, caps tracking, structural spacing,
@@ -483,6 +485,175 @@ module Style =
     let noAgentBody = "flex flex-col gap-2"
     /// Full-width within the column so it reads as the section's one action.
     let noAgentAction = "w-full"
+
+    // --- Terminals (Plan 12) -------------------------------------------------------------------
+    // The conversation column's mirror on the right: a strip of open terminals, the blocks
+    // that have run in the selected one, and beneath them the composer — the message
+    // composer's sibling, because queueing a command and queueing a message are the same act.
+    //
+    // It is a COLUMN, not an overlay. The conversation never moves when terminals open, for
+    // the same reason settings is the sidebar's other face rather than a drawer over the
+    // timeline: reading something and then having it slide out from under you is the thing
+    // this shell does not do.
+
+    /// The terminals column. Mirrors `sidebar`'s geometry (a fixed column on desktop that
+    /// animates shut, an off-canvas drawer on mobile) reflected to the right edge.
+    let terminalPanel =
+        "relative w-term shrink-0 bg-panel h-full overflow-hidden z-40 border-l border-hair flex flex-col "
+        + "md:transition-[width] md:duration-200 md:ease-out "
+        + "md:[.term-closed_&]:w-0 md:[.term-closed_&]:border-l-0 "
+        + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-[min(var(--spacing-term),92vw)] "
+        + "max-md:transition-transform max-md:duration-200 max-md:ease-out "
+        + "max-md:[.term-closed_&]:translate-x-[101%] motion-reduce:transition-none"
+
+    /// Held at the column's full width so nothing reflows while the column animates shut.
+    let terminalPane = "absolute inset-0 w-term max-md:w-[min(var(--spacing-term),92vw)] flex flex-col"
+
+    /// The column's head, on the same 88px band as the sidebar and the main header.
+    let terminalHead = "h-band shrink-0 flex items-end justify-between gap-2 px-5 pb-5 border-b border-hair"
+
+    /// The open-terminal strip: one chip per terminal, scrolling horizontally when there are
+    /// more than fit rather than wrapping into a second band that shifts the whole column.
+    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 py-2 overflow-x-auto border-b border-hair"
+    let private tabBase =
+        caps + " px-2.5 py-1.5 max-w-40 truncate border transition-colors focus-visible:outline-2 focus-visible:outline-blue"
+    let terminalTab = tabBase + " border-transparent text-ink-faint hover:text-ink"
+    let terminalTabActive = tabBase + " border-blue text-blue"
+    /// Adds a terminal. The one action in the strip that is not a selection.
+    let terminalTabNew = tabBase + " border-edge text-ink-dim hover:border-ink hover:text-ink"
+
+    /// The scrolling block history.
+    let terminalBlocks = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
+
+    /// One block: the command that ran, then its output.
+    let terminalBlock = "flex flex-col bg-surface"
+    /// The command line as it was run — mono, and marked with a prompt glyph so a command
+    /// is never mistaken for the output above it.
+    let terminalBlockCommand = "flex items-baseline gap-2 px-3 py-2 border-b border-hair"
+    let terminalPrompt = "shrink-0 font-mono text-code text-green select-none"
+    let terminalCommandText = "font-mono text-code text-ink break-all"
+    /// Output: preformatted, wrapping, and horizontally scrollable for the lines that will
+    /// not wrap — the column must never make the PAGE scroll sideways.
+    let terminalOutput = "px-3 py-2 overflow-x-auto font-mono text-code-sm leading-4 whitespace-pre-wrap break-words text-ink-dim"
+    let terminalOutputEmpty = "px-3 py-2 " + small
+    /// The truncation notice: a stated gap in the record, in the error voice because a
+    /// missing audit trail is not a neutral fact.
+    let terminalTruncated = caps + " px-3 py-2 text-err"
+
+    /// The composer area beneath the blocks.
+    let terminalComposer = "shrink-0 flex flex-col gap-2 px-3 py-3 border-t border-hair"
+    /// A queued command awaiting its turn (or its approval).
+    let terminalQueued = "flex flex-col gap-1 px-3 py-2 bg-surface border-l-2"
+    let terminalQueuedReady = terminalQueued + " border-l-green"
+    let terminalQueuedAwaiting = terminalQueued + " border-l-blue"
+    let terminalQueuedRow = "flex items-center gap-2"
+    /// The command input itself: mono, on the surface tone, blue focus edge like every
+    /// other field — a terminal composer is a field, not a terminal.
+    let terminalInput =
+        "flex-1 min-w-0 bg-surface border border-hair focus:border-blue outline-none "
+        + "px-3 py-2 font-mono text-code text-ink placeholder:text-ink-faint"
+    /// Someone else's composer slot in this terminal: shown, not editable-by-mistake — it is
+    /// the same live text, so it is the terminal's version of watching a draft being written.
+    let terminalPeerDraft = "flex items-center gap-2 px-3 py-2 bg-surface border-l-2"
+    /// Who is in a slot right now, by live caret — one dot per peer, coloured by peer.
+    let terminalEditors = "shrink-0 flex items-center gap-1"
+
+    /// The empty state, when no terminal is open.
+    let terminalEmpty = "flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center"
+
+    /// Reopens the column once it is shut (the mirror of `navReopen`).
+    let terminalReopen =
+        "absolute right-0 top-0 h-band flex items-end pb-5 pr-5 opacity-0 pointer-events-none "
+        + "[.term-closed_&]:opacity-100 [.term-closed_&]:pointer-events-auto"
+
+    // --- ANSI styling ---------------------------------------------------------------------------
+    // Turning a parsed `AnsiStyle` into what a span wears. Split in two on purpose:
+    //
+    //   * the SIXTEEN named colours are theme tokens, emitted as literal utility class names.
+    //     Literal because Tailwind scans this source for the classes it must generate — a
+    //     `sprintf "text-term-%s"` composes a class that is never built, and the span would
+    //     come out unstyled. (The same trap the avatar checkers hit; see `@source inline`.)
+    //   * the other 240 (the 6x6x6 cube, the grey ramp) and any 24-bit colour are ARITHMETIC,
+    //     resolved by `Ansi.rgbOf` and emitted inline. There is no token to name them with,
+    //     and 240 generated utilities to cover a case a build log might use once is not a
+    //     trade worth making.
+
+    let private ansiFgClass (colour: AnsiColour) : string =
+        match colour with
+        | IndexedColour 0 -> "text-term-black"
+        | IndexedColour 1 -> "text-term-red"
+        | IndexedColour 2 -> "text-term-green"
+        | IndexedColour 3 -> "text-term-yellow"
+        | IndexedColour 4 -> "text-term-blue"
+        | IndexedColour 5 -> "text-term-magenta"
+        | IndexedColour 6 -> "text-term-cyan"
+        | IndexedColour 7 -> "text-term-white"
+        | IndexedColour 8 -> "text-term-black-bright"
+        | IndexedColour 9 -> "text-term-red-bright"
+        | IndexedColour 10 -> "text-term-green-bright"
+        | IndexedColour 11 -> "text-term-yellow-bright"
+        | IndexedColour 12 -> "text-term-blue-bright"
+        | IndexedColour 13 -> "text-term-magenta-bright"
+        | IndexedColour 14 -> "text-term-cyan-bright"
+        | IndexedColour 15 -> "text-term-white-bright"
+        | _ -> ""
+
+    let private ansiBgClass (colour: AnsiColour) : string =
+        match colour with
+        | IndexedColour 0 -> "bg-term-black"
+        | IndexedColour 1 -> "bg-term-red"
+        | IndexedColour 2 -> "bg-term-green"
+        | IndexedColour 3 -> "bg-term-yellow"
+        | IndexedColour 4 -> "bg-term-blue"
+        | IndexedColour 5 -> "bg-term-magenta"
+        | IndexedColour 6 -> "bg-term-cyan"
+        | IndexedColour 7 -> "bg-term-white"
+        | IndexedColour 8 -> "bg-term-black-bright"
+        | IndexedColour 9 -> "bg-term-red-bright"
+        | IndexedColour 10 -> "bg-term-green-bright"
+        | IndexedColour 11 -> "bg-term-yellow-bright"
+        | IndexedColour 12 -> "bg-term-blue-bright"
+        | IndexedColour 13 -> "bg-term-magenta-bright"
+        | IndexedColour 14 -> "bg-term-cyan-bright"
+        | IndexedColour 15 -> "bg-term-white-bright"
+        | _ -> ""
+
+    /// A span's colours, resolved with `Inverse` already applied — the flag is a render-time
+    /// swap, which is exactly why the parser leaves it as a flag rather than pre-swapping
+    /// colours it does not know the defaults for. A background fill also forces the
+    /// foreground to the page ground, so inverted text stays readable when only one side of
+    /// the pair was ever set.
+    let private ansiColours (style: AnsiStyle) : AnsiColour * AnsiColour =
+        if style.Inverse then
+            (match style.Background with DefaultColour -> IndexedColour 0 | c -> c),
+            (match style.Foreground with DefaultColour -> IndexedColour 7 | c -> c)
+        else style.Foreground, style.Background
+
+    /// The utility classes for a styled run.
+    let ansiClasses (style: AnsiStyle) : string =
+        let foreground, background = ansiColours style
+        [ if style.Bold then "font-semibold"
+          // Dim is opacity, not a colour: it has to compose with whatever colour is set,
+          // and it must not drop text below the contrast floor — 75% of a colour that
+          // clears 4.5:1 on this ground still clears 3:1, and dim text is decoration.
+          if style.Dim then "opacity-75"
+          if style.Italic then "italic"
+          if style.Underline then "underline"
+          ansiFgClass foreground
+          if background <> DefaultColour then "px-0.5"
+          ansiBgClass background ]
+        |> List.filter (fun c -> c <> "")
+        |> String.concat " "
+
+    /// The inline `style` for a run whose colour is arithmetic rather than named. Empty for
+    /// every named colour, which is the common case.
+    let ansiInline (style: AnsiStyle) : string =
+        let foreground, background = ansiColours style
+        let rgb (label: string) (colour: AnsiColour) =
+            match AnsiColour.rgbOf colour with
+            | Some (r, g, b) -> sprintf "%s:rgb(%d %d %d);" label r g b
+            | None -> ""
+        rgb "color" foreground + rgb "background-color" background
 
     // --- Document shell ------------------------------------------------------------------------
 

@@ -32,12 +32,57 @@ type QueuedMessage =
       /// (Yjs's concurrent-move duplication is unrepresentable this way).
       Order   : float }
 
+/// A collaborative command line waiting to be sent to a terminal (Plan 12): the terminal
+/// composer's draft, and the exact shape `DraftState` has, for the exact reason. One slot
+/// per (terminal, author), so everyone sees everyone typing and any peer may co-edit a
+/// slot — including the agent's, which is what makes reviewing its command the same act as
+/// reading its message.
+///
+/// The command TEXT is not here. It is a top-level `Y.Text` root keyed by
+/// `BodyKey.terminalDraft` (the same sibling-root arrangement rich bodies use, and for the
+/// same reason), so this record carries only the slot's identity. Plain `Y.Text` rather
+/// than a rich body because a command is characters, not prose: round-tripping `ls *.fs`
+/// through Markdown would escape the glob.
+type TerminalDraft =
+    { Terminal : TerminalId
+      Author   : PeerId
+      /// The queue key this draft becomes when sent, minted by its author when the slot is
+      /// published — so two peers sending it concurrently write ONE entry, exactly as in
+      /// the message queue.
+      QueueId  : QueueId }
+
+/// A command waiting to run in a terminal. Collaborative until the drain consumes it: any
+/// peer may edit the text (the `Y.Text` merges), reorder, delete, or approve it. That IS
+/// the approval UX — reading what is about to run, fixing it in place, and letting it go.
+type TerminalQueued =
+    { QueueId  : QueueId
+      Terminal : TerminalId
+      /// Who wrote the command. Decides whether the terminal's mode demands an approval;
+      /// never changed by an edit, because "who asked for this" is not editable.
+      Author   : ActorRef
+      /// A fractional index within this terminal's queue — one register write to reorder.
+      Order    : float
+      /// The peer who approved it, if one has. Whether an approval is REQUIRED is not
+      /// stored: it is computed from the terminal's mode and `Author` at drain time
+      /// (`TerminalApprovalMode.requiresApproval`), so changing the mode re-decides every
+      /// waiting entry instead of leaving stale verdicts behind.
+      ApprovedBy : PeerId option }
+
 /// The name of the top-level `Y.XmlFragment` root that holds a draft/queue body. Stable across
 /// peers so every replica's `BodyRegistry` and editor bind to the same fragment (root types
 /// merge by name, so there is no creation race).
 module BodyKey =
     let draft (author: PeerId) : string = "draft:" + PeerId.value author
     let queued (id: QueueId) : string = "queue:" + QueueId.value id
+
+    /// A terminal composer's `Y.Text` root. Keyed by both ids because the slot is per
+    /// author PER TERMINAL — one person may be mid-command in two terminals at once.
+    let terminalDraft (terminal: TerminalId) (author: PeerId) : string =
+        "term-draft:" + TerminalId.value terminal + ":" + PeerId.value author
+
+    /// A queued terminal command's `Y.Text` root. Keyed by the queue id alone: the entry
+    /// already names its terminal, and the key must not change when the text is edited.
+    let terminalQueued (id: QueueId) : string = "term-queue:" + QueueId.value id
 
 type SharedBrief = { Body : string }
 
@@ -48,13 +93,36 @@ type SyncedSessionState =
       /// The session's human-given title: collaborative text, so concurrent edits
       /// interleave and merge exactly like a draft body. Empty until first named.
       Title       : Ylmish.Text
-      SharedBrief : SharedBrief option }
+      SharedBrief : SharedBrief option
+      /// Terminal composer slots, keyed by (terminal, author) — one per person per
+      /// terminal, structurally, exactly as `Drafts` caps a person at one message draft.
+      TerminalDrafts : Map<TerminalId * PeerId, TerminalDraft>
+      /// Commands queued across every terminal. One flat map rather than a map per
+      /// terminal: a queue entry names its terminal, and a flat keyed map is what makes
+      /// concurrent creation safe (different keys never conflict) regardless of which
+      /// terminal each peer was looking at.
+      TerminalQueue : Map<QueueId, TerminalQueued>
+      /// Per-terminal approval mode. An absent entry is `ApproveAgent` — the default is
+      /// the absence, so a terminal nobody has configured carries no register restating
+      /// what the default already says.
+      TerminalModes : Map<TerminalId, TerminalApprovalMode> }
 
 module SyncedSessionState =
 
-    /// Nothing synced yet: no drafts, an empty queue, an unnamed title, no shared brief.
+    /// Nothing synced yet: no drafts, an empty queue, an unnamed title, no shared brief,
+    /// no terminal composers.
     let empty : SyncedSessionState =
-        { Drafts = Map.empty; Queue = Map.empty; Title = Ylmish.Text.empty; SharedBrief = None }
+        { Drafts = Map.empty
+          Queue = Map.empty
+          Title = Ylmish.Text.empty
+          SharedBrief = None
+          TerminalDrafts = Map.empty
+          TerminalQueue = Map.empty
+          TerminalModes = Map.empty }
+
+    /// A terminal's approval mode, defaulting where none is set.
+    let modeOf (terminal: TerminalId) (state: SyncedSessionState) : TerminalApprovalMode =
+        state.TerminalModes |> Map.tryFind terminal |> Option.defaultValue ApproveAgent
 
 /// The queue's total order. `Order` is a float register; ties (possible when two peers
 /// mint concurrently) are broken by `QueueId`, so the order is always a total,
@@ -103,3 +171,51 @@ module QueueOrder =
             let belowBelow = if i + 2 < entries.Length then Some entries.[i + 2].Order else None
             Some (between (Some below) belowBelow)
         | _ -> None
+
+/// The terminal queue's order, per terminal. The same total, deterministic
+/// `(Order, QueueId)` rule the message queue uses — restated over the terminal entry
+/// rather than abstracted over both, because the one thing these two queues must never
+/// share is a code path that could reorder one when asked to reorder the other. The
+/// fractional-index arithmetic itself IS shared (`QueueOrder.between`): that part is about
+/// floats, not about queues.
+module TerminalQueueOrder =
+
+    /// One terminal's entries in consumption order.
+    let sortedFor (terminal: TerminalId) (queue: Map<QueueId, TerminalQueued>) : TerminalQueued list =
+        queue
+        |> Map.toList
+        |> List.map snd
+        |> List.filter (fun e -> e.Terminal = terminal)
+        |> List.sortBy (fun e -> e.Order, QueueId.value e.QueueId)
+
+    /// The order value for a new entry appended at the tail of a terminal's queue.
+    let nextFor (terminal: TerminalId) (queue: Map<QueueId, TerminalQueued>) : float =
+        match sortedFor terminal queue with
+        | [] -> 1.0
+        | entries -> (List.last entries).Order + 1.0
+
+    /// The order value that moves `id` one position earlier within its own terminal.
+    let moveUp (queue: Map<QueueId, TerminalQueued>) (id: QueueId) : float option =
+        match Map.tryFind id queue with
+        | None -> None
+        | Some entry ->
+            let entries = sortedFor entry.Terminal queue
+            match entries |> List.tryFindIndex (fun e -> e.QueueId = id) with
+            | Some i when i > 0 ->
+                let above = entries.[i - 1].Order
+                let aboveAbove = if i >= 2 then Some entries.[i - 2].Order else None
+                Some (QueueOrder.between aboveAbove (Some above))
+            | _ -> None
+
+    /// The order value that moves `id` one position later within its own terminal.
+    let moveDown (queue: Map<QueueId, TerminalQueued>) (id: QueueId) : float option =
+        match Map.tryFind id queue with
+        | None -> None
+        | Some entry ->
+            let entries = sortedFor entry.Terminal queue
+            match entries |> List.tryFindIndex (fun e -> e.QueueId = id) with
+            | Some i when i < entries.Length - 1 ->
+                let below = entries.[i + 1].Order
+                let belowBelow = if i + 2 < entries.Length then Some entries.[i + 2].Order else None
+                Some (QueueOrder.between (Some below) belowBelow)
+            | _ -> None

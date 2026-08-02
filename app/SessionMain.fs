@@ -302,7 +302,10 @@ Async.StartImmediate (
                         (fun () -> envCreds || connectedSomewhere ())
                         sessionMount)
             | _ -> None
-        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin port
+        // Transcripts live beside the event log and the doc sidecar, one `.cast` file per
+        // terminal — a durable, replayable record of everything its commands printed.
+        let transcriptStore = TranscriptStore.openStore (sprintf "%s/terminals" dataDir)
+        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

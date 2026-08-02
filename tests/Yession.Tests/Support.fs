@@ -277,6 +277,10 @@ type Client =
     { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
       Connection : App.Connection
       Registry : BodyRegistry
+      /// The plain-text roots the terminal composers live in (Plan 12), alongside the rich
+      /// bodies. Held on the client for the same reason `Registry` is: a test drives the
+      /// composer by writing the CRDT the browser's input writes.
+      Texts : TextRegistry
       Channel : FrameChannel<string>
       Doc : Y.Doc
       Hello : PeerHelloPayload }
@@ -290,15 +294,18 @@ let connectClientWith (options: App.ConnectOptions) (signalUrl: string) (token: 
         let doc = Y.Doc.Create ()
         let local = peer id name
         let registry = BodyRegistry doc
+        let texts = TextRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         // The composer's publication rule, wired exactly as the browser wires it: the client's
         // draft slot appears when its body has content and goes when the body empties.
         DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = token }
-        let connection = App.connect options doc registry hello (user >> runner.Dispatch) channel
+        // The model is what "how far have we consumed" means (see `ConnectOptions`).
+        let options = { options with ReadPosition = Some (fun () -> (runner.Model ()).EventConsumer.LastProcessedOffset) }
+        let connection = App.connect options doc registry texts hello (user >> runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
-        return { Runner = runner; Connection = connection; Registry = registry; Channel = channel; Doc = doc; Hello = hello }
+        return { Runner = runner; Connection = connection; Registry = registry; Texts = texts; Channel = channel; Doc = doc; Hello = hello }
     }
 
 /// `connectClientWith` under the default options (frame-based event reads).
@@ -328,15 +335,19 @@ let connectInMemoryClientVia
         let doc = Y.Doc.Create ()
         let local = peer id name
         let registry = BodyRegistry doc
+        let texts = TextRegistry doc
         let runner = Harness.run (App.makeProgram doc (ClientModel.init local))
         // As the browser wires it (see `connectClientWith`).
         DraftSlot.follow doc registry local.PeerId (user >> runner.Dispatch) |> ignore
         let hello = { PeerId = local.PeerId; DisplayName = name; Token = host.MintPeerToken () }
         let dispatch = user >> runner.Dispatch
-        let connection = App.connect (makeOptions dispatch) doc registry hello dispatch clientEnd
+        let options =
+            { makeOptions dispatch with
+                ReadPosition = Some (fun () -> (runner.Model ()).EventConsumer.LastProcessedOffset) }
+        let connection = App.connect options doc registry texts hello dispatch clientEnd
         Async.StartImmediate connection.Run
         do! runner.WaitFor (fun m -> m.Connection = Connected)
-        return { Runner = runner; Connection = connection; Registry = registry; Channel = clientEnd; Doc = doc; Hello = hello }
+        return { Runner = runner; Connection = connection; Registry = registry; Texts = texts; Channel = clientEnd; Doc = doc; Hello = hello }
     }
 
 /// `connectInMemoryClientVia` with options that do not depend on dispatch.
@@ -355,8 +366,9 @@ let reconnectClient (signalUrl: string) (client: Client) : Async<Client> =
         let options =
             { App.ConnectOptions.defaults with
                 ResumeAfter = (client.Runner.Model ()).EventConsumer.LastProcessedOffset
-                PageSize = 2 }
-        let connection = App.connect options client.Doc client.Registry client.Hello (user >> client.Runner.Dispatch) channel
+                PageSize = 2
+                ReadPosition = Some (fun () -> (client.Runner.Model ()).EventConsumer.LastProcessedOffset) }
+        let connection = App.connect options client.Doc client.Registry client.Texts client.Hello (user >> client.Runner.Dispatch) channel
         Async.StartImmediate connection.Run
         do! client.Runner.WaitFor (fun m -> m.Connection = Connected)
         return { client with Connection = connection; Channel = channel }

@@ -30,6 +30,33 @@
   --color-blue-bright: #7fd0f5;
   --color-agent-ground: #0e1418;
 
+  /* The sixteen named ANSI colours a terminal can paint its output with (Plan 12).
+     `Ansi.rgbOf` resolves the 240 arithmetic ones (the 6x6x6 cube and the grey ramp) on
+     its own; these are the ones that mean "whatever red this theme calls red", so they
+     are the theme's to answer — and they are held to the same AA floor as every other
+     text colour, on every surface output can sit on. Raw ANSI would not clear it: the
+     classic `blue` is #000080, which is 1.3:1 on #111 and unreadable.
+
+     `term-black` is the one deliberate departure. A terminal renders index 0 as black,
+     which on this theme's black ground is invisible — so it is a mid grey that clears the
+     floor instead. Text that cannot be read is not a faithful rendering of anything. */
+  --color-term-black: #818181;
+  --color-term-red: #ff5a5a;
+  --color-term-green: #96dc3c;
+  --color-term-yellow: #ebc83c;
+  --color-term-blue: #5ab4ff;
+  --color-term-magenta: #e68cf0;
+  --color-term-cyan: #5ad7e1;
+  --color-term-white: #d2d2d2;
+  --color-term-black-bright: #a0a0a0;
+  --color-term-red-bright: #ff8282;
+  --color-term-green-bright: #bef06e;
+  --color-term-yellow-bright: #fae178;
+  --color-term-blue-bright: #8ccdff;
+  --color-term-magenta-bright: #f5affa;
+  --color-term-cyan-bright: #8cebf5;
+  --color-term-white-bright: #fff;
+
   --font-sans: 'Segoe UI', 'Segoe UI Variable', 'Segoe WP', 'Frutiger', 'Helvetica Neue', system-ui, sans-serif;
   --font-mono: 'Cascadia Code', 'Consolas', monospace;
 
@@ -54,6 +81,9 @@
      the sidebar column (`w-side`). */
   --spacing-band: 88px;
   --spacing-side: 280px;
+  /* The terminals column (Plan 12). Wider than the sidebar because it holds 80-column
+     mono output, and that is the width the content actually has. */
+  --spacing-term: 420px;
 
   --animate-pulse2: pulse2 1.1s ease-in-out infinite;
   --animate-blink: blink 1s steps(1) infinite;

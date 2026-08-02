@@ -23,3 +23,15 @@ open Yjs
 type BodyRegistry (doc: Y.Doc) =
     /// The live fragment for this body id — created on first access, stable thereafter.
     member _.Fragment (id: string) : Y.XmlFragment = doc.getXmlFragment id
+
+/// The same arrangement for PLAIN collaborative text: a top-level `Y.Text` root per key,
+/// co-managed by the app and never part of the Ylmish-encoded tree. Terminal command
+/// drafts and queued commands live here (`BodyKey.terminalDraft`/`terminalQueued`).
+///
+/// Plain text rather than a rich body, because a command line is characters: a shell glob,
+/// a quoted argument, and a backslash all have to survive verbatim, and round-tripping
+/// them through Markdown would not let them. Still a CRDT, so two people editing one
+/// command line merge per character exactly as they do in a message.
+type TextRegistry (doc: Y.Doc) =
+    /// The live text for this key — created on first access, stable thereafter.
+    member _.Text (key: string) : Y.Text = doc.getText key

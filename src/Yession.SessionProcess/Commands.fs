@@ -7,11 +7,23 @@ open Yession.Domain
 /// interrupt alone — draft creation and sending are pure CRDT writes.
 module SessionCommands =
 
-    /// Handle one command from an accepted peer. `requestInterrupt` is the scheduler's
-    /// injected authority: it validates the turn is the one currently running (the
-    /// interrupt-vs-completion race resolves here) and performs the cancellation.
+    /// Handle one command from an accepted peer.
+    ///
+    /// Every authority is injected as a function, so this stays a pure routing decision the
+    /// tests can drive without a scheduler, an environment, or a sandbox:
+    ///   * `requestInterrupt` validates the turn is the one currently running (the
+    ///     interrupt-vs-completion race resolves there) and performs the cancellation;
+    ///   * `openTerminal`/`closeTerminal` are the terminal manager's (Plan 12).
+    ///
+    /// A successful `OpenTerminal` answers `CommandAccepted` and nothing more: the new
+    /// terminal's id reaches every peer as a `TerminalOpened` EVENT. Returning it in the
+    /// response would give the requesting peer a second, earlier, privately-delivered
+    /// source of truth about a durable fact — and then two code paths to keep agreeing.
     let handle
         (requestInterrupt: PeerId -> AgentTurnId -> Result<unit, string>)
+        (openTerminal: ActorRef -> string -> Async<Result<TerminalId, string>>)
+        (closeTerminal: TerminalId -> string -> Async<Result<unit, string>>)
+        (actorFor: PeerId -> ActorRef)
         (peerId: PeerId)
         (command: SessionCommand)
         : Async<SessionCommandResult> =
@@ -19,6 +31,15 @@ module SessionCommands =
             match command with
             | InterruptAgentTurn turnId ->
                 match requestInterrupt peerId turnId with
+                | Ok () -> return CommandAccepted
+                | Error reason -> return CommandRejected reason
+            | OpenTerminal title ->
+                let title = if title.Trim () = "" then "terminal" else title.Trim ()
+                match! openTerminal (actorFor peerId) title with
+                | Ok _ -> return CommandAccepted
+                | Error reason -> return CommandRejected reason
+            | CloseTerminal terminalId ->
+                match! closeTerminal terminalId "closed by a peer" with
                 | Ok () -> return CommandAccepted
                 | Error reason -> return CommandRejected reason
         }

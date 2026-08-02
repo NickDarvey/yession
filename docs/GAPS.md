@@ -300,3 +300,22 @@ discovers it in production. Items are roughly ordered by how much they matter.
 - The vendored Hedgehog does no shrinking: a failing property prints the whole
   schedule, not a minimal one.
 - Load/scale characteristics (many peers, large logs, long drafts) are unmeasured.
+
+## Terminals (Plan 12)
+
+- **The browser-side terminal input binding has no browser E2E.** `syncTerminalInputs`
+  (app/browser/Browser.fs) pushes a `Y.Text` root's value into an `<input>`, writes
+  keystrokes back as the minimal CRDT edit, and preserves the caret when a collaborator's
+  edit re-renders under it. Every layer beneath it is tested (the minimal-diff edit, the
+  slot rule, the queue, the drain), but the binding itself is only exercised by a real
+  browser, and PR 2's live mode is built directly on top of it.
+- **A queued command whose terminal closes stays queued for ever.** Nothing runs it and
+  nothing removes it; it is visible in the doc against a closed terminal and a person can
+  delete it. Deliberately non-destructive rather than silently dropping someone's text, but
+  the UI does not yet say why it will not run.
+- **Terminal access equals session access.** A terminal can read the sandbox's environment
+  (`env`), which after resolve-at-spawn includes secrets the session's spec references.
+  This is not a new privilege — any peer could already ask the agent to run `env` — but a
+  terminal makes it one keystroke, and a future per-user terminal gate would attach here.
+- **Agent commands cannot hold a live-mode lease** (PR 2). A policy decision, not a
+  mechanism gap: leases are human-only until there is a reason to change that.
