@@ -1,0 +1,277 @@
+# Plan 12 — Terminals on the WorkSandbox
+
+> **Status: draft** — not implemented. Builds directly on the sandbox seam from
+> [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
+> session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
+
+Humans and the agent get zero-to-many terminals against the session's WorkSandbox, on a
+new right panel that behaves like the conversation column: everyone sees everyone's
+drafts (the agent's included), presence cursors work, and approval — when the terminal's
+mode asks for it — happens on the queued command before it runs. Every byte in and out
+is captured durably. Full-screen interactive programs (TUIs) are supported without
+giving up the collaborative default.
+
+## A "collaborative terminal" is three things, not one
+
+The mode question ("simple-but-collab vs complex-but-solo") dissolves once the surface
+is split into what it actually is:
+
+1. **The input draft** — the command about to run. This is *exactly* a message draft:
+   collaborative text in the Yjs doc, one slot per author, co-editable, visible to every
+   peer as it is typed, sent by moving it into a queue. The existing machinery
+   (`DraftState`, `QueueOrder`, `BodyKey`, the drain's exactly-once dedup) transfers
+   almost verbatim.
+2. **The output stream** — server-authoritative, append-only, unmergeable. Two peers
+   cannot "concurrently edit" a process's stdout; there is nothing for a CRDT to do.
+   Output is broadcast state plus durable record, never Yjs.
+3. **Live keystrokes into a foreground program** — vim, htop, a REPL's line editor. No
+   draft exists, no approval is possible mid-keystroke, and interleaving two peers'
+   keystrokes is how tmux corrupts a shared editor. Single-writer by nature.
+
+So a terminal has two **modes**, and the flip is not "collab vs solo" but **what
+currently owns the pty's stdin**:
+
+- **Block mode** (the shell prompt is idle): the composer owns stdin. Commands are
+  drafted collaboratively, queued, approved per the terminal's policy, and executed by
+  the Session Process; each run is a *block* — the command, its output, its exit code —
+  in the style of Warp or a Jupyter cell. This is the default, and it is where the
+  message-like UX lives.
+- **Live mode** (a foreground program owns the terminal): one peer holds a **write
+  lease**; their keystrokes go straight to the pty, everyone else watches read-only.
+  Claim, release, steal (any peer may take the lease — collaborators are trusted; the
+  event log records the take), idle-timeout back to block mode. This is GNU screen's
+  `multiuser` ACL model, not tmux's merged-keystroke free-for-all.
+
+**The flip is detected, not configured.** Alternate-screen entry (DECSET 1049) is the
+universal "a TUI took over" signal, and OSC 133 semantic-prompt marks (emitted by an
+instrumented shell; superset dialect used by VS Code, Warp, WezTerm, kitty) give command
+start/finish + exit code from an ordinary interactive shell. Detection proposes the
+mode; a peer can always override ("take terminal" enters live mode explicitly, releasing
+the lease returns to block mode). Mechanism supports both automatic and explicit
+flipping; the automatic policy is one small pure function over the emulator's state, so
+shipping it, tuning it, or turning it off is cheap.
+
+## Transport: the data channel, not SSE
+
+HTTP SSE-out/POST-in was considered and rejected. `design.md` §5 pins "WebRTC is the
+session transport; HTTP is bootstrap/signalling only", and the practical objections are
+real: N terminals × M tabs of `EventSource` runs into the browser's 6-connections-per-
+origin cap on HTTP/1.1 (local serving has no TLS, so no h2 multiplexing), and every
+byte takes a server round-trip where the data channel is already direct, ordered,
+reliable, and multiplexed. Terminals add **frames to the existing channel**, exactly as
+presence did:
+
+```
+SessionFrame gains:
+  | Terminal of TerminalFrame
+
+TerminalFrame =
+  | TerminalOutput  of TerminalId * seq: int * data: string   // base64 raw bytes
+  | TerminalInput   of TerminalId * data: string              // live mode only; lease-checked
+  | TerminalResize  of TerminalId * cols: int * rows: int     // live mode; lease holder only
+  | TerminalSnapshot of TerminalId * seq: int * screen: string // serialized screen for joiners
+```
+
+The one HTTP exception stays the one the design already grants — **immutable,
+cacheable history chunks**. Each terminal's transcript is served as fixed-size chunks
+(`GET <session>/terminals/{id}/chunks/{n}`), byte-identical in mechanism to
+`GET /events/{n}`: full chunks are immutable forever and cache with
+`public, immutable`; the tail chunk is `no-store`. Availability hints ride the data
+channel; replay and audit reads ride the browser's HTTP cache. Nothing new is invented.
+
+## Durable capture: raw bytes in a sidecar, facts in the event log
+
+Two records, deliberately separate:
+
+**The transcript sidecar** — `<session>.term-<id>.cast`, following the doc-persistence
+sidecar precedent (`<session>.doc.jsonl`: append + fsync, torn-tail drop, loud
+corruption failure). Format is **asciicast v2**: a JSONL header
+(`{version:2, width, height, timestamp}`) then `[t, "o", data]` / `[t, "i", data]` /
+`[t, "r", "COLSxROWS"]` events. This buys an existing, well-understood, replayable
+audit format — the standard asciinema player replays a session — instead of a bespoke
+one. "Every line is captured" is delivered as **every byte is captured**, input
+included, which matters because ANSI can rewrite what the *screen* shows: the rendered
+buffer is a projection and must never be the audit trail. The raw stream is.
+
+**The main event log** — durable facts only, never raw output. A `yes`-loop's megabytes
+must not poison the event fold every client runs, and the session log's chunk cache
+must not churn under terminal noise. New `SessionEvent` cases:
+
+```
+| TerminalOpened     of { TerminalId; OpenedBy: ActorRef; Cols; Rows }
+| TerminalClosed     of { TerminalId; Reason }
+| TerminalLeaseTaken of { TerminalId; By: ActorRef }        // live mode entered/stolen
+| TerminalLeaseReleased of { TerminalId }                    // back to block mode
+| TerminalBlockStarted  of { TerminalId; BlockId; QueueId option; Author: ActorRef; Command: string }
+| TerminalBlockCompleted of { TerminalId; BlockId; ExitCode: int option }
+| TerminalTranscriptMark of { TerminalId; Seq: int }         // periodic offset bracket
+| TerminalTranscriptTruncated of { TerminalId; DroppedBytes: int }
+```
+
+Attribution joins at projection time: the log's lease/block events bracket transcript
+sequence ranges (via `TerminalTranscriptMark` and the block events' positions), so
+"who typed these bytes" is answerable from the two records together without extending
+the asciicast format. Backpressure is explicit: output is coalesced (~16 ms flush
+windows) before framing and appending, and a hard cap drops output *with a
+`TerminalTranscriptTruncated` event* — never silently.
+
+## The pty is a backend capability on the sandbox seam
+
+Pipes are not a tty: no `TERM` line discipline, no SIGWINCH, and most TUIs refuse or
+degrade. `Sandbox` (the PR #73 seam) gains a second spawn shape:
+
+```
+type PtyHandle =
+    { Write  : string -> unit          // raw bytes to the pty master
+      Resize : int -> int -> unit      // cols rows
+      Kill   : unit -> unit
+      Exited : Async<SandboxRun> }
+
+type Sandbox = { ...; SpawnPty : (SandboxExec * cols * rows -> (string -> unit) -> Async<Result<PtyHandle, string>>) option }
+```
+
+`SpawnPty` is an **option** because pty support is genuinely per-backend:
+
+- **docker** — free. `docker exec` with `Tty: true` plus the exec-resize endpoint, both
+  already in dockerode. No new dependency.
+- **host** — needs `node-pty` (the only serious Node pty; native addon). It joins the
+  Nix `nodeModules` derivation the way `node-datachannel` did (built from source, baked
+  in). Off-Nix, where the addon may be absent, `SpawnPty` is `None`.
+- **srt** — wraps the host spawn, so it inherits the host's answer.
+
+A backend without a pty is degraded, not broken: **block mode runs over the existing
+piped `Spawn`** (that is precisely today's `Execute` path), and only live mode reports
+"unavailable on this backend" — the same declare-and-skip honesty the capability-tagged
+test tiers use. Tests gain a `Pty` capability tag, probed like `Docker`
+(present under Nix, dropped cleanly elsewhere).
+
+## The Session Process holds the authoritative screen
+
+Each open terminal gets an `@xterm/headless` emulator in the Session Process — the same
+terminal emulator the browser renders with, minus the DOM. It is fed every output byte
+and is the single source of three derived truths:
+
+- **Join/reconnect snapshots.** A joining peer receives `TerminalSnapshot` (the
+  serialize-addon dump of the current screen + scrollback tail, tagged with the
+  transcript seq it represents) and then live `TerminalOutput` frames after that seq —
+  the terminal equivalent of the event-offset catch-up, so a reconnect never replays
+  megabytes.
+- **Mode detection.** Alt-screen state and OSC 133 marks are read off the emulator, and
+  the block/live flip is a pure function of them.
+- **Block boundaries.** OSC 133 `C`/`D` marks (or, for Process-spawned block commands,
+  the process lifecycle itself) delimit each block's output range and exit code.
+
+Determinism is testable: folding a transcript through a fresh headless emulator must
+reproduce the serialized snapshot — a property the cheap tier can pin without any pty.
+
+**Size policy** (easy to fumble, so decided here): a terminal's size is a synced LWW
+register, default 80×24; in live mode the lease holder's resize writes it (their
+foreground program is the one that must agree with the pty); in block mode any peer may
+set it. Viewers whose viewport is smaller render with xterm.js scrolling — the pty is
+never resized to the smallest viewer (tmux's worst inheritance).
+
+## Drafts, queue, and approval: the message machinery, re-keyed
+
+The synced state gains terminal composers and a per-terminal command queue, shaped
+exactly like drafts and the message queue:
+
+- **Composer body**: one per (terminal, author), a `Y.Text` root under
+  `BodyKey.terminalDraft terminalId author` — commands are plain text, so `Y.Text`
+  (the title's type), not the rich-text `XmlFragment`. Slot publication follows the
+  body, the `DraftSlot` rule verbatim.
+- **Presence**: `FocusField` gains `TerminalDraft of TerminalId * PeerId`, and every
+  collaborator's caret shows in terminal composers exactly as it does in message
+  drafts. **The agent drafts through the same slot**: its tool writes the command text
+  into its own composer body before queueing, so peers watch the agent type where they
+  watch each other type.
+- **Queue entry**: `{ QueueId; Author; Order: float; Approval }` in a per-terminal map.
+  The minted-`QueueId` merge trick carries over, so two peers concurrently sending the
+  same draft still produce one entry.
+- **Approval is a CRDT register on the entry**, and the terminal's mode is a synced
+  register deciding who needs it:
+
+  ```
+  TerminalApprovalMode = AutoRun | ApproveAgent | ApproveAll   (default ApproveAgent)
+  Approval             = AutoApproved | AwaitingApproval | Approved of ActorRef
+  ```
+
+  The Session Process's drain (the queue's single consumer, same exactly-once anchor in
+  the log) consumes an entry only when its approval state satisfies the mode; an
+  awaiting entry simply sits, visible, editable, reorderable — which *is* the approval
+  UX: the human reads the agent's queued command, perhaps edits it, and approves it in
+  place. Rejection is deletion (a pure CRDT delete, like deleting a queued message).
+
+Opening and closing terminals are durable facts the CRDT cannot express, so they are
+`SessionCommand`s (`OpenTerminal`, `CloseTerminal`, plus `TakeTerminalLease` /
+`ReleaseTerminalLease`), answered by the Process and recorded as events. The open
+terminal list every client renders is a pure fold over `TerminalOpened`/`Closed`. An
+`OpenTerminal` triggers the environment's lazy `Ensure` — a terminal is a need, and a
+session that never opens one never starts a sandbox.
+
+## The agent on the same surface
+
+The agent gets one tool, `run_terminal_command(terminal?, command)`, which drafts into
+its composer slot and queues — it does **not** get a private execution path. In
+`ApproveAgent`/`ApproveAll` modes its entry waits for a human; in `AutoRun` it drains
+immediately. Live mode is human-only for now (an agent lease is a policy decision, not
+a mechanism gap; recorded in GAPS).
+
+This also unifies a seam PR #73 left visible: the Step-13 command log
+(`CommandRequested/…/CommandCompleted`, the read-only sidebar section) and terminals
+would otherwise be two parallel command surfaces. The agent's existing `ExecuteCommand`
+capability is re-pointed at a designated terminal ("agent terminal", opened lazily on
+first use) so its commands become ordinary blocks there; the old sidebar commands
+section retires once nothing feeds it. One surface, one audit trail.
+
+**Secrets posture, stated honestly:** resolve-at-spawn puts the sandbox's env in reach
+of anyone who can run `env` in a terminal. This is not a new privilege — the agent
+could already be asked to run `env`, and any peer can already ask the agent — but a
+terminal makes it one keystroke instead of one prompt. Terminal access therefore equals
+session access (no separate gate), and the mitigation stays where Plan 06 put it:
+sensitive values reach the sandbox only when the spec references them. Recorded in
+GAPS as a place a future per-user terminal gate could attach.
+
+## The right panel
+
+A third column, the conversation column's mirror: a terminal strip (tabs or list, one
+per open terminal, plus "new terminal"), and per terminal an xterm.js viewport
+(`@xterm/xterm` + fit/serialize addons — the ProseMirror-style Fable binding is the
+established pattern) over the composer/queue area. In block mode the area under the
+viewport is the composer row (every peer's published slots + the queue with approval
+chips) — visually the message composer's sibling. In live mode it collapses to a lease
+bar ("nick is typing · take over"), and the viewport becomes the input surface for the
+lease holder. WCAG floor applies as everywhere: the viewport is focusable and
+scrollable by keyboard, mode/lease state is announced, approval buttons are real
+buttons, and terminal theme tokens ride `app/tailwind.css` under the Phase4 contrast
+test.
+
+## Delivery
+
+Three PRs, each independently green and shippable:
+
+**1. Blocks, no pty.** Domain vocabulary (`TerminalId`, events, folds), transcript
+sidecar + chunk route, `Terminal` frames (output/snapshot only), synced composers +
+queue + approval, the drain gate, the right panel rendering blocks through xterm.js
+(as a renderer only — commands run through the existing piped `Spawn`), agent tool +
+`ExecuteCommand` re-point. Zero native dependencies; runs on every backend today.
+*Verify:* cheap-tier folds and drain/approval properties (incl. transcript-replay
+determinism vs a headless emulator), `Browser` E2E for the panel + two-peer draft
+visibility, `Ports` E2E for chunk immutability/caching headers.
+
+**2. Pty + live mode.** `SpawnPty` on the seam (docker via exec-tty, host via node-pty
+in the Nix `nodeModules`), the headless emulator per terminal, snapshots-after-seq,
+lease claim/steal/release + `TerminalInput`/`TerminalResize`, alt-screen + OSC 133
+detection with the auto-flip policy and manual override, size register. New `Pty` test
+capability. *Verify:* `Pty`-tagged suites (a real vim/alt-screen round trip; lease
+enforcement — a non-holder's input frame is dropped and logged), `Docker`-tagged
+exec-tty suite, cheap-tier flip-policy purity tests.
+
+**3. Polish the seams.** Retire the sidebar commands section, idle-lease timeout,
+transcript compaction/retention policy, asciinema-player replay view for closed
+terminals (the audit read), GAPS entries (agent lease, per-user terminal gating,
+docker non-root unchanged).
+
+Protocol note: terminals extend the Session↔Browser frame protocol and session events;
+the Manager↔Session control protocol is untouched, so no major bump — each PR is a
+`feat:` with `+semver: minor` on its branch commit body only if it lands user-facing
+capability (PR 1 and 2 do).
