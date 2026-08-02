@@ -47,6 +47,17 @@ let private workBackend =
     | Ok backend -> backend
     | Error e -> failwith e
 
+// The AgentSandbox backend (`YESSION_AGENT_SANDBOX`): where the agent CLI process
+// runs. The host tier is implemented (allowlisted env + scratch HOME through the
+// SDK's `spawnClaudeCodeProcess` seam, wired in Agent.fs); anything else refuses the
+// boot — fail closed, never a silent fallback.
+do
+    match SandboxBackend.parse (Interop.envOr "YESSION_AGENT_SANDBOX" "host") with
+    | Ok HostBackend -> ()
+    | Ok other ->
+        failwithf "agent sandbox: the %s backend is not implemented yet — set host" (SandboxBackend.describe other)
+    | Error e -> failwith e
+
 // Secret references in the sandbox spec resolve over the control channel at sandbox
 // spawn — the values go straight into the sandbox policy env and are dropped. Without
 // a Manager there is nothing to resolve against; plain values still work.

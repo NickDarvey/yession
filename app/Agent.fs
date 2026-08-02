@@ -84,7 +84,8 @@ type private RunOutcome =
         allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret'],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
-        ...($1 ? { env: $1 } : {})
+        env: $1,
+        spawnClaudeCodeProcess: $10
       }
     })
     let body = ''
@@ -122,7 +123,7 @@ type private RunOutcome =
 })()""")>]
 let private runQuery
     (prompts: {| system: string; prompt: string |})
-    (credentialEnv: obj)
+    (agentEnv: obj)
     (claudePath: string)
     (ensure: string -> JS.Promise<string>)
     (executeCommand: string -> string array -> JS.Promise<string>)
@@ -131,6 +132,7 @@ let private runQuery
     (setSecret: string -> string -> JS.Promise<string>)
     (listSecrets: unit -> JS.Promise<string>)
     (deleteSecret: string -> JS.Promise<string>)
+    (claudeSpawner: obj)
     : JS.Promise<RunOutcome> =
     jsNative
 
@@ -138,13 +140,13 @@ let private runQuery
 /// points the SDK at a system Claude Code install instead. Empty = SDK default.
 let private claudePath () = Interop.envOr "YESSION_CLAUDE_PATH" ""
 
-/// The spawned CLI's full environment when a turn runs on a RESOLVED credential
-/// (Plan 08): the process env with both ambient credential variables removed — a
-/// per-turn credential must never silently lose to an inherited one — and exactly the
-/// resolved variable set. Deletion (not `undefined`) so no spawn implementation
-/// resurrects the ambient value.
-[<Emit("(() => { const e = { ...process.env }; delete e.ANTHROPIC_API_KEY; delete e.CLAUDE_CODE_OAUTH_TOKEN; e[$0] = $1; return e })()")>]
-let private credentialEnvFor (name: string) (value: string) : obj = jsNative
+/// The CLI's per-session scratch HOME: it writes `~/.claude` session state, which now
+/// lives (and dies) with the session's data directory instead of the real HOME.
+let private agentHome () =
+    sprintf "%s/agent-home" (Interop.envOr "YESSION_SESSION_DATA" ".yession")
+
+[<Emit("Object.fromEntries($0)")>]
+let private toEnvObj (entries: (string * string) array) : obj = jsNative
 
 /// One prompt per turn: the completed conversation as a transcript plus the message to
 /// answer. Built from the projection only — draft/Yjs state never appears here.
@@ -251,22 +253,27 @@ let private deleteSecretFor (capabilities: AgentCapabilities) : string -> JS.Pro
         |> Async.StartAsPromise
 
 /// The Claude Agent SDK–backed `RunAgent`, parameterized by the turn's credential:
-/// `None` = the ambient process env (the documented last resort — the pre-Plan-08
-/// behaviour); `Some (envVar, value)` = the spawned CLI runs with exactly that
-/// credential, both ambient credential variables removed. Streams text deltas as
-/// chunks; the typed capabilities surface as MCP tools; failures are values, never
-/// exceptions. The abort signal maps onto the SDK's AbortController, so an interrupt
-/// cancels the live query promptly (the returned failure is then discarded by the
-/// orchestrator).
+/// `None` = the ambient credential variables pass through (the documented last resort
+/// — how CI's LiveAgent tier feeds the agent); `Some (envVar, value)` = the spawned
+/// CLI runs with exactly that credential, both ambient credential variables displaced.
+/// Either way the CLI's environment is the AgentSandbox policy env — allowlisted
+/// baseline + per-session scratch HOME — never the raw process env, and the CLI
+/// process itself comes up through the `spawnClaudeCodeProcess` seam. Streams text
+/// deltas as chunks; the typed capabilities surface as MCP tools; failures are values,
+/// never exceptions. The abort signal maps onto the SDK's AbortController, so an
+/// interrupt cancels the live query promptly (the returned failure is then discarded
+/// by the orchestrator); the spawner's own kill fires only on the SDK's forwarded
+/// signal, after the graceful stdin-EOF window.
 let runWith (credential: (string * string) option) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
+            let home = agentHome ()
+            Fs.ensureDir home
+            let env = Sandboxes.AgentSandbox.envFor (Sandboxes.ambientEnv ()) home credential
             let! outcome =
                 runQuery
                     {| system = context.SystemPrompt; prompt = promptOf context |}
-                    (match credential with
-                     | Some (name, value) -> credentialEnvFor name value
-                     | None -> null)
+                    (toEnvObj (Map.toArray env))
                     (claudePath ())
                     (ensureFor capabilities)
                     (executeFor capabilities)
@@ -275,6 +282,7 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (setSecretFor capabilities)
                     (listSecretsFor capabilities)
                     (deleteSecretFor capabilities)
+                    (Sandboxes.AgentSandbox.hostClaudeSpawner ())
                 |> Async.AwaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens

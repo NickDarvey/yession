@@ -129,6 +129,27 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" baseline) None "no credential survives"
             Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" baseline) None "the launch secret does not"
 
+        testCase "the agent CLI's env: one credential, scratch HOME, never the raw process env" <| fun () ->
+            let ambient =
+                Map.ofList
+                    [ "PATH", "/usr/bin"
+                      "HOME", "/home/u"
+                      "HTTPS_PROXY", "http://proxy:3128"
+                      "ANTHROPIC_API_KEY", "ambient-key"
+                      "CLAUDE_CODE_OAUTH_TOKEN", "ambient-token"
+                      "YESSION_CONTROL_SECRET", "launch-secret" ]
+            // A resolved per-turn credential displaces BOTH ambient credential vars.
+            let resolved = Sandboxes.AgentSandbox.envFor ambient "/data/agent-home" (Some ("CLAUDE_CODE_OAUTH_TOKEN", "turn-token"))
+            Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" resolved) (Some "turn-token") "the turn's credential is set"
+            Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" resolved) None "the ambient key never rides along"
+            Expect.equal (Map.tryFind "HOME" resolved) (Some "/data/agent-home") "the CLI gets the scratch HOME"
+            Expect.equal (Map.tryFind "HTTPS_PROXY" resolved) (Some "http://proxy:3128") "proxy config passes through"
+            Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" resolved) None "the launch secret never reaches the CLI"
+            // The documented ambient last resort passes exactly the two credential vars.
+            let ambientRun = Sandboxes.AgentSandbox.envFor ambient "/data/agent-home" None
+            Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" ambientRun) (Some "ambient-key") "the ambient key passes when nothing displaces it"
+            Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" ambientRun) (Some "ambient-token") "so does the ambient token"
+
         testCase "policy assembly: spec variables win over the baseline; docker takes no baseline" <| fun () ->
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
             let resolved = Map.ofList [ "HOME", "/workspace-home"; "TOKEN", "t" ]

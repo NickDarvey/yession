@@ -402,6 +402,60 @@ module DockerSandbox =
                 with ex -> return Error (sprintf "docker sandbox failed: %s" ex.Message)
             }
 
+// --- The AgentSandbox: where the agent CLI process runs ----------------------------------
+
+/// Extra names the agent CLI may inherit beyond the host baseline: outbound-proxy
+/// configuration, without which a proxied deployment's CLI cannot reach the API.
+let agentPassthroughNames : string list =
+    [ "HTTP_PROXY"; "HTTPS_PROXY"; "NO_PROXY"; "http_proxy"; "https_proxy"; "no_proxy"
+      "NODE_EXTRA_CA_CERTS"; "SSL_CERT_FILE" ]
+
+/// The agent CLI's confinement (PR 2 of the sandboxing plan): the SDK stays in-process;
+/// the CLI it spawns goes through the `spawnClaudeCodeProcess` seam with a policy env.
+/// Host tier here; the srt wrap arrives with the srt backend.
+module AgentSandbox =
+
+    /// The spawned CLI's WHOLE environment: the host baseline + proxy passthrough, a
+    /// per-session scratch HOME (the CLI writes `~/.claude` state there), and exactly
+    /// one credential — the turn's resolved credential displaces both ambient
+    /// credential variables by construction (the allowlist never admits them), and the
+    /// documented ambient last resort passes exactly those two through.
+    let envFor (ambient: Map<string, string>) (home: string) (credential: (string * string) option) : Map<string, string> =
+        let baseline =
+            ambient
+            |> Map.filter (fun name _ ->
+                List.contains name hostBaselineNames || List.contains name agentPassthroughNames)
+        let credentials =
+            match credential with
+            | Some (name, value) -> Map.ofList [ name, value ]
+            | None ->
+                [ "ANTHROPIC_API_KEY"; "CLAUDE_CODE_OAUTH_TOKEN" ]
+                |> List.choose (fun name -> ambient |> Map.tryFind name |> Option.map (fun value -> name, value))
+                |> Map.ofList
+        mergeEnv baseline (Map.add "HOME" home credentials)
+
+    let private childProcess : obj = importAll "node:child_process"
+
+    // The SDK's `spawnClaudeCodeProcess` seam. The env arriving in `options.env` IS the
+    // policy env (it flows from the query's `env` option), so the spawner passes it
+    // verbatim. `detached: true` makes the CLI a process-group leader, and the kill on
+    // `options.signal` takes the whole tree — that signal is the SDK's FORWARDED one,
+    // firing only after its stdin-EOF + grace window, so the force-kill never pre-empts
+    // the CLI's graceful shutdown.
+    [<Emit("""((cp) => (options) => {
+  const child = cp.spawn(options.command, options.args, { cwd: options.cwd || undefined, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true })
+  const killTree = () => { try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch {} } }
+  if (options.signal) {
+    if (options.signal.aborted) killTree()
+    else options.signal.addEventListener('abort', killTree, { once: true })
+  }
+  return child
+})($0)""")>]
+    let private hostSpawnerOver (cp: obj) : obj = jsNative
+
+    /// The host-backend agent spawner, handed to the SDK as `spawnClaudeCodeProcess`.
+    let hostClaudeSpawner () : obj = hostSpawnerOver childProcess
+
 // --- Backend selection --------------------------------------------------------------------
 
 /// The session's `CreateSandbox` for its configured backend. `Error` fails the session
