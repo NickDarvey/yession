@@ -80,6 +80,11 @@ let tests =
                 do! rejectedEnded
                 let! events = eventsOf h
                 Expect.equal events [ joined; left ] "a rejected peer must not append events"
+                // Close the rejected peer's connection too: a client PeerConnection that
+                // outlives its suite is a live libdatachannel object, and the global
+                // `Interop.cleanup ()` a later suite runs then waits on it until it times
+                // out ("cleanup timeout (possible deadlock)").
+                do! badChannel.Close ()
             }
 
         testCaseAsync "stop the Session Process host" <|
