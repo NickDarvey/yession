@@ -84,9 +84,9 @@ let tests =
                       OnError = Ylmish.Program.OnError.log }
 
             let mutable latest = { Title = Text.empty; Count = 0 }
-            let mutable send : Ylmish.Program.Message<Model, Msg> -> unit = ignore
+            let mutable send : Ylmish.Program.Message<Msg> -> unit = ignore
             let mutable armed = true
-            let setState (m: Model) (dispatch: Ylmish.Program.Message<Model, Msg> -> unit) =
+            let setState (m: Model) (dispatch: Ylmish.Program.Message<Msg> -> unit) =
                 latest <- m
                 send <- dispatch
                 // Armed on the render caused by the FIRST bump, so the doc subscription is
