@@ -214,7 +214,8 @@ session that never opens one never starts a sandbox.
 
 ## The agent on the same surface
 
-The agent gets one tool, `run_terminal_command(terminal?, command)`, which drafts into
+The agent gets one tool (named in "Closing the loophole" below — it shipped as
+`queue_terminal_command` and ends up as `execute_command`), which drafts into
 its composer slot and queues — it does **not** get a private execution path. In
 `ApproveAgent`/`ApproveAll` modes its entry waits for a human; in `AutoRun` it drains
 immediately. Live mode is human-only for now (an agent lease is a policy decision, not
@@ -226,6 +227,110 @@ would otherwise be two parallel command surfaces. The agent's existing `ExecuteC
 capability is re-pointed at a designated terminal ("agent terminal", opened lazily on
 first use) so its commands become ordinary blocks there; the old sidebar commands
 section retires once nothing feeds it. One surface, one audit trail.
+
+## Closing the loophole: one `execute_command`, on the terminal
+
+PR 1 shipped the terminal tool *beside* `execute_command` rather than instead of it, and
+that split is worse than either end of it. `execute_command` is synchronous, returns exit
+code and output, and can be chained — run, read, decide, run again. `queue_terminal_command`
+is visible, editable and approvable, and returns before anything has happened. So the
+gated path is the weak one, and a model that needs an answer will take the path that gives
+it one. The tool description says to prefer the terminal "whenever a human should see what
+you are about to run", but prose does not beat a capability gradient.
+
+The consequence is worse than a nudge being ignored: **`ApproveAgent` is currently
+unenforceable.** A session can set every terminal to require approval and the agent
+routes around it, because it has a second door with no gate on it. The gate only becomes
+real when there is one door.
+
+So the two converge into one tool, keeping the name that describes what it does:
+
+```
+execute_command(command, terminal?) -> outcome
+read_terminal_block(block)          -> outcome
+```
+
+Both return the same shape, so the agent learns one thing. `queue_terminal_command` and
+the old `execute_command` both go; net tool count is unchanged.
+
+### The wait is two waits, not one
+
+The reason "queue and return" looked forced is that it answered one question — *how do we
+avoid blocking a turn on a human?* — by giving up a different thing: waiting for a
+*process*, which was never the problem. Those are separate waits with separate bounds, and
+separating them is the whole design:
+
+- **Waiting for approval is unbounded in principle.** A human may be asleep. It gets a
+  short grace (`approvalGrace`, 5s) so that a supervised session — where approvals come in
+  seconds — still chains normally, and then the tool returns `AwaitingApproval` with the
+  block id. The turn continues; the agent says what it queued and why.
+- **Waiting for a process is already bounded**, by the same 120s command timeout
+  `execute_command` uses today. Keeping it is not a new risk, it is the existing one.
+
+So the shape is: enqueue (visible immediately) → await approval up to `approvalGrace` →
+await completion up to the command timeout → return exit code and output. Under `AutoRun`
+the first wait does not exist: the drain subscribes to the doc, the agent's write is local
+to the Session Process, and the entry drains on the update. **`AutoRun` is synchronous, at
+the cost of one in-process doc round trip** — which is the "same perf" bar, met by not
+having a network hop in the path rather than by hiding one.
+
+A command still running when the timeout fires returns `Running` with the block id and the
+output so far. `read_terminal_block` resumes any handle — an approval that arrived late, a
+long build — and returns the outcome or the current state. Nothing is lost by a deadline;
+it is a yield, not a cancellation.
+
+### What the outcome carries
+
+Exit code, and the output tail (capped — the block's full bytes are in the transcript,
+which is what the cap on `blockOutputCap` already protects), plus the block id and its
+transcript range so `read_terminal_block` can fetch the rest. The status is one of
+`Completed code | Running block | AwaitingApproval block | Rejected block`, and the wording
+must keep saying which — telling a model "queued" when it is actually blocked on a person
+has it conclude, after a silent pause, that the command failed.
+
+**`command` becomes a shell command line, not `executable` + argv.** Today's
+`execute_command` takes an argv array. A terminal block is a line a human reads in a queue
+and may edit before approving, and an argv array is not that. The quoting burden moves to
+the model, which is the side that knows what it meant.
+
+### Two things this fixes that are not about tools
+
+**The agent gets its output back.** Terminal events fold into `TerminalProjection` and
+deliberately *not* into the conversation — a command someone ran is not something someone
+said. That is right for the chat log and wrong for the agent, whose context pack is built
+from the conversation, so today it cannot see the result of anything it queued even on the
+next turn. `AgentContextPack` gains a separate, bounded terminal digest: for each block
+since the agent's last turn, the command, who authored and approved it, the exit code, and
+an output tail. Separate field, so the conversation stays a conversation.
+
+**A block outlives its turn.** Today's `execute_command` runs a process owned by the turn;
+an interrupt kills it. A terminal block is owned by the session. Aborting a turn cancels
+the *wait*, not the command — the block runs on, its output lands in the transcript, and
+the next turn's digest reports it. An audit trail with holes where someone pressed stop is
+not an audit trail.
+
+### `ensure_environment` retires with it
+
+It exists to start the environment lazily before a command. Opening a terminal already
+ensures the environment, and `execute_command` opens the agent terminal on first use, so
+the tool has nothing left to do. Its `reason` argument was the one genuinely useful thing
+about it, and it survives as the **agent terminal's title** — so the strip says *"running
+the test suite"* rather than *"agent"*, which is a better answer to "what is that terminal
+for" than the tool ever gave.
+
+### The default is a policy decision, and it is stated here
+
+Terminals default to `ApproveAgent`. If the agent terminal inherited that, replacing the
+tool would silently turn every agent command into an approval prompt — a large change to
+autonomy smuggled in under a refactor. So **the agent terminal opens in the session's agent
+policy, which defaults to `AutoRun`**: identical to today's behaviour, because a tool
+replacement should not change what the agent may do.
+
+What changes is that the gate becomes real. Setting `ApproveAgent` today does nothing;
+after this it stops the agent, because there is no second door. And the asymmetry is
+useful in itself: the agent's own scratch terminal is auto, while a terminal a *human*
+opened keeps its own mode, so an agent asked to run something in your terminal is gated by
+your terminal's policy.
 
 **Secrets posture, stated honestly:** resolve-at-spawn puts the sandbox's env in reach
 of anyone who can run `env` in a terminal. This is not a new privilege — the agent
@@ -270,10 +375,30 @@ capability. *Verify:* `Pty`-tagged suites (a real vim/alt-screen round trip; lea
 enforcement — a non-holder's input frame is dropped and logged), `Docker`-tagged
 exec-tty suite, cheap-tier flip-policy purity tests.
 
-**3. Polish the seams.** Retire the sidebar commands section, idle-lease timeout,
-transcript compaction/retention policy, asciinema-player replay view for closed
-terminals (the audit read), GAPS entries (agent lease, per-user terminal gating,
+**3. One `execute_command`, and the seams.** The convergence above: the bounded two-phase
+wait (`approvalGrace` then the existing command timeout), `read_terminal_block` to resume a
+handle, the agent terminal opened lazily in the session's agent policy, the terminal digest
+on `AgentContextPack`, and the block surviving its turn. Then the retirements the
+convergence unblocks: the old `execute_command` and `queue_terminal_command` both deleted in
+favour of the merged tool, `ensure_environment` deleted with its `reason` living on as the
+agent terminal's title, and the sidebar commands section retired once nothing feeds it. Plus
+idle-lease timeout, transcript compaction/retention policy, asciinema-player replay view for
+closed terminals (the audit read), GAPS entries (agent lease, per-user terminal gating,
 docker non-root unchanged).
+*Verify:* cheap-tier state machine for the wait (pure: which phase a given mode/approval
+timeline lands in, and that every path names its status rather than reporting a bare
+"queued"); `Ports Native` E2E that the agent chains — runs a command, reads real output,
+runs a second command conditioned on it — under `AutoRun`, and that under `ApproveAgent` the
+same call returns `AwaitingApproval` inside the grace and `read_terminal_block` picks it up
+after a human approves; a test that an interrupted turn leaves the block running and its
+outcome in the next turn's digest; and a `LiveAgent` turn proving a real model uses the one
+tool it now has.
+
+**A note on ordering.** This is PR 3 because it depends on nothing in PR 2 and everything in
+PR 1, and because the retirements need somewhere to land — but the loophole is open until it
+ships. If PR 2 slips, this should go before it rather than wait: `ApproveAgent` claiming a
+gate it does not have is the kind of thing that reads as a feature and behaves as a
+blind spot.
 
 Protocol note: terminals extend the Session↔Browser frame protocol and session events;
 the Manager↔Session control protocol is untouched, so no major bump — each PR is a
@@ -310,6 +435,14 @@ old command log's retirement in PR 3. Doing the first without the second would c
 agent's existing tool from "runs and returns output" to "blocks until a human approves",
 which turns a review gate into a deadlock whenever nobody is looking. The agent gets a new
 tool that queues and returns; re-pointing and retiring now belong together, in PR 3.
+
+That reasoning holds and the outcome was still wrong, because shipping the queue-only tool
+*alongside* `execute_command` left the gated path strictly weaker than the ungated one —
+and `ApproveAgent` unenforceable, since the agent can route around it. The escape from the
+dilemma is that "blocks until a human approves" and "blocks until the process exits" are
+different waits with different bounds; bounding only the first keeps the review gate from
+deadlocking without giving up the output. Designed above ("Closing the loophole"),
+delivered in PR 3.
 
 **Presence in a terminal composer renders as chips, not carets.** Focus is reported and
 relayed end to end (`FocusField.TerminalDraftBody`/`TerminalQueuedBody`), and the composer
