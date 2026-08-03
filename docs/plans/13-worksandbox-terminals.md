@@ -317,27 +317,27 @@ shows who is in it, coloured by peer. Pixel-positioned remote carets need per-in
 measurement in the browser shell; the title and the ProseMirror bodies each solve that
 their own way, and a third measurement path is its own change.
 
-**One upstream defect found; mitigated here, not fixed.** `withYlmish`'s doc subscription
-decodes against `currentModel` — the model as of the last message Elmish *processed* — and
-dispatches `Set m` carrying that already-decoded model, which `update` returns in place of
-the live one. So a message dispatched but not yet processed when a remote doc update
-arrives is undone. Elmish's ring buffer makes that window ordinary: anything dispatched
-from inside the dispatch loop queues. The terminal drain makes it reproducible (it removes
-a queue entry between two event appends); the message drain has always been able to hit it.
+**One upstream defect found, mitigated here, then fixed upstream.** `withYlmish`'s doc
+subscription decoded against `currentModel` — the model as of the last message Elmish
+*processed* — and dispatched `Set m` carrying that already-decoded model, which `update`
+returned in place of the live one. So a message dispatched but not yet processed when a
+remote doc update arrived was undone. Elmish's ring buffer makes that window ordinary:
+anything dispatched from inside the dispatch loop queues. The terminal drain made it
+reproducible (it removes a queue entry between two event appends); the message drain could
+always hit it.
 
-Deterministic 40-line repro, with no Yession types in it, in
-`tests/Yession.Tests/YlmishRace.fs`. The fix belongs upstream and is small: `update`
-already receives the live `model`, so `Set` can re-decode against it rather than return a
-payload decoded earlier — source-compatible, and it deletes the `currentModel` mutable
-along with the race.
+Filed as [Ylmish#136](https://github.com/NickDarvey/Ylmish/issues/136) with a deterministic
+40-line repro, and fixed by [Ylmish#137](https://github.com/NickDarvey/Ylmish/pull/137):
+`Set` is now a payload-free SIGNAL and `update` decodes against the model Elmish hands it,
+which deletes the `currentModel` mutable along with the race and drops `'model` from
+`Message`. Yession moved to `1.0.0-beta0222` and the pinned regression test — which asserted
+the defect on purpose — went red on cue (`expected: 1, actual: 2`) and was deleted with it.
 
-What ships here is a **mitigation**, and only a partial one. Making the MODEL the read
-position (`ConnectOptions.ReadPosition`) plus a doc-update re-arm means anything a re-read
-can rebuild — the conversation, the terminal projection, the read offset — converges back
-after a clobber instead of stopping for good. State that a re-read *cannot* rebuild is
-still silently reverted: which draft the composer has open, whether the terminals column is
-open, a Claude sign-in flow's progress. Recorded in [GAPS.md](../GAPS.md); the real fix is
-the upstream one.
+The mitigation went with it: the doc-update re-arm and the `parked` flag that existed only
+to stop that re-arm hammering a settled-failed feed are gone. `ConnectOptions.ReadPosition`
+**stays**, on its own merits rather than as a workaround — a read loop and a model that
+each track their own consumed offset will drift the moment a fold is discarded, and one
+source of truth is the fix for that whatever Ylmish does.
 
 ### Verification
 
