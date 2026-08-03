@@ -32,7 +32,7 @@ type QueuedMessage =
       /// (Yjs's concurrent-move duplication is unrepresentable this way).
       Order   : float }
 
-/// A collaborative command line waiting to be sent to a terminal (Plan 12): the terminal
+/// A collaborative command line waiting to be sent to a terminal (Plan 13): the terminal
 /// composer's draft, and the exact shape `DraftState` has, for the exact reason. One slot
 /// per (terminal, author), so everyone sees everyone typing and any peer may co-edit a
 /// slot — including the agent's, which is what makes reviewing its command the same act as

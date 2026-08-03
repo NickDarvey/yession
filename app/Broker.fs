@@ -32,7 +32,7 @@ let private postGrant (url: string) (contentType: string) (body: string) : JS.Pr
 let private grantAt (tokenUrl: string) (request: TokenRequest) : Async<Result<string, string>> =
     async {
         try
-            let! reply = postGrant tokenUrl request.ContentType request.Body |> Async.AwaitPromise
+            let! reply = postGrant tokenUrl request.ContentType request.Body |> Interop.awaitPromise
             if reply.status >= 200 && reply.status < 300 then return Ok reply.body
             else return Error (sprintf "token endpoint refused (%d): %s" reply.status reply.body)
         with e ->
@@ -115,7 +115,7 @@ let create
             async {
                 let verifier = randomVerifier ()
                 let state = randomVerifier ()
-                let! challenge = s256Challenge verifier |> Async.AwaitPromise
+                let! challenge = s256Challenge verifier |> Interop.awaitPromise
                 // Where the provider sends the code: the Manager's own public callback
                 // by default; a session-supplied URI when the provider's registered
                 // redirect set cannot include this Manager (completion arrives as a

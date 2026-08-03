@@ -268,11 +268,13 @@ let dev () =
 
 // node-datachannel (native addon) and @anthropic-ai/claude-agent-sdk (resolves its own native
 // `claude` sibling via import.meta.url) MUST NOT be bundled — they only work from their real
-// node_modules. zod is a dynamic import shared with the SDK; dockerode is pure JS but pulls
-// ssh2 (with an optional native addon), so it resolves from node_modules too. Everything else
-// (yjs, lib0, Thoth, prosemirror, …) inlines.
+// node_modules. @anthropic-ai/sandbox-runtime is the same shape: it reaches for vendored
+// helper binaries beside its own module. zod is a dynamic import shared with the SDK; dockerode
+// is pure JS but pulls ssh2 (with an optional native addon), so it resolves from node_modules
+// too. Everything else (yjs, lib0, Thoth, prosemirror, …) inlines.
 let private externals =
-    [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "zod"; "dockerode"; "@napi-rs/keyring" ]
+    [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "@anthropic-ai/sandbox-runtime"
+      "zod"; "dockerode"; "@napi-rs/keyring" ]
     |> List.map (sprintf "--external:%s")
 
 // The OTel SDK does a dynamic `require('util')`; esbuild's ESM output can't satisfy a runtime
@@ -329,6 +331,7 @@ let private packageJson (version: string) =
   "engines": { "node": ">=24" },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "%s",
+    "@anthropic-ai/sandbox-runtime": "%s",
     "@napi-rs/keyring": "%s",
     "dockerode": "%s",
     "node-datachannel": "%s",
@@ -338,6 +341,7 @@ let private packageJson (version: string) =
 """
         version
         (depVersion "@anthropic-ai/claude-agent-sdk")
+        (depVersion "@anthropic-ai/sandbox-runtime")
         (depVersion "@napi-rs/keyring")
         (depVersion "dockerode")
         (depVersion "node-datachannel")
@@ -464,8 +468,7 @@ let private runNodeSuite (target: string) (timeoutMs: int) =
         failwith "tests timed out"
 
 // Ask the box whether it really has a capability, by running the cheapest command that can
-// only succeed if it does. A missing binary, a non-zero exit and a hang all answer false —
-// the caller drops the capability, and its suites report a skip instead of failing.
+// only succeed if it does. A missing binary, a non-zero exit and a hang all answer false.
 let private probeSucceeds (command: string) (arguments: string list) =
     try
         let psi = ProcessStartInfo command
@@ -485,33 +488,69 @@ let private probeSucceeds (command: string) (arguments: string list) =
 // there").
 let private dockerReachable () = probeSucceeds "docker" [ "info" ]
 
-// `Docker` is the one capability a run cannot know it has just by declaring it — `verify`
-// names the whole set, but a laptop or dev container has no daemon. Probe once and drop it
-// when absent, so the Docker suites report a real skip through `Tag.needs` instead of running
-// and passing empty. YESSION_REQUIRE_DOCKER (release.yml sets it) opts OUT of the drop: a gate
-// that was promised a daemon must fail loudly, never quietly skip its way to green.
-let private resolveDocker (caps: string list) : string list =
-    if not (List.contains "Docker" caps) then caps
-    elif not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "YESSION_REQUIRE_DOCKER")) then caps
-    elif dockerReachable () then caps
-    else
-        eprintfn "check: no Docker daemon reachable — dropping the Docker capability (its suites will report a skip)"
-        caps |> List.filter (fun c -> c <> "Docker")
-
 // For Nix the CLI being there is the whole question: the invocations below pass
 // `--extra-experimental-features nix-command` themselves, so a box that never opted into the
 // new CLI still runs the gate rather than failing on an unrecognised subcommand.
 let private nixAvailable () = probeSucceeds "nix" [ "--version" ]
 
-// Same shape as `resolveDocker`, and for the same reason: `verify` names the whole capability
-// set, but plenty of boxes have no Nix. YESSION_REQUIRE_NIX (release.yml) opts out of the drop.
-let private resolveNix (caps: string list) : string list =
-    if not (List.contains "Nix" caps) then caps
-    elif not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable "YESSION_REQUIRE_NIX")) then caps
-    elif nixAvailable () then caps
+// The live agent suites need a real credential; the SDK reads either of these.
+let private agentCredentials () =
+    [ "ANTHROPIC_API_KEY"; "CLAUDE_CODE_OAUTH_TOKEN" ]
+    |> List.exists (fun name -> not (String.IsNullOrEmpty (Environment.GetEnvironmentVariable name)))
+
+// The srt backend confines with bubblewrap on Linux and Seatbelt on macOS. Seatbelt is part
+// of the OS, so darwin always has the capability; on Linux it is bubblewrap, socat (the bridge
+// into the unshared network namespace) and ripgrep (srt refuses to start a sandbox without
+// one) that have to be there — and, since bwrap needs unprivileged user namespaces, being
+// installed is not the same as WORKING. Run the profile the suites will run under, rather than
+// look for binaries: a kernel that forbids the nested namespace fails here, where the reason
+// is one line, instead of inside a suite.
+let private srtAvailable () =
+    if OperatingSystem.IsMacOS () then true
     else
-        eprintfn "check: no nix CLI on PATH — dropping the Nix capability (its suites will report a skip)"
-        caps |> List.filter (fun c -> c <> "Nix")
+        let named name = Environment.GetEnvironmentVariable name
+        let bwrap = match named "YESSION_BWRAP_PATH" with null | "" -> "bwrap" | path -> path
+        let socat = match named "YESSION_SOCAT_PATH" with null | "" -> "socat" | path -> path
+        let ripgrep = match named "YESSION_RIPGREP_PATH" with null | "" -> "rg" | path -> path
+        let weak = (match named "YESSION_SANDBOX_NESTED" with null -> "" | v -> v.Trim().ToLowerInvariant ()) = "weak"
+        let confines =
+            if weak then
+                probeSucceeds bwrap [ "--ro-bind"; "/"; "/"; "--dev"; "/dev"; "--unshare-net"; "--unshare-pid"
+                                      "--unshare-user"; "--bind"; "/proc"; "/proc"; "true" ]
+            else
+                probeSucceeds bwrap [ "--ro-bind"; "/"; "/"; "--dev"; "/dev"; "--unshare-net"; "--unshare-pid"
+                                      "--unshare-user"; "--cap-drop"; "ALL"; "--proc"; "/proc"; "--"
+                                      bwrap; "--ro-bind"; "/"; "/"; "--unshare-user"; "true" ]
+        probeSucceeds socat [ "-V" ] && probeSucceeds ripgrep [ "--version" ] && confines
+
+// ASKING FOR A CAPABILITY IS REQUIRING IT. A run names the capabilities it wants; anything it
+// named and cannot host is an ERROR, with the reason, before a single test runs.
+//
+// This used to drop the capability instead, so its suites reported a skip — which reads as
+// prudence and behaves as a blind spot. A release workflow that named a secret this repository
+// does not have shipped every version up to v5.0.0-beta.0 with the live agent suite quietly
+// skipped: green, and never once a real agent turn. The `YESSION_REQUIRE_*` overrides that
+// existed to patch exactly that hole are gone with the drop that needed them; there is one
+// rule now, and it is the obvious one.
+//
+// What stays a skip is the RUNTIME partition (`Tag.needs`): a Node suite on the .NET CLR and a
+// browser suite on Node are not availability questions, they are the other runtime's tests.
+let private requireCapabilities (caps: string list) =
+    let missing =
+        [ if List.contains "Docker" caps && not (dockerReachable ()) then
+            "Docker: no daemon answers `docker info` (is it running, is DOCKER_HOST right?)"
+          if List.contains "Nix" caps && not (nixAvailable ()) then
+            "Nix: no `nix` on PATH"
+          if List.contains "LiveAgent" caps && not (agentCredentials ()) then
+            "LiveAgent: no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in the environment"
+          if List.contains "Srt" caps && not (srtAvailable ()) then
+            "Srt: no working confinement (bubblewrap, socat, ripgrep, and — under the strict "
+            + "profile — a nested user namespace; an unprivileged container needs "
+            + "YESSION_SANDBOX_NESTED=weak)" ]
+    if not (List.isEmpty missing) then
+        failwithf
+            "check: this box cannot host every capability it was asked for:\n  - %s\nRun a tier it can host, or install what is missing."
+            (String.concat "\n  - " missing)
 
 // Build the installable from the WORKING TREE and boot it.
 //
@@ -537,7 +576,8 @@ let private buildNixPackage () =
 let private progress (label: string) = printfn "check: %s" label
 
 let private runCheckOnce (requested: string list) =
-    let caps = requested |> resolveDocker |> resolveNix
+    let caps = requested
+    requireCapabilities caps
     let capSet = Set.ofList caps
     Environment.SetEnvironmentVariable ("YESSION_TEST_CAPS", String.concat " " caps)
     progress (sprintf "capabilities: %s" (if List.isEmpty caps then "none (cheap tier)" else String.concat " " caps))
@@ -652,7 +692,7 @@ let check (caps: string list) =
     restore ()
     runCheckOnce caps
 
-let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix" ]
+let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt" ]
 
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 

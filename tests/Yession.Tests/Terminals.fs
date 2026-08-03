@@ -778,7 +778,7 @@ let private syncTests =
 
 
 let tests =
-    testList "Terminals (Plan 12)" [
+    testList "Terminals (Plan 13)" [
         approvalTests
         drainTests
         projectionTests

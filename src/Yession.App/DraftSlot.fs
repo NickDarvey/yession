@@ -96,7 +96,7 @@ module DraftSlot =
         observeDeep fragment handler
         Subscription.ofStop (fun () -> unobserveDeep fragment handler)
 
-/// The same publication rule for a terminal composer (Plan 12). Identical in shape and in
+/// The same publication rule for a terminal composer (Plan 13). Identical in shape and in
 /// reasoning — a slot exists exactly while its command line has content — over a plain
 /// `Y.Text` instead of a rich body, so emptiness is a string test rather than a Markdown
 /// serialize.

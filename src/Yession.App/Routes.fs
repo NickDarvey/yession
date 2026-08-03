@@ -44,7 +44,7 @@ type SessionRoute =
     /// after `EventChunk` — that module already exists in the domain, and one identifier
     /// meaning two things is what makes F# symbols hard to find.
     | Events of index: int
-    /// Immutable chunk `index` of a terminal's transcript (Plan 12) — the history leg of
+    /// Immutable chunk `index` of a terminal's transcript (Plan 13) — the history leg of
     /// the terminal feed, cacheable on exactly the same argument as `Events`. The terminal
     /// is carried as a raw string because a route is a PATH, and validating it into a
     /// `TerminalId` is the server's job at dispatch, not the router's at parse.

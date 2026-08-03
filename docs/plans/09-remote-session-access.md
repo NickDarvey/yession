@@ -74,7 +74,7 @@ Each frame is the Running sessions only:
 ## The binding (operator-side, not shipped)
 
 Yession's contract ends at the stream. The binding translates registry → proxy config,
-per operator, like 07's Caddy header-mapping example. The correctness pattern is a
+per operator, like 07's header-mapping proxy. The correctness pattern is a
 **level-based reconciler**, not up/down event handlers — edge-triggered teardown dies
 exactly when needed (Manager SIGKILL, reboot, binding crash between events), and
 persisted proxy config (e.g. `tailscale serve --bg`) outlives all of those:

@@ -32,7 +32,7 @@ type SessionHost =
       Doc : Y.Doc
       /// The session's lazily-started environment (Step 12).
       Environment : SessionEnvironment.SessionEnvironment
-      /// The session's terminals (Plan 12) — opening one starts the environment.
+      /// The session's terminals (Plan 13) — opening one starts the environment.
       Terminals : SessionTerminals.SessionTerminals
       /// The agent's terminal capability, exposed so a test can drive the agent's HALF of
       /// the approval flow without a model in the loop. Production reaches it through
@@ -70,7 +70,7 @@ let startFull
     (secretsCapabilities: ControlClient.SessionSecretsCapabilities option)
     (baseLog: EventLog<SessionEvent> option)
     (docStore: DocStore.DocStore option)
-    // Terminal transcripts (Plan 12). `None` = an in-memory store, so terminals behave
+    // Terminal transcripts (Plan 13). `None` = an in-memory store, so terminals behave
     // identically in a test host and the only thing missing is what outlives the process.
     (transcriptStore: TranscriptStore.TranscriptStore option)
     (reportName: (string -> Async<unit>) option)
@@ -92,6 +92,9 @@ let startFull
     // where to ask for this session back (Plan 11). None for a Manager-less session:
     // there is then nothing to ask.
     (managerOrigin: string option)
+    // Whether a session keeps its address across launches (Plan 12); false means the
+    // client's local-first promise has to be qualified. Baked into the shell.
+    (ephemeralStorage: bool)
     (port: int)
     : Async<SessionHost> =
     async {
@@ -205,7 +208,7 @@ let startFull
             match MessageId.create (string (Guid.NewGuid ())) with
             | Ok id -> id
             | Error e -> failwithf "message id invariant violated: %s" e
-        // --- Terminals (Plan 12) -----------------------------------------------------
+        // --- Terminals (Plan 13) -----------------------------------------------------
         //
         // A second consumer over a second queue, sharing nothing with the agent scheduler
         // but the doc updates that wake both. That independence is the design: a build
@@ -237,7 +240,7 @@ let startFull
                 broadcastTerminalRecord
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 
-        // The agent's terminal capability (Plan 12): it QUEUES a command where people can
+        // The agent's terminal capability (Plan 13): it QUEUES a command where people can
         // see it, and returns. It does not wait for the command to run — waiting would make
         // the turn block on a human pressing Approve, and a review gate that deadlocks when
         // nobody is looking is not a review gate.
@@ -495,7 +498,7 @@ let startFull
                         return lines, List.length lines = EventChunk.size
                     } }
 
-        // The HTTP-cacheable transcript read surface (Plan 12) — the history leg of the
+        // The HTTP-cacheable transcript read surface (Plan 13) — the history leg of the
         // terminal feed, on the same immutability argument as the event chunks.
         let transcriptEndpoint : Signalling.TranscriptEndpoint =
             { ValidateToken = peerTokens.Validate >> Option.isSome
@@ -509,7 +512,7 @@ let startFull
                         | Error _ -> return None
                     } }
 
-        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) (Some transcriptEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin port
+        let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) (Some transcriptEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin ephemeralStorage port
         // Port 0 asks the OS for a free port, so any number of instances/sessions
         // coexist; report the port actually bound.
         let port = Interop.serverPort server
@@ -573,7 +576,7 @@ let startWithEnvironment
     // No mount: these helpers serve an unfronted, origin-root session. No transcript store
     // either — terminals fall back to the in-memory one, which is the right default for a
     // host with no data directory.
-    startFull (fun () -> runAgent) makeEnvironment None baseLog None None None None (fun _ _ -> ()) None None None sessionId None "" None port
+    startFull (fun () -> runAgent) makeEnvironment None baseLog None None None None (fun _ _ -> ()) None None None sessionId None "" None false port
 
 /// `startWithEnvironment` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

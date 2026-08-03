@@ -27,6 +27,11 @@ module Dom =
     /// this session has no Manager.
     let managerMetaName = "yession-manager"
 
+    /// The `<meta name>` marking a deployment whose sessions do NOT keep their address
+    /// across launches, so browser storage does not survive one. Emitted only in that case:
+    /// absence is the good deployment, exactly as with the Manager origin above.
+    let ephemeralStorageMetaName = "yession-ephemeral-storage"
+
     /// `data-*` hooks on the session client shell (`View`) and its browser delegation.
     module Hooks =
         // Header — the collaborative session title and its secondary id.
@@ -108,7 +113,7 @@ module Dom =
         // the session has stopped and this deployment can bring it back.
         let sessionGone = "data-session-gone"
         let sessionReopen = "data-session-reopen"
-        // Terminals (Plan 12): the column, its strip of open terminals, the blocks that have
+        // Terminals (Plan 13): the column, its strip of open terminals, the blocks that have
         // run, and the composer that queues the next command. The composer's hooks mirror the
         // message composer's, because the interaction is the same one.
         let terminalPanel = "data-terminal-panel"
@@ -158,12 +163,18 @@ module Dom =
         /// What every degraded state promises: this is a local-first client, so a lost leg
         /// costs sync, not the ability to work.
         let localFallback = "You can keep writing — everything is saved locally and syncs when the session is back."
+        /// The same promise where it cannot be kept (Plan 13): this deployment addresses
+        /// sessions by port, so a session that restarts comes back at a new origin — and a
+        /// browser partitions storage by origin, which strands anything written here in the
+        /// meantime. Everything already sent is safe; it is on the server.
+        let localFallbackEphemeral =
+            "You can keep writing, but this session reopens at a new address — anything written here while it is away will not come back with it."
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.
         let agent = "agent"
         let sessionProcess = "session-process"
-        // Terminal block/queue status tokens (Plan 12).
+        // Terminal block/queue status tokens (Plan 13).
         let blockRunning = "running"
         let blockOk = "ok"
         let blockFailed = "failed"

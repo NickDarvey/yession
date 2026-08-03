@@ -153,7 +153,7 @@ let
   npmDeps = pkgs.fetchNpmDeps {
     src = npmManifests;
     name = "yession-npm-deps";
-    hash = "sha256-b9zc6a1ep1xBo3uZ3UAeqmXVZ2mLEkm7V9VfcaseFMo=";
+    hash = "sha256-CfON1xpe52KHCPRdtXaDhC1Is5FOr3OcmNBSKAirgIs=";
   };
 
   # node_modules as a Nix artifact: the offline npm tree (npmConfigHook installs it from npmDeps
@@ -231,6 +231,19 @@ let
     dontStrip = true;
   };
 
+  # The srt backend confines with bubblewrap, reaches its filtering proxy through socat (the
+  # network namespace is unshared, so a Unix-socket bridge is the only way out), and finds the
+  # files it must deny outright with ripgrep. All three are NAMED rather than left to PATH: srt
+  # treats an explicit path as a directive and reports it missing, where a PATH lookup would
+  # silently pick up someone else's build — or find nothing, and fail a sandbox that had no
+  # business depending on the host's incidental tools. macOS confines with Seatbelt, which ships
+  # with the OS and needs none of them — hence Linux only.
+  srtToolFlags = lib.optionalString pkgs.stdenv.isLinux ''
+    \
+        --set-default YESSION_BWRAP_PATH ${pkgs.bubblewrap}/bin/bwrap \
+        --set-default YESSION_SOCAT_PATH ${pkgs.socat}/bin/socat \
+        --set-default YESSION_RIPGREP_PATH ${pkgs.ripgrep}/bin/rg'';
+
   # nix — the installable: two wrapped Node bins over tasks.fsx's shims, the runtime
   # node_modules, and the Nix node-datachannel addon, with the agent pointed at claude-code.
   nix = pkgs.stdenv.mkDerivation {
@@ -252,10 +265,10 @@ let
       # which inherits YESSION_CLAUDE_PATH from this wrapper.
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-session" \
         --add-flags "$out/libexec/yession/bin/yession-session.js" \
-        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude
+        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude ${srtToolFlags}
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-manager" \
         --add-flags "$out/libexec/yession/bin/yession-manager.js" \
-        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude
+        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude ${srtToolFlags}
       runHook postInstall
     '';
     dontStrip = true;

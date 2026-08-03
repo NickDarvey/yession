@@ -66,7 +66,7 @@ module App =
           /// collaborative field), so collaborators see the cursor. Ephemeral presence — the
           /// Session Process relays it to other peers and never persists it.
           ReportPresence : Focus option -> unit
-          /// Ask the Session Process to open a terminal (Plan 12). The new terminal arrives
+          /// Ask the Session Process to open a terminal (Plan 13). The new terminal arrives
           /// as a `TerminalOpened` event, not as a response — one source of truth for a
           /// durable fact, and it is the one every peer already reads.
           OpenTerminal : string -> unit
@@ -126,7 +126,7 @@ module App =
     type EventFeed = EventOffset option -> Async<Result<EventPage<SessionEvent>, FeedFault>>
 
     /// Reading a terminal's transcript over HTTP — the history leg of the terminal feed
-    /// (Plan 12), and a deliberate copy of `EventFetch`'s shape because it is the same
+    /// (Plan 13), and a deliberate copy of `EventFetch`'s shape because it is the same
     /// problem: immutable fixed-size chunks, so the browser's own cache is the store and
     /// only the growing tail reaches the network.
     ///
@@ -200,7 +200,7 @@ module App =
           /// so the browser cache serves history (immutable full chunks); pure
           /// data-channel peers leave it `None` and read over frames.
           FetchEvents : EventFeed option
-          /// When given, terminal history is fetched through this feed (Plan 12). `None`
+          /// When given, terminal history is fetched through this feed (Plan 13). `None`
           /// leaves a client with only what arrives live — which is correct for a peer
           /// that has no HTTP leg, and is why this is optional rather than required.
           FetchTranscripts : TranscriptFetch.TranscriptFeed option

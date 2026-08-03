@@ -1,4 +1,4 @@
-# Plan 12 — Terminals on the WorkSandbox
+# Plan 13 — Terminals on the WorkSandbox
 
 > **Status: PR 1 of 3 implemented** (blocks, no pty). PRs 2 (pty + live mode) and 3
 > (polish) remain. Builds directly on the sandbox seam from

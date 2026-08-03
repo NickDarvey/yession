@@ -4,7 +4,7 @@ open Fable.Core
 open Yjs
 open Yession.Domain
 
-/// Reading and editing a plain collaborative command line (Plan 12).
+/// Reading and editing a plain collaborative command line (Plan 13).
 ///
 /// A terminal composer is an `<input>` bound to a `Y.Text` root, and the whole difficulty
 /// is in one function: turning "the input's value is now this string" back into CRDT

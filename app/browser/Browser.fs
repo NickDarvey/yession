@@ -204,7 +204,7 @@ let private clearTimeoutJs (handle: float) : unit = jsNative
 })()""")>]
 let private toggleNav () : unit = jsNative
 
-/// The terminals column's open state (Plan 12), as a class on the shell root — the same
+/// The terminals column's open state (Plan 13), as a class on the shell root — the same
 /// mechanism the sidebar uses, so a Lit re-render never fights the CSS transition.
 ///
 /// It differs from the nav in one way that matters: it is driven FROM the model, because
@@ -271,7 +271,7 @@ let private hostBodyKey (el: obj) : string = jsNative
 [<Emit("$0.getAttribute('data-rich-readonly') === 'true'")>]
 let private hostReadOnly (el: obj) : bool = jsNative
 
-// --- Terminal command lines (Plan 12) --------------------------------------------------
+// --- Terminal command lines (Plan 13) --------------------------------------------------
 // The view renders `<input data-terminal-input="<key>">` for each terminal composer slot and
 // each queued command; the value is bound imperatively to that key's `Y.Text` root, the same
 // arrangement the rich bodies use one level up. An `<input>` rather than an editor because a
@@ -465,7 +465,8 @@ let private start () =
                         match SessionId.create value with
                         | Ok id -> Some id
                         | Error _ -> None)
-                Manager = metaContent Dom.managerMetaName }
+                Manager = metaContent Dom.managerMetaName
+                EphemeralStorage = (metaContent Dom.ephemeralStorageMetaName).IsSome }
 
         // The connection is wired later (after persistence and signalling); the interrupt
         // control holds this ref so everything else works before — and without — the
@@ -480,7 +481,7 @@ let private start () =
         // records the fragment it bound so a fragment swap (a sent draft's slot recreated)
         // triggers a remount.
         let registry = BodyRegistry doc
-        // The plain-text roots the terminal composers live in (Plan 12), beside the rich
+        // The plain-text roots the terminal composers live in (Plan 13), beside the rich
         // bodies and resolved the same way.
         let texts = TextRegistry doc
         let mutable latestModel = initial
@@ -767,11 +768,14 @@ let private start () =
               ReopenSession =
                 fun () ->
                     // A full navigation to the Manager, not a fetch: it launches the session
-                    // if it is stopped and then hands us on to wherever this deployment says
-                    // the session lives, which may be a different port entirely. Nothing is
-                    // lost by reloading — the doc is in IndexedDB and the log replays — and a
-                    // pinned port means we land back on the same origin, so what was written
-                    // offline is still here to sync.
+                    // if it is stopped and hands us on to wherever this deployment says the
+                    // session lives.
+                    //
+                    // What the reload costs depends on the address. Under a `{id}` template
+                    // we land on the SAME origin, so the doc in IndexedDB is still this
+                    // session's and syncs straight back. Addressed by port we land somewhere
+                    // new, and anything written since it stopped stays behind — which is why
+                    // the card says so before this runs.
                     //
                     // The anchor's href is the same URL, so this is an enhancement rather
                     // than the mechanism: with no JS the link still works.

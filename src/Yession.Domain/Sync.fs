@@ -449,7 +449,7 @@ module SyncedStateSync =
                     | Error _ -> None)
             | _ -> None
 
-    // --- Terminals (Plan 12) -----------------------------------------------------------
+    // --- Terminals (Plan 13) -----------------------------------------------------------
     //
     // The same three moves the message queue needs, over the terminal roots: read a
     // command's text, remove consumed entries, and answer the publication rule's two
@@ -486,7 +486,7 @@ module SyncedStateSync =
             | _ -> None
 
     /// Put a command in a terminal's queue, from the Session Process, in ONE transaction:
-    /// the command's text root and the entry that names it (Plan 12).
+    /// the command's text root and the entry that names it (Plan 13).
     ///
     /// This is the Process's one CREATING doc write, and it earns the exception the same way
     /// the drain's removals do: the terminal queue is collaborative state, and the agent is

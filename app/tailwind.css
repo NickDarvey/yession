@@ -30,7 +30,7 @@
   --color-blue-bright: #7fd0f5;
   --color-agent-ground: #0e1418;
 
-  /* The sixteen named ANSI colours a terminal can paint its output with (Plan 12).
+  /* The sixteen named ANSI colours a terminal can paint its output with (Plan 13).
      `Ansi.rgbOf` resolves the 240 arithmetic ones (the 6x6x6 cube and the grey ramp) on
      its own; these are the ones that mean "whatever red this theme calls red", so they
      are the theme's to answer — and they are held to the same AA floor as every other
@@ -81,7 +81,7 @@
      the sidebar column (`w-side`). */
   --spacing-band: 88px;
   --spacing-side: 280px;
-  /* The terminals column (Plan 12). Wider than the sidebar because it holds 80-column
+  /* The terminals column (Plan 13). Wider than the sidebar because it holds 80-column
      mono output, and that is the width the content actually has. */
   --spacing-term: 420px;
 

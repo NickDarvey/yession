@@ -65,7 +65,7 @@ type SessionEvent =
     | CommandStarted of CommandStarted
     | CommandOutputReceived of CommandOutputReceived
     | CommandCompleted of CommandCompleted
-    // Terminals (Plan 12): durable FACTS about a terminal — never its raw output, which
+    // Terminals (Plan 13): durable FACTS about a terminal — never its raw output, which
     // lives in the per-terminal transcript sidecar (`Transcript.fs`). A terminal that
     // printed a gigabyte adds four events here, not a gigabyte, so the log every client
     // folds stays the size of what happened rather than the size of what was printed.

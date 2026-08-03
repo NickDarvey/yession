@@ -13,7 +13,7 @@ module SessionCommands =
     /// tests can drive without a scheduler, an environment, or a sandbox:
     ///   * `requestInterrupt` validates the turn is the one currently running (the
     ///     interrupt-vs-completion race resolves there) and performs the cancellation;
-    ///   * `openTerminal`/`closeTerminal` are the terminal manager's (Plan 12).
+    ///   * `openTerminal`/`closeTerminal` are the terminal manager's (Plan 13).
     ///
     /// A successful `OpenTerminal` answers `CommandAccepted` and nothing more: the new
     /// terminal's id reaches every peer as a `TerminalOpened` EVENT. Returning it in the

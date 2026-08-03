@@ -84,7 +84,7 @@ type ComposerChoice =
 /// colour is derived from its id (`PeerColour`), not carried.
 type RemotePresence = { DisplayName : string; Focus : Focus }
 
-/// One terminal's live transcript as this client has it (Plan 12). Records are keyed by
+/// One terminal's live transcript as this client has it (Plan 13). Records are keyed by
 /// their sequence number, which makes application idempotent by construction: the same
 /// record arriving twice — once as a live frame, once inside a fetched chunk — is one map
 /// entry, exactly as an event at a known offset folds once. That is the whole reason the
@@ -140,6 +140,14 @@ type ClientModel =
       /// Static for the life of the page. Never a message, never folded: it is a fact
       /// about the deployment that served this document, not part of the session's state.
       Manager       : string option
+      /// Whether this deployment's sessions change address between launches (Plan 12).
+      /// When true the browser's storage does not survive a restart, because it is
+      /// partitioned by origin and the origin carries the port — so the client's
+      /// local-first promise has to be qualified wherever it is made.
+      ///
+      /// Static for the life of the page, like `Manager`: a fact about the deployment that
+      /// served this document, never a message and never folded.
+      EphemeralStorage : bool
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
       EventConsumer : EventConsumerState
@@ -158,7 +166,7 @@ type ClientModel =
       Environment   : EnvironmentStatus
       /// The read-only command log, folded from command events (Step 13).
       Commands      : CommandLog
-      /// Terminals, folded from terminal events (Plan 12) — the panel's structure.
+      /// Terminals, folded from terminal events (Plan 13) — the panel's structure.
       Terminals     : TerminalProjection
       /// Each terminal's transcript as this client has it. Separate from the projection
       /// because it arrives on a different leg: facts fold from the event log, bytes
@@ -231,7 +239,7 @@ type ClientMsg =
     | ClaudeStatusMsg of ClaudeStatus
     /// The Claude sign-in flow moved (begin/busy/error/reset).
     | ClaudeFlowMsg of ClaudeFlowState
-    // --- Terminals (Plan 12) ---------------------------------------------------------
+    // --- Terminals (Plan 13) ---------------------------------------------------------
     /// One transcript record arrived — live over the data channel, or from a fetched
     /// history chunk. Both routes carry the sequence number, so both fold the same way.
     | TerminalRecordMsg of TerminalId * seq: int * TranscriptRecord
@@ -281,6 +289,7 @@ module ClientModel =
           Connection = Disconnected None
           Session = None
           Manager = None
+          EphemeralStorage = false
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
           EventConsumer =

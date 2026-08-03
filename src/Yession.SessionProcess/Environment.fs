@@ -22,7 +22,7 @@ module SessionEnvironment =
           /// Spawn a process in the running environment WITHOUT the command-event
           /// lifecycle — the caller records what happened in its own terms.
           ///
-          /// Terminals (Plan 12) need this: a block's output belongs in that terminal's
+          /// Terminals (Plan 13) need this: a block's output belongs in that terminal's
           /// transcript, and its lifecycle in the block events, so routing it through
           /// `Execute` would write every printed byte into the event log a second time.
           /// The environment is still the one gate — a spawn with nothing running is an

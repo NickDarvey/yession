@@ -41,10 +41,23 @@ jobs:
       # colon-space in an unquoted step name once took every master release down at startup.
       - name: Lint the workflows (release.yml is only exercised on master)
         run: devenv shell -- lint
+      # srt's strict profile drops capabilities and mounts a fresh /proc through a NESTED user
+      # namespace, and Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`,
+      # which forbids exactly that — so the first run of the sandbox probes here dropped the
+      # `Srt` capability and skipped, leaving the confining backend with no CI coverage at all.
+      # The runner is an ephemeral VM and nothing about the product changes; `|| true` keeps a
+      # runner image without the knob working, and `check` then drops the capability with its
+      # own line rather than failing.
+      - name: Permit nested user namespaces (the sandbox escape probes need them)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       # `check` does everything Yession-specific: restore + link the addon, provision Chromium
       # for the browser E2Es, and run the gate.
-      - name: Cheap tier + browser + native WebRTC/host E2E
-        run: devenv shell -- check Browser Ports Native
+      # `Srt` is here rather than only in `verify` because the escape probes are the whole
+      # point of the confining backend and they run in seconds. `check` probes for a WORKING
+      # bubblewrap first and drops the capability (with a line saying so) where the kernel
+      # refuses one, so this cannot fail a PR on a runner that cannot host it.
+      - name: Cheap tier + browser + native WebRTC/host E2E + sandbox escape probes
+        run: devenv shell -- check Browser Ports Native Srt
 
   # The installable package, built on macOS. flake.nix advertises aarch64-darwin and
   # x86_64-darwin and nix/node-datachannel.nix claims platforms.unix, but every other job

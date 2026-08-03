@@ -59,7 +59,7 @@ type ListSessionSecrets = unit -> Async<Result<SecretMetadata list, string>>
 /// Delete one of the session's secrets; false = it did not exist.
 type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 
-/// What queueing a terminal command did (Plan 12).
+/// What queueing a terminal command did (Plan 13).
 type QueuedTerminalCommand =
     { Terminal : TerminalId
       /// Whether the terminal's approval mode is holding it for a human. The agent is
@@ -68,7 +68,7 @@ type QueuedTerminalCommand =
       /// deciding its command failed and trying something else.
       AwaitingApproval : bool }
 
-/// Put a command in a terminal's queue (Plan 12). Named for what it does: the agent does
+/// Put a command in a terminal's queue (Plan 13). Named for what it does: the agent does
 /// NOT get to run a command in a terminal — it queues one, exactly as a person does, and
 /// the terminal's approval mode decides what happens next.
 ///
@@ -88,7 +88,7 @@ type AgentCapabilities =
       SetSecret : SetSessionSecret
       ListSecrets : ListSessionSecrets
       DeleteSecret : DeleteSessionSecret
-      /// Queue a command in a terminal (Plan 12), where people can see it, edit it, and —
+      /// Queue a command in a terminal (Plan 13), where people can see it, edit it, and —
       /// depending on the terminal's mode — approve it before it runs.
       QueueTerminalCommand : QueueTerminalCommand }
 

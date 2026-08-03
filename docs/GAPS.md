@@ -50,28 +50,64 @@ discovers it in production. Items are roughly ordered by how much they matter.
   outcome is a 401 on every UI route, and the default `--auth none` denies everything.
   Under `--auth localhost` anyone with local access can still manage sessions — that
   is the localhost trust rule working as stated, not an oversight.
-- **The `host` sandbox backend provides no OS isolation — and it is the default.**
-  Sandboxes are session-owned (the `CreateSandbox` seam): agent-issued commands run as
-  child processes of the Session Process. The host backend passes an allowlisted env
-  (never the process's own — the credential-leak regression test pins this), but file
-  system and network are unconfined. `YESSION_WORK_SANDBOX=docker` opts into isolation;
-  flipping the default to a confining backend (srt — bubblewrap/Seatbelt via
-  `@anthropic-ai/sandbox-runtime` — is the planned sub-second tier) is deliberate
-  future work.
-- **The agent CLI itself still runs unconfined in the Session Process** (`tools: []`
-  bounds the model's tool surface, not the process). Moving the CLI behind the sandbox
-  seam via the SDK's `spawnClaudeCodeProcess` is the next planned step (AgentSandbox).
+- **Sandboxes confine by default; `host` is the opt-out.** Both sandboxes default to
+  `srt` (bubblewrap on Linux, Seatbelt on macOS): agent-issued commands and the agent CLI
+  are OS-confined unless an operator asks for something else. `YESSION_WORK_SANDBOX=host`
+  is still there and still honest about what it is — no filesystem or network confinement,
+  only the env allowlist (which the credential-leak regression test pins) — it just has to
+  be chosen now. `=docker` remains the full-userland option for the WorkSandbox.
+  - **A Linux host without the confinement tools cannot start a session.** srt needs
+    bubblewrap, socat and ripgrep; the Nix installable names all three, but an
+    `npm i -g yession` on a bare box does not have them, and the session fails when its
+    sandbox is created rather than starting unconfined. That is the intended trade — the
+    fix is to install them, or to choose `host` deliberately.
+  - **An unprivileged container needs `YESSION_SANDBOX_NESTED=weak`** (below), which is
+    now on the default path rather than an opt-in one.
+- **The agent CLI runs through the `spawnClaudeCodeProcess` seam with a policy env**
+  (AgentSandbox): allowlisted baseline + proxy passthrough, a per-session scratch HOME
+  (`<data>/agent-home` — `~/.claude` state lives and dies with the session), exactly one
+  credential, and a process-group kill on the SDK's forwarded abort signal.
+  srt — the default — adds OS confinement around it: the CLI reads and writes only its
+  scratch HOME of the operator's files, and reaches only `AgentSandbox`'s domains
+  (`YESSION_AGENT_DOMAINS`). `YESSION_AGENT_SANDBOX=host` opts out, leaving the file
+  system and network open to the CLI. Docker is BY DESIGN not an agent backend: a container
+  per session boot is the opposite of the sub-second start the agent needs, and the
+  WorkSandbox keeps it.
+  - The SDK's spawn seam is SYNCHRONOUS and srt's wrap is not, so the srt tier hands the
+    SDK a stand-in process whose streams are live immediately and joins the real child to
+    them when the wrap resolves. It is plumbing, not policy, and the `Srt` suite drives it
+    end to end (stdin in, stdout out, exit code) rather than trusting it.
+- **srt's egress allowlist is per PROCESS, not per sandbox.** `SandboxManager` is a
+  singleton with one filtering proxy pair, so a session whose AgentSandbox and WorkSandbox
+  are both srt confines their FILES exactly (the profile rides each spawn) but can only
+  UNION their allowlists — the work sandbox can reach the agent's API hosts, without any
+  credential for them. Splitting it needs either a manager instance per sandbox (srt does
+  not offer one) or a Session Process per sandbox.
+- **The strict confinement profile needs a nested user namespace, which an unprivileged
+  container refuses.** srt's seccomp helper creates one inside bubblewrap's to drop
+  capabilities and mount a fresh `/proc`; Docker's default (and this repo's dev container)
+  denies it. `YESSION_SANDBOX_NESTED=weak` is srt's documented answer — the host's `/proc`
+  stays visible and capabilities are not dropped, so it is genuinely weaker confinement,
+  and it is therefore CONFIGURED rather than fallen back to: an unset value means strict,
+  and a session on a host that cannot host it fails at boot instead of quietly running
+  wide open. `check` probes whichever profile the run configures before declaring the
+  `Srt` capability.
 - **The Docker backend runs through the `dockerode` SDK and is integration-tested in the
   verify gate.** Containers and a per-sandbox named workspace volume are named by the
   session id (a Crockford base32 id, always a valid Docker object name), and `EnvironmentSpec`
   is fully interpreted — image/build, mounts (incl. the persistent workspace volume),
   working directory, env-var refs, and secret refs (resolved at sandbox spawn). The
-  container drops all capabilities and sets `no-new-privileges`; it still runs the
-  image's default (usually root) user with no resource limits — deliberate until a
-  config surface exists. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
-  where a daemon exists; on the CI `verify` runner `YESSION_REQUIRE_DOCKER=1` makes a
-  missing daemon a hard failure rather than a silent skip. The dev container has no
-  daemon, so local runs still report a skip.
+  container drops all capabilities and sets `no-new-privileges`. It runs the image's
+  default (usually root) user, and that is a DECISION rather than an omission: without
+  `CAP_DAC_OVERRIDE` that root does not bypass file permissions — the mount suite proved
+  it by failing to write into a `0700` host directory — so the main thing a non-root user
+  buys is already bought, while running as one breaks the named workspace volume Docker
+  creates root-owned. What remains is that files written through a BIND mount are owned by
+  root on the host, which is a nuisance rather than an escape. Resource limits are
+  likewise absent, as they are for every backend. The suite (`tests/Yession.Tests/DockerIntegration.fs`) runs
+  where a daemon exists; asking for the capability requires it, so a `verify` on a
+  daemon-less runner fails rather than skipping. The dev container has no daemon, so
+  `check Docker` refuses to start there — run a tier that does not ask for it.
 - **Secrets are a real Manager-owned store now** ([Plan 06](plans/06-secrets-and-abac.md)):
   AES-256-GCM per-entry ciphertext in `<DataDir>/secrets.json`, the KEK in the OS
   credential manager (`@napi-rs/keyring`, imported non-extractably each start), a
@@ -96,11 +132,13 @@ discovers it in production. Items are roughly ordered by how much they matter.
     gated to the caller's readable scopes; refresh tokens still never leave the
     Manager, and no agent-facing tool wraps either.
   - **Secret-token-injection is future work.** A resolved secret enters the sandbox
-    as a plain env var, so anything the agent runs inside can read it. The srt
-    backend's enforced egress allowlist will bound where a read value can be *sent*
-    — most of the practical risk — and the real fix is egress substitution (a
+    as a plain env var, so anything the agent runs inside can read it. Under the srt
+    backend the enforced egress allowlist now bounds where a read value can be *sent*,
+    which is most of the practical risk. The real fix is egress substitution — a
     placeholder inside the sandbox, the real value substituted at the proxy toward
-    declared hosts); srt's mandatory proxy is the natural host for that.
+    declared hosts — and srt implements exactly that (`credentials.envVars` with
+    `mode: "mask"` and `injectHosts`), so what remains is wiring `SecretRef` injection
+    through it instead of through the policy env.
   - **No KEK rotation/recovery** (a lost credential entry orphans the store loudly;
     the operator deletes the file), and multi-user same-name injection precedence is
     unresolved until a real multi-user strategy lands.
@@ -316,7 +354,7 @@ discovers it in production. Items are roughly ordered by how much they matter.
   progress — which a racing update reverts with no symptom beyond the UI moving under you.
   The fix is upstream: decode at processing time, against the model `update` is handed.
 
-## Terminals (Plan 12)
+## Terminals (Plan 13)
 
 - **A queued command whose terminal closes stays queued for ever.** Nothing runs it and
   nothing removes it; it is visible in the doc against a closed terminal and a person can

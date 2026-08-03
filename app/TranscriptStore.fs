@@ -1,6 +1,6 @@
 module Yession.Host.TranscriptStore
 
-// Per-terminal transcripts (Plan 12): one append-only asciicast file per terminal, held
+// Per-terminal transcripts (Plan 13): one append-only asciicast file per terminal, held
 // under the session's data directory as `terminals/<id>.cast`.
 //
 // Same discipline as the event log and the doc sidecar, because it is the same promise:

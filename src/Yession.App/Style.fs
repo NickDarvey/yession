@@ -486,7 +486,7 @@ module Style =
     /// Full-width within the column so it reads as the section's one action.
     let noAgentAction = "w-full"
 
-    // --- Terminals (Plan 12) -------------------------------------------------------------------
+    // --- Terminals (Plan 13) -------------------------------------------------------------------
     // The conversation column's mirror on the right: a strip of open terminals, the blocks
     // that have run in the selected one, and beneath them the composer — the message
     // composer's sibling, because queueing a command and queueing a message are the same act.

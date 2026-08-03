@@ -39,13 +39,38 @@ let private controlChannel =
     | url, secret -> Some (url, secret)
 
 // The session-owned WorkSandbox (the sandbox seam): the backend comes from
-// `YESSION_WORK_SANDBOX` (default host — explicitly unsandboxed for now), parsed
-// fail-closed at boot — a typo refuses the start rather than silently dropping
-// isolation.
+// `YESSION_WORK_SANDBOX`, parsed fail-closed at boot — a typo refuses the start rather
+// than silently dropping isolation.
+//
+// The default is `srt`: agent-issued commands are confined unless an operator says
+// otherwise. That is the point of the seam, and a default of `host` meant every
+// deployment that never read the documentation ran them unconfined. `host` is still
+// there, and still honest about what it is — it just has to be asked for now.
 let private workBackend =
-    match SandboxBackend.parse (Interop.envOr "YESSION_WORK_SANDBOX" "host") with
+    match SandboxBackend.parse (Interop.envOr "YESSION_WORK_SANDBOX" "srt") with
     | Ok backend -> backend
     | Error e -> failwith e
+
+// The AgentSandbox backend (`YESSION_AGENT_SANDBOX`): where the agent CLI process
+// runs — host or srt, never docker (a work-sandbox-only backend). Both tiers go through
+// the SDK's `spawnClaudeCodeProcess` seam with an allowlisted env and a scratch HOME
+// (Agent.fs); srt adds the OS-level confinement around it. Defaults to `srt` for the
+// same reason the WorkSandbox does. Parsed HERE, at boot, so a bad value fails the
+// session at start rather than mid-turn. Fail closed, never a silent fallback.
+let private agentBackend =
+    match SandboxBackend.parseAgent (Interop.envOr "YESSION_AGENT_SANDBOX" "srt") with
+    | Ok backend -> backend
+    | Error e -> failwithf "agent sandbox: %s" e
+
+// srt's own configuration — the confinement tools and how far the nesting can go — is
+// parsed here too, whenever either sandbox will use it. It would otherwise first be read
+// where the sandbox is created: for the WorkSandbox that is the agent's first
+// `ensure_environment`, minutes into a session, which is no place to discover a typo.
+do
+    if agentBackend = SrtBackend || workBackend = SrtBackend then
+        match Sandboxes.SrtSandbox.toolsFrom (Sandboxes.ambientEnv ()) with
+        | Ok _ -> ()
+        | Error e -> failwithf "sandbox: %s" e
 
 // Secret references in the sandbox spec resolve over the control channel at sandbox
 // spawn — the values go straight into the sandbox policy env and are dropped. Without
@@ -118,6 +143,11 @@ let private sessionMount = PublicAccess.sessionMount sessionId publicAccess
 /// URL, and that endpoint is the same HTTP server as the management UI, so it is precisely
 /// the origin that serves `/sessions/{id}/open`. Same precedence as the Manager's OIDC
 /// issuer, and by construction the same value.
+/// Whether this deployment's sessions keep their address across launches (Plan 13). The
+/// shell carries the negative so the client can qualify its local-first promise — which is
+/// otherwise a lie on any deployment addressing sessions by port, including the default.
+let private ephemeralStorage = not (PublicAccess.sessionAddressIsStable publicAccess)
+
 let private managerOrigin =
     PublicAccess.managerUrlOr (controlChannel |> Option.map fst) publicAccess
 
@@ -305,7 +335,7 @@ Async.StartImmediate (
         // Transcripts live beside the event log and the doc sidecar, one `.cast` file per
         // terminal — a durable, replayable record of everything its commands printed.
         let transcriptStore = TranscriptStore.openStore (sprintf "%s/terminals" dataDir)
-        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin port
+        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register
@@ -335,7 +365,7 @@ Async.StartImmediate (
             onStdinClosed (fun () ->
                 Async.StartImmediate (
                     async {
-                        do! telemetry.Shutdown () |> Async.AwaitPromise
+                        do! telemetry.Shutdown () |> Interop.awaitPromise
                         Interop.exit 0
                     }))
         // The one readiness line of the spawn contract — last, so the Manager can

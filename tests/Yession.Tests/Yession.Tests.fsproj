@@ -19,7 +19,6 @@
     <Compile Include="Version.fs" />
     <Compile Include="Domain.fs" />
     <Compile Include="Routes.fs" />
-    <Compile Include="Ports.fs" />
     <Compile Include="Reaper.fs" />
     <Compile Include="Secrets.fs" />
     <Compile Include="SessionProcess.fs" />
@@ -38,6 +37,7 @@
     <Compile Include="Client.fs" />
     <Compile Include="Phase2.fs" />
     <Compile Include="DockerIntegration.fs" />
+    <Compile Include="SrtIntegration.fs" />
     <Compile Include="Phase3.fs" />
     <Compile Include="EventsHttp.fs" />
     <Compile Include="Resilience.fs" />

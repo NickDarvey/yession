@@ -13,7 +13,7 @@ type SessionCommand =
     /// Cancel the running agent turn (Phase 3, Step 17). Rejected if that turn is no
     /// longer running — the interrupt-vs-completion race resolves at the Process.
     | InterruptAgentTurn of AgentTurnId
-    /// Open a terminal on the session's WorkSandbox (Plan 12). A command rather than a
+    /// Open a terminal on the session's WorkSandbox (Plan 13). A command rather than a
     /// CRDT write because the terminal's id is minted by the Process and its existence is
     /// a durable fact — a client cannot conjure one into the doc. The new terminal arrives
     /// back as a `TerminalOpened` event, not in the response: one path for the fact, and
@@ -56,7 +56,7 @@ type ControlFrame =
 /// sync-boundary layer (Step 05).
 type StateFrame<'State> = StateSync of 'State
 
-/// Terminal traffic (Plan 12), multiplexed onto the session's existing data channel
+/// Terminal traffic (Plan 13), multiplexed onto the session's existing data channel
 /// rather than given a leg of its own.
 ///
 /// The alternative considered and rejected was SSE-out/POST-in per terminal. Three
@@ -88,7 +88,7 @@ type FocusField =
     | Title
     | DraftBody of PeerId
     | QueueBody of QueueId
-    /// A terminal composer's command line (Plan 12) — presence works there for the same
+    /// A terminal composer's command line (Plan 13) — presence works there for the same
     /// reason it works in a message draft: co-editing a command you cannot see someone
     /// else's caret in is co-editing blind.
     | TerminalDraftBody of TerminalId * PeerId
@@ -119,7 +119,7 @@ type SessionFrame<'State> =
     | Control of ControlFrame
     /// Ephemeral cursor presence; relayed to other peers, never logged or persisted.
     | Presence of PresencePayload
-    /// Live terminal traffic (Plan 12). Durable by the time it is sent — the Session
+    /// Live terminal traffic (Plan 13). Durable by the time it is sent — the Session
     /// Process appends to the transcript before it broadcasts — so a dropped frame costs
     /// latency, never the record.
     | Terminal of TerminalFrame

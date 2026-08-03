@@ -67,7 +67,7 @@ let create (sessionId: SessionId) (mount: string) : Auth =
                             clientSecret
                             // Loopback HTTP issuer (RFC 8252 pattern) — see the binding.
                             (createObj [ "execute" ==> [| allowInsecureRequests |] ])
-                        |> Async.AwaitPromise
+                        |> Interop.awaitPromise
                     configuration <- Some (resolved, redirectUri)
                     return Ok ()
                 with e ->
@@ -82,7 +82,7 @@ let create (sessionId: SessionId) (mount: string) : Auth =
                 | None -> return None
                 | Some (config, redirectUri) ->
                     let verifier = randomPKCECodeVerifier ()
-                    let! challenge = calculatePKCECodeChallenge verifier |> Async.AwaitPromise
+                    let! challenge = calculatePKCECodeChallenge verifier |> Interop.awaitPromise
                     let state = randomState ()
                     pendingLogins.Add state verifier
                     let url =
@@ -119,7 +119,7 @@ let create (sessionId: SessionId) (mount: string) : Auth =
                                     (createObj
                                         [ "pkceCodeVerifier" ==> verifier
                                           "expectedState" ==> (queryOf requestUrl "state" |> Option.defaultValue "") ])
-                                |> Async.AwaitPromise
+                                |> Interop.awaitPromise
                             let claims = tokens.claims ()
                             // The attribution rides the validated ID token: only the
                             // provider's own `yession_attribution = "user"` claim makes

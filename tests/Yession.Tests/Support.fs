@@ -277,7 +277,7 @@ type Client =
     { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
       Connection : App.Connection
       Registry : BodyRegistry
-      /// The plain-text roots the terminal composers live in (Plan 12), alongside the rich
+      /// The plain-text roots the terminal composers live in (Plan 13), alongside the rich
       /// bodies. Held on the client for the same reason `Registry` is: a test drives the
       /// composer by writing the CRDT the browser's input writes.
       Texts : TextRegistry

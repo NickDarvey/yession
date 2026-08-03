@@ -105,6 +105,49 @@ let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNat
 [<Fable.Core.Emit("delete process.env[$0]")>]
 let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
+// A promise that is already rejected when the workflow gets to it — the shape every
+// backend produces routinely (a docker 404 for a container that is not there).
+[<Fable.Core.Emit("Promise.reject(new Error($0))")>]
+let private rejectedPromise (message: string) : JS.Promise<unit> = Fable.Core.Util.jsNative
+
+// Count Node's unhandled-rejection reports. Registering a listener is also what stops
+// Node from killing the process over one, so the count is observable rather than fatal.
+[<Fable.Core.Emit("(() => { const w = { count: 0 }; const on = () => { w.count++ }; process.on('unhandledRejection', on); w.stop = () => process.off('unhandledRejection', on); return w })()")>]
+let private watchUnhandledRejections () : obj = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("$0.count")>]
+let private unhandledCount (watch: obj) : int = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("$0.stop()")>]
+let private stopWatching (watch: obj) : unit = Fable.Core.Util.jsNative
+
+let private promiseAwaitTests =
+    testList "Awaiting a promise (Node interop)" [
+        testCaseAsync "a rejection is handled at the call, so reaching it late is caught, not fatal" <|
+            async {
+                let watch = watchUnhandledRejections ()
+                // Build the await now and run it later. Fable's async trampoline hijacks a
+                // workflow onto a `setTimeout` every 2000 steps, so a real await lands here:
+                // after Node has already decided whether the rejection was handled. Nothing
+                // the workflow does later can undo that verdict, so the handler has to be
+                // attached by now.
+                let awaiting = Interop.awaitPromise (rejectedPromise "boom")
+                do! Async.Sleep 10
+                let! caught =
+                    async {
+                        try
+                            do! awaiting
+                            return "no error"
+                        with ex -> return ex.Message
+                    }
+                do! Async.Sleep 10
+                let unhandled = unhandledCount watch
+                stopWatching watch
+                Expect.equal caught "boom" "the rejection arrives as a catchable exception"
+                Expect.equal unhandled 0 "and Node never reports it unhandled — which would kill the process"
+            }
+    ]
+
 let private sandboxPolicyTests =
     testList "Sandbox policy (pure)" [
         testCase "backend parsing accepts exactly host, srt, and docker — and fails closed" <| fun () ->
@@ -113,6 +156,8 @@ let private sandboxPolicyTests =
             Expect.equal (SandboxBackend.parse " Docker ") (Ok DockerBackend) "case/space tolerant"
             Expect.isError (SandboxBackend.parse "podman") "an unknown backend is a loud error, never a fallback"
             Expect.isError (SandboxBackend.parse "") "blank is not a choice"
+            Expect.equal (SandboxBackend.parseAgent "srt") (Ok SrtBackend) "the agent sandbox accepts srt"
+            Expect.isError (SandboxBackend.parseAgent "docker") "docker is a work-sandbox backend only, by design"
 
         testCase "the host baseline is an allowlist: credentials never pass it" <| fun () ->
             let ambient =
@@ -128,6 +173,109 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" baseline) None "credentials do not"
             Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" baseline) None "no credential survives"
             Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" baseline) None "the launch secret does not"
+
+        testCase "the agent CLI's env: one credential, scratch HOME, never the raw process env" <| fun () ->
+            let ambient =
+                Map.ofList
+                    [ "PATH", "/usr/bin"
+                      "HOME", "/home/u"
+                      "HTTPS_PROXY", "http://proxy:3128"
+                      "ANTHROPIC_API_KEY", "ambient-key"
+                      "CLAUDE_CODE_OAUTH_TOKEN", "ambient-token"
+                      "YESSION_CONTROL_SECRET", "launch-secret" ]
+            // A resolved per-turn credential displaces BOTH ambient credential vars.
+            let resolved = Sandboxes.AgentSandbox.envFor ambient "/data/agent-home" (Some ("CLAUDE_CODE_OAUTH_TOKEN", "turn-token"))
+            Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" resolved) (Some "turn-token") "the turn's credential is set"
+            Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" resolved) None "the ambient key never rides along"
+            Expect.equal (Map.tryFind "HOME" resolved) (Some "/data/agent-home") "the CLI gets the scratch HOME"
+            Expect.equal (Map.tryFind "HTTPS_PROXY" resolved) (Some "http://proxy:3128") "proxy config passes through"
+            Expect.equal (Map.tryFind "YESSION_CONTROL_SECRET" resolved) None "the launch secret never reaches the CLI"
+            // The documented ambient last resort passes exactly the two credential vars.
+            let ambientRun = Sandboxes.AgentSandbox.envFor ambient "/data/agent-home" None
+            Expect.equal (Map.tryFind "ANTHROPIC_API_KEY" ambientRun) (Some "ambient-key") "the ambient key passes when nothing displaces it"
+            Expect.equal (Map.tryFind "CLAUDE_CODE_OAUTH_TOKEN" ambientRun) (Some "ambient-token") "so does the ambient token"
+
+        testCase "egress: only a confined backend carries an allowlist, and it is opt-in" <| fun () ->
+            let ambient = Map.ofList [ "YESSION_WORK_DOMAINS", "api.example.com, cdn.example.com" ]
+            Expect.equal (Sandboxes.egressFor HostBackend ambient) None "an unconfined backend is unrestricted"
+            Expect.equal (Sandboxes.egressFor DockerBackend ambient) None "so is docker"
+            Expect.equal
+                (Sandboxes.egressFor SrtBackend ambient)
+                (Some [ "api.example.com"; "cdn.example.com" ])
+                "srt carries exactly the configured domains"
+            Expect.equal
+                (Sandboxes.egressFor SrtBackend Map.empty)
+                (Some [])
+                "and none where none were configured — srt has no unrestricted mode, so it fails closed"
+
+        testCase "the srt config: the home is denied, the policy's paths are the holes in it" <| fun () ->
+            let policy =
+                { Support.emptyPolicy with
+                    ReadPaths = [ "/opt/tools" ]
+                    WritePaths = [ "/data/workspace" ]
+                    AllowedDomains = Some [ "api.example.com" ] }
+            let config =
+                Sandboxes.SrtSandbox.configFor
+                    { Bwrap = Some "/usr/bin/bwrap"
+                      Socat = Some "/usr/bin/socat"
+                      Ripgrep = Some "/usr/bin/rg"
+                      Nesting = Sandboxes.StrictNesting }
+                    (Some "/home/operator")
+                    policy
+            Expect.equal config.DenyRead [ "/home/operator" ] "the operator's home is the denied region"
+            Expect.equal config.AllowRead [ "/opt/tools"; "/data/workspace" ] "read paths, and everything writable"
+            Expect.isTrue (List.contains "/data/workspace" config.AllowWrite) "the policy's write paths"
+            Expect.isTrue (List.contains Sandboxes.SrtSandbox.tmpDir config.AllowWrite) "and the temp dir srt redirects TMPDIR to"
+            Expect.equal config.AllowedDomains [ "api.example.com" ] "the egress allowlist rides through"
+            Expect.equal config.Bwrap (Some "/usr/bin/bwrap") "the named confinement tool rides through"
+            Expect.equal config.Ripgrep (Some "/usr/bin/rg") "and so does the scanner srt will not start without"
+            Expect.isFalse config.WeakNesting "the strict profile is what a configured host gets"
+            let unrestricted =
+                Sandboxes.SrtSandbox.configFor
+                    { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
+                    None
+                    Support.emptyPolicy
+            Expect.equal unrestricted.AllowedDomains [] "a policy naming no domains gets no egress, never all of it"
+
+        testCase "the confinement tools: named, blank is absent, and weakening is never a guess" <| fun () ->
+            let tools =
+                Sandboxes.SrtSandbox.toolsFrom
+                    (Map.ofList
+                        [ "YESSION_BWRAP_PATH", " /nix/store/x/bin/bwrap "
+                          "YESSION_SOCAT_PATH", ""
+                          "YESSION_RIPGREP_PATH", "/nix/store/x/bin/rg" ])
+                |> expect
+            Expect.equal tools.Bwrap (Some "/nix/store/x/bin/bwrap") "a named tool is trimmed and used"
+            Expect.equal tools.Ripgrep (Some "/nix/store/x/bin/rg") "every dependency is named, not left to PATH"
+            Expect.equal tools.Socat None "a blank one is absent (darwin sets neither), not a path of empty string"
+            Expect.equal tools.Nesting Sandboxes.StrictNesting "unconfigured means the strict profile"
+            Expect.equal
+                (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_SANDBOX_NESTED", "weak" ])
+                 |> expect
+                 |> fun t -> t.Nesting)
+                Sandboxes.WeakNesting
+                "an unprivileged container asks for the weaker profile explicitly"
+            Expect.isError
+                (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_SANDBOX_NESTED", "off" ]))
+                "and anything else is a loud error, not a guess at which way to err"
+
+        testCase "an argv survives the shell srt wraps it in" <| fun () ->
+            // srt's Linux/macOS wrapper takes a command STRING, so anything an argv can hold
+            // has to come back out the other side of a shell intact.
+            Expect.equal
+                (Sandboxes.SrtSandbox.commandLine "/bin/echo" [ "two words"; "it's"; "$HOME"; "a;b" ])
+                "'/bin/echo' 'two words' 'it'\\''s' '$HOME' 'a;b'"
+                "spaces, quotes, expansions and separators are all inert"
+
+        testCase "the agent's egress: a known default, replaceable wholesale" <| fun () ->
+            Expect.equal
+                (Sandboxes.AgentSandbox.domainsFrom Map.empty)
+                Sandboxes.AgentSandbox.defaultDomains
+                "unconfigured, the CLI reaches the API and the console it refreshes a credential against"
+            Expect.equal
+                (Sandboxes.AgentSandbox.domainsFrom (Map.ofList [ "YESSION_AGENT_DOMAINS", "gateway.internal" ]))
+                [ "gateway.internal" ]
+                "a deployment that fronts the API elsewhere replaces the list, it does not add to it"
 
         testCase "policy assembly: spec variables win over the baseline; docker takes no baseline" <| fun () ->
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
@@ -693,6 +841,7 @@ let private persistenceTests =
 let tests =
     testList "Phase2" [
         // Cheap tier: pure policy/parse, folds, host-sandbox child-process integration.
+        promiseAwaitTests
         sandboxPolicyTests
         environmentProjectionTests
         commandFoldTests

@@ -179,7 +179,7 @@ Infrastructure delivered after Phase 4 acceptance, outside the numbered phase ta
   agent turn running on the TURN ACTOR's credential (session ▸ actor ▸ ambient env),
   resolved fresh per turn. Follow-ups recorded in the plan doc + GAPS.
 
-- **Terminals on the WorkSandbox (Plan 12)** — [12-worksandbox-terminals.md](12-worksandbox-terminals.md)
+- **Terminals on the WorkSandbox (Plan 13)** — [13-worksandbox-terminals.md](13-worksandbox-terminals.md)
   (Status: PR 1 of 3 delivered). Zero-to-many terminals against the session's WorkSandbox, on a
   right panel built out of the message composer's parts: a command line is a collaborative
   `Y.Text` slot per (terminal, author), sending enqueues it under the key the slot was published

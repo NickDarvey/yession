@@ -24,7 +24,7 @@ type Transcript =
 /// the process that wrote it and an audit trail that restarts at zero is not one.
 type OpenTranscript = TerminalId -> TranscriptHeader -> Transcript
 
-/// The terminal queue's drain decision, as a pure function (Plan 12). The Session Process
+/// The terminal queue's drain decision, as a pure function (Plan 13). The Session Process
 /// is the single consumer of the terminal queue exactly as it is of the message queue,
 /// and this is the whole policy: what runs next, and what is merely left over.
 ///

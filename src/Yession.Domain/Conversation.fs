@@ -60,7 +60,7 @@ module ConversationProjection =
         | CommandStarted _
         | CommandOutputReceived _
         | CommandCompleted _ -> proj
-        // Terminals (Plan 12) project into `TerminalProjection`. A command someone ran is
+        // Terminals (Plan 13) project into `TerminalProjection`. A command someone ran is
         // not something someone said: it belongs beside its output, in the terminal it ran
         // in, not interleaved with the conversation.
         | SessionEvent.TerminalOpened _

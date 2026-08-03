@@ -40,6 +40,7 @@ type Need =
     | LiveAgent   // real model credentials
     | Keyring     // a usable OS credential manager (Keychain / Credential Manager / Secret Service)
     | Nix         // the nix CLI, to evaluate/build this repo's derivations against the working tree
+    | Srt         // OS-level confinement: bubblewrap + socat on Linux, Seatbelt on macOS
 
 // process.env under Node; the CLR reads it through System.Environment below. Guarded so this
 // branch is dead-code-eliminated out of the .NET build path — jsNative would throw there.
@@ -52,7 +53,7 @@ let private getEnv (name: string) : string =
         match System.Environment.GetEnvironmentVariable name with null -> "" | v -> v
     else jsEnv name
 
-let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix ]
+let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix; Srt ]
 
 let private parseNeed (s: string) : Need option =
     match s.Trim().ToLowerInvariant () with
@@ -63,10 +64,8 @@ let private parseNeed (s: string) : Need option =
     | "liveagent" -> Some LiveAgent
     | "keyring"   -> Some Keyring
     | "nix"       -> Some Nix
+    | "srt"       -> Some Srt
     | _           -> None
-
-let private hasCreds =
-    getEnv "ANTHROPIC_API_KEY" <> "" || getEnv "CLAUDE_CODE_OAUTH_TOKEN" <> ""
 
 /// The capabilities THIS run declares it has. `YESSION_TEST_CAPS` is the primary API (a
 /// space/comma list, e.g. from `check Browser Native`); `YESSION_TEST_TIER=verify|all`
@@ -79,10 +78,13 @@ let private requestedCaps : Set<Need> =
         |> Array.choose parseNeed
         |> Set.ofArray
 
-/// `LiveAgent` additionally requires real credentials — drop it when absent, so `-- LiveAgent`
-/// without creds reports a skip rather than failing at connect time.
-let private caps : Set<Need> =
-    if hasCreds then requestedCaps else Set.remove LiveAgent requestedCaps
+/// What the run declared, verbatim. A capability is never dropped here: `check` refuses to
+/// start when the box cannot host one it was asked for (tasks.fsx `requireCapabilities`), so
+/// by the time this runs the declared set is the available set. `LiveAgent` used to be
+/// silently removed when no credential was present, which is how a release workflow naming a
+/// secret this repository does not have shipped every version up to v5.0.0-beta.0 with the
+/// live agent suite reporting a skip.
+let private caps : Set<Need> = requestedCaps
 
 let private onDotnet = Compiler.isDotnet
 
@@ -94,11 +96,8 @@ let private canRun (need: Need list) : bool =
     onDotnet = runsOnDotnet need
     && need |> List.forall (fun n -> Set.contains n caps)
 
-/// What this run actually has, for the skip line. A cap can be missing because it was never
-/// declared OR because the run declared it and then dropped it (no credentials, no daemon), so
-/// the reason reports the resolved set rather than claiming anything about `YESSION_TEST_CAPS`
-/// — a skip that said "not in YESSION_TEST_CAPS" about a cap that WAS in it sent one reader
-/// hunting a cap-propagation bug that did not exist.
+/// What this run declared, for the skip line — which now means exactly "this tier did not ask
+/// for it", since a cap that was asked for and is unavailable fails the run instead.
 let private declared : string =
     if Set.isEmpty caps then "none"
     else caps |> Set.toList |> List.map (sprintf "%A") |> String.concat ", "

@@ -11,9 +11,9 @@ namespace Yession.Domain
 /// configuration — so an invalid choice fails the session loudly at start, never
 /// silently mid-turn.
 type SandboxBackend =
-    /// Explicitly unsandboxed: plain child processes of the Session Process. The
-    /// default for now; switching the default to a confined backend is a later,
-    /// deliberate flip.
+    /// Explicitly unsandboxed: plain child processes of the Session Process. No longer
+    /// the default — it has to be asked for, and it is honest about what it is: the env
+    /// allowlist still holds, the filesystem and the network do not.
     | HostBackend
     /// OS-level confinement via `@anthropic-ai/sandbox-runtime` (bubblewrap on Linux,
     /// Seatbelt on macOS): wrapped spawn, millisecond start, enforced egress filtering.
@@ -38,6 +38,15 @@ module SandboxBackend =
         | HostBackend -> "host"
         | SrtBackend -> "srt"
         | DockerBackend -> "docker"
+
+    /// Parse the AgentSandbox backend: the agent CLI runs on host or under srt. Docker
+    /// is BY DESIGN not an agent backend — a container per session boot is the
+    /// opposite of the sub-second start the agent needs; the WorkSandbox keeps it.
+    let parseAgent (raw: string) : Result<SandboxBackend, string> =
+        parse raw
+        |> Result.bind (function
+            | DockerBackend -> Error "docker is a work-sandbox backend only — the agent sandbox is host or srt"
+            | backend -> Ok backend)
 
 /// Everything a sandbox needs to know at creation. `Env` is the sandbox's WHOLE base
 /// environment — backends pass it verbatim and must never merge the parent process's
