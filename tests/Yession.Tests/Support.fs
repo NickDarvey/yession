@@ -274,7 +274,7 @@ let waitUntil (label: string) (condition: unit -> bool) : Async<unit> =
 /// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.
 type Client =
-    { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
+    { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientMsg>>
       Connection : App.Connection
       Registry : BodyRegistry
       /// The plain-text roots the terminal composers live in (Plan 13), alongside the rich
@@ -384,7 +384,7 @@ let reconnectClient (signalUrl: string) (client: Client) : Async<Client> =
 /// until the owner's update arrives (an empty root merges with the incoming one by name).
 module Body =
 
-    type Runner = Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
+    type Runner = Harness.Runner<ClientModel, Ylmish.Program.Message<ClientMsg>>
 
     /// Author a peer's draft body on a bare runner under an EXPLICIT queue key: publish the slot
     /// carrying that key, then write the markdown into its top-level body fragment. A bare runner

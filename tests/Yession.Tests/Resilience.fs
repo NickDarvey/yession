@@ -457,7 +457,7 @@ let private channelTests =
 /// runs, with WebRTC and Lit swapped for the two things a test can hold: a channel it can cut,
 /// and a record of every attempt.
 type private Lifecycle =
-    { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
+    { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientMsg>>
       /// Compose a body and send it through the LIVE connection — the app's own atomic send,
       /// so the drain sees one update and the timeline is reached the way it really is.
       Say : string -> Async<unit>

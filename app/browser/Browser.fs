@@ -790,7 +790,7 @@ let private start () =
 
         // Render the Lit view on every model change. Lit diffs into `#app`, so the focused
         // textarea and its caret survive; only the timeline scroll is restored by hand.
-        let setState (model: ClientModel) (dispatch: Ylmish.Program.Message<ClientModel, ClientMsg> -> unit) =
+        let setState (model: ClientModel) (dispatch: Ylmish.Program.Message<ClientMsg> -> unit) =
             dispatchRef <- fun msg -> dispatch (Ylmish.Program.Message.User msg)
             latestModel <- model
             let scroll = timelineScroll ()

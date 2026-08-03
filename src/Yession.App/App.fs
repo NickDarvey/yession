@@ -207,19 +207,16 @@ module App =
           /// How far the MODEL has consumed the log. When given, this — not the read
           /// loop's own bookkeeping — is what "how far have we got" means.
           ///
-          /// The distinction is not academic. `withYlmish` applies a remote doc update by
-          /// SETTING the model from a decode, and a `Set` replaces every non-synced field
-          /// with the snapshot the decode was built from. So a doc update that lands just
-          /// after an event page was folded rolls that fold back: the conversation, the
-          /// terminal projection and the read offset all revert, while the read loop's
-          /// private cursor stays where it got to — and consumption stops for good,
-          /// because the loop believes it is up to date and nothing will ever say
-          /// otherwise.
+          /// One source of truth, because two drift. The loop's private cursor advances
+          /// when a page ARRIVES; the model's advances when the page is FOLDED. Anything
+          /// that discards a fold — a decode failure keeping the current model, a
+          /// reconnect onto a restored replica — moves them apart, and a loop reading its
+          /// own cursor then believes it is up to date while the model is missing events
+          /// nothing will ever offer again.
           ///
-          /// Reading the position from the model closes that hole: a rolled-back model is
-          /// visibly behind, so the next hint (or doc update — see `connect`) re-reads,
-          /// and the fold is offset-gated, so re-reading costs a round trip and changes
-          /// nothing else.
+          /// Asking the model instead makes that unrepresentable: a model that lost a
+          /// fold is visibly behind, so the next hint re-reads it. The fold is
+          /// offset-gated, so a re-read costs a round trip and changes nothing else.
           ReadPosition : (unit -> EventOffset option) option }
 
     module ConnectOptions =
@@ -397,11 +394,6 @@ module App =
         let mutable lastProcessed : EventOffset option = options.ResumeAfter
         let mutable latestKnown : EventOffset option = None
         let mutable readInFlight : RequestId option = None
-        // Set when a read has failed for good (its resilience policy already spent). While
-        // parked, nothing re-requests on its own — the loop waits for an availability hint
-        // or a reconnect, which is the difference between reporting a dead feed once and
-        // hammering it. Only the doc-update re-arm respects this; a hint clears it.
-        let mutable parked = false
 
         // Where consumption has actually got to. The model's answer when the composition
         // gave one; the loop's own bookkeeping otherwise (a peer with no model behind it).
@@ -438,7 +430,6 @@ module App =
 
         and onEventsPage (requestId: RequestId) (page: EventPage<SessionEvent>) =
             if readInFlight = Some requestId then readInFlight <- None
-            parked <- false
             lastProcessed <- EventOffset.maxOption lastProcessed page.LastOffset
             latestKnown <- EventOffset.maxOption latestKnown page.LastOffset
             dispatch (EventsPageMsg page)
@@ -459,7 +450,6 @@ module App =
             // with no log line and nothing in the model. Drafts, title, and presence kept
             // syncing over the data channel the whole time, so the only symptom was a
             // timeline that never filled.
-            parked <- true
             dispatch (EventFeedMsg (FeedStalled (FeedFault.describe fault)))
 
         // How far a contiguous HTTP read has got through each terminal's transcript. Held
@@ -501,14 +491,6 @@ module App =
                     }
                 Async.StartImmediate (readFrom (readPositionOf terminal))
 
-        // A doc update is the one thing that can silently undo a fold (see
-        // `ConnectOptions.ReadPosition`), so it is also the signal that consumption may
-        // need to resume. Cheap: `requestIfBehind` does nothing unless the position the
-        // model reports has actually fallen behind what the session says exists — and
-        // nothing at all while the feed is parked, so a dead feed is still reported once
-        // rather than retried behind the policy's back.
-        DocSync.onAnyUpdate doc (fun () -> if not parked then requestIfBehind ())
-
         let dispatchAndConsume (msg: ClientMsg) =
             dispatch msg
             match msg with
@@ -528,11 +510,9 @@ module App =
                 // updates are idempotent, so this is always safe.
                 Async.StartImmediate (channel.Send (State (StateSync (DocSync.fullState doc))))
                 latestKnown <- EventOffset.maxOption latestKnown accepted.LatestOffset
-                parked <- false
                 requestIfBehind ()
             | EventsAvailableMsg latest ->
                 latestKnown <- EventOffset.maxOption latestKnown (Some latest)
-                parked <- false
                 requestIfBehind ()
             | _ -> ()
 

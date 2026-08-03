@@ -22,7 +22,7 @@ open Yession.Tests.Support
 // An offline peer: a full client program on its own doc, never connected to a channel.
 // Updates move only when a test explicitly delivers them.
 type private OfflinePeer =
-    { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientModel, ClientMsg>>
+    { Runner : Harness.Runner<ClientModel, Ylmish.Program.Message<ClientMsg>>
       Registry : BodyRegistry
       Doc : Y.Doc }
 
