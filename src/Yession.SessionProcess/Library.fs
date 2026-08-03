@@ -31,3 +31,8 @@ module Bootstrap =
         | CommandStarted _ -> "command-started"
         | CommandOutputReceived _ -> "command-output-received"
         | CommandCompleted _ -> "command-completed"
+        | SessionEvent.TerminalOpened _ -> "terminal-opened"
+        | SessionEvent.TerminalClosed _ -> "terminal-closed"
+        | SessionEvent.TerminalBlockStarted _ -> "terminal-block-started"
+        | SessionEvent.TerminalBlockCompleted _ -> "terminal-block-completed"
+        | SessionEvent.TerminalTranscriptTruncated _ -> "terminal-transcript-truncated"

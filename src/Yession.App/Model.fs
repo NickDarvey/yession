@@ -84,6 +84,46 @@ type ComposerChoice =
 /// colour is derived from its id (`PeerColour`), not carried.
 type RemotePresence = { DisplayName : string; Focus : Focus }
 
+/// One terminal's live transcript as this client has it (Plan 13). Records are keyed by
+/// their sequence number, which makes application idempotent by construction: the same
+/// record arriving twice — once as a live frame, once inside a fetched chunk — is one map
+/// entry, exactly as an event at a known offset folds once. That is the whole reason the
+/// live leg and the history leg can be different transports and still agree.
+type TerminalFeed =
+    { Records : Map<int, TranscriptRecord>
+      /// The transcript length this client believes the session has, from availability
+      /// hints and from the records it has seen. Drives catch-up the way
+      /// `LatestKnownOffset` drives the event feed.
+      KnownLength : int
+      /// How far a contiguous prefix has been read. Fetching resumes here.
+      ReadThrough : int }
+
+module TerminalFeed =
+
+    let empty : TerminalFeed = { Records = Map.empty; KnownLength = 0; ReadThrough = 0 }
+
+    /// Fold one record in. Out-of-order and duplicate records are both fine — the map key
+    /// is the sequence number.
+    let withRecord (seq: int) (record: TranscriptRecord) (feed: TerminalFeed) : TerminalFeed =
+        { feed with
+            Records = Map.add seq record feed.Records
+            KnownLength = max feed.KnownLength (seq + 1) }
+
+    /// The records in `[fromSeq, toSeq)`, in order — one block's output.
+    let slice (fromSeq: int) (toSeq: int) (feed: TerminalFeed) : TranscriptRecord list =
+        feed.Records
+        |> Map.toList
+        |> List.filter (fun (seq, _) -> seq >= fromSeq && seq < toSeq)
+        |> List.map snd
+
+    /// The output text of a range: the `o`/`e` records concatenated. Input and resize
+    /// records are excluded — a replay shows what was typed, a block's OUTPUT does not.
+    let outputText (fromSeq: int) (toSeq: int) (feed: TerminalFeed) : string =
+        slice fromSeq toSeq feed
+        |> List.filter (fun r -> r.Kind = TranscriptOutput || r.Kind = TranscriptStderr)
+        |> List.map (fun r -> r.Data)
+        |> String.concat ""
+
 type ClientModel =
     { Peer          : PeerState
       Connection    : ConnectionState
@@ -126,6 +166,19 @@ type ClientModel =
       Environment   : EnvironmentStatus
       /// The read-only command log, folded from command events (Step 13).
       Commands      : CommandLog
+      /// Terminals, folded from terminal events (Plan 13) — the panel's structure.
+      Terminals     : TerminalProjection
+      /// Each terminal's transcript as this client has it. Separate from the projection
+      /// because it arrives on a different leg: facts fold from the event log, bytes
+      /// stream from the transcript.
+      TerminalFeeds : Map<TerminalId, TerminalFeed>
+      /// Which terminal the panel is showing. `None` = the first open one, resolved by
+      /// `selectedTerminal` — a stored choice would go stale the moment that terminal
+      /// closed.
+      TerminalChoice : TerminalId option
+      /// Whether the terminals panel is open. View state, never synced: two people in one
+      /// session may reasonably want different columns on screen.
+      TerminalsOpen : bool
       /// The Claude connection panel's state (Plan 08), driven by the /claude routes.
       Claude        : ClaudeViewState }
 
@@ -186,6 +239,38 @@ type ClientMsg =
     | ClaudeStatusMsg of ClaudeStatus
     /// The Claude sign-in flow moved (begin/busy/error/reset).
     | ClaudeFlowMsg of ClaudeFlowState
+    // --- Terminals (Plan 13) ---------------------------------------------------------
+    /// One transcript record arrived — live over the data channel, or from a fetched
+    /// history chunk. Both routes carry the sequence number, so both fold the same way.
+    | TerminalRecordMsg of TerminalId * seq: int * TranscriptRecord
+    /// A terminal's transcript is this long. A hint that triggers a read, never data.
+    | TerminalAvailableMsg of TerminalId * length: int
+    /// A contiguous prefix of a terminal's transcript has been read through this seq.
+    | TerminalReadThroughMsg of TerminalId * seq: int
+    /// Show this terminal in the panel.
+    | SelectTerminalMsg of TerminalId
+    /// Open or close the terminals column.
+    | ToggleTerminalsMsg
+    /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
+    /// becomes when sent. The author's own call, exactly as for a message draft.
+    | EnsureTerminalDraftMsg of TerminalId * PeerId * QueueId
+    /// Send = enqueue: the slot's command moves into the terminal's queue at the tail
+    /// under the key the slot has carried since publication, and the slot clears.
+    | SendTerminalDraftMsg of TerminalId * PeerId
+    /// Drop a composer slot without sending it.
+    | DiscardTerminalDraftMsg of TerminalId * PeerId
+    /// Approve a queued command, by the peer approving it. The drain runs it on the next
+    /// pass; until then it is still editable, which is the point.
+    | ApproveTerminalQueuedMsg of QueueId * PeerId
+    /// Withdraw an approval — the mirror of granting one, so a mis-click is undoable for
+    /// as long as the command has not been consumed.
+    | UnapproveTerminalQueuedMsg of QueueId
+    /// Delete a queued command. Until consumed, deletion wins.
+    | DeleteTerminalQueuedMsg of QueueId
+    /// Reorder a queued command within its terminal: one fractional-index register write.
+    | ReorderTerminalQueuedMsg of QueueId * order: float
+    /// Set a terminal's approval mode.
+    | SetTerminalModeMsg of TerminalId * TerminalApprovalMode
 
 module ClientModel =
 
@@ -219,6 +304,10 @@ module ClientModel =
           Composer = Unchosen
           Environment = EnvironmentNotStarted
           Commands = CommandLog.empty
+          Terminals = TerminalProjection.empty
+          TerminalFeeds = Map.empty
+          TerminalChoice = None
+          TerminalsOpen = false
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
               Flow = ClaudeIdle } }
@@ -269,6 +358,47 @@ module ClientModel =
         model.Presence
         |> Map.toList
         |> List.filter (fun (_, presence) -> presence.Focus.Field = DraftBody peer)
+        |> List.map (fun (editor, presence) -> editor, presence.DisplayName)
+
+    /// Which terminal the panel shows: the stored choice while it is still open, else the
+    /// first open one. Resolved rather than stored, for the same reason `composerTarget`
+    /// is: a choice that outlives what it pointed at is a blank pane nobody asked for.
+    let selectedTerminal (model: ClientModel) : TerminalId option =
+        let openIds = TerminalProjection.openTerminals model.Terminals |> List.map (fun t -> t.TerminalId)
+        match model.TerminalChoice with
+        | Some chosen when List.contains chosen openIds -> Some chosen
+        | _ -> List.tryHead openIds
+
+    /// A terminal's feed, empty when nothing has arrived for it yet.
+    let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
+        model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
+
+    /// A terminal's queued commands in run order.
+    let terminalQueue (terminal: TerminalId) (model: ClientModel) : TerminalQueued list =
+        TerminalQueueOrder.sortedFor terminal model.Synced.TerminalQueue
+
+    /// The composer slots published in a terminal, in stable order — every peer mid-command
+    /// there, the local peer included.
+    let terminalDrafts (terminal: TerminalId) (model: ClientModel) : PeerId list =
+        model.Synced.TerminalDrafts
+        |> Map.toList
+        |> List.filter (fun ((t, _), _) -> t = terminal)
+        |> List.map (fun ((_, author), _) -> author)
+        |> List.sortBy PeerId.value
+
+    /// Whether a queued command is waiting on an approval it has not got — the one question
+    /// the queue's UI asks, answered by the same function the drain asks
+    /// (`TerminalApprovalMode.requiresApproval`), so a badge can never disagree with what
+    /// the Session Process will actually do.
+    let awaitsApproval (entry: TerminalQueued) (model: ClientModel) : bool =
+        TerminalApprovalMode.requiresApproval (SyncedSessionState.modeOf entry.Terminal model.Synced) entry.Author
+        && Option.isNone entry.ApprovedBy
+
+    /// Who is editing a terminal composer right now, by their live caret.
+    let terminalEditorsOf (terminal: TerminalId) (author: PeerId) (model: ClientModel) : (PeerId * string) list =
+        model.Presence
+        |> Map.toList
+        |> List.filter (fun (_, presence) -> presence.Focus.Field = TerminalDraftBody (terminal, author))
         |> List.map (fun (editor, presence) -> editor, presence.DisplayName)
 
     /// A peer's display name: the roster's, else the peer's own live presence, else the raw id
@@ -329,6 +459,9 @@ module ClientModel =
             let commands =
                 freshEvents
                 |> List.fold (fun log e -> CommandLog.applyEvent log e.Event) model.Commands
+            let terminals =
+                freshEvents
+                |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) model.Terminals
             // The roster keeps departed peers: a draft's author may have left while their words
             // are still in the composer, and "who wrote this" must still have an answer.
             let peers =
@@ -346,6 +479,7 @@ module ClientModel =
                 Agent = agent
                 Environment = environment
                 Commands = commands
+                Terminals = terminals
                 Peers = peers
                 EventConsumer =
                     { LastProcessedOffset = highWater
@@ -428,3 +562,93 @@ module ClientModel =
             { model with Claude = { Status = status; Flow = flow } }
         | ClaudeFlowMsg flow ->
             { model with Claude = { model.Claude with Flow = flow } }
+        | TerminalRecordMsg (terminal, seq, record) ->
+            let feed = terminalFeed terminal model |> TerminalFeed.withRecord seq record
+            { model with TerminalFeeds = Map.add terminal feed model.TerminalFeeds }
+        | TerminalAvailableMsg (terminal, length) ->
+            let feed = terminalFeed terminal model
+            { model with
+                TerminalFeeds =
+                    Map.add terminal { feed with KnownLength = max feed.KnownLength length } model.TerminalFeeds }
+        | TerminalReadThroughMsg (terminal, seq) ->
+            let feed = terminalFeed terminal model
+            { model with
+                TerminalFeeds =
+                    Map.add
+                        terminal
+                        { feed with ReadThrough = max feed.ReadThrough seq; KnownLength = max feed.KnownLength seq }
+                        model.TerminalFeeds }
+        | SelectTerminalMsg terminal ->
+            { model with TerminalChoice = Some terminal; TerminalsOpen = true }
+        | ToggleTerminalsMsg ->
+            { model with TerminalsOpen = not model.TerminalsOpen }
+        | EnsureTerminalDraftMsg (terminal, author, queueId) ->
+            // Idempotent, and the queue key of an existing slot is never re-minted: every
+            // co-editor's send depends on it staying the one the slot was published with.
+            if Map.containsKey (terminal, author) model.Synced.TerminalDrafts then model
+            else
+                model
+                |> withSynced
+                    { model.Synced with
+                        TerminalDrafts =
+                            Map.add
+                                (terminal, author)
+                                { Terminal = terminal; Author = author; QueueId = queueId }
+                                model.Synced.TerminalDrafts }
+        | SendTerminalDraftMsg (terminal, author) ->
+            // Slot -> queue entry in one model update (one CRDT transaction), attributed to
+            // the slot's AUTHOR rather than to whoever pressed send. Two peers sending the
+            // same slot write the same key, so the replicas merge to one entry instead of
+            // running the command twice. The command TEXT is carried over imperatively in
+            // the same transaction (`App.connect`'s SendTerminalDraft) — shared types
+            // cannot be re-parented.
+            match Map.tryFind (terminal, author) model.Synced.TerminalDrafts with
+            | Some draft when not (Map.containsKey draft.QueueId model.Synced.TerminalQueue) ->
+                let entry =
+                    { QueueId = draft.QueueId
+                      Terminal = terminal
+                      // The author is the PEER who wrote it. Attribution to a verified user
+                      // happens at the durable append, where the Session Process knows the
+                      // binding — the doc only ever knows connections.
+                      Author = PeerRef author
+                      Order = TerminalQueueOrder.nextFor terminal model.Synced.TerminalQueue
+                      ApprovedBy = None }
+                model
+                |> withSynced
+                    { model.Synced with
+                        TerminalDrafts = Map.remove (terminal, author) model.Synced.TerminalDrafts
+                        TerminalQueue = Map.add draft.QueueId entry model.Synced.TerminalQueue }
+            | _ -> model
+        | DiscardTerminalDraftMsg (terminal, author) ->
+            model
+            |> withSynced
+                { model.Synced with TerminalDrafts = Map.remove (terminal, author) model.Synced.TerminalDrafts }
+        | ApproveTerminalQueuedMsg (queueId, approver) ->
+            match Map.tryFind queueId model.Synced.TerminalQueue with
+            | Some entry ->
+                model
+                |> withSynced
+                    { model.Synced with
+                        TerminalQueue =
+                            Map.add queueId { entry with ApprovedBy = Some approver } model.Synced.TerminalQueue }
+            | None -> model
+        | UnapproveTerminalQueuedMsg queueId ->
+            match Map.tryFind queueId model.Synced.TerminalQueue with
+            | Some entry ->
+                model
+                |> withSynced
+                    { model.Synced with
+                        TerminalQueue = Map.add queueId { entry with ApprovedBy = None } model.Synced.TerminalQueue }
+            | None -> model
+        | DeleteTerminalQueuedMsg queueId ->
+            model |> withSynced { model.Synced with TerminalQueue = Map.remove queueId model.Synced.TerminalQueue }
+        | ReorderTerminalQueuedMsg (queueId, order) ->
+            match Map.tryFind queueId model.Synced.TerminalQueue with
+            | Some entry ->
+                model
+                |> withSynced
+                    { model.Synced with
+                        TerminalQueue = Map.add queueId { entry with Order = order } model.Synced.TerminalQueue }
+            | None -> model
+        | SetTerminalModeMsg (terminal, mode) ->
+            model |> withSynced { model.Synced with TerminalModes = Map.add terminal mode model.Synced.TerminalModes }

@@ -113,6 +113,31 @@ module Dom =
         // the session has stopped and this deployment can bring it back.
         let sessionGone = "data-session-gone"
         let sessionReopen = "data-session-reopen"
+        // Terminals (Plan 13): the column, its strip of open terminals, the blocks that have
+        // run, and the composer that queues the next command. The composer's hooks mirror the
+        // message composer's, because the interaction is the same one.
+        let terminalPanel = "data-terminal-panel"
+        let terminalToggle = "data-terminal-toggle"
+        let terminalTab = "data-terminal-tab"
+        let terminalNew = "data-terminal-new"
+        let terminalClose = "data-terminal-close"
+        let terminalId = "data-terminal-id"
+        let terminalMode = "data-terminal-mode"
+        let terminalBlock = "data-terminal-block"
+        let terminalBlockStatus = "data-terminal-block-status"
+        let terminalOutput = "data-terminal-output"
+        let terminalTruncated = "data-terminal-truncated"
+        let terminalInput = "data-terminal-input"
+        let terminalSend = "data-terminal-send"
+        let terminalDiscard = "data-terminal-discard"
+        let terminalDraftAuthor = "data-terminal-draft-author"
+        /// One per live caret in a terminal composer slot.
+        let terminalDraftEditor = "data-terminal-draft-editor"
+        let terminalQueued = "data-terminal-queued"
+        let terminalQueuedStatus = "data-terminal-queued-status"
+        let terminalApprove = "data-terminal-approve"
+        let terminalUnapprove = "data-terminal-unapprove"
+        let terminalQueueDelete = "data-terminal-queue-delete"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
@@ -138,7 +163,7 @@ module Dom =
         /// What every degraded state promises: this is a local-first client, so a lost leg
         /// costs sync, not the ability to work.
         let localFallback = "You can keep writing — everything is saved locally and syncs when the session is back."
-        /// The same promise where it cannot be kept (Plan 12): this deployment addresses
+        /// The same promise where it cannot be kept (Plan 13): this deployment addresses
         /// sessions by port, so a session that restarts comes back at a new origin — and a
         /// browser partitions storage by origin, which strands anything written here in the
         /// meantime. Everything already sent is safe; it is on the server.
@@ -149,6 +174,14 @@ module Dom =
         // Non-human authors.
         let agent = "agent"
         let sessionProcess = "session-process"
+        // Terminal block/queue status tokens (Plan 13).
+        let blockRunning = "running"
+        let blockOk = "ok"
+        let blockFailed = "failed"
+        /// A queued command whose terminal's mode demands an approval it has not got.
+        let queuedAwaitingApproval = "awaiting-approval"
+        /// A queued command that will run as soon as the terminal is free.
+        let queuedReady = "ready"
         let system = "system"
         // Conversation item status.
         let complete = "complete"

@@ -17,6 +17,9 @@
     <Compile Include="ProseMirror.fs" />
     <Compile Include="Editor.fs" />
     <Compile Include="RichText.fs" />
+    <!-- Editing a plain collaborative command line: needed by the view (which renders the
+         composer) and by App (which sends it). -->
+    <Compile Include="TerminalText.fs" />
     <Compile Include="View.fs" />
     <Compile Include="App.fs" />
   </ItemGroup>

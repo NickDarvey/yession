@@ -148,6 +148,38 @@ module CommandId =
         normalize "CommandId" raw |> Result.map CommandId
     let value (CommandId s) = s
 
+/// One terminal on the session's WorkSandbox (docs/plans/12). Constrained to the same
+/// filename-safe alphabet as `SessionId` for the same reason: a terminal's transcript is a
+/// sidecar file named after it, and an id that cannot be a filename would be discovered at
+/// the first append rather than at parse.
+type TerminalId = private TerminalId of string
+
+module TerminalId =
+    let private isNameChar (c: char) =
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c = '-'
+
+    let create (raw: string) : Result<TerminalId, string> =
+        normalize "TerminalId" raw
+        |> Result.bind (fun s ->
+            if s.Length >= 2 && String.forall isNameChar s then Ok (TerminalId s)
+            else Error "TerminalId must be filename-safe ([A-Za-z0-9-], at least 2 characters)")
+
+    /// Mint a fresh id: 128 random bits, Crockford base32-encoded — the same shape a
+    /// session id has, and legal in a filename by construction.
+    let mint () : TerminalId = TerminalId (Base32Crockford.encode (Base32Crockford.guidBytes ()))
+
+    let value (TerminalId s) = s
+
+/// One executed command in a terminal: the command, its output range, and its exit code.
+/// Minted by the Session Process when it starts the run — never by a client, because a
+/// block is a durable fact about something that actually happened.
+type BlockId = private BlockId of string
+
+module BlockId =
+    let create (raw: string) : Result<BlockId, string> =
+        normalize "BlockId" raw |> Result.map BlockId
+    let value (BlockId s) = s
+
 /// A Manager-verified user identity — the OIDC `sub` claim the Manager itself issued
 /// (docs/plans/04-session-authorization.md). Under the localhost strategy this is the
 /// single "local" user; a BYO strategy (docs/plans/07) mints real subjects.
@@ -167,3 +199,40 @@ type ActorRef =
     | Agent
     | SessionProcess
     | System
+
+module ActorRef =
+
+    /// An actor as ONE string. The events' wire format is a tagged object (Serialization.fs)
+    /// and stays that way; this exists for the places that need a value a CRDT register can
+    /// hold — a terminal queue entry's author, which may be the agent and so cannot be the
+    /// bare `PeerId` the message queue gets away with.
+    ///
+    /// The `:` separator is safe because neither a `UserId` nor a `PeerId` is parsed out of
+    /// the remainder — `ofToken` splits on the FIRST colon only, so a subject containing one
+    /// round-trips.
+    let token (actor: ActorRef) : string =
+        match actor with
+        | UserRef u -> "user:" + UserId.value u
+        | PeerRef p -> "peer:" + PeerId.value p
+        | Agent -> "agent"
+        | SessionProcess -> "process"
+        | System -> "system"
+
+    /// Parse a token back. Total by returning an option: the doc is shared with peers we do
+    /// not control, so an unreadable actor is an entry to skip, never a crash.
+    let ofToken (raw: string) : ActorRef option =
+        if isNull (box raw) then None
+        else
+            match raw with
+            | "agent" -> Some Agent
+            | "process" -> Some SessionProcess
+            | "system" -> Some System
+            | _ ->
+                let idx = raw.IndexOf ':'
+                if idx <= 0 then None
+                else
+                    let rest = raw.Substring (idx + 1)
+                    match raw.Substring (0, idx) with
+                    | "user" -> (match UserId.create rest with Ok u -> Some (UserRef u) | Error _ -> None)
+                    | "peer" -> (match PeerId.create rest with Ok p -> Some (PeerRef p) | Error _ -> None)
+                    | _ -> None

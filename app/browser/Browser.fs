@@ -204,6 +204,15 @@ let private clearTimeoutJs (handle: float) : unit = jsNative
 })()""")>]
 let private toggleNav () : unit = jsNative
 
+/// The terminals column's open state (Plan 13), as a class on the shell root — the same
+/// mechanism the sidebar uses, so a Lit re-render never fights the CSS transition.
+///
+/// It differs from the nav in one way that matters: it is driven FROM the model, because
+/// the app opens this column itself (selecting a terminal opens it). So this is a `set`,
+/// not a `toggle` — the model holds the bit, and this reflects it.
+[<Emit("document.documentElement.classList.toggle('term-closed', !$0)")>]
+let private setTerminalsOpen (isOpen: bool) : unit = jsNative
+
 // Settings is the sidebar column's other FACE (Style.settingsPane), not a drawer over the
 // conversation — so opening it has to bring that column on screen, and `nav-alt` means the
 // opposite thing on each side of the breakpoint: uncollapse on desktop, slide the drawer in on
@@ -261,6 +270,67 @@ let private hostBodyKey (el: obj) : string = jsNative
 
 [<Emit("$0.getAttribute('data-rich-readonly') === 'true'")>]
 let private hostReadOnly (el: obj) : bool = jsNative
+
+// --- Terminal command lines (Plan 13) --------------------------------------------------
+// The view renders `<input data-terminal-input="<key>">` for each terminal composer slot and
+// each queued command; the value is bound imperatively to that key's `Y.Text` root, the same
+// arrangement the rich bodies use one level up. An `<input>` rather than an editor because a
+// command is characters, and the CRDT merge happens per character either way.
+
+[<Emit("Array.from(document.querySelectorAll('[data-terminal-input]'))")>]
+let private terminalInputs () : obj[] = jsNative
+
+[<Emit("$0.getAttribute('data-terminal-input')")>]
+let private terminalInputKey (el: obj) : string = jsNative
+
+[<Emit("$0.readOnly === true")>]
+let private terminalInputReadOnly (el: obj) : bool = jsNative
+
+[<Emit("$0.value")>]
+let private inputValue (el: obj) : string = jsNative
+
+/// Set an input's value while keeping the caret where the person left it. A remote edit
+/// re-renders the value under a focused input, and `el.value = …` resets the selection to
+/// the end — which is a collaborator's keystroke throwing your cursor across the line.
+/// Offsets are clamped, so a shorter value cannot leave the caret past the end.
+// The locals are `__y`-prefixed for a reason that cost an afternoon: Fable substitutes
+// `$0` with the ARGUMENT'S OWN IDENTIFIER, so a template that declares `const el = $0`
+// against an F# value also called `el` emits `let el = el` — a temporal-dead-zone
+// self-reference that throws at the first call. Names that no F# binding will ever have
+// make the substitution safe whatever the call site is called.
+[<Emit("""(() => {
+  const __yInput = $0, __yNext = $1;
+  if (__yInput.value === __yNext) return;
+  const __yFocused = document.activeElement === __yInput;
+  const __yStart = __yFocused ? __yInput.selectionStart : null;
+  const __yEnd = __yFocused ? __yInput.selectionEnd : null;
+  __yInput.value = __yNext;
+  if (__yFocused && __yStart !== null) {
+    const __yLimit = __yNext.length;
+    __yInput.setSelectionRange(Math.min(__yStart, __yLimit), Math.min(__yEnd, __yLimit));
+  }
+})()""")>]
+let private setInputValue (el: obj) (value: string) : unit = jsNative
+
+/// Attach a listener once. The flag lives on the element, so a Lit re-render that reuses the
+/// same element does not stack a second handler on it — and one that creates a fresh element
+/// gets its own.
+[<Emit("""(() => {
+  const __yBind = $0;
+  if (__yBind.__yessionBound) return false;
+  __yBind.__yessionBound = true;
+  __yBind.addEventListener('input', $1);
+  __yBind.addEventListener('keyup', $2);
+  __yBind.addEventListener('click', $2);
+  __yBind.addEventListener('select', $2);
+  __yBind.addEventListener('focus', $2);
+  __yBind.addEventListener('blur', $3);
+  return true;
+})()""")>]
+let private bindTerminalInput (el: obj) (onInput: unit -> unit) (onSelect: unit -> unit) (onBlur: unit -> unit) : bool = jsNative
+
+[<Emit("($0 && typeof $0.selectionStart === 'number') ? [$0.selectionStart, $0.selectionEnd] : null")>]
+let private inputSelection (el: obj) : (int * int) option = jsNative
 
 // --- Client-side doc persistence (Step 20): IndexedDB via y-indexeddb ------------------
 
@@ -411,6 +481,9 @@ let private start () =
         // records the fragment it bound so a fragment swap (a sent draft's slot recreated)
         // triggers a remount.
         let registry = BodyRegistry doc
+        // The plain-text roots the terminal composers live in (Plan 13), beside the rich
+        // bodies and resolved the same way.
+        let texts = TextRegistry doc
         let mutable latestModel = initial
         // Keyed by body id; the mount records the fragment AND whether it bound read-only, because
         // both can change under one key: a sent draft's slot is recreated (new fragment), and a
@@ -434,6 +507,20 @@ let private start () =
             elif key.StartsWith "queue:" then
                 match QueueId.create (key.Substring 6) with
                 | Ok q -> Some (QueueBody q)
+                | Error _ -> None
+            elif key.StartsWith "term-draft:" then
+                // `term-draft:<terminal>:<peer>` — split on the FIRST colon after the
+                // prefix, because a terminal id is Crockford base32 and never contains one.
+                let rest = key.Substring 11
+                let idx = rest.IndexOf ':'
+                if idx <= 0 then None
+                else
+                    match TerminalId.create (rest.Substring (0, idx)), PeerId.create (rest.Substring (idx + 1)) with
+                    | Ok terminal, Ok author -> Some (TerminalDraftBody (terminal, author))
+                    | _ -> None
+            elif key.StartsWith "term-queue:" then
+                match QueueId.create (key.Substring 11) with
+                | Ok q -> Some (TerminalQueuedBody q)
                 | Error _ -> None
             else None
 
@@ -480,6 +567,53 @@ let private start () =
                 handle.Dispose ()
                 mountedBodies.Remove stale |> ignore
                 lastPushed.Remove stale |> ignore
+
+        /// Bind every rendered terminal command line to its `Y.Text` root: push the CRDT's
+        /// value in, send the input's edits back out as the MINIMUM edit that gets there
+        /// (`TerminalText.setTo` — anything coarser would clobber a collaborator rather than
+        /// merge with them), and report the caret as presence.
+        ///
+        /// Called after every render AND on every doc update, because a terminal command
+        /// line is a root the Ylmish codec does not carry (it holds only the slot's
+        /// identity), so a remote keystroke in one does not necessarily reach the model.
+        let syncTerminalInputs () =
+            for el in terminalInputs () do
+                let key = terminalInputKey el
+                if not (isNull (box key)) && key <> "" then
+                    let reportFocus () =
+                        match fieldOfKey key, inputSelection el with
+                        | Some field, Some (anchor, head) ->
+                            let root = box (texts.Text key)
+                            let enc i = ProseMirror.relPosFromTypeIndex root i |> ProseMirror.encodeRel
+                            sendFocus (Some { Field = field; Pos = { Anchor = enc anchor; Head = enc head } })
+                        | _ -> sendFocus None
+                    // A read-only line (a collaborator's slot) still shows live text; it just
+                    // never writes back, and never claims a caret.
+                    if not (terminalInputReadOnly el) then
+                        bindTerminalInput
+                            el
+                            (fun () -> TerminalText.setTo texts key (inputValue el))
+                            reportFocus
+                            (fun () -> sendFocus None)
+                        |> ignore
+                    setInputValue el (TerminalText.read texts key)
+
+        // The publication rule, one subscription per open terminal. Started when a terminal
+        // appears and stopped when it goes, so a closed terminal's rule cannot republish a
+        // slot into a terminal that no longer exists.
+        let terminalSlots = System.Collections.Generic.Dictionary<string, Subscription> ()
+
+        let syncTerminalSlots (model: ClientModel) =
+            let openIds =
+                TerminalProjection.openTerminals model.Terminals |> List.map (fun t -> TerminalId.value t.TerminalId)
+            for terminal in TerminalProjection.openTerminals model.Terminals do
+                let key = TerminalId.value terminal.TerminalId
+                if not (terminalSlots.ContainsKey key) then
+                    terminalSlots.[key] <-
+                        TerminalDraftSlot.follow doc texts terminal.TerminalId peerId (fun msg -> dispatchRef msg)
+            for stale in terminalSlots.Keys |> Seq.filter (fun k -> not (List.contains k openIds)) |> Seq.toList do
+                terminalSlots.[stale].Stop ()
+                terminalSlots.Remove stale |> ignore
 
         // The remote cursors currently in a given body, coloured per peer.
         let cursorsFor (key: string) : Editor.RemoteBodyCursor list =
@@ -627,6 +761,10 @@ let private start () =
                             false
               ClaudeDisconnect =
                 fun scope -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Disconnect)) scope "" "" false
+              OpenTerminal = fun title -> connectionRef |> Option.iter (fun c -> c.OpenTerminal title)
+              CloseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.CloseTerminal id)
+              SendTerminalDraft =
+                fun terminal author -> connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
               ReopenSession =
                 fun () ->
                     // A full navigation to the Manager, not a fetch: it launches the session
@@ -664,6 +802,15 @@ let private start () =
             // overlay collaborators' cursors: remote carets in each body editor, and title carets
             // measured against the just-rendered input.
             syncRichBodies ()
+            syncTerminalInputs ()
+            // The terminals column's open state is a class on the shell root, like the
+            // sidebar's — presentation, so a re-render never fights it — but driven FROM the
+            // model, because unlike the sidebar this column's visibility is something the app
+            // itself changes (selecting a terminal opens it).
+            setTerminalsOpen model.TerminalsOpen
+            // Keep a slot rule running for every open terminal: a person may be mid-command
+            // in more than one, and each slot follows its own command line.
+            syncTerminalSlots model
             pushPresences ()
             placeTitleCursorsAll ()
 
@@ -722,7 +869,20 @@ let private start () =
                     (App.EventFetch.policy Resilience.Policy.sleep jsRandom (fun attempt ->
                         App.EventFetch.retrying attempt
                         |> Option.iter (fun health -> dispatchRef (EventFeedMsg health))))
-            let options = { App.ConnectOptions.defaults with FetchEvents = Some feed }
+            // Terminal history rides the same HTTP leg, in immutable chunks, for the same
+            // payoff: a reload replays a terminal out of the browser cache and only the live
+            // tail crosses the data channel. No resilience policy on it — unlike the event
+            // feed, a failed read here is re-armed by the next record or availability hint
+            // that arrives, so there is nothing for a retry schedule to add.
+            let transcripts = App.TranscriptFetch.overHttp httpGet SessionRoute.relative None
+            let options =
+                { App.ConnectOptions.defaults with
+                    FetchEvents = Some feed
+                    FetchTranscripts = Some transcripts
+                    // The model is the read position (see `ConnectOptions.ReadPosition`):
+                    // `latestModel` is kept current by `setState`, so a fold rolled back by
+                    // a racing doc update is visibly behind and gets re-read.
+                    ReadPosition = Some (fun () -> latestModel.EventConsumer.LastProcessedOffset) }
             let openChannel =
                 Resilience.Policy.guard
                     (App.SessionChannel.policy Resilience.Policy.sleep jsRandom)
@@ -742,6 +902,7 @@ let private start () =
                                         { options with ResumeAfter = resumeAfter }
                                         doc
                                         registry
+                                        texts
                                         hello
                                         dispatch
                                         (frameChannel dc)

@@ -30,6 +30,8 @@ let all =
         Tag.needs "Connections" [] (fun () -> Connections.tests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
+        Tag.needs "Terminals" [] (fun () -> Terminals.tests)
+        Tag.needs "Ylmish race" [] (fun () -> YlmishRace.tests)
         Tag.needs "Editor" [] (fun () -> Editor.tests)
         Tag.needs "Agent" [] (fun () -> Agent.tests)
         Tag.needs "Version" [] (fun () -> Version.tests)

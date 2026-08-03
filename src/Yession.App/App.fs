@@ -65,7 +65,24 @@ module App =
           /// Broadcast the local peer's caret+selection focus (or `None` when it leaves every
           /// collaborative field), so collaborators see the cursor. Ephemeral presence — the
           /// Session Process relays it to other peers and never persists it.
-          ReportPresence : Focus option -> unit }
+          ReportPresence : Focus option -> unit
+          /// Ask the Session Process to open a terminal (Plan 13). The new terminal arrives
+          /// as a `TerminalOpened` event, not as a response — one source of truth for a
+          /// durable fact, and it is the one every peer already reads.
+          OpenTerminal : string -> unit
+          /// Ask the Session Process to close a terminal.
+          CloseTerminal : TerminalId -> unit
+          /// Send the command in a terminal composer slot: enqueue it. ANY co-editor may
+          /// send, so the `PeerId` names whose slot it is. A pure CRDT write under the key
+          /// the slot has carried since publication.
+          SendTerminalDraft : TerminalId -> PeerId -> unit
+          /// Discard a terminal composer slot by emptying its command line, which retracts
+          /// the slot through the same publication rule that typing published it with.
+          DiscardTerminalDraft : TerminalId -> PeerId -> unit
+          /// Catch a terminal's transcript up from where this client has read to. Safe to
+          /// call repeatedly: records fold by sequence number, so a re-read costs bytes and
+          /// changes nothing.
+          FetchTranscript : TerminalId -> unit }
 
     /// The platform's HTTP GET, as a TOTAL function: the body, the status it refused with,
     /// or the transport error it never got past. Totality is the whole point — the old port
@@ -108,6 +125,69 @@ module App =
     /// so a resilience policy can be composed onto it without either end knowing.
     type EventFeed = EventOffset option -> Async<Result<EventPage<SessionEvent>, FeedFault>>
 
+    /// Reading a terminal's transcript over HTTP — the history leg of the terminal feed
+    /// (Plan 13), and a deliberate copy of `EventFetch`'s shape because it is the same
+    /// problem: immutable fixed-size chunks, so the browser's own cache is the store and
+    /// only the growing tail reaches the network.
+    ///
+    /// One difference from the event feed, and it is the reason this is a separate module
+    /// rather than a reuse: a transcript's first line is its asciicast header, not a
+    /// record. Chunk 0 therefore yields one fewer record than it has lines, and every
+    /// record's sequence number is its LINE index — which is what keeps a fetched chunk and
+    /// a live frame talking about the same thing.
+    module TranscriptFetch =
+
+        /// One fetched page: the records it carried with their sequence numbers, and
+        /// whether the transcript continues past this chunk.
+        type TranscriptPage =
+            { Records : (int * TranscriptRecord) list
+              /// One past the last line this chunk covered.
+              NextSeq : int
+              /// A full chunk means more may exist; a partial chunk IS the current tail.
+              IsEnd : bool }
+
+        type TranscriptFeed = TerminalId -> int -> Async<Result<TranscriptPage, FeedFault>>
+
+        /// Build a feed over the platform's HTTP GET, resolving routes with `urlOf` (the
+        /// browser passes `SessionRoute.relative` and lets `<base href>` do the rest).
+        let overHttp (get: HttpGet) (urlOf: SessionRoute -> string) (token: string option) : TranscriptFeed =
+            fun terminal fromSeq ->
+                async {
+                    let index = TranscriptChunk.indexOf (max 0 fromSeq)
+                    let tokenSuffix =
+                        token
+                        |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
+                        |> Option.defaultValue ""
+                    let url = urlOf (TerminalTranscript (TerminalId.value terminal, index)) + tokenSuffix
+                    match! get url with
+                    | Error (HttpUnreachable detail) -> return Error (FeedUnreachable detail)
+                    | Error (HttpStatus status) -> return Error (FeedRefused status)
+                    | Ok text ->
+                        let lines = text.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
+                        let first = TranscriptChunk.firstSeq index
+                        // Decode line by line, keeping each one's LINE index as its seq.
+                        // A line that will not decode fails the page: a partially decoded
+                        // transcript is not history, it is a guess — the same rule the
+                        // event feed applies to a corrupt chunk.
+                        let rec decode i acc =
+                            if i >= lines.Length then Ok (List.rev acc)
+                            else
+                                match Codec.fromString Codec.transcriptLine lines.[i] with
+                                | Ok (TranscriptRecordLine record) -> decode (i + 1) ((first + i, record) :: acc)
+                                // The header is line 0 and carries no output; it is skipped
+                                // rather than rejected.
+                                | Ok (TranscriptHeaderLine _) -> decode (i + 1) acc
+                                | Error e -> Error (FeedCorrupt e)
+                        match decode 0 [] with
+                        | Error fault -> return Error fault
+                        | Ok records ->
+                            return
+                                Ok
+                                    { Records = records |> List.filter (fun (seq, _) -> seq >= fromSeq)
+                                      NextSeq = first + lines.Length
+                                      IsEnd = lines.Length < TranscriptChunk.size }
+                }
+
     /// How a connection consumes the event log (Step 07).
     type ConnectOptions =
         { /// Resume consumption after this offset (the model's `LastProcessedOffset`
@@ -119,10 +199,36 @@ module App =
           /// `ReadEventsAfter` frames — the browser passes its HTTP chunk fetcher here
           /// so the browser cache serves history (immutable full chunks); pure
           /// data-channel peers leave it `None` and read over frames.
-          FetchEvents : EventFeed option }
+          FetchEvents : EventFeed option
+          /// When given, terminal history is fetched through this feed (Plan 13). `None`
+          /// leaves a client with only what arrives live — which is correct for a peer
+          /// that has no HTTP leg, and is why this is optional rather than required.
+          FetchTranscripts : TranscriptFetch.TranscriptFeed option
+          /// How far the MODEL has consumed the log. When given, this — not the read
+          /// loop's own bookkeeping — is what "how far have we got" means.
+          ///
+          /// The distinction is not academic. `withYlmish` applies a remote doc update by
+          /// SETTING the model from a decode, and a `Set` replaces every non-synced field
+          /// with the snapshot the decode was built from. So a doc update that lands just
+          /// after an event page was folded rolls that fold back: the conversation, the
+          /// terminal projection and the read offset all revert, while the read loop's
+          /// private cursor stays where it got to — and consumption stops for good,
+          /// because the loop believes it is up to date and nothing will ever say
+          /// otherwise.
+          ///
+          /// Reading the position from the model closes that hole: a rolled-back model is
+          /// visibly behind, so the next hint (or doc update — see `connect`) re-reads,
+          /// and the fold is offset-gated, so re-reading costs a round trip and changes
+          /// nothing else.
+          ReadPosition : (unit -> EventOffset option) option }
 
     module ConnectOptions =
-        let defaults : ConnectOptions = { ResumeAfter = None; PageSize = 100; FetchEvents = None }
+        let defaults : ConnectOptions =
+            { ResumeAfter = None
+              PageSize = 100
+              FetchEvents = None
+              FetchTranscripts = None
+              ReadPosition = None }
 
     /// The HTTP event feed for `ConnectOptions.FetchEvents`: translates "events after
     /// offset X" into the Session Process's immutable-chunk URL scheme (`/events/{n}`) and
@@ -275,6 +381,7 @@ module App =
         (options: ConnectOptions)
         (doc: Y.Doc)
         (registry: BodyRegistry)
+        (texts: TextRegistry)
         (hello: PeerHelloPayload)
         (dispatch: ClientMsg -> unit)
         (channel: FrameChannel<string>)
@@ -290,9 +397,21 @@ module App =
         let mutable lastProcessed : EventOffset option = options.ResumeAfter
         let mutable latestKnown : EventOffset option = None
         let mutable readInFlight : RequestId option = None
+        // Set when a read has failed for good (its resilience policy already spent). While
+        // parked, nothing re-requests on its own — the loop waits for an availability hint
+        // or a reconnect, which is the difference between reporting a dead feed once and
+        // hammering it. Only the doc-update re-arm respects this; a hint clears it.
+        let mutable parked = false
+
+        // Where consumption has actually got to. The model's answer when the composition
+        // gave one; the loop's own bookkeeping otherwise (a peer with no model behind it).
+        let readCursor () =
+            match options.ReadPosition with
+            | Some position -> position ()
+            | None -> lastProcessed
 
         let behind () =
-            match latestKnown, lastProcessed with
+            match latestKnown, readCursor () with
             | Some latest, Some processed -> EventOffset.value latest > EventOffset.value processed
             | Some _, None -> true
             | None, _ -> false
@@ -302,22 +421,24 @@ module App =
         let rec request () =
             let requestId = RequestId.fresh ()
             readInFlight <- Some requestId
+            let after = readCursor ()
             match options.FetchEvents with
             | Some fetch ->
                 Async.StartImmediate (
                     async {
-                        match! fetch lastProcessed with
+                        match! fetch after with
                         | Ok page -> onEventsPage requestId page
                         | Error fault -> onFeedFault requestId fault
                     })
             | None ->
-                Async.StartImmediate (channel.Send (EventLog (ReadEventsAfter (requestId, lastProcessed, options.PageSize))))
+                Async.StartImmediate (channel.Send (EventLog (ReadEventsAfter (requestId, after, options.PageSize))))
 
         and requestIfBehind () =
             if Option.isNone readInFlight && behind () then request ()
 
         and onEventsPage (requestId: RequestId) (page: EventPage<SessionEvent>) =
             if readInFlight = Some requestId then readInFlight <- None
+            parked <- false
             lastProcessed <- EventOffset.maxOption lastProcessed page.LastOffset
             latestKnown <- EventOffset.maxOption latestKnown page.LastOffset
             dispatch (EventsPageMsg page)
@@ -338,11 +459,68 @@ module App =
             // with no log line and nothing in the model. Drafts, title, and presence kept
             // syncing over the data channel the whole time, so the only symptom was a
             // timeline that never filled.
+            parked <- true
             dispatch (EventFeedMsg (FeedStalled (FeedFault.describe fault)))
+
+        // How far a contiguous HTTP read has got through each terminal's transcript. Held
+        // here rather than read back off the model for the same reason `lastProcessed` is:
+        // the read loop must not depend on a model update having been folded yet.
+        //
+        // Only HTTP reads advance it. A live record at a higher seq is still folded into
+        // the model — it is keyed by seq, so it lands wherever it belongs — but it does not
+        // prove the records BEFORE it have arrived, and treating it as if it did is how a
+        // client ends up with a hole it will never fetch.
+        let transcriptRead = System.Collections.Generic.Dictionary<string, int> ()
+
+        let readPositionOf (terminal: TerminalId) =
+            match transcriptRead.TryGetValue (TerminalId.value terminal) with
+            | true, seq -> seq
+            | _ -> 0
+
+        let fetchTranscript (terminal: TerminalId) =
+            match options.FetchTranscripts with
+            | None -> ()
+            | Some fetch ->
+                let rec readFrom (fromSeq: int) =
+                    async {
+                        match! fetch terminal fromSeq with
+                        | Error _ ->
+                            // A transcript read that fails is not a session that failed: the
+                            // live leg keeps delivering, and the next availability hint
+                            // re-arms this. Parking beats spinning.
+                            return ()
+                        | Ok page ->
+                            for (seq, record) in page.Records do
+                                dispatch (TerminalRecordMsg (terminal, seq, record))
+                            transcriptRead.[TerminalId.value terminal] <- max (readPositionOf terminal) page.NextSeq
+                            dispatch (TerminalReadThroughMsg (terminal, page.NextSeq))
+                            // `NextSeq > fromSeq` guards the one way this could spin: a
+                            // chunk that yields nothing new would otherwise be re-read for
+                            // ever at the same offset.
+                            if not page.IsEnd && page.NextSeq > fromSeq then return! readFrom page.NextSeq
+                    }
+                Async.StartImmediate (readFrom (readPositionOf terminal))
+
+        // A doc update is the one thing that can silently undo a fold (see
+        // `ConnectOptions.ReadPosition`), so it is also the signal that consumption may
+        // need to resume. Cheap: `requestIfBehind` does nothing unless the position the
+        // model reports has actually fallen behind what the session says exists — and
+        // nothing at all while the feed is parked, so a dead feed is still reported once
+        // rather than retried behind the policy's back.
+        DocSync.onAnyUpdate doc (fun () -> if not parked then requestIfBehind ())
 
         let dispatchAndConsume (msg: ClientMsg) =
             dispatch msg
             match msg with
+            | TerminalAvailableMsg (terminal, length) ->
+                // The terminal-feed counterpart of `EventsAvailable`: a hint that there is
+                // more, answered by a read rather than by trusting the hint's contents.
+                if length > readPositionOf terminal then fetchTranscript terminal
+            | TerminalRecordMsg (terminal, seq, _) when seq > readPositionOf terminal ->
+                // Live output beyond the read position means history exists that this
+                // client has not fetched — the records between where it read to and where
+                // the live stream now is. Ask for them.
+                fetchTranscript terminal
             | ConnectedMsg accepted ->
                 // The client's half of the initial full-state exchange: state restored
                 // from local persistence (Step 20) — or carried across a reconnect —
@@ -350,9 +528,11 @@ module App =
                 // updates are idempotent, so this is always safe.
                 Async.StartImmediate (channel.Send (State (StateSync (DocSync.fullState doc))))
                 latestKnown <- EventOffset.maxOption latestKnown accepted.LatestOffset
+                parked <- false
                 requestIfBehind ()
             | EventsAvailableMsg latest ->
                 latestKnown <- EventOffset.maxOption latestKnown (Some latest)
+                parked <- false
                 requestIfBehind ()
             | _ -> ()
 
@@ -410,7 +590,43 @@ module App =
                 // Presence carries the local peer's identity so collaborators can label
                 // and colour the caret; the Session Process relays it to other peers.
                 Async.StartImmediate (
-                    channel.Send (Presence { PeerId = hello.PeerId; DisplayName = hello.DisplayName; Focus = focus })) }
+                    channel.Send (Presence { PeerId = hello.PeerId; DisplayName = hello.DisplayName; Focus = focus }))
+          OpenTerminal =
+            fun title ->
+                Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), OpenTerminal title))))
+          CloseTerminal =
+            fun terminalId ->
+                Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), CloseTerminal terminalId))))
+          SendTerminalDraft =
+            fun terminal author ->
+                // Enqueue under the key the slot has carried since publication — read from
+                // the doc, never minted here, so two co-editors sending at once produce ONE
+                // entry rather than running the command twice.
+                //
+                // Command text copied over, the model updated, and the composer emptied all
+                // in ONE transaction, for the same two reasons the message send is atomic:
+                // the Session Process drains on the entry's arrival (an entry without its
+                // command would run as an empty one), and a split update lets a `withYlmish`
+                // Set from the drain's removal clobber non-synced model fields.
+                match SyncedStateSync.terminalDraftQueueId doc terminal author with
+                | Some queueId ->
+                    TerminalText.moveInto
+                        doc
+                        texts
+                        (BodyKey.terminalDraft terminal author)
+                        (BodyKey.terminalQueued queueId)
+                        (fun () -> dispatch (SendTerminalDraftMsg (terminal, author)))
+                // No slot means nothing published to send: an untouched composer, or one a
+                // co-editor sent a moment ago. Both are no-ops.
+                | None -> ()
+          DiscardTerminalDraft =
+            fun terminal author ->
+                // Emptying the command line IS the discard — the publication rule retracts
+                // the slot the moment it goes empty, exactly as typing published it.
+                doc.transact ((fun _ ->
+                    TerminalText.clear texts (BodyKey.terminalDraft terminal author)
+                    dispatch (DiscardTerminalDraftMsg (terminal, author))), null)
+          FetchTranscript = fetchTranscript }
 
     /// The session leg's lifecycle: open a transport, serve one session over it, and decide
     /// whether to come back. The outermost layer of the client, and the last one that was only

@@ -56,7 +56,15 @@ type ViewActions =
       /// Ask the Manager to bring this session back and take the browser to it (Plan 11).
       /// Imperative because it is a navigation, and a navigation is not a state change this
       /// document survives to fold.
-      ReopenSession : unit -> unit }
+      ReopenSession : unit -> unit
+      /// Ask the Session Process to open a terminal (Plan 13). A command, so imperative:
+      /// the terminal's id is minted by the Process and comes back as an event.
+      OpenTerminal : string -> unit
+      /// Ask the Session Process to close a terminal.
+      CloseTerminal : TerminalId -> unit
+      /// Send a terminal composer slot: enqueue its command. Imperative for exactly the
+      /// reason `SendDraft` is — the command text is a shared type the reducer cannot move.
+      SendTerminalDraft : TerminalId -> PeerId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -72,7 +80,10 @@ module ViewActions =
           ClaudeComplete = ignore
           ClaudePasteToken = ignore
           ClaudeDisconnect = ignore
-          ReopenSession = ignore }
+          ReopenSession = ignore
+          OpenTerminal = ignore
+          CloseTerminal = ignore
+          SendTerminalDraft = fun _ _ -> () }
 
 module View =
 
@@ -507,6 +518,15 @@ module View =
             html $"""<button type="button" class="{Style.headerNoAgent}" data-settings-toggle="prompt" @click={Ev(fun _ -> actions.ToggleSettings ())}>no agent</button>"""
         | _ -> Lit.nothing
 
+    /// The way back into the terminals column once it is shut. Present only while it IS
+    /// shut, so there are never two controls for the one column on screen at once.
+    let private terminalsReopen (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        if model.TerminalsOpen then Lit.nothing
+        else
+            html $"""
+                <button type="button" class="{Style.terminalReopen}" aria-label="Show terminals"
+                        data-terminal-toggle="show" @click={Ev(fun _ -> dispatch ToggleTerminalsMsg)}>{Icon.left}terminals</button>"""
+
     let private header (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         let titleStr = Ylmish.Text.toString model.Synced.Title
         let sessionIdText = model.Session |> Option.map SessionId.value |> Option.defaultValue ""
@@ -536,6 +556,7 @@ module View =
               <div class="{Style.headerAside}">
                 {agentAbsence actions model.Claude}
                 {headerStatus model}
+                {terminalsReopen dispatch model}
               </div>
             </header>"""
 
@@ -665,6 +686,214 @@ module View =
               {startMine}
             </section>"""
 
+    // --- Terminals (Plan 13) -------------------------------------------------------------
+
+    /// Styled terminal output. Each parsed run becomes one span carrying its SGR styling;
+    /// lines are separated by real newlines inside a `pre-wrap` block, so selecting and
+    /// copying output yields the text a person would expect rather than a run of divs.
+    let private ansiText (text: string) : TemplateResult list =
+        Ansi.parse text
+        |> List.mapi (fun i line ->
+            let spans =
+                line.Spans
+                |> List.map (fun span ->
+                    // A run with no styling at all is emitted bare — the overwhelmingly
+                    // common case, and one span per plain line is a span too many.
+                    let classes = Style.ansiClasses span.Style
+                    let inline' = Style.ansiInline span.Style
+                    if classes = "" && inline' = "" then html $"{span.Text}"
+                    else html $"""<span class="{classes}" style="{inline'}">{span.Text}</span>""")
+            // The newline BEFORE every line but the first, so a trailing line adds no
+            // trailing blank one.
+            if i = 0 then html $"{spans}" else html $"""{"\n"}{spans}""")
+
+    let private terminalBlockStatusLabel =
+        function
+        | BlockRunning -> Dom.Text.blockRunning
+        | BlockFinished (CommandSucceeded _) -> Dom.Text.blockOk
+        | BlockFinished _ -> Dom.Text.blockFailed
+
+    let private terminalBlockStatus =
+        function
+        | BlockRunning -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>running</span>"""
+        | BlockFinished (CommandSucceeded code) -> html $"""<span class="{Style.statusOk}">{Icon.checkSm} {code}</span>"""
+        | BlockFinished (CommandFailed code) -> html $"""<span class="{Style.statusErr}">{Icon.crossSm} {code}</span>"""
+        | BlockFinished CommandTimedOut -> html $"""<span class="{Style.statusErr}">timed out</span>"""
+        | BlockFinished (CommandExecutionFailed _) -> html $"""<span class="{Style.statusErr}">failed</span>"""
+
+    /// One block: the command that ran, then everything it printed.
+    let private terminalBlockView (feed: TerminalFeed) (block: TerminalBlock) : TemplateResult =
+        // A running block's output runs to whatever has arrived; a finished one is bounded
+        // by the range its completion event recorded — which is what makes a reload show
+        // exactly the same block as the live view did.
+        let toSeq = block.ToSeq |> Option.defaultValue (max feed.KnownLength block.FromSeq)
+        let output = TerminalFeed.outputText block.FromSeq toSeq feed
+        let body =
+            if output = "" then
+                match block.Status with
+                | BlockRunning -> html $"""<div class="{Style.terminalOutputEmpty}" data-terminal-output>…</div>"""
+                | BlockFinished _ -> html $"""<div class="{Style.terminalOutputEmpty}" data-terminal-output>no output</div>"""
+            else html $"""<div class="{Style.terminalOutput}" data-terminal-output>{ansiText output}</div>"""
+        html $"""
+            <article class="{Style.terminalBlock}" data-terminal-block="{BlockId.value block.BlockId}"
+                     data-terminal-block-status="{terminalBlockStatusLabel block.Status}">
+              <div class="{Style.terminalBlockCommand}">
+                <span class="{Style.terminalPrompt}">$</span>
+                <code class="{Style.terminalCommandText}">{block.Command}</code>
+                <span class="ml-auto shrink-0">{terminalBlockStatus block.Status}</span>
+              </div>
+              {body}
+            </article>"""
+
+    /// The queued commands for a terminal: still editable, still reorderable, and — when the
+    /// terminal's mode says so — still waiting for someone to say yes. That waiting state is
+    /// the approval UX: there is no modal, because the thing you approve is a thing you can
+    /// fix first.
+    let private terminalQueue (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult list =
+        ClientModel.terminalQueue terminal model
+        |> List.map (fun entry ->
+            let id = entry.QueueId
+            let awaiting = ClientModel.awaitsApproval entry model
+            let statusToken = if awaiting then Dom.Text.queuedAwaitingApproval else Dom.Text.queuedReady
+            let approval =
+                if awaiting then
+                    html $"""
+                        <button type="button" class="{Style.btnPrimary}" data-terminal-approve="{QueueId.value id}"
+                                @click={Ev(fun _ -> dispatch (ApproveTerminalQueuedMsg (id, model.Peer.PeerId)))}>Approve</button>"""
+                elif Option.isSome entry.ApprovedBy then
+                    html $"""
+                        <button type="button" class="{Style.btn}" data-terminal-unapprove="{QueueId.value id}"
+                                @click={Ev(fun _ -> dispatch (UnapproveTerminalQueuedMsg id))}>Hold</button>"""
+                else Lit.nothing
+            html $"""
+                <article class="{if awaiting then Style.terminalQueuedAwaiting else Style.terminalQueuedReady}"
+                         data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
+                  <div class="{Style.terminalQueuedRow}">
+                    <span class="{Style.terminalPrompt}">$</span>
+                    <input type="text" class="{Style.terminalInput}" aria-label="Queued command"
+                           data-terminal-input="{BodyKey.terminalQueued id}">
+                  </div>
+                  <div class="{Style.terminalQueuedRow}">
+                    <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if awaiting then "waiting for approval" else "queued"}</span>
+                    <span class="{Style.small}">{authorLabel entry.Author}</span>
+                    <div class="ml-auto flex items-center gap-2">
+                      {approval}
+                      <button type="button" class="{Style.btnIcon}" aria-label="Move up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.TerminalQueue id with Some o -> dispatch (ReorderTerminalQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                      <button type="button" class="{Style.btnIcon}" aria-label="Move down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.TerminalQueue id with Some o -> dispatch (ReorderTerminalQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                      <button type="button" class="{Style.btnIconDanger}" aria-label="Delete" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteTerminalQueuedMsg id))}>{Icon.close}</button>
+                    </div>
+                  </div>
+                </article>""")
+
+    /// The terminal composer: your command line, and everyone else's as they type them.
+    let private terminalComposer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult =
+        let mine = model.Peer.PeerId
+        let mode = SyncedSessionState.modeOf terminal model.Synced
+        let editors (author: PeerId) =
+            ClientModel.terminalEditorsOf terminal author model
+            |> List.map (fun (editor, name) ->
+                html $"""
+                    <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer editor}"
+                          title="{name}" data-terminal-draft-editor="{PeerId.value editor}"></span>""")
+        // Someone else mid-command: their live text, read-only here. Watching a collaborator
+        // type a command is the same affordance as watching them type a message, which is
+        // the whole reason the terminal composer is built out of the message composer's parts.
+        let peerDraft (author: PeerId) =
+            html $"""
+                <div class="{Style.terminalPeerDraft}" style="border-left-color:{PeerColour.ofPeer author}"
+                     data-terminal-draft-author="{PeerId.value author}">
+                  <span class="{Style.terminalPrompt}">$</span>
+                  <input type="text" class="{Style.terminalInput}" readonly aria-label="{ClientModel.nameOf author model}'s command"
+                         data-terminal-input="{BodyKey.terminalDraft terminal author}">
+                  <span class="{Style.terminalEditors}">{editors author}</span>
+                  <button type="button" class="{Style.btn}" data-terminal-send="{PeerId.value author}"
+                          @click={Ev(fun _ -> actions.SendTerminalDraft terminal author)}>Run</button>
+                </div>"""
+        let others = ClientModel.terminalDrafts terminal model |> List.filter (fun author -> author <> mine)
+        html $"""
+            <section class="{Style.terminalComposer}">
+              <div class="{Style.sideRow}">
+                <label class="{Style.label}" for="terminal-mode">approval</label>
+                <select id="terminal-mode" class="{Style.field} w-auto" data-terminal-mode="{TerminalApprovalMode.describe mode}"
+                        @change={EvVal(fun v -> match TerminalApprovalMode.parse v with Some m -> dispatch (SetTerminalModeMsg (terminal, m)) | None -> ())}>
+                  <option value="approve-agent" ?selected={mode = ApproveAgent}>the agent's commands</option>
+                  <option value="approve-all" ?selected={mode = ApproveAll}>every command</option>
+                  <option value="auto" ?selected={mode = AutoRun}>nothing — run them</option>
+                </select>
+              </div>
+              {terminalQueue dispatch model terminal}
+              {others |> List.map peerDraft}
+              <div class="{Style.terminalQueuedRow}">
+                <span class="{Style.terminalPrompt}">$</span>
+                <input type="text" class="{Style.terminalInput}" aria-label="Command"
+                       placeholder="a command to run here"
+                       data-terminal-input="{BodyKey.terminalDraft terminal mine}">
+                <span class="{Style.terminalEditors}">{editors mine}</span>
+                <button type="button" class="{Style.btnPrimary}" data-terminal-send="{PeerId.value mine}"
+                        @click={Ev(fun _ -> actions.SendTerminalDraft terminal mine)}>Run</button>
+              </div>
+            </section>"""
+
+    /// The terminals column: the conversation's mirror on the right.
+    let private terminals (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        let openTerminals = TerminalProjection.openTerminals model.Terminals
+        let selected = ClientModel.selectedTerminal model
+        let tab (view: TerminalView) =
+            let isSelected = selected = Some view.TerminalId
+            html $"""
+                <button type="button" class="{if isSelected then Style.terminalTabActive else Style.terminalTab}"
+                        data-terminal-tab="{TerminalId.value view.TerminalId}" aria-pressed="{if isSelected then "true" else "false"}"
+                        @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}</button>"""
+        let body =
+            match selected |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals) with
+            | None ->
+                html $"""
+                    <div class="{Style.terminalEmpty}">
+                      <span class="{Style.small}">Nothing is open. A terminal runs commands in this session's workspace — everything it prints is recorded.</span>
+                      <button type="button" class="{Style.btnPrimary}" data-terminal-new
+                              @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
+                    </div>"""
+            | Some view ->
+                let feed = ClientModel.terminalFeed view.TerminalId model
+                let truncated =
+                    if view.DroppedBytes > 0 then
+                        html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{view.DroppedBytes} bytes of output were not recorded</div>"""
+                    else Lit.nothing
+                let blocks =
+                    if List.isEmpty view.Blocks then
+                        [ html $"""<div class="{Style.terminalOutputEmpty}">Nothing has run here yet.</div>""" ]
+                    else view.Blocks |> List.map (terminalBlockView feed)
+                html $"""
+                    <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
+                      {truncated}
+                      {blocks}
+                    </div>
+                    {terminalComposer actions dispatch model view.TerminalId}"""
+        let closeSelected =
+            match selected with
+            | Some id ->
+                html $"""
+                    <button type="button" class="{Style.cls [ Style.terminalTab; "ml-auto" ]}" data-terminal-close="{TerminalId.value id}"
+                            aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal id)}>close</button>"""
+            | None -> Lit.nothing
+        html $"""
+            <aside class="{Style.terminalPanel}" data-terminal-panel>
+              <div class="{Style.terminalPane}">
+                <div class="{Style.terminalHead}">
+                  <span class="{Style.settingsTitle}">terminals</span>
+                  <button type="button" class="{Style.navChevronForward}" aria-label="Hide terminals"
+                          data-terminal-toggle="hide" @click={Ev(fun _ -> dispatch ToggleTerminalsMsg)}>{Icon.right}</button>
+                </div>
+                <div class="{Style.terminalTabs}">
+                  {openTerminals |> List.map tab}
+                  <button type="button" class="{Style.terminalTabNew}" data-terminal-new
+                          @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
+                  {closeSelected}
+                </div>
+                {body}
+              </div>
+            </aside>"""
+
     /// The client shell, rendered into `#app`.
     let view (actions: ViewActions) (model: ClientModel) (dispatch: ClientMsg -> unit) : TemplateResult =
         html $"""
@@ -676,4 +905,5 @@ module View =
               {agentStrip actions model.Agent}
               {queue dispatch model.Synced}
               {drafts actions dispatch model}
-            </div>"""
+            </div>
+            {terminals actions dispatch model}"""

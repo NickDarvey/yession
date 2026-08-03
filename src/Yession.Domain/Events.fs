@@ -65,6 +65,18 @@ type SessionEvent =
     | CommandStarted of CommandStarted
     | CommandOutputReceived of CommandOutputReceived
     | CommandCompleted of CommandCompleted
+    // Terminals (Plan 13): durable FACTS about a terminal — never its raw output, which
+    // lives in the per-terminal transcript sidecar (`Transcript.fs`). A terminal that
+    // printed a gigabyte adds four events here, not a gigabyte, so the log every client
+    // folds stays the size of what happened rather than the size of what was printed.
+    // The block events bracket the transcript range they produced (`FromSeq`/`ToSeq`),
+    // which is how "who ran this, and which bytes are its output" is answerable from the
+    // log and the transcript together.
+    | TerminalOpened of TerminalOpened
+    | TerminalClosed of TerminalClosed
+    | TerminalBlockStarted of TerminalBlockStarted
+    | TerminalBlockCompleted of TerminalBlockCompleted
+    | TerminalTranscriptTruncated of TerminalTranscriptTruncated
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -157,3 +169,47 @@ and CommandOutputReceived =
 and CommandCompleted =
     { CommandId : CommandId
       Result : CommandResult }
+
+and TerminalOpened =
+    { TerminalId : TerminalId
+      /// Who asked for it. A terminal is opened by a peer or by the agent, and which one
+      /// decides nothing about how it behaves — it is attribution, for the audit.
+      OpenedBy : ActorRef
+      /// A human label, so a session with four terminals is navigable. Never unique.
+      Title : string }
+
+and TerminalClosed =
+    { TerminalId : TerminalId
+      Reason : string }
+
+and TerminalBlockStarted =
+    { TerminalId : TerminalId
+      BlockId : BlockId
+      /// The queue entry this block was drained from, when it came through the composer.
+      /// `None` for a block the Session Process ran on its own behalf.
+      QueueId : QueueId option
+      /// Who wrote the command — not who approved it (that is `ApprovedBy`) and not who
+      /// happened to press send.
+      Author : ActorRef
+      /// The approver, when the terminal's mode required one. `None` = ran unapproved,
+      /// which is a fact worth recording rather than an absence worth inferring.
+      ApprovedBy : ActorRef option
+      /// The command line, snapshotted from the collaborative draft at drain time and
+      /// immutable thereafter — exactly as `MessageSent` snapshots a message body.
+      Command : string
+      /// The transcript line index at which this block's output begins.
+      FromSeq : int }
+
+and TerminalBlockCompleted =
+    { TerminalId : TerminalId
+      BlockId : BlockId
+      Result : CommandResult
+      /// The transcript line index one past this block's last output line.
+      ToSeq : int }
+
+and TerminalTranscriptTruncated =
+    { TerminalId : TerminalId
+      BlockId : BlockId option
+      /// Output this terminal produced and the transcript did NOT keep. Recorded so a
+      /// gap in an audit trail is a stated fact, never a silent one.
+      DroppedBytes : int }

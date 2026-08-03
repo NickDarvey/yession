@@ -11,6 +11,10 @@
     <Compile Include="Resilience.fs" />
     <Compile Include="Identity.fs" />
     <Compile Include="Events.fs" />
+    <!-- Terminal output as styled text, and the durable transcript that records it.
+         Both depend only on Identity/Events, and neither knows what a session is. -->
+    <Compile Include="Ansi.fs" />
+    <Compile Include="Transcript.fs" />
     <Compile Include="EventLog.fs" />
     <Compile Include="Sandbox.fs" />
     <Compile Include="Environment.fs" />
@@ -20,6 +24,9 @@
     <Compile Include="Notifications.fs" />
     <Compile Include="Mcp.fs" />
     <Compile Include="Conversation.fs" />
+    <!-- Before SessionState: the synced terminal state carries the approval mode this
+         declares, so the policy type precedes the collaborative state that holds it. -->
+    <Compile Include="Terminals.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="SessionState.fs" />
     <Compile Include="RichText.fs" />

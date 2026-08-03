@@ -179,6 +179,22 @@ Infrastructure delivered after Phase 4 acceptance, outside the numbered phase ta
   agent turn running on the TURN ACTOR's credential (session ▸ actor ▸ ambient env),
   resolved fresh per turn. Follow-ups recorded in the plan doc + GAPS.
 
+- **Terminals on the WorkSandbox (Plan 13)** — [13-worksandbox-terminals.md](13-worksandbox-terminals.md)
+  (Status: PR 1 of 3 delivered). Zero-to-many terminals against the session's WorkSandbox, on a
+  right panel built out of the message composer's parts: a command line is a collaborative
+  `Y.Text` slot per (terminal, author), sending enqueues it under the key the slot was published
+  with, and the terminal's approval mode (`AutoRun | ApproveAgent | ApproveAll`, defaulting to
+  ApproveAgent) decides whether the Session Process's second drain runs it or leaves it visible
+  and editable until a human approves — which IS the approval UX. Blocks (command, output range,
+  exit code) are durable facts; the BYTES go to a per-terminal asciicast v2 transcript sidecar,
+  served in immutable cacheable chunks on the same argument as the event log, with live records
+  riding new `Terminal` frames on the existing data channel. Output renders through a pure-F#
+  SGR parser against a WCAG-AA terminal palette (no xterm.js yet — that arrives with the pty in
+  PR 2). The agent gets `queue_terminal_command`, which queues where people can see it and
+  returns rather than blocking a turn on a human. Fixed en route: a `withYlmish` `Set` could roll
+  back a just-folded event page and stop consumption permanently — the model is now the read
+  position (`ConnectOptions.ReadPosition`).
+
 ## Blockers log
 
 | Date | Step | Blocker | Owner | Resolution |
