@@ -262,6 +262,60 @@ Who may reject: any peer, per the terminal-access-equals-session-access posture 
 event records which. The agent may not — it proposes, humans dispose. An agent withdrawing
 its *own* queued command is coherent, and a different action.
 
+### A leased terminal holds its queue (PR 2)
+
+Live mode is the pty's stdin belonging to one peer. A drain that fired anyway would type
+a queued command into a terminal somebody is already typing into — which is precisely the
+merged-keystroke corruption this design rejected tmux for on page one. So the lease is a
+gate on the drain, and PR 2 cannot ship without it: it is the correctness hole PR 2 opens
+by introducing leases at all. Today `TerminalQueueDrain.plan` knows `busy`, `isOpen` and
+the mode, and nothing about who holds the terminal.
+
+The case is narrower than "the terminal is in live mode", and the narrowing matters. A
+block that *becomes* live — the drain runs `vim`, alt-screen entry flips the terminal, a
+peer holds the lease for the editor's lifetime — is already covered, because that terminal
+is `busy` with a running block. The gap is a terminal that is live with **no block
+running**: someone pressed "take terminal" and is typing at the shell. `busy` is false, the
+terminal is open, an approved entry is sitting there, and nothing stops the drain.
+
+So `plan` takes the holder alongside the rest, and the gates order:
+
+```
+rejected      -> Rejections   (before everything; a refusal outranks any policy)
+consumed      -> Removals     (log-anchored repair)
+closed        -> nothing
+busy          -> skip         (one block per terminal)
+leased        -> hold         (someone owns stdin)
+approval/mode -> hold or Ready
+```
+
+Rejection sits above the lease gate as well as the mode gate: refusing a command touches
+no pty, so a leased terminal is irrelevant to it. Someone can clear out a bad queue while
+a colleague is inside vim.
+
+**Release re-arms the drain**, exactly as block completion already does (the `drain ()`
+call after `RunBlock` resolves, which is what lets a terminal's next command start
+immediately). `TerminalLeaseReleased` gets the same treatment, so handing the terminal
+back starts whatever was waiting for it.
+
+**Held-for-a-terminal is not held-for-approval**, and the two must never render or report
+as one. "Nick is using this terminal" resolves when a person finishes a task; "waiting for
+approval" resolves when a person makes a decision. A queue that says only *pending* leaves
+both looking like a stall. The composer shows the holder and a steal control — any peer may
+take the lease, which is already how leases work here — and the PR 3 tool reports
+`AwaitingTerminal` distinctly from `AwaitingApproval`.
+
+That distinction also settles the tool's wait: the `approvalGrace` does **not** apply to a
+leased terminal. The grace exists because a supervised approval often lands in seconds; a
+peer with a terminal open is mid-task and will not be done in five. `execute_command`
+returns `AwaitingTerminal` at once rather than burning the grace on a wait that was never
+going to resolve.
+
+**Starvation is bounded by the idle-lease timeout** (PR 3), and until it lands a lease held
+indefinitely does starve its queue. That is acceptable only because it is *visible* — the
+composer names the holder — and because any peer can steal the lease. An invisible hold
+would not be.
+
 Opening and closing terminals are durable facts the CRDT cannot express, so they are
 `SessionCommand`s (`OpenTerminal`, `CloseTerminal`, plus `TakeTerminalLease` /
 `ReleaseTerminalLease`), answered by the Process and recorded as events. The open
@@ -428,18 +482,24 @@ visibility, `Ports` E2E for chunk immutability/caching headers.
 via node-pty in the Nix `nodeModules`), the headless emulator per terminal,
 snapshots-after-seq, lease claim/steal/release + `TerminalInput`/`TerminalResize`,
 alt-screen + OSC 133 detection with the auto-flip policy and manual override, size
-register. New `Pty` test capability. Plus **rejection as an answer** (above): the
-`RejectedBy` register, `TerminalCommandRejected`, `Rejections` on the drain plan,
-rejection joining `consumedOf`, the `Rejected` block status, and the reject control beside
-approve.
+register. New `Pty` test capability. Plus the two queue changes leases and review demand:
+**the lease as a drain gate** (above) — the holder threaded into
+`TerminalQueueDrain.plan`, release re-arming the drain, and `AwaitingTerminal` reported
+distinctly from `AwaitingApproval` — and **rejection as an answer** — the `RejectedBy`
+register, `TerminalCommandRejected`, `Rejections` on the drain plan, rejection joining
+`consumedOf`, the `Rejected` block status, and the reject control beside approve.
 *Verify:* `Pty`-tagged suites (a real vim/alt-screen round trip; lease enforcement — a
 non-holder's input frame is dropped and logged), `Docker`-tagged exec-tty suite,
-cheap-tier flip-policy purity tests. For rejection, cheap-tier: a rejected entry is never
-`Ready` under ANY mode, `AutoRun` included; a rejected `QueueId` folds into `consumedOf`
-so it cannot run afterwards; both orderings of the reject/drain race leave exactly one
-event and one outcome; the projection surfaces the refusal with its actor and reason; the
-event round-trips. `Browser`: reject removes the entry for both peers and both see who
-refused.
+cheap-tier flip-policy purity tests. For the lease gate, cheap-tier over `plan`: an
+approved entry in a leased terminal with NO running block is held, not `Ready` (the case
+`busy` does not cover); the hold names the terminal, not approval; release yields it
+`Ready`; and a `Pty` E2E that a command queued during a live session runs on release and
+not before. For rejection, cheap-tier: a rejected entry is never `Ready` under ANY mode,
+`AutoRun` included, and is rejected even while the terminal is leased; a rejected
+`QueueId` folds into `consumedOf` so it cannot run afterwards; both orderings of the
+reject/drain race leave exactly one event and one outcome; the projection surfaces the
+refusal with its actor and reason; the event round-trips. `Browser`: reject removes the
+entry for both peers and both see who refused.
 
 Rejection rides in PR 2 rather than PR 3 because it is the half of the approval gate PR 1
 left out, and a gate that records every yes and no no is the weaker thing wearing the

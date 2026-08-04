@@ -350,7 +350,10 @@ discovers it in production. Items are roughly ordered by how much they matter.
   This is not a new privilege — any peer could already ask the agent to run `env` — but a
   terminal makes it one keystroke, and a future per-user terminal gate would attach here.
 - **Agent commands cannot hold a live-mode lease** (PR 2). A policy decision, not a
-  mechanism gap: leases are human-only until there is a reason to change that.
+  mechanism gap: leases are human-only until there is a reason to change that. The drain
+  gate that must accompany leases — a live terminal holds its queue rather than typing
+  into a session someone else owns — is designed in Plan 13 and lands with them, so the
+  hole does not exist yet only because live mode does not.
 - **Refusing a queued command leaves no record.** Approval is recorded on the block;
   rejection is a CRDT delete, so the entry is simply gone and the log that captures every
   yes captures no no. "The agent proposed this and a human said no" is the more
