@@ -203,7 +203,118 @@ exactly like drafts and the message queue:
   the log) consumes an entry only when its approval state satisfies the mode; an
   awaiting entry simply sits, visible, editable, reorderable — which *is* the approval
   UX: the human reads the agent's queued command, perhaps edits it, and approves it in
-  place. Rejection is deletion (a pure CRDT delete, like deleting a queued message).
+  place.
+
+### Rejection is an answer, not a deletion (PR 2)
+
+PR 1 made rejection a CRDT delete, by symmetry with deleting a queued message. The
+symmetry is false. A queued message is your own text and deleting it is a withdrawal; a
+queued *command* is frequently the agent's, and refusing it is the review gate doing the
+one thing it exists for. Deletion leaves no trace of that: the entry is simply gone, and
+a log that records every approval records no refusal. "The agent proposed this and a
+human said no" is the more interesting half, and it is the half currently thrown away.
+
+So rejection becomes an explicit answer, on the same rails as approval:
+
+```
+| TerminalCommandRejected of
+    { TerminalId ; QueueId
+      Author     : ActorRef        // whose command it was
+      RejectedBy : ActorRef        // who said no
+      Command    : string          // snapshotted — the queue entry is about to vanish
+      Reason     : string option }
+```
+
+**Doc proposes, drain disposes, log records** — the shape the rest of this design already
+has. A peer writes `RejectedBy` on the entry, a register beside `Approval`, so it merges
+and survives a disconnect exactly as an approval does and every peer sees *who* refused
+before the entry goes. The drain observes it, appends the event, removes the entry.
+Rejection is deliberately NOT a `SessionCommand`: a command frame from a peer that drops
+mid-flight is lost, and the log stays the Session Process's alone to write.
+
+The command text is snapshotted into the event for the same reason the drain snapshots it
+at consumption — the doc entry is deleted immediately after, and a record saying
+*something* was rejected is not a record.
+
+**The race is settled where every other one here is: in the log.** Under `AutoRun` a human
+can hit reject in the same tick the drain takes the entry. Neither side needs a lock,
+because `TerminalQueueDrain.consumedOf` already folds `TerminalBlockStarted` into the
+consumed set and rejection simply joins it — whichever event reaches the append-only log
+first wins, and the second is dropped as already consumed. The Session Process is the log's
+only writer, so check-and-append is serial there by construction. A rejected `QueueId` can
+therefore never run afterwards, and a started one can never be retro-rejected: stopping
+something already running is `kill`, a different verb with a different event.
+
+`TerminalQueueDrain.plan` gains `Rejections` beside `Ready`/`Removals`, and a rejected
+entry is never `Ready` under any mode — the rejection check precedes the mode gate,
+because a refusal outranks a policy that would otherwise have auto-run it.
+
+**A refusal is visible, not merely recorded.** The projection folds it into the terminal's
+block list as an entry with `Status = Rejected (by, reason)` and no transcript range, so
+the terminal reads *"agent: `rm -rf /` — rejected by nick"* in line with the commands that
+did run. That mints a `BlockId` for something which never spawned, and the widening is
+deliberate: a `BlockId` names **a proposed command and its outcome**, not a process. The
+alternative — a parallel list merged by timestamp in the view — is worse in every way that
+matters. Without it the entry just disappears from everyone's screen, which is
+indistinguishable from a bug.
+
+Who may reject: any peer, per the terminal-access-equals-session-access posture below; the
+event records which. The agent may not — it proposes, humans dispose. An agent withdrawing
+its *own* queued command is coherent, and a different action.
+
+### A leased terminal holds its queue (PR 2)
+
+Live mode is the pty's stdin belonging to one peer. A drain that fired anyway would type
+a queued command into a terminal somebody is already typing into — which is precisely the
+merged-keystroke corruption this design rejected tmux for on page one. So the lease is a
+gate on the drain, and PR 2 cannot ship without it: it is the correctness hole PR 2 opens
+by introducing leases at all. Today `TerminalQueueDrain.plan` knows `busy`, `isOpen` and
+the mode, and nothing about who holds the terminal.
+
+The case is narrower than "the terminal is in live mode", and the narrowing matters. A
+block that *becomes* live — the drain runs `vim`, alt-screen entry flips the terminal, a
+peer holds the lease for the editor's lifetime — is already covered, because that terminal
+is `busy` with a running block. The gap is a terminal that is live with **no block
+running**: someone pressed "take terminal" and is typing at the shell. `busy` is false, the
+terminal is open, an approved entry is sitting there, and nothing stops the drain.
+
+So `plan` takes the holder alongside the rest, and the gates order:
+
+```
+rejected      -> Rejections   (before everything; a refusal outranks any policy)
+consumed      -> Removals     (log-anchored repair)
+closed        -> nothing
+busy          -> skip         (one block per terminal)
+leased        -> hold         (someone owns stdin)
+approval/mode -> hold or Ready
+```
+
+Rejection sits above the lease gate as well as the mode gate: refusing a command touches
+no pty, so a leased terminal is irrelevant to it. Someone can clear out a bad queue while
+a colleague is inside vim.
+
+**Release re-arms the drain**, exactly as block completion already does (the `drain ()`
+call after `RunBlock` resolves, which is what lets a terminal's next command start
+immediately). `TerminalLeaseReleased` gets the same treatment, so handing the terminal
+back starts whatever was waiting for it.
+
+**Held-for-a-terminal is not held-for-approval**, and the two must never render or report
+as one. "Nick is using this terminal" resolves when a person finishes a task; "waiting for
+approval" resolves when a person makes a decision. A queue that says only *pending* leaves
+both looking like a stall. The composer shows the holder and a steal control — any peer may
+take the lease, which is already how leases work here — and the PR 3 tool reports
+`AwaitingTerminal` distinctly from `AwaitingApproval`.
+
+That distinction also settles the tool's wait: the `approvalGrace` does **not** apply to a
+leased terminal. The grace exists because a supervised approval often lands in seconds; a
+peer with a terminal open is mid-task and will not be done in five. `execute_command`
+returns `AwaitingTerminal` at once rather than burning the grace on a wait that was never
+going to resolve.
+
+**Starvation is bounded by the idle-lease timeout** (PR 3), and until it lands a lease held
+indefinitely does starve its queue. That is acceptable only because it is *visible* — the
+composer names the holder — and because any peer can steal the lease. An invisible hold
+would not be.
 
 Opening and closing terminals are durable facts the CRDT cannot express, so they are
 `SessionCommand`s (`OpenTerminal`, `CloseTerminal`, plus `TakeTerminalLease` /
@@ -367,13 +478,32 @@ queue + approval, the drain gate, the right panel rendering blocks through xterm
 determinism vs a headless emulator), `Browser` E2E for the panel + two-peer draft
 visibility, `Ports` E2E for chunk immutability/caching headers.
 
-**2. Pty + live mode.** `SpawnPty` on the seam (docker via exec-tty, host via node-pty
-in the Nix `nodeModules`), the headless emulator per terminal, snapshots-after-seq,
-lease claim/steal/release + `TerminalInput`/`TerminalResize`, alt-screen + OSC 133
-detection with the auto-flip policy and manual override, size register. New `Pty` test
-capability. *Verify:* `Pty`-tagged suites (a real vim/alt-screen round trip; lease
-enforcement — a non-holder's input frame is dropped and logged), `Docker`-tagged
-exec-tty suite, cheap-tier flip-policy purity tests.
+**2. Pty + live mode, and rejection.** `SpawnPty` on the seam (docker via exec-tty, host
+via node-pty in the Nix `nodeModules`), the headless emulator per terminal,
+snapshots-after-seq, lease claim/steal/release + `TerminalInput`/`TerminalResize`,
+alt-screen + OSC 133 detection with the auto-flip policy and manual override, size
+register. New `Pty` test capability. Plus the two queue changes leases and review demand:
+**the lease as a drain gate** (above) — the holder threaded into
+`TerminalQueueDrain.plan`, release re-arming the drain, and `AwaitingTerminal` reported
+distinctly from `AwaitingApproval` — and **rejection as an answer** — the `RejectedBy`
+register, `TerminalCommandRejected`, `Rejections` on the drain plan, rejection joining
+`consumedOf`, the `Rejected` block status, and the reject control beside approve.
+*Verify:* `Pty`-tagged suites (a real vim/alt-screen round trip; lease enforcement — a
+non-holder's input frame is dropped and logged), `Docker`-tagged exec-tty suite,
+cheap-tier flip-policy purity tests. For the lease gate, cheap-tier over `plan`: an
+approved entry in a leased terminal with NO running block is held, not `Ready` (the case
+`busy` does not cover); the hold names the terminal, not approval; release yields it
+`Ready`; and a `Pty` E2E that a command queued during a live session runs on release and
+not before. For rejection, cheap-tier: a rejected entry is never `Ready` under ANY mode,
+`AutoRun` included, and is rejected even while the terminal is leased; a rejected
+`QueueId` folds into `consumedOf` so it cannot run afterwards; both orderings of the
+reject/drain race leave exactly one event and one outcome; the projection surfaces the
+refusal with its actor and reason; the event round-trips. `Browser`: reject removes the
+entry for both peers and both see who refused.
+
+Rejection rides in PR 2 rather than PR 3 because it is the half of the approval gate PR 1
+left out, and a gate that records every yes and no no is the weaker thing wearing the
+stronger thing's face. It shares nothing with the pty work; if PR 2 splits, it goes first.
 
 **3. One `execute_command`, and the seams.** The convergence above: the bounded two-phase
 wait (`approvalGrace` then the existing command timeout), `read_terminal_block` to resume a

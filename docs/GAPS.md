@@ -350,7 +350,16 @@ discovers it in production. Items are roughly ordered by how much they matter.
   This is not a new privilege — any peer could already ask the agent to run `env` — but a
   terminal makes it one keystroke, and a future per-user terminal gate would attach here.
 - **Agent commands cannot hold a live-mode lease** (PR 2). A policy decision, not a
-  mechanism gap: leases are human-only until there is a reason to change that.
+  mechanism gap: leases are human-only until there is a reason to change that. The drain
+  gate that must accompany leases — a live terminal holds its queue rather than typing
+  into a session someone else owns — is designed in Plan 13 and lands with them, so the
+  hole does not exist yet only because live mode does not.
+- **Refusing a queued command leaves no record.** Approval is recorded on the block;
+  rejection is a CRDT delete, so the entry is simply gone and the log that captures every
+  yes captures no no. "The agent proposed this and a human said no" is the more
+  interesting half of a review gate, and it is currently thrown away — the queue also
+  cannot distinguish it from the author withdrawing their own text. Fixed by
+  `TerminalCommandRejected` and the `Rejected` block status in PR 2.
 - **`ApproveAgent` does not currently gate the agent.** It gates `queue_terminal_command`,
   but `execute_command` still runs on the old path with no approval and no terminal, so an
   agent that wants an answer has an ungated door. The mode is enforceable only once the two

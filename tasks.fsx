@@ -232,9 +232,38 @@ let private declareEsm (outDir: string) =
                 let options = Text.Json.JsonSerializerOptions (WriteIndented = true)
                 File.WriteAllText (manifest, node.ToJsonString options + "\n")
 
+/// The resolved package set behind a project: the exact `<package>/<version>` pairs NuGet
+/// settled on, hashed. Only the `libraries` keys, so it does not move with the machine's
+/// package-folder path or with a restore that changed nothing.
+let private packageGraph (project: string) : string =
+    let assets = Path.Combine (Path.GetDirectoryName project, "obj", "project.assets.json")
+    let node = Text.Json.Nodes.JsonNode.Parse (File.ReadAllText assets)
+    let libraries = node.["libraries"] :?> Text.Json.Nodes.JsonObject
+    let keys = libraries |> Seq.map (fun kv -> kv.Key) |> Seq.sort |> String.concat "\n"
+    Convert.ToHexString (Security.Cryptography.SHA256.HashData (Text.Encoding.UTF8.GetBytes keys))
+
 /// Compile an F# project to JS. `quiet` captures Fable's banner — the build verbs print their
 /// own one-line progress; `check` streams it.
+///
+/// Fable caches the cracked project and the package sources it copied under
+/// `<out>/fable_modules`, and its cache key does not include the RESOLVED package graph — so
+/// a version bump in Directory.Packages.props leaves the previous package's sources in place
+/// and Fable compiles THEM. project.assets.json said Ylmish 1.0.0-beta0222 while fable_modules
+/// still held beta0219, and the build was green against the previous library; it was only loud
+/// because that release changed the API's shape, and a source-compatible bump would have passed
+/// in silence. So key the out dir on the graph here: if it moved, the cached crack is void.
 let private fable (quiet: bool) (project: string) (outDir: string) =
+    let stamp = Path.Combine (outDir, ".package-graph")
+    let graph = packageGraph project
+    if File.Exists stamp && File.ReadAllText stamp <> graph then
+        let modules = Path.Combine (outDir, "fable_modules")
+        if Directory.Exists modules then Directory.Delete (modules, true)
+    // Stamped BEFORE compiling, not after: it records which graph `fable_modules` holds, and
+    // once the stale copy is gone that is settled. A compile error in OUR sources says nothing
+    // about the packages, and re-deleting them on every attempt would make an error-fix loop
+    // pay a full dependency re-copy each time round.
+    Directory.CreateDirectory outDir |> ignore
+    File.WriteAllText (stamp, graph)
     if quiet then run "dotnet" [ "fable"; project; "-o"; outDir ] |> ignore
     else exec "dotnet" [ "fable"; project; "-o"; outDir ]
     declareEsm outDir
@@ -714,14 +743,28 @@ let clean () =
             // leave it (removing the link would strand the shell without its addon-baked deps).
             // A real dir (off-Nix npm install) is cleaned normally.
             if (DirectoryInfo p).LinkTarget = null then Directory.Delete (p, true)
-    // Sweep the F#/.NET build dirs, without descending into deps or git.
-    let rec sweep dir =
+    // .NET build outputs live BESIDE a project file, so find the projects and delete THEIR
+    // bin/obj — rather than deleting every directory in the tree that happens to carry the
+    // name. A name match is a guess about where output lives; a project's own output
+    // directory is not, and the guess had teeth: this walk used to follow `.devenv/profile`
+    // into the Nix store and delete the devenv profile's `bin`, 806 tool symlinks, after
+    // which every devenv invocation failed until the store path was repaired.
+    //
+    // Symlinks and dot-directories are skipped, which is one rule and not two: this
+    // repository's build outputs are inside this repository, and both are paths out of it.
+    // `node_modules` is named as well because off Nix it is a real directory, full of `bin`.
+    let rec projects dir = seq {
+        yield! Directory.GetFiles (dir, "*.fsproj")
         for sub in Directory.GetDirectories dir do
-            match Path.GetFileName sub with
-            | "bin" | "obj" | "fable_modules" -> Directory.Delete (sub, true)
-            | "node_modules" | ".git" -> ()
-            | _ -> sweep sub
-    sweep repoRoot
+            let name = Path.GetFileName sub
+            if (DirectoryInfo sub).LinkTarget = null
+               && not (name.StartsWith ".")
+               && name <> "node_modules" then yield! projects sub
+    }
+    for project in projects repoRoot do
+        for out in [ "bin"; "obj" ] do
+            let p = Path.Combine (Path.GetDirectoryName project, out)
+            if Directory.Exists p && (DirectoryInfo p).LinkTarget = null then Directory.Delete (p, true)
 
 // Reused CI runners must not leak session containers/volumes between jobs. Best-effort.
 let cleanDocker () =
