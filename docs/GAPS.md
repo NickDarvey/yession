@@ -351,3 +351,15 @@ discovers it in production. Items are roughly ordered by how much they matter.
   terminal makes it one keystroke, and a future per-user terminal gate would attach here.
 - **Agent commands cannot hold a live-mode lease** (PR 2). A policy decision, not a
   mechanism gap: leases are human-only until there is a reason to change that.
+- **`ApproveAgent` does not currently gate the agent.** It gates `queue_terminal_command`,
+  but `execute_command` still runs on the old path with no approval and no terminal, so an
+  agent that wants an answer has an ungated door. The mode is enforceable only once the two
+  tools converge (Plan 13 PR 3, "Closing the loophole"). Until then, treat the terminal
+  approval mode as covering what the agent chose to put in a terminal, not everything it
+  can run.
+- **The agent never learns what a queued command did.** Terminal events fold into
+  `TerminalProjection` and deliberately not into the conversation, and the agent's context
+  pack is built from the conversation — so a block's exit code and output are outside it,
+  on that turn and every later one. The agent cannot chain (run, read, decide, run again)
+  through a terminal, which is the substantive reason it reaches for `execute_command`.
+  Fixed by the terminal digest on `AgentContextPack` in PR 3.
