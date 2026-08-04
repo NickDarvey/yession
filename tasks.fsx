@@ -714,14 +714,28 @@ let clean () =
             // leave it (removing the link would strand the shell without its addon-baked deps).
             // A real dir (off-Nix npm install) is cleaned normally.
             if (DirectoryInfo p).LinkTarget = null then Directory.Delete (p, true)
-    // Sweep the F#/.NET build dirs, without descending into deps or git.
-    let rec sweep dir =
+    // .NET build outputs live BESIDE a project file, so find the projects and delete THEIR
+    // bin/obj — rather than deleting every directory in the tree that happens to carry the
+    // name. A name match is a guess about where output lives; a project's own output
+    // directory is not, and the guess had teeth: this walk used to follow `.devenv/profile`
+    // into the Nix store and delete the devenv profile's `bin`, after which every devenv
+    // invocation failed until the store path was repaired.
+    //
+    // Symlinks and dot-directories are skipped, which is one rule and not two: this
+    // repository's build outputs are inside this repository, and both are paths out of it.
+    // `node_modules` is named as well because off Nix it is a real directory, full of `bin`.
+    let rec projects dir = seq {
+        yield! Directory.GetFiles (dir, "*.fsproj")
         for sub in Directory.GetDirectories dir do
-            match Path.GetFileName sub with
-            | "bin" | "obj" | "fable_modules" -> Directory.Delete (sub, true)
-            | "node_modules" | ".git" -> ()
-            | _ -> sweep sub
-    sweep repoRoot
+            let name = Path.GetFileName sub
+            if (DirectoryInfo sub).LinkTarget = null
+               && not (name.StartsWith ".")
+               && name <> "node_modules" then yield! projects sub
+    }
+    for project in projects repoRoot do
+        for out in [ "bin"; "obj" ] do
+            let p = Path.Combine (Path.GetDirectoryName project, out)
+            if Directory.Exists p && (DirectoryInfo p).LinkTarget = null then Directory.Delete (p, true)
 
 // Reused CI runners must not leak session containers/volumes between jobs. Best-effort.
 let cleanDocker () =
