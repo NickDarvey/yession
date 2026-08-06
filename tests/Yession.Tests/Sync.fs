@@ -665,9 +665,54 @@ let private titlePresenceTests =
             Expect.isFalse (Map.containsKey base'.Peer.PeerId next.Presence) "you never render your own remote caret"
     ]
 
+// The harness's own guard. `WaitFor` resolving on a model change is exercised by every suite
+// in the repo; what nothing exercised is the case where it NEVER does — which used to hang
+// until the whole run's budget expired, killing every suite after it and reporting a timeout
+// with no test name on it. These pin the deadline at a few milliseconds (the point of
+// `runWith`) so the guard is proved in the cheap tier rather than costing 30s to observe.
+let private harnessTests =
+    testList "Test harness" [
+        testCaseAsync "a condition that never arrives fails the ONE test, with why" <|
+            async {
+                let doc = Y.Doc.Create ()
+                let p = Harness.runWith 50 (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+                let! outcome = Async.Catch (p.WaitFor (fun _ -> false))
+                match outcome with
+                | Choice1Of2 () -> failwith "a never-satisfied predicate must not resolve"
+                | Choice2Of2 error ->
+                    Expect.stringContains error.Message "WaitFor timed out" "the failure says what timed out"
+                    Expect.stringContains error.Message "50ms" "and how long it waited"
+            }
+
+        // The deadline must not cost anything when the condition DOES arrive — including the
+        // common case where it is already true before the wait begins.
+        testCaseAsync "a condition that is already true resolves without waiting" <|
+            async {
+                let doc = Y.Doc.Create ()
+                let p = Harness.runWith 50 (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+                do! p.WaitFor (fun m -> m.Peer.DisplayName = "Ada")
+            }
+
+        testCaseAsync "a condition that arrives resolves, and the deadline never fires after it" <|
+            async {
+                let doc = Y.Doc.Create ()
+                let p = Harness.runWith 50 (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+                let waited = p.WaitFor (fun m -> m.Composer = Own)
+                p.Dispatch (user StartDraftMsg)
+                do! waited
+                // Past the deadline, on a runner that keeps updating: a timer that fired now
+                // would be resuming a continuation that is already settled, which is exactly
+                // the bug an unguarded `setTimeout` would have.
+                do! Async.Sleep 120
+                p.Dispatch (user StartDraftMsg)
+                Expect.equal (p.Model ()).Composer Own "the model still works after the deadline passed"
+            }
+    ]
+
 let tests =
     testList "Sync" [
         codecTests
+        harnessTests
         draftSlotTests
         composerTests
         queueUnitTests
