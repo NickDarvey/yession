@@ -12,6 +12,12 @@ type AgentContextPack =
     { SessionId      : SessionId
       Conversation   : ConversationItem list
       CurrentMessage : ConversationItem
+      /// What the session's terminals did since the previous turn (Plan 13, stage 3a).
+      /// A SEPARATE field, deliberately: a command someone ran is not something someone
+      /// said, so folding blocks into `Conversation` would make the chat log a place
+      /// where machine output accumulates. The agent needs both; the conversation stays
+      /// a conversation.
+      Terminals      : TerminalBlockDigest list
       SystemPrompt   : string }
 
 type AgentResponseChunk = { Text : string }

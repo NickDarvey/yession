@@ -49,6 +49,10 @@ module Scheduler =
         (mintTurnId: unit -> AgentTurnId)
         (mintMessageId: unit -> MessageId)
         (actorFor: PeerId -> ActorRef)
+        // How a block's output is read back for the agent's terminal digest (Plan 13,
+        // stage 3a). Injected rather than reached for, so a session with no transcript
+        // storage still runs turns — it simply reports blocks with empty output.
+        (readTranscript: ReadTranscript)
         (initialConsumed: Set<string>)
         : SessionScheduler =
 
@@ -119,7 +123,19 @@ module Scheduler =
                                 let! page = log.Read None System.Int32.MaxValue
                                 let projection, _ =
                                     ConversationProjection.applyEvents None page.Events ConversationProjection.empty
-                                do! AgentTurn.run log agent (signalFor turn) capabilitiesFor emitUsage (fun () -> turn.TurnId) mintMessageId sessionId projection.Items trigger
+                                // The terminal digest comes off the SAME page, so the
+                                // conversation and the terminals describe one instant.
+                                // This page was read before `AgentTurn.run` appends this
+                                // turn's `AgentTurnStarted`, which is what makes the
+                                // window "since the previous turn" without a cursor.
+                                let events = page.Events |> List.map (fun envelope -> envelope.Event)
+                                let terminals =
+                                    events
+                                    |> List.fold TerminalProjection.applyEvent TerminalProjection.empty
+                                    |> TerminalDigest.build
+                                        (fun id fromSeq toSeq -> readTranscript id fromSeq toSeq |> Transcript.printed)
+                                        (TerminalDigest.window events)
+                                do! AgentTurn.run log agent (signalFor turn) capabilitiesFor emitUsage (fun () -> turn.TurnId) mintMessageId sessionId projection.Items terminals trigger
                                 // Release the slot and re-arm — unless an interrupt
                                 // already released it (and possibly started a successor).
                                 match running with

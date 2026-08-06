@@ -24,6 +24,26 @@ type Transcript =
 /// the process that wrote it and an audit trail that restarts at zero is not one.
 type OpenTranscript = TerminalId -> TranscriptHeader -> Transcript
 
+/// Read back what a terminal printed, over a half-open line range — `None` as the end
+/// meaning "to whatever it has now", which is what a still-running block has.
+///
+/// Separate from `Transcript` rather than a method on it, because the two have opposite
+/// shapes: appends are hot, per-terminal and held open, while reads are rare, bounded and
+/// addressed by id (a digest tail, a chunk request). Giving the append path a read it does
+/// not use would make every writer carry a reader it must implement.
+type ReadTranscript = TerminalId -> int -> int option -> TranscriptRecord list
+
+module Transcript =
+
+    /// What a range of records PRINTED. Input records are skipped — the command is already
+    /// carried on the block, and echoing it back into its own output would have a reader
+    /// count it twice — and a resize is not output at all.
+    let printed (records: TranscriptRecord list) : string =
+        records
+        |> List.filter (fun r -> r.Kind = TranscriptOutput || r.Kind = TranscriptStderr)
+        |> List.map (fun r -> r.Data)
+        |> String.concat ""
+
 /// The terminal queue's drain decision, as a pure function (Plan 13). The Session Process
 /// is the single consumer of the terminal queue exactly as it is of the message queue,
 /// and this is the whole policy: what runs next, and what is merely left over.

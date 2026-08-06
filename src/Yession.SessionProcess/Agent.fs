@@ -18,6 +18,9 @@ module AgentTurn =
         + "Start an environment only when repository or command execution is needed. "
         + "Use command execution deliberately. "
         + "Prefer high-signal investigation over noisy exploration. "
+        + "Commands you queue in a terminal run outside your turn, so their results reach "
+        + "you on a later turn as terminal activity rather than as a tool result — read it "
+        + "before assuming a queued command did nothing. "
         + "Explain meaningful progress to the session."
 
     /// Run one agent turn for a human `MessageSent`, appending the lifecycle events:
@@ -44,6 +47,10 @@ module AgentTurn =
         (mintMessageId: unit -> MessageId)
         (sessionId: SessionId)
         (conversation: ConversationItem list)
+        // What the terminals did since the previous turn (Plan 13, stage 3a). Built by the
+        // caller from the same log page the conversation came from, so the two describe
+        // the same instant.
+        (terminals: TerminalBlockDigest list)
         (trigger: MessageSent)
         : Async<unit> =
         async {
@@ -69,6 +76,7 @@ module AgentTurn =
                     { SessionId = sessionId
                       Conversation = conversation
                       CurrentMessage = currentMessage
+                      Terminals = terminals
                       SystemPrompt = systemPrompt }
                 do! append (AgentContextBuilt { AgentTurnId = turnId; MessageCount = List.length conversation })
 

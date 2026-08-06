@@ -245,6 +245,111 @@ let private projectionTests =
             Expect.equal (TerminalProjection.tryFind terminalA proj |> Option.get).DroppedBytes 512 "the loss is counted"
     ]
 
+// --- The agent's terminal digest (Plan 13, stage 3a) -------------------------------------
+
+let private turnStarted (n: string) =
+    SessionEvent.AgentTurnStarted
+        { AgentTurnId = AgentTurnId.create ("t-" + n) |> expect
+          TriggeredByMessageId = MessageId.create ("m-" + n) |> expect }
+
+/// A reader that answers from a per-terminal string, so the digest's own slicing is what
+/// is under test rather than a transcript store's.
+let private readsBack (text: string) : TerminalId -> int -> int option -> string =
+    fun _ _ _ -> text
+
+let private digestOf events =
+    fold events |> TerminalDigest.build (readsBack "") (TerminalDigest.window events)
+
+let private digestTests =
+    testList "Terminal digest" [
+        testCase "the window is everything since the PREVIOUS turn began" <| fun () ->
+            let events =
+                [ opened terminalA "build"
+                  started terminalA "1" "old" 0
+                  completed terminalA "1" (CommandSucceeded 0) 2
+                  turnStarted "1"
+                  started terminalA "2" "new" 2
+                  completed terminalA "2" (CommandSucceeded 0) 5 ]
+            Expect.equal
+                (digestOf events |> List.map (fun d -> d.Command))
+                [ "new" ]
+                "a block that both started and finished before the last turn is old news"
+
+        testCase "a block that finishes DURING the turn is reported, though it started before" <| fun () ->
+            // The case the agent is actually waiting on: it queued something, the turn
+            // ended, the command finished afterwards. Keying the window on starts alone
+            // would drop precisely the outcome it asked for.
+            let events =
+                [ opened terminalA "build"
+                  started terminalA "1" "make" 0
+                  turnStarted "1"
+                  completed terminalA "1" (CommandFailed 2) 7 ]
+            let digest = digestOf events
+            Expect.equal (digest |> List.map (fun d -> d.Command)) [ "make" ] "it is in the digest"
+            Expect.equal digest.Head.Status (BlockFinished (CommandFailed 2)) "with the exit code it ended on"
+
+        testCase "a still-running block is reported as running, not omitted" <| fun () ->
+            let events = [ opened terminalA "build"; turnStarted "1"; started terminalA "1" "sleep 60" 0 ]
+            let digest = digestOf events
+            Expect.equal digest.Head.Status BlockRunning "the agent is told it has not finished"
+
+        testCase "the digest carries who wrote the command and who approved it" <| fun () ->
+            let events =
+                [ opened terminalA "build"
+                  turnStarted "1"
+                  SessionEvent.TerminalBlockStarted
+                      { TerminalId = terminalA
+                        BlockId = block "1"
+                        QueueId = None
+                        Author = ActorRef.Agent
+                        ApprovedBy = Some (PeerRef bob)
+                        Command = "rm -rf build"
+                        FromSeq = 0 }
+                  completed terminalA "1" (CommandSucceeded 0) 3 ]
+            let entry = (digestOf events).Head
+            Expect.equal entry.Author ActorRef.Agent "the agent's own command"
+            Expect.equal entry.ApprovedBy (Some (PeerRef bob)) "and the human who let it run"
+            Expect.equal entry.Title "build" "named by its terminal, not an opaque id"
+
+        testCase "output is capped from the FRONT, and the loss is stated" <| fun () ->
+            // Keeping the tail is the whole point: a build's verdict is its last lines,
+            // and a cap that kept the head would hand the agent the part it can guess.
+            let long = String.replicate (TerminalDigest.tailCap + 500) "x"
+            let events = [ opened terminalA "build"; turnStarted "1"; started terminalA "1" "make" 0 ]
+            let digest = fold events |> TerminalDigest.build (readsBack long) (TerminalDigest.window events)
+            Expect.equal digest.Head.OutputTail.Length TerminalDigest.tailCap "the tail is capped"
+            Expect.equal digest.Head.Elided 500 "and what was dropped is counted, not silently elided"
+
+        testCase "output that fits is not elided at all" <| fun () ->
+            let events = [ opened terminalA "build"; turnStarted "1"; started terminalA "1" "make" 0 ]
+            let digest = fold events |> TerminalDigest.build (readsBack "ok\n") (TerminalDigest.window events)
+            Expect.equal digest.Head.OutputTail "ok\n" "it arrives whole"
+            Expect.equal digest.Head.Elided 0 "with nothing claimed to be missing"
+
+        testCase "blocks across several terminals all appear, in the order they ran" <| fun () ->
+            let events =
+                [ opened terminalA "build"
+                  opened terminalB "logs"
+                  turnStarted "1"
+                  started terminalA "1" "make" 0
+                  started terminalB "2" "tail -f log" 0 ]
+            Expect.equal
+                (digestOf events |> List.map (fun d -> d.Command))
+                [ "make"; "tail -f log" ]
+                "a terminal is not a filter — the agent sees the session's work"
+
+        testCase "what a block PRINTED excludes what was typed into it" <| fun () ->
+            // The command already rides on the block. Echoing the input record back into
+            // its own output would have a reader count the command twice.
+            let printed =
+                Transcript.printed
+                    [ { At = 0.0; Kind = TranscriptInput; Data = "make\n" }
+                      { At = 0.1; Kind = TranscriptOutput; Data = "building" }
+                      { At = 0.2; Kind = TranscriptResize; Data = "80x24" }
+                      { At = 0.3; Kind = TranscriptStderr; Data = "!" } ]
+            Expect.equal printed "building!" "output and stderr, in order, and nothing else"
+    ]
+
 // --- ANSI -------------------------------------------------------------------------------
 
 let private lineTexts (lines: AnsiLine list) =
@@ -782,6 +887,7 @@ let tests =
         approvalTests
         drainTests
         projectionTests
+        digestTests
         ansiTests
         transcriptTests
         codecTests
