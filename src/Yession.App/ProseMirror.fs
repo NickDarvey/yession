@@ -129,11 +129,35 @@ module ProseMirror =
     let private callChain (fn: obj) (a: Command) (b: Command) : Command = jsNative
     let chain (a: Command) (b: Command) : Command = callChain chainCommandsFn a b
 
+    /// Steps out of a code block rather than typing into it — chained ahead of a command the
+    /// schema would refuse inside one (a hard break, which `code_block`'s `text*` content
+    /// cannot hold).
+    [<Import("exitCode", "prosemirror-commands")>]
+    let exitCode : Command = jsNative
+
     /// A command that always handles the key by running an effect — how a keystroke reaches
     /// the app (Enter sends). Returning `true` is what stops ProseMirror inserting anything.
     /// A `System.Func` because ProseMirror calls it with three arguments, not curried.
     let effectCommand (run: unit -> unit) : Command =
         box (System.Func<EditorState, obj, obj, bool>(fun _ _ _ -> run (); true))
+
+    /// `nodeType.create()` — a leaf node to insert (the hard break).
+    [<Emit("$0.create()")>]
+    let nodeCreate (n: NodeType) : Node = jsNative
+
+    [<Emit("$0.scrollIntoView()")>]
+    let trScrollIntoView (tr: Transaction) : Transaction = jsNative
+
+    [<Emit("$0($1)")>]
+    let private applyDispatch (dispatch: obj) (tr: Transaction) : unit = jsNative
+
+    /// A command that EDITS the document, written the way ProseMirror expects: `dispatch` is
+    /// absent when the editor is only asking whether the command applies, and a command that
+    /// edited anyway would change the document on a mere probe.
+    let editCommand (edit: EditorState -> Transaction) : Command =
+        box (System.Func<EditorState, obj, obj, bool>(fun state dispatch _ ->
+            if present dispatch then applyDispatch dispatch (edit state)
+            true))
 
     // --- prosemirror-inputrules ------------------------------------------------------------
 

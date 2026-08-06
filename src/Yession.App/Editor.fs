@@ -76,15 +76,39 @@ module Editor =
         if present (m "code") then rules.Add (markRule "`([^`]+)`$" (m "code"))
         inputRules (createObj [ "rules" ==> rules.ToArray () ])
 
-    /// Base editing keys + list handling + Yjs-aware undo/redo, and Enter.
+    /// A LINE BREAK inside the current block: a `hard_break`, which Markdown serializes as a
+    /// trailing backslash and parses straight back — so the break survives the round trip into
+    /// the timeline (`RichText` renders it as `<br>`) rather than being a thing you can only
+    /// see while you type it. `None` when the schema has no such node, because an unbound key
+    /// is honest and a key that silently does nothing is not.
     ///
-    /// `onSubmit` is what Enter does in a COMPOSER: send. That is what Enter does in every
-    /// chat surface, and the new line it displaces moves to `Alt-Enter` — which is bound to
-    /// exactly the behaviour Enter used to have (split the list item, else split the block),
-    /// read off `baseKeymap` rather than rebuilt, so the two can never drift.
+    /// Chained after `exitCode` so the same keystroke steps OUT of a code block, whose `text*`
+    /// content cannot hold a break at all.
+    let private lineBreak () : Command option =
+        let br = nodeType schema "hard_break"
+        if not (present br) then None
+        else
+            Some (
+                chain
+                    exitCode
+                    (editCommand (fun state ->
+                        trScrollIntoView ((state.tr).replaceSelectionWith (nodeCreate br, false)))))
+
+    /// Base editing keys + list handling + Yjs-aware undo/redo, and Enter's three jobs.
     ///
-    /// A body with nothing to send (a queued message being edited in place) passes `None`
-    /// and keeps plain Enter: binding a send there would fire an action that does not exist.
+    /// Enter used to mean both "commit" and "new block", and nothing meant "new line". It now
+    /// means one thing per key:
+    ///
+    ///   Enter        — send, in a COMPOSER. What Enter does in every chat surface.
+    ///   Alt-Enter    — a new PARAGRAPH: exactly the behaviour Enter used to have (split the
+    ///                  list item, else split the block), read off `baseKeymap` rather than
+    ///                  rebuilt, so the two can never drift.
+    ///   Shift-Enter  — a LINE BREAK within the block. Bound in every body, composer or not:
+    ///                  it is an editing key, not part of the send bargain.
+    ///
+    /// A body with nothing to send (a queued message being edited in place) passes `None` for
+    /// `onSubmit` and keeps plain Enter as the paragraph: binding a send there would fire an
+    /// action that does not exist.
     let private editorKeymap (onSubmit: (unit -> unit) option) : obj =
         let keys = createObj []
         keys?("Mod-z") <- yUndo
@@ -92,9 +116,9 @@ module Editor =
         keys?("Mod-Shift-z") <- yRedo
         keys?("Mod-b") <- toggleMark (markType schema "strong")
         keys?("Mod-i") <- toggleMark (markType schema "em")
-        // What a plain Enter means in prose: split the list item when in one, else whatever
-        // ProseMirror's own Enter does.
-        let newLine =
+        // What a plain Enter always meant in prose: split the list item when in one, else
+        // whatever ProseMirror's own Enter does.
+        let newParagraph =
             if present (nodeType schema "list_item") then
                 chain (splitListItem (nodeType schema "list_item")) (baseEnter baseKeymap)
             else baseEnter baseKeymap
@@ -104,11 +128,12 @@ module Editor =
             keys?("Shift-Tab") <- liftListItem li
             keys?("Mod-[") <- liftListItem li
             keys?("Mod-]") <- sinkListItem li
+        lineBreak () |> Option.iter (fun command -> keys?("Shift-Enter") <- command)
         match onSubmit with
         | Some submit ->
             keys?("Enter") <- effectCommand submit
-            keys?("Alt-Enter") <- newLine
-        | None -> keys?("Enter") <- newLine
+            keys?("Alt-Enter") <- newParagraph
+        | None -> keys?("Enter") <- newParagraph
         keys
 
     // --- Presence: report the local selection, overlay remote ones -------------------------

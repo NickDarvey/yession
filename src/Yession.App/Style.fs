@@ -553,7 +553,7 @@ module Style =
     /// so it teaches once and then gets out of the way. Never the only route: every action
     /// it names has a button on this same row.
     let draftHint =
-        "hidden md:block " + caps + " text-ink-faint opacity-0 transition-opacity "
+        "hidden md:block min-w-0 truncate " + caps + " text-ink-faint opacity-0 transition-opacity "
         + "group-focus-within:opacity-100 motion-reduce:transition-none"
 
     /// Send sits at the TRAILING edge — where the eye ends the line it just wrote, and where
