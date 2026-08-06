@@ -156,3 +156,80 @@ module TerminalProjection =
     /// directory and environment mean anything from one command to the next.
     let runningBlock (view: TerminalView) : TerminalBlock option =
         view.Blocks |> List.tryFind (fun b -> b.Status = BlockRunning)
+
+/// One block an agent turn is told the outcome of (Plan 13, stage 3a).
+///
+/// Terminal events fold into `TerminalProjection` and deliberately NOT into the
+/// conversation — a command someone ran is not something someone said. That is right for
+/// the chat log and wrong for the agent, whose context is built from the conversation, so
+/// without this it cannot see the result of anything it queued, on that turn or any later
+/// one. Which is the substantive reason it reaches for a private execution path instead.
+type TerminalBlockDigest =
+    { TerminalId : TerminalId
+      /// The terminal's title, so the agent can name the place rather than an opaque id.
+      Title : string
+      BlockId : BlockId
+      /// Who wrote the command — the agent's own, or someone else's it should know ran.
+      Author : ActorRef
+      ApprovedBy : ActorRef option
+      Command : string
+      Status : TerminalBlockStatus
+      /// The tail of what the block printed, capped. All of it stays in the transcript;
+      /// this is the part that fits in a context window.
+      OutputTail : string
+      /// Characters of output the tail leaves out. Stated rather than silently elided: a
+      /// model that cannot tell a short output from a truncated one will confidently
+      /// describe the wrong thing.
+      Elided : int }
+
+/// What an agent turn is told about the terminals since it last ran (Plan 13, stage 3a).
+module TerminalDigest =
+
+    /// Characters of output tail kept per block. The transcript keeps the rest, and a
+    /// block's full range travels with it, so nothing here is the only copy.
+    let tailCap = 2000
+
+    /// The blocks whose start or completion fell after the PREVIOUS turn began.
+    ///
+    /// No stored cursor is needed, and that is a property of when the page is read rather
+    /// than a trick: an agent turn's context is built from a page read BEFORE that turn
+    /// appends its own `AgentTurnStarted`, so resetting on every `AgentTurnStarted` in the
+    /// page leaves exactly what moved since the previous one.
+    ///
+    /// Completion counts as movement, not just the start. A block that began before the
+    /// last turn and finished during it is precisely the case the agent is waiting on —
+    /// reporting only newly-started blocks would drop every outcome it actually asked for.
+    let window (events: SessionEvent list) : Set<string> =
+        events
+        |> List.fold
+            (fun acc event ->
+                match event with
+                | SessionEvent.AgentTurnStarted _ -> Set.empty
+                | SessionEvent.TerminalBlockStarted b -> Set.add (BlockId.value b.BlockId) acc
+                | SessionEvent.TerminalBlockCompleted b -> Set.add (BlockId.value b.BlockId) acc
+                | _ -> acc)
+            Set.empty
+
+    /// Assemble the digest: every in-window block, in the order it ran, with a bounded
+    /// tail of what it printed. `readOutput` is handed the block's transcript range —
+    /// `None` for a running block, which has no end yet and reads to whatever the terminal
+    /// has so far.
+    let build
+        (readOutput: TerminalId -> int -> int option -> string)
+        (window: Set<string>)
+        (proj: TerminalProjection)
+        : TerminalBlockDigest list =
+        [ for terminal in proj.Terminals do
+            for block in terminal.Blocks do
+                if Set.contains (BlockId.value block.BlockId) window then
+                    let output = readOutput terminal.TerminalId block.FromSeq block.ToSeq
+                    let elided = max 0 (output.Length - tailCap)
+                    { TerminalId = terminal.TerminalId
+                      Title = terminal.Title
+                      BlockId = block.BlockId
+                      Author = block.Author
+                      ApprovedBy = block.ApprovedBy
+                      Command = block.Command
+                      Status = block.Status
+                      OutputTail = (if elided > 0 then output.Substring elided else output)
+                      Elided = elided } ]

@@ -179,9 +179,45 @@ let private promptOf (context: AgentContextPack) : string =
         |> List.filter (fun item -> item.Status = Complete)
         |> List.map (fun item -> sprintf "%s: %s" (label item.Author) item.Body)
         |> String.concat "\n"
+    // The terminal digest is rendered as its own section, never folded into the
+    // conversation: the model must be able to tell what someone SAID from what a machine
+    // PRINTED, and a block attributed like a chat line invites it to reply to the output.
+    let terminals =
+        match context.Terminals with
+        | [] -> ""
+        | blocks ->
+            let render (block: TerminalBlockDigest) =
+                let outcome =
+                    match block.Status with
+                    | BlockRunning -> "still running"
+                    | BlockFinished (CommandSucceeded code) -> sprintf "exit %d" code
+                    | BlockFinished (CommandFailed code) -> sprintf "exit %d" code
+                    | BlockFinished (CommandExecutionFailed reason) -> sprintf "could not run: %s" reason
+                    | BlockFinished CommandTimedOut -> "timed out"
+                let approved =
+                    match block.ApprovedBy with
+                    | Some actor -> sprintf ", approved by %s" (label actor)
+                    | None -> ""
+                let elided =
+                    if block.Elided > 0 then
+                        sprintf "[%d earlier characters omitted — the whole output is in the transcript]\n" block.Elided
+                    else ""
+                sprintf
+                    "[%s] %s ran: %s (%s%s)\n%s%s"
+                    block.Title
+                    (label block.Author)
+                    block.Command
+                    outcome
+                    approved
+                    elided
+                    block.OutputTail
+            sprintf
+                "\n\nTerminal activity since your last turn (you did not see this before now):\n%s"
+                (blocks |> List.map render |> String.concat "\n\n")
     sprintf
-        "Conversation so far:\n%s\n\nReply to the latest message from %s:\n%s"
+        "Conversation so far:\n%s%s\n\nReply to the latest message from %s:\n%s"
         transcript
+        terminals
         (label context.CurrentMessage.Author)
         context.CurrentMessage.Body
 
