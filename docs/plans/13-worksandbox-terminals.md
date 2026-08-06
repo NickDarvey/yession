@@ -193,18 +193,31 @@ editor's lifetime" is only possible if the drained command is running on the pty
 spawned beside the shell has no tty, so `vim` degrades or refuses and the flip never
 happens.
 
-**Validated against Warp**, which is the same block model and now open source. Its shell
-hooks live in `app/assets/bundled/bootstrap/`: `warp_preexec` fires before a command runs
-and `warp_precmd` on return to the prompt, emitting
-`{"hook": "CommandFinished", "value": {"exit_code": ..., "next_block_id": ...}}` over a DCS
-JSON channel (`zsh_body.sh:301-311`). Two details there are worth copying rather than
-rediscovering. The exit code is read from `$?` as the very first statement of the prompt
-hook — "prior to executing any other" (`zsh_body.sh:302-308`) — because anything else run
-first overwrites it. And sharing the prompt with whatever the image's shell already does
-takes explicit care: Warp saves `precmd_functions`, runs with only its own registered, and
-restores them afterwards — with a special case to leave powerlevel10k's in place, because
-removing them makes p10k believe a command is still running (`zsh_body.sh:236-242`). Ours
-appends and never replaces, for the same reason.
+**Validated against Warp**, which is the same block model and now open source — a check
+that corrected this design as much as it confirmed it. The confirmation is the shape:
+Warp's boundaries come from **prompt hooks**, `warp_preexec` before a command and
+`warp_precmd` on return to the prompt (`zsh_body.sh:301`, `bash_body.sh:432`), and three
+details there are worth taking rather than rediscovering. The exit code is read from `$?`
+as the very first statement of the prompt hook — "we MUST check this first" — because
+anything run before it overwrites the value. Hooks are *appended* to whatever the image's
+shell already registered, never substituted: Warp special-cases powerlevel10k because
+removing its precmd makes p10k believe a command is still running (`zsh_body.sh:1241`).
+And bootstrap is verified by **timeout** rather than by acknowledgement — seven seconds,
+after which the session is treated as un-instrumented (`view.rs:632`).
+
+The correction is the transport, and it matters because it was nearly cargo-culted. **Warp
+does not use OSC 133 for block boundaries at all.** It parses only `A`/`B` from that
+dialect, purely to locate where prompt text ends, and ignores `C`/`D` entirely; its blocks
+ride a private DCS channel carrying hex-encoded JSON (`ESC P $ d <hex> ESC \`), with a
+two-phase completion — a cheap `CommandFinished` for latency, then a richer `Precmd`
+carrying cwd, PS1, git branch and venv.
+
+We are not copying that, and the reason is the payload. Warp's channel exists to move
+*user data* out of the shell, which is why it is hex-encoded — a cwd or a PS1 containing
+`ESC` or `ST` would otherwise terminate the sequence carrying it (`bash_body.sh:70`). What
+we need back is one integer. `C`/`D` say exactly that and nothing more, they are the
+dialect an image's own shell integration is most likely to already emit, and
+`registerOscHandler(133, …)` reads them without us writing a parser.
 
 ### The marks, and why not a sentinel
 
@@ -215,9 +228,9 @@ the block's output range rather than inside it, and `ToSeq` and the exit code bo
 off `D`. `@xterm/headless` surfaces these directly: `registerOscHandler(133, …)` on the
 parser, so the Session Process reads marks as a callback instead of scanning bytes.
 
-We need less of the protocol than Warp does. Warp must reconstruct what a human typed at a
-prompt it does not control, so its hooks carry the command text, a shell-minted block id
-and a session id. Our drain *composed* the command line and already recorded it in
+We need less of the protocol than Warp does, because Warp must reconstruct what a human
+typed at a prompt it does not control — hence hooks carrying the command text and a
+shell-minted block id. Our drain *composed* the command line and already recorded it in
 `TerminalBlockStarted`, so all we need back is "it started" and "it finished, with this
 code".
 
@@ -231,6 +244,71 @@ more wrapping, and the result is a parser for shell grammar living in the drain 
 the shell's job, and which fails silently by producing a block that never closes. Warp
 reached the same conclusion by construction: prompt hooks, not command rewriting.
 
+### A mark must prove it came from our shell
+
+`ESC ] 133 ; D ; 0 BEL` is a dozen bytes of ASCII, and **the output stream is full of bytes
+we did not write** — a file someone `cat`s, a build log, a fetched page, a filename. Any of
+them can contain that sequence, and here marks are not a rendering nicety: they write the
+event log. A forged `D` closes the running block early, stamps it with an exit code nobody
+produced, and cuts its transcript range short — a failed command recorded as successful, in
+the record that exists precisely to be trusted. The output of a command is the least
+trustworthy input in this system and is about to become a control channel.
+
+Warp has this problem and answers it with an integrity token: a cryptographically random
+`u64` session id, minted client-side and *registered before the shell is ever told it*,
+carried on every hook, with unregistered hooks rejected and logged (`bootstrap.rs:208`,
+`mod.rs:558`). We take that directly. Each terminal's instrumentation is issued a fresh
+nonce at open, every mark carries it (`ESC ] 133 ; D ; <code> ; y=<nonce> BEL`), and a mark
+without the terminal's current nonce is not a mark — it is bytes that happen to look like
+one, and it goes to the screen as ordinary output.
+
+**The Process strips its own marks from the byte stream before appending to the
+transcript.** Otherwise the nonce is readable by anyone who can fetch a chunk — including,
+after PR 3, the agent through `read_terminal_block`, which would let one approved command
+buy the ability to forge the outcome of every later one. Stripping closes that, and is
+independently right: marks are protocol rather than content, and an asciicast replayed in
+`asciinema` should not carry them. It also disambiguates the nested case for free — an
+image whose own shell ships VS Code-style OSC 133 integration emits unnonced marks, and
+those must not be mistaken for ours.
+
+Authentic marks still arrive wrongly, and Warp's answer to that is instructive for how
+*little* to do. It runs a whole lifecycle state machine whose enumerated outcomes are
+mostly refusals — `DuplicateCompletion`, `CollidingCompletion`, `RepeatedPreexec` — and
+whose repair paths are behind a feature flag that is **off by default**, because guessing
+at a broken sequence is riskier than leaving a block wrong. It also documents `preexec`
+firing with no command submitted at all. We are far less exposed, because the Process knows
+which command it wrote and which block is open, so the rule is just: a `D` that does not
+match the block currently believed to be running is dropped, a second `C` inside an open
+block is dropped, and neither is repaired into something else. Dropped marks are counted
+and surfaced on the terminal, since a stream of them is the same evidence as no marks.
+
+### Writing a command into a shell
+
+Typing into a line editor is not the same as piping to stdin, and Warp's write path
+(`pty_controller.rs:755`) encodes three lessons. It sends the shell's **kill-line** bytes
+first, because the editor may already hold a half-typed line from a peer; it wraps the
+command in **bracketed paste** where the shell enabled it, so a multi-line command arrives
+as one submission rather than as several; and it **strips `ESC` from the command text**
+before writing (`pty_controller.rs:796`).
+
+That last one is ours with more force than Warp's. A terminal composer is collaborative and
+the agent writes into one, so the command text is attacker-reachable in a way a locally
+typed line is not: a command carrying `ESC` could emit a forged mark from the *input* side,
+or reprogram the terminal on its way in. Command text is a line for a shell to run, and
+everything below `0x20` other than the submitting newline is stripped before it is written.
+
+Two repairs belong on block completion, both learned the same way — Warp force-unsets
+bracketed paste and force-exits the alternate screen when a command completes, because a
+connection dropped inside a remote TUI otherwise leaves the local terminal stuck in a mode
+its own shell never set and cannot clear (`terminal_model.rs:2328`). A terminal that ends a
+block wedged in the alt screen is one nobody can type into again.
+
+The docker backend needs one more accommodation: Warp writes its bootstrap to container
+exec sessions in 4KB chunks with delays, because "the double-PTY proxy drops data for large
+writes" (`pty_controller.rs:444`). Our instrumentation goes in at launch rather than by
+typing, so this bites only a very long command line — but the write path should chunk
+rather than assume a large write survives.
+
 ### Instrumentation, and the probe
 
 We control how the shell is launched — `SandboxExec` carries `Env` and an argv — so the
@@ -238,6 +316,22 @@ hooks go in at spawn rather than by editing anything in the image: `--rcfile` fo
 `ZDOTDIR` for zsh, `ENV` for a POSIX `sh`. The payload is a few lines that emit the two
 marks, not Warp's 70KB of shell (theirs also powers completions, syntax highlighting and
 command search, none of which we are doing).
+
+The three are not equally easy, and the plan should not pretend otherwise. bash and zsh
+have real prompt hooks to append to — `PROMPT_COMMAND` and `precmd_functions` — which is
+where `D` and its `$?` belong. **A bare POSIX `sh` or `dash` has no prompt hook at all**, so
+the marks have to ride inside `PS1`, which the shell expands afresh each prompt; that works
+for `A` and, with `$?` expanded in place, for `D`. It is the shakiest of the three, and it
+is exactly why the probe below decides by observation rather than by shell name. Warp's own
+subshell patterns omit `sh` and `dash` entirely — for their far larger payload the answer is
+simply "not supported" — and a terminal of ours that lands there falls back rather than
+limping.
+
+Two small habits from the same source are worth copying because they cost nothing: every
+bootstrap line begins with a space, so `HISTCONTROL=ignorespace`/`HIST_IGNORE_SPACE` keeps
+our instrumentation out of the user's shell history, and external binaries are invoked as
+`command -p` so a clobbered `PATH` in someone's image cannot break the marks
+(`bash_body.sh:4`).
 
 Whether it *worked* is then probed by running it, exactly as the `Srt` and `Docker`
 capabilities are: on open, the Process waits a bounded moment for the shell's first prompt
@@ -648,8 +742,13 @@ Then **blocks move onto the pty** ("Block mode on a pty" above): one instrumente
 terminal, the drain writing command lines into it, OSC 133 `C`/`D` via
 `registerOscHandler` giving block ranges and exit codes, the bounded prompt-mark probe at
 open with PR 1's per-block `Spawn` as the declared fallback, and `IntegrationLost` — the
-missing-`C` detector, the queue hold, and the re-arm control. Transcript input records
-narrow to Process-composed writes; live keystrokes are relayed and not recorded.
+missing-`C` detector, the queue hold, and the re-arm control. With it, the mark integrity
+work: a per-terminal nonce required on every mark, marks stripped from the byte stream
+before the transcript sees them, and duplicate or mismatched marks dropped rather than
+repaired. And the write path: kill-line before writing, bracketed paste where the shell
+takes it, control characters stripped from command text, chunked writes for the container
+double-pty, and the bracketed-paste/alt-screen unwedge on completion. Transcript input
+records narrow to Process-composed writes; live keystrokes are relayed and not recorded.
 
 Plus the two queue changes leases and review demand: **the lease as a drain gate** (above)
 — the holder threaded into `TerminalQueueDrain.plan`, release re-arming the drain,
@@ -664,7 +763,13 @@ cheap-tier flip-policy purity tests. For blocks on the pty, `Pty`-tagged: `cd` i
 moves the next one (the property a per-block spawn cannot have); a failing command's exit
 code arrives from the `D` mark; a command line carrying a trailing comment and one carrying
 a heredoc both close their blocks — the two cases that kill a drain-appended sentinel; and
-a block's `FromSeq` excludes the shell's echo of its own command. For the probe and the
+a block's `FromSeq` excludes the shell's echo of its own command. For mark integrity,
+cheap-tier where it belongs — it is a pure function over bytes: a `D` bearing the wrong
+nonce or none is output and never completes a block (the `cat` of a crafted file, which
+gets a fixture); the terminal's own marks never reach the transcript, so a chunk fetch
+cannot leak the nonce; a duplicate `D` and a second `C` inside an open block are both
+dropped. Plus a `Pty` case that a command whose text contains `ESC` cannot emit a mark from
+the input side. For the probe and the
 fallback, cheap-tier over the pure decision, plus a `Pty` suite launching a shell that
 cannot be instrumented and asserting the terminal declares itself degraded and still runs
 blocks through the PR 1 path. For `IntegrationLost`, a `Pty` suite where the shell is
