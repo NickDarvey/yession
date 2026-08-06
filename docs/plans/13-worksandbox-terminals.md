@@ -1,7 +1,9 @@
 # Plan 13 — Terminals on the WorkSandbox
 
-> **Status: PR 1 of 3 implemented** (blocks, no pty). PRs 2 (pty + live mode) and 3
-> (polish) remain. Builds directly on the sandbox seam from
+> **Status: stage 1 of 3 implemented** (blocks, no pty). Stage 2 (pty + live mode, as
+> parts 2a–2f) and stage 3 (one `execute_command`, as parts 3a–3e) remain — see
+> [Delivery](#delivery) for the split and what each part depends on.
+> Builds directly on the sandbox seam from
 > [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
 >
@@ -576,15 +578,16 @@ going to resolve.
 moment a peer drops — `Transport` runs its cleanup and appends `PeerLeft` — and a lease
 held by a peer who is gone is the one hold nobody should have to clear by hand. So
 `PeerLeft` releases any lease that peer held, appending `TerminalLeaseReleased` and
-re-arming the drain through the same path a voluntary release takes. This belongs in PR 2
-and not with the idle timeout below, because the two answer different questions: an idle
+re-arming the drain through the same path a voluntary release takes. This belongs with the
+leases themselves (2e) and not with the idle timeout below (3c), because the two answer
+different questions: an idle
 timeout guesses that a *present* holder has stopped caring, while a dropped connection is
 a fact the Process is already told. Without it a crashed tab leaves the composer reading
 "nick is using this terminal" for ever, with the queue held behind a peer who cannot
 release it and no signal that anything is wrong — a deadlock wearing a status message's
 face, and the first thing anyone would hit in a demo.
 
-**Starvation by a live holder is bounded by the idle-lease timeout** (PR 3), and until it
+**Starvation by a live holder is bounded by the idle-lease timeout** (3c), and until it
 lands a lease held indefinitely by a *connected* peer does starve its queue. That is
 acceptable only because it is *visible* — the composer names the holder — and because any
 peer can steal the lease. An invisible hold would not be.
@@ -740,7 +743,11 @@ test.
 
 ## Delivery
 
-Three PRs, each independently green and shippable:
+Three stages, each independently green and shippable — and stages 2 and 3 are delivered as
+several PRs apiece, because a stage is a coherent capability and a PR is a reviewable,
+bisectable change, and those are not the same size. The split below follows the dependency
+graph rather than a target PR count: every part names what it needs, and parts that need
+nothing may land in any order or at once.
 
 **1. Blocks, no pty.** Domain vocabulary (`TerminalId`, events, folds), transcript
 sidecar + chunk route, `Terminal` frames (output/snapshot only), synced composers +
@@ -751,78 +758,129 @@ queue + approval, the drain gate, the right panel rendering blocks through xterm
 determinism vs a headless emulator), `Browser` E2E for the panel + two-peer draft
 visibility, `Ports` E2E for chunk immutability/caching headers.
 
-**2. Pty + live mode, and rejection.** `SpawnPty` on the seam (docker via exec-tty, host
-via node-pty in the Nix `nodeModules`), the headless emulator per terminal,
-snapshots-after-seq, lease claim/steal/release + `TerminalInput`/`TerminalResize`,
-alt-screen (`buffer.type`/`onBufferChange`) detection with the auto-flip policy and manual
-override, size register + the block-mode register→pty resize path. New `Pty` test
-capability.
+**2. Pty, live mode, and rejection — five PRs, not one.** Written as one it is the whole
+pty stack plus two queue changes, which is too much to review and far too much to bisect.
+The seams below are the ones the dependencies actually have, not an arbitrary slicing:
 
-Then **blocks move onto the pty** ("Block mode on a pty" above): one instrumented shell per
-terminal, the drain writing command lines into it, OSC 133 `C`/`D` via
-`registerOscHandler` giving block ranges and exit codes, the bounded prompt-mark probe at
-open with PR 1's per-block `Spawn` as the declared fallback, and `IntegrationLost` — the
-missing-`C` detector, the queue hold, and the re-arm control. With it, the mark integrity
-work: a per-terminal nonce required on every mark, marks stripped from the byte stream
-before the transcript sees them, and duplicate or mismatched marks dropped rather than
-repaired. And the write path: kill-line before writing, bracketed paste where the shell
-takes it, control characters stripped from command text, chunked writes for the container
-double-pty, and the bracketed-paste/alt-screen unwedge on completion. Transcript input
-records narrow to Process-composed writes; live keystrokes are relayed and not recorded.
+```
+2a rejection      — depends on nothing        \
+2b emulator       — depends on nothing         > mutually independent; any order, or at once
+2c SpawnPty       — depends on nothing        /
+2d blocks on pty  — needs 2b (OSC handler) + 2c (a pty)
+2e live mode      — needs 2d (there must be a shell to take over)
+```
 
-Plus the two queue changes leases and review demand: **the lease as a drain gate** (above)
-— the holder threaded into `TerminalQueueDrain.plan`, release re-arming the drain,
-`PeerLeft` releasing a dropped holder's lease, and `AwaitingTerminal` reported distinctly
-from `AwaitingApproval` — and **rejection as an answer** — the `RejectedBy` register,
-`TerminalCommandRejected` carrying a Process-minted `BlockId`, `Rejections` on the drain
-plan, rejection joining `consumedOf`, the `Rejected` block status, and the reject control
-beside approve.
-*Verify:* `Pty`-tagged suites (a real vim/alt-screen round trip; lease enforcement — a
-non-holder's input frame is dropped and logged), `Docker`-tagged exec-tty suite,
-cheap-tier flip-policy purity tests. For blocks on the pty, `Pty`-tagged: `cd` in one block
-moves the next one (the property a per-block spawn cannot have); a failing command's exit
-code arrives from the `D` mark; a command line carrying a trailing comment and one carrying
-a heredoc both close their blocks — the two cases that kill a drain-appended sentinel; and
-a block's `FromSeq` excludes the shell's echo of its own command. For mark integrity,
-cheap-tier where it belongs — it is a pure function over bytes: a `D` bearing the wrong
-nonce or none is output and never completes a block (the `cat` of a crafted file, which
-gets a fixture); the terminal's own marks never reach the transcript, so a chunk fetch
-cannot leak the nonce; a duplicate `D` and a second `C` inside an open block are both
-dropped. Plus a `Pty` case that a command whose text contains `ESC` cannot emit a mark from
-the input side. For the probe and the
-fallback, cheap-tier over the pure decision, plus a `Pty` suite launching a shell that
-cannot be instrumented and asserting the terminal declares itself degraded and still runs
-blocks through the PR 1 path. For `IntegrationLost`, a `Pty` suite where the shell is
-replaced mid-session (`exec`): the missing-`C` detector fires within its window while a
-genuinely long-running command does NOT trip it, the queue is held rather than drained into
-an unmarked shell, and the re-arm control restores marking. Transcript capture: a live-mode
-keystroke never appears as an `"i"` record while the drain's command line does. For the
-lease gate, cheap-tier over `plan`: an
-approved entry in a leased terminal with NO running block is held, not `Ready` (the case
-`busy` does not cover); the hold names the terminal, not approval; release yields it
-`Ready`; a `Pty` E2E that a command queued during a live session runs on release and
-not before; and a `Ports` test that a holder's `PeerLeft` releases the lease and re-arms
-the drain, so a dropped tab does not strand the queue. For rejection, cheap-tier: a rejected entry is never `Ready` under ANY mode,
-`AutoRun` included, and is rejected even while the terminal is leased; a rejected
-`QueueId` folds into `consumedOf` so it cannot run afterwards; both orderings of the
-reject/drain race leave exactly one event and one outcome; the projection surfaces the
-refusal with its actor and reason; the event round-trips. `Browser`: reject removes the
-entry for both peers and both see who refused.
+The one non-obvious constraint is that **live mode comes last, not first.** A lease is
+ownership of a running shell's stdin, so until blocks are typed into a persistent shell
+there is nothing to take over — a terminal in 2c/2d state has a pty and no reason for
+anyone to hold it. Sequencing leases before blocks would mean building the lease against a
+pty nothing uses.
 
-Rejection rides in PR 2 rather than PR 3 because it is the half of the approval gate PR 1
-left out, and a gate that records every yes and no no is the weaker thing wearing the
-stronger thing's face. It shares nothing with the pty work; if PR 2 splits, it goes first.
+**2a. Rejection as an answer.** The `RejectedBy` register, `TerminalCommandRejected`
+carrying a Process-minted `BlockId`, `Rejections` on the drain plan, rejection joining
+`consumedOf`, the `Rejected` block status, and the reject control beside approve. Touches
+the queue, the events and the projection; touches nothing the pty work touches, which is
+why it can go first or in parallel. It is also the half of the approval gate PR 1 left out,
+and a gate that records every yes and no no is the weaker thing wearing the stronger
+thing's face.
+*Verify:* cheap-tier — a rejected entry is never `Ready` under ANY mode, `AutoRun`
+included; a rejected `QueueId` folds into `consumedOf` so it cannot run afterwards; both
+orderings of the reject/drain race leave exactly one event and one outcome; the projection
+surfaces the refusal with its actor and reason; the event round-trips. `Browser`: reject
+removes the entry for both peers and both see who refused.
 
-**3. One `execute_command`, and the seams.** The convergence above: the bounded two-phase
-wait (`approvalGrace` then the existing command timeout), `read_terminal_block` to resume a
-handle, the agent terminal opened lazily in the session's agent policy, the terminal digest
-on `AgentContextPack`, and the block surviving its turn. Then the retirements the
-convergence unblocks: the old `execute_command` and `queue_terminal_command` both deleted in
-favour of the merged tool, `ensure_environment` deleted with its `reason` living on as the
-agent terminal's title, and the sidebar commands section retired once nothing feeds it. Plus
-idle-lease timeout, transcript compaction/retention policy, asciinema-player replay view for
-closed terminals (the audit read), GAPS entries (agent lease, per-user terminal gating,
-docker non-root unchanged).
+**2b. The headless emulator.** `@xterm/headless` into the npm tree and the Nix
+`nodeModules` derivation, an emulator per terminal fed by the output PR 1 already produces,
+the size register as synced state, and the `TerminalSnapshot` frame.
+*Verify:* cheap-tier — folding a transcript through a fresh emulator reproduces the
+serialized snapshot, which is the property everything downstream trusts; the size register
+round-trips and merges.
+This is an **enabling PR and says so**: the snapshot frame has no consumer until 2d, and
+its value is landing the dependency and pinning determinism on their own, where a failure
+is unambiguous. If fewer PRs are wanted, this is the one to fold into 2d — it is the
+cheapest of the three prerequisites, being a pure-JS dependency rather than a native build.
+
+**2c. `SpawnPty` on the sandbox seam.** Docker via exec-tty, host via `node-pty` built from
+source into the Nix `nodeModules` the way `node-datachannel` is, srt inheriting the host's
+answer, and `SpawnPty = None` where the addon is absent. New `Pty` test capability, probed
+by running. No terminal-model change at all.
+*Verify:* `Pty`- and `Docker`-tagged suites driving the seam directly — spawn a shell on a
+pty, write and read its echo, resize and observe the program agree, kill it and see
+`Exited` resolve; and that a backend without the addon reports `None` rather than failing.
+Nothing consumes `SpawnPty` until 2d, which is deliberate: this is the hardest dependency
+in the stack (a native addon whose absence changes the Nix FOD hash) and it is worth
+landing where a red `check Nix` can only mean one thing.
+
+**2d. Blocks move onto the pty.** One instrumented shell per terminal, the drain writing
+command lines into it, OSC 133 `C`/`D` via `registerOscHandler` giving block ranges and
+exit codes, the bounded prompt-mark probe at open with PR 1's per-block `Spawn` as the
+declared fallback, the block-mode register→pty resize path, mark integrity (the
+per-terminal nonce, marks stripped before the transcript sees them, duplicate and
+mismatched marks dropped rather than repaired), and the write path (kill-line, bracketed
+paste, control characters stripped from command text, chunked writes for the container
+double-pty, and the bracketed-paste/alt-screen unwedge on completion).
+*Verify:* `Pty`-tagged — `cd` in one block moves the next one, the property a per-block
+spawn cannot have; a failing command's exit code arrives from the `D` mark; a command line
+carrying a trailing comment and one carrying a heredoc both close their blocks, the two
+cases that kill a drain-appended sentinel; a block's `FromSeq` excludes the shell's echo of
+its own command; and a command whose text contains `ESC` cannot emit a mark from the input
+side. Mark integrity is cheap-tier where it belongs, being a pure function over bytes: a
+`D` bearing the wrong nonce or none is output and never completes a block (the `cat` of a
+crafted file, which gets a fixture); the terminal's own marks never reach the transcript,
+so a chunk fetch cannot leak the nonce; a duplicate `D` and a second `C` inside an open
+block are both dropped. For the probe and fallback, cheap-tier over the pure decision plus
+a `Pty` suite launching a shell that cannot be instrumented, asserting the terminal
+declares itself degraded and still runs blocks through the PR 1 path.
+
+**2e. Live mode.** Lease claim/steal/release as `SessionCommand`s and events,
+`TerminalInput`/`TerminalResize` frames with enforcement, alt-screen
+(`buffer.type`/`onBufferChange`) detection with the auto-flip policy and manual override,
+the lease holder owning the size register, the lease as a drain gate — the holder threaded
+into `TerminalQueueDrain.plan`, release re-arming the drain, `PeerLeft` releasing a dropped
+holder's lease, and `AwaitingTerminal` reported distinctly from `AwaitingApproval` — and
+the transcript input narrowing.
+*Verify:* `Pty`-tagged — a real vim/alt-screen round trip; lease enforcement, where a
+non-holder's input frame is dropped and logged; a command queued during a live session runs
+on release and not before. Cheap-tier flip-policy purity tests, and over `plan`: an approved
+entry in a leased terminal with NO running block is held, not `Ready` (the case `busy` does
+not cover), the hold names the terminal rather than approval, and release yields it `Ready`.
+`Ports`: a holder's `PeerLeft` releases the lease and re-arms the drain, so a dropped tab
+does not strand the queue. Transcript capture: a live-mode keystroke never appears as an
+`"i"` record while the drain's command line does. `Browser`: the lease bar names the holder
+and the steal control works.
+
+**2f (optional). `IntegrationLost`.** The missing-`C` detector, the queue hold, and the
+re-arm control. Hardening on top of 2d rather than part of it, because losing marks
+mid-session is visible and non-corrupting on its own — the block simply never closes — so
+2d is shippable without it. Split it out if 2d is still too large; keep it in 2d if not.
+*Verify:* a `Pty` suite where the shell is replaced mid-session (`exec`) — the detector
+fires within its window while a genuinely long-running command does NOT trip it, the queue
+is held rather than drained into an unmarked shell, and the re-arm control restores marking.
+
+**3. One `execute_command`, and the seams.** Splits along the same principle. Note that
+**none of it depends on PR 2** — the merged tool runs on PR 1's block model — so 3a and 3b
+can overlap the pty work entirely.
+
+**3a. The agent gets its output back.** The bounded terminal digest on `AgentContextPack`:
+for each block since the agent's last turn, the command, who authored and approved it, the
+exit code, and an output tail, as a separate field so the conversation stays a
+conversation. Independent of everything else in this plan and worth shipping alone — it
+closes the GAPS entry that the agent cannot see what its queued commands did, which is the
+substantive reason it reaches for `execute_command` in the first place. Half the loophole
+loses its motive before the tool changes at all.
+*Verify:* cheap-tier — the digest is bounded, covers exactly the blocks since the last
+turn, and carries approval attribution; `Ports Native` that a queued command's exit code
+reaches the next turn's pack.
+
+**3b. One tool, and the retirements.** The convergence: the bounded two-phase wait
+(`approvalGrace` then the existing command timeout), `read_terminal_block` to resume a
+handle, `command` as a shell line rather than argv, the agent terminal opened lazily in the
+session's agent policy, and the block surviving its turn. Then the retirements it unblocks —
+the old `execute_command` and `queue_terminal_command` both deleted in favour of the merged
+tool, `ensure_environment` deleted with its `reason` living on as the agent terminal's
+title, and the sidebar commands section retired once nothing feeds it. Convergence and
+retirement are one PR because they are one change: two doors is the defect, and deleting the
+ungated one is what closes it.
 *Verify:* cheap-tier state machine for the wait (pure: which phase a given mode/approval
 timeline lands in, and that every path names its status rather than reporting a bare
 "queued"); `Ports Native` E2E that the agent chains — runs a command, reads real output,
@@ -832,11 +890,19 @@ after a human approves; a test that an interrupted turn leaves the block running
 outcome in the next turn's digest; and a `LiveAgent` turn proving a real model uses the one
 tool it now has.
 
-**A note on ordering.** This is PR 3 because it depends on nothing in PR 2 and everything in
-PR 1, and because the retirements need somewhere to land — but the loophole is open until it
-ships. If PR 2 slips, this should go before it rather than wait: `ApproveAgent` claiming a
-gate it does not have is the kind of thing that reads as a feature and behaves as a
-blind spot.
+**3c–3e, three independent tails**, sharing nothing with each other and each shippable
+whenever: the **idle-lease timeout** (the only one gated on 2e, bounding the starvation that
+section leaves open); **transcript compaction and retention**, which is a policy decision
+about the sidecar and the chunk route; and the **asciinema-player replay view** for closed
+terminals, the audit read, which needs only PR 1's transcript. Plus the GAPS entries (agent
+lease, per-user terminal gating, docker non-root unchanged).
+
+**A note on ordering.** PR 3 is numbered after PR 2 because the retirements need somewhere
+to land, not because it depends on it — and the loophole is open until 3b ships. If PR 2
+slips, 3a and 3b should go before it rather than wait: `ApproveAgent` claiming a gate it
+does not have is the kind of thing that reads as a feature and behaves as a blind spot.
+Under the split that advice sharpens, because 3a is small, independent of everything, and
+removes the agent's reason to want the ungated door.
 
 Protocol note: terminals extend the Session↔Browser frame protocol and session events;
 the Manager↔Session control protocol is untouched, so no major bump — each PR is a
