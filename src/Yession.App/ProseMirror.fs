@@ -114,6 +114,27 @@ module ProseMirror =
     [<Import("toggleMark", "prosemirror-commands")>]
     let toggleMark (mark: MarkType) : Command = jsNative
 
+    /// What plain Enter does in a bare ProseMirror — split the block, make a paragraph,
+    /// lift an empty one, break a line inside code. Read off `baseKeymap` rather than
+    /// reassembled from its four parts, so rebinding Enter can hand the ORIGINAL behaviour
+    /// to another key without a second definition of it drifting from ProseMirror's.
+    [<Emit("$0.Enter")>]
+    let baseEnter (bindings: obj) : Command = jsNative
+
+    /// `chainCommands(a, b)`: try `a`, fall through to `b` when it declines. Variadic in JS,
+    /// so it is called explicitly rather than imported as a curried F# function.
+    [<Import("chainCommands", "prosemirror-commands")>]
+    let private chainCommandsFn : obj = jsNative
+    [<Emit("$0($1, $2)")>]
+    let private callChain (fn: obj) (a: Command) (b: Command) : Command = jsNative
+    let chain (a: Command) (b: Command) : Command = callChain chainCommandsFn a b
+
+    /// A command that always handles the key by running an effect — how a keystroke reaches
+    /// the app (Enter sends). Returning `true` is what stops ProseMirror inserting anything.
+    /// A `System.Func` because ProseMirror calls it with three arguments, not curried.
+    let effectCommand (run: unit -> unit) : Command =
+        box (System.Func<EditorState, obj, obj, bool>(fun _ _ _ -> run (); true))
+
     // --- prosemirror-inputrules ------------------------------------------------------------
 
     [<Import("inputRules", "prosemirror-inputrules")>]

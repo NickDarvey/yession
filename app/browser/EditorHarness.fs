@@ -28,6 +28,13 @@ let private exposeMd (f: unit -> string) : unit = jsNative
 [<Emit("(function(f){ window.__pushRemote = f; })($0)")>]
 let private exposePush (f: string -> unit) : unit = jsNative
 
+/// How many times Enter has asked to send. The harness mounts the editor exactly as the
+/// COMPOSER does (`onSubmit` supplied), so the E2E drives the real binding: Enter sends and
+/// inserts nothing, Alt+Enter is the new line. A counter rather than a callback because what
+/// the test needs to know is "did it fire", and the send itself belongs to the app.
+[<Emit("(function(n){ window.__sends = n; })($0)")>]
+let private exposeSends (n: int) : unit = jsNative
+
 let private doc = Y.Doc.Create ()
 let private fragment = doc.getXmlFragment "body"
 
@@ -35,7 +42,17 @@ do
     // The editor reports its local selection here; keep the latest so the harness can replay it
     // as a remote peer's cursor on demand.
     let mutable lastSelection : (string * string) option = None
-    let handle = Editor.mountEditor host fragment false (fun sel -> lastSelection <- sel)
+    let mutable sends = 0
+    exposeSends 0
+    let handle =
+        Editor.mountEditor
+            host
+            fragment
+            false
+            (fun sel -> lastSelection <- sel)
+            (Some (fun () ->
+                sends <- sends + 1
+                exposeSends sends))
     exposeMd (fun () -> Markdown.ofFragment fragment)
     exposePush (fun name ->
         match lastSelection with
