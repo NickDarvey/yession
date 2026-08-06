@@ -338,10 +338,30 @@ capabilities are: on open, the Process waits a bounded moment for the shell's fi
 mark. Arrived, the terminal is instrumented and runs blocks on the pty. Absent — an image
 whose shell is something we do not know how to instrument, or which ignores the mechanism
 — **the terminal falls back to PR 1's behaviour: one piped `Spawn` per block, no live mode,
-no shared shell state.** That is the whole reason this design can afford to be strict about
-marks. The degraded path is not a worse terminal invented for the occasion; it is the
-terminal that already shipped, with its own tests, on every backend. A terminal says which
-of the two it is, because "your `cd` will not persist here" is not something to discover.
+no shared shell state.** A terminal says which of the two it is, because "your `cd` will not
+persist here" is not something to discover.
+
+That fallback is what lets this design be strict about marks, and the reason is not that
+the code happens to exist already. It is that a per-block spawn is a **complete answer to a
+smaller question** rather than a degraded attempt at this one. "Run this line, tell me when
+it ends and with what code" is answered exactly by a process, because there the block
+boundary *is* the process boundary — nothing is parsed, nothing is inferred, and there is
+no mark to forge or lose. So refusing an ambiguous mark costs a capability and never costs
+correctness: it drops to a mode with no ambiguity in it at all. A fallback that merely
+guessed worse would make strictness expensive and we would end up tuning heuristics
+instead.
+
+The two things it gives up are exactly the two that need a shared shell — state carried
+between blocks, and a tty for a foreground program — so both are stateable at open rather
+than discovered at the third command.
+
+Worth noting that Warp's fallback is the mirror of ours: it keeps the pty and loses the
+boundaries, accumulating an entire uninstrumented session into **one block** with one exit
+code (`terminal_model.rs:1579`, where a command simply outlives the input editor). Ours
+keeps the boundaries and loses the pty. That option is open to us only because a block here
+starts life as a *queued command object* rather than as a line a human typed at a prompt —
+there is something to spawn separately. Warp has no such object and therefore no such
+choice.
 
 ### When integration is lost mid-session
 
