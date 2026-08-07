@@ -365,15 +365,18 @@ let private lazyLifecycleTests =
         testCaseAsync "a development task identifies need and starts the environment (E2E-2)" <|
             async {
                 let recorder = SandboxRecorder ()
-                // A task agent: signals need through the typed capability, twice — the
-                // second need must reuse the running environment.
+                // A task agent that runs a command. `ensure_environment` retired with stage
+                // 3b — opening a terminal IS the need, and running a command opens the
+                // agent's — so the need now arrives through the one door that is left. It
+                // runs twice to pin the other half: the agent terminal is opened once and
+                // reused, so a second command is not a second need.
                 let taskAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! first = capabilities.EnsureEnvironment "need to inspect the repository"
-                            let! second = capabilities.EnsureEnvironment "and to run the tests"
+                            let! first = capabilities.ExecuteCommand None "true"
+                            let! second = capabilities.ExecuteCommand None "true"
                             match first, second with
-                            | EnvironmentAvailable, EnvironmentAvailable ->
+                            | Ok _, Ok _ ->
                                 onChunk { Text = "environment is up" }
                                 return AgentCompleted ("environment is up", None)
                             | other -> return AgentFailed (sprintf "%A" other)
@@ -390,6 +393,15 @@ let private lazyLifecycleTests =
                 do! a.Runner.WaitFor (fun model ->
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "environment is up")
                         && (match model.Environment with EnvironmentRunning _ -> true | _ -> false))
+
+                // A SECOND need, from a different actor and against a different terminal:
+                // Ada opens her own. This is the half E2E-2 is really about — a need arriving
+                // while an environment is already running must reuse it rather than start a
+                // second one — and it is a stronger case than the agent's own second command,
+                // which reuses a terminal it already has and is therefore no need at all.
+                a.Connection.OpenTerminal "ada's"
+                do! a.Runner.WaitFor (fun model ->
+                        (TerminalProjection.openTerminals model.Terminals |> List.length) = 2)
 
                 Expect.equal recorder.Created 1 "exactly one sandbox created across two needs"
                 let! envEvents = environmentEventsOf managed.Host.Log
@@ -451,14 +463,6 @@ let private lazyLifecycleTests =
 
 let private commandPort = 8120
 
-let private nodeCommand (id: string) (script: string) : CommandRequest =
-    { CommandId = CommandId.create id |> expect
-      Executable = "node"
-      Arguments = [ "-e"; script ]
-      WorkingDirectory = None
-      Environment = Map.empty
-      Timeout = None }
-
 /// A real host-backend WorkSandbox composition over the given log — exactly what
 /// SessionMain wires, minus the control channel (no secret refs here).
 let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>) (name: string) =
@@ -475,121 +479,29 @@ let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>)
 let private hostSandboxFor (sessionId: SessionId) : CreateSandbox =
     Sandboxes.forBackend HostBackend (SessionId.value sessionId) EnvironmentSpec.defaults |> expect
 
-// Pure fold + a local child-process integration — cheap tier, no ports.
+// The properties of the retired `Execute` path that OUTLIVE it (Plan 13, stage 3b).
+//
+// Step 13's command log — `CommandRequested/Started/OutputReceived/Completed` folded into a
+// read-only sidebar — retired with the merged tool: nothing feeds it, because the agent's
+// commands are terminal blocks now and a block's bytes belong in its transcript rather than
+// in the event log a second time. Its fold and its streaming test went with it, covered where
+// the behaviour moved (`Terminals`, `PtyIntegration`).
+//
+// The COMMAND TIMEOUT went too, and deliberately rather than by omission: a block is owned by
+// the session, not by the turn that asked for it, so a deadline is now a YIELD — the tool
+// returns `Running` with a handle and the command runs on — where the old one killed the
+// process. `TerminalCommandWait` is where that is pinned.
+//
+// What must not be lost is the SECURITY property, which is about the sandbox seam rather than
+// about any tool on top of it.
 let private commandFoldTests =
     testList "Command execution (local)" [
-        testCase "command output ordering is preserved per command (interleaved commands)" <| fun () ->
-            let idA = CommandId.create "cmd-a" |> expect
-            let idB = CommandId.create "cmd-b" |> expect
-            let events =
-                [ CommandRequested { CommandId = idA; Executable = "a"; Arguments = [] }
-                  CommandRequested { CommandId = idB; Executable = "b"; Arguments = [] }
-                  CommandStarted { CommandId = idA }
-                  CommandStarted { CommandId = idB }
-                  CommandOutputReceived { CommandId = idA; Stream = Stdout; Text = "a1" }
-                  CommandOutputReceived { CommandId = idB; Stream = Stdout; Text = "b1" }
-                  CommandOutputReceived { CommandId = idA; Stream = Stderr; Text = "a2" }
-                  CommandOutputReceived { CommandId = idA; Stream = Stdout; Text = "a3" }
-                  CommandOutputReceived { CommandId = idB; Stream = Stdout; Text = "b2" }
-                  CommandCompleted { CommandId = idA; Result = CommandSucceeded 0 }
-                  CommandCompleted { CommandId = idB; Result = CommandFailed 2 } ]
-            let log = events |> List.fold CommandLog.applyEvent CommandLog.empty
-            let entry id = log.Entries |> List.find (fun e -> e.CommandId = id)
-            Expect.equal
-                ((entry idA).Output)
-                [ Stdout, "a1"; Stderr, "a2"; Stdout, "a3" ]
-                "command A's output, in order, uncontaminated by B"
-            Expect.equal ((entry idB).Output) [ Stdout, "b1"; Stdout, "b2" ] "command B's output, in order"
-            Expect.equal ((entry idA).Status) (CommandFinished (CommandSucceeded 0)) "A finished"
-            Expect.equal ((entry idB).Status) (CommandFinished (CommandFailed 2)) "B failed with its exit code"
-            // Determinism: re-folding the same events yields the same log.
-            Expect.equal (events |> List.fold CommandLog.applyEvent CommandLog.empty) log "deterministic fold"
-
-        testCaseAsync "a real command streams its output into the event log (integration)" <|
-            async {
-                let sessionId = SessionId.create "cmd-int" |> expect
-                let log =
-                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
-                let environment = hostEnvironment log "cmd-int"
-                let! _ = environment.Ensure None "run a command"
-
-                let! result =
-                    environment.Execute (nodeCommand "cmd-real" "console.log('alpha'); console.error('warn'); console.log('beta')") ignore
-                Expect.equal result (CommandSucceeded 0) "the command succeeded"
-
-                let! page = log.Read None Int32.MaxValue
-                let commandLog =
-                    page.Events |> List.fold (fun l e -> CommandLog.applyEvent l e.Event) CommandLog.empty
-                let entry = commandLog.Entries |> List.exactlyOne
-                Expect.equal entry.Status (CommandFinished (CommandSucceeded 0)) "completed in the log"
-                let textOf stream =
-                    entry.Output
-                    |> List.filter (fun (s, _) -> s = stream)
-                    |> List.map snd
-                    |> String.concat ""
-                Expect.equal (textOf Stdout) "alpha\nbeta\n" "stdout streamed, in order"
-                Expect.equal (textOf Stderr) "warn\n" "stderr streamed"
-
-                // Exit codes and lifecycle ordering are events too.
-                let! failed = environment.Execute (nodeCommand "cmd-fail" "process.exit(3)") ignore
-                Expect.equal failed (CommandFailed 3) "non-zero exit is a value"
-                let! after = log.Read None Int32.MaxValue
-                let kinds =
-                    after.Events
-                    |> List.choose (fun e ->
-                        match e.Event with
-                        | CommandRequested c -> Some (CommandId.value c.CommandId, "requested")
-                        | CommandStarted c -> Some (CommandId.value c.CommandId, "started")
-                        | CommandCompleted c -> Some (CommandId.value c.CommandId, "completed")
-                        | _ -> None)
-                    |> List.filter (fun (id, _) -> id = "cmd-fail")
-                    |> List.map snd
-                Expect.equal kinds [ "requested"; "started"; "completed" ] "the lifecycle, in order"
-            }
-
-        testCaseAsync "a command past its timeout maps to CommandTimedOut and kills the process" <|
-            async {
-                // Timeout is ONE mechanism now — the session races the sandbox handle's
-                // Exited — so this covers every backend.
-                let recorder = SandboxRecorder ()
-                let mutable killed = false
-                let neverEnding : CreateSandbox =
-                    fun _ ->
-                        async {
-                            return
-                                Ok
-                                    { Ref = "never"
-                                      Spawn =
-                                        fun _ _ ->
-                                            async {
-                                                return
-                                                    Ok
-                                                        { WriteStdin = ignore
-                                                          CloseStdin = ignore
-                                                          Kill = fun () -> killed <- true
-                                                          Exited = Async.FromContinuations (fun _ -> ()) }
-                                            }
-                                      SpawnPty = None
-                                      Dispose = fun () -> async { recorder.Disposed <- recorder.Disposed + 1 } }
-                        }
-                let sessionId = SessionId.create "cmd-timeout" |> expect
-                let log =
-                    Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
-                let environment =
-                    Yession.SessionProcess.SessionEnvironment.create log neverEnding preparedEmptyPolicy "scripted" "env-timeout"
-                let! _ = environment.Ensure None "hang"
-                let! result =
-                    environment.Execute
-                        { nodeCommand "cmd-hang" "unused" with Timeout = Some (TimeSpan.FromMilliseconds 50.0) }
-                        ignore
-                Expect.equal result CommandTimedOut "the timeout fires before the command finishes"
-                Expect.isTrue killed "the timed-out process is killed"
-            }
-
         testCaseAsync "a host-sandbox command never inherits the session's credentials (leak regression)" <|
             async {
-                // The old Manager-side spawn merged `process.env` into every command;
-                // this plants a credential there and proves the seam keeps it out.
+                // The old Manager-side spawn merged `process.env` into every command; this
+                // plants a credential there and proves the seam keeps it out. Driven through
+                // `Spawn`, which is what the terminal drain uses and therefore what every
+                // agent command now goes through.
                 setEnv "ANTHROPIC_API_KEY" "planted-credential"
                 try
                     let sessionId = SessionId.create "cmd-leak" |> expect
@@ -598,12 +510,19 @@ let private commandFoldTests =
                     let environment = hostEnvironment log "cmd-leak"
                     let! _ = environment.Ensure None "leak probe"
                     let mutable output = ""
-                    let! result =
-                        environment.Execute
-                            (nodeCommand "cmd-leak-probe" "console.log('key=' + (process.env.ANTHROPIC_API_KEY || 'absent'))")
-                            (fun c -> output <- output + c.Text)
-                    Expect.equal result (CommandSucceeded 0) "the probe ran"
-                    Expect.isTrue (output.Contains "key=absent") "the planted credential does not reach the command"
+                    let! spawned =
+                        environment.Spawn
+                            { Executable = "node"
+                              Arguments = [ "-e"; "console.log('key=' + (process.env.ANTHROPIC_API_KEY || 'absent'))" ]
+                              Env = Map.empty
+                              WorkingDirectory = None }
+                            (fun (_, text) -> output <- output + text)
+                    match spawned with
+                    | Error e -> failwith e
+                    | Ok handle ->
+                        let! ended = handle.Exited
+                        Expect.equal ended (SandboxExited 0) "the probe ran"
+                        Expect.isTrue (output.Contains "key=absent") "the planted credential does not reach the command"
                 finally
                     unsetEnv "ANTHROPIC_API_KEY"
             }
@@ -611,17 +530,17 @@ let private commandFoldTests =
 
 let private commandTests =
     testList "Command execution" [
-        testCaseAsync "an agent-run command reaches browser clients as a read-only log (E2E-3/E2E-4)" <|
+        testCaseAsync "an agent-run command reaches browser clients as a terminal block (E2E-3/E2E-4)" <|
             async {
-                // The agent ensures an environment, runs a real command, and answers.
+                // The agent runs a real command through its ONE door, and the answer comes
+                // back INSIDE the turn — which is what stage 3b bought: the old
+                // `queue_terminal_command` returned before anything had happened, so an agent
+                // that needed an answer took the ungated path instead.
                 let devAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! _ = capabilities.EnsureEnvironment "need to run a command"
-                            let! result =
-                                capabilities.ExecuteCommand (nodeCommand "cmd-e2e" "console.log('hello from the env')") ignore
-                            match result with
-                            | CommandSucceeded 0 ->
+                            match! capabilities.ExecuteCommand None "echo hello from the env" with
+                            | Ok outcome when outcome.Status = TerminalCommandRan (CommandSucceeded 0) ->
                                 onChunk { Text = "ran it" }
                                 return AgentCompleted ("ran it", None)
                             | other -> return AgentFailed (sprintf "%A" other)
@@ -633,17 +552,19 @@ let private commandTests =
                 let managed = (m.Registered ()) |> List.head
 
                 // Two clients: the sender, and a second browser that must see the same
-                // command log purely through event pages.
+                // block purely through event pages.
                 let! a = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "ada" "Ada"
                 let! b = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "grace" "Grace"
                 do! compose a a.Hello.PeerId "run the thing"
                 a.Connection.SendDraft a.Hello.PeerId
 
                 let sawCommand (model: ClientModel) =
-                    model.Commands.Entries
-                    |> List.exists (fun e ->
-                        e.Status = CommandFinished (CommandSucceeded 0)
-                        && (e.Output |> List.exists (fun (_, text) -> text.Contains "hello from the env")))
+                    model.Terminals.Terminals
+                    |> List.exists (fun t ->
+                        t.Blocks
+                        |> List.exists (fun b ->
+                            b.Command.Contains "hello from the env"
+                            && b.Status = BlockFinished (CommandSucceeded 0)))
                 do! a.Runner.WaitFor sawCommand
                 do! b.Runner.WaitFor sawCommand
 
@@ -653,19 +574,21 @@ let private commandTests =
                     page.Events
                     |> List.choose (fun e ->
                         match e.Event with
-                        | CommandRequested _ -> Some "requested"
-                        | CommandStarted _ -> Some "started"
-                        | CommandOutputReceived _ -> Some "output"
-                        | CommandCompleted _ -> Some "completed"
+                        | SessionEvent.TerminalOpened _ -> Some "terminal"
+                        | SessionEvent.TerminalBlockStarted _ -> Some "started"
+                        | SessionEvent.TerminalBlockCompleted _ -> Some "completed"
                         | _ -> None)
-                Expect.equal kinds [ "requested"; "started"; "output"; "completed" ] "Started/OutputReceived/Completed appended"
+                Expect.equal kinds [ "terminal"; "started"; "completed" ] "the block lifecycle is appended, in order"
 
-                // E2E-4: the UI renders the read-only command log from events.
+                // E2E-4: the UI renders the block from events. The read-only command log it
+                // used to render retired with the merged tool (Plan 13, stage 3b) — a terminal
+                // block IS the read-only record now, and it is the one people can also act on.
                 let html = Support.render (b.Runner.Model ())
-                Expect.isTrue (html.Contains Dom.Hooks.commandLog) "the command log section renders"
-                Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.commandStatus (Dom.Text.cmdSucceeded 0))) "the command status renders"
-                Expect.isTrue (html.Contains "hello from the env") "the streamed output renders"
-                Expect.isFalse (html.Contains Dom.Hooks.commandInput) "no input surface exists — read-only by construction"
+                Expect.isTrue (html.Contains Dom.Hooks.terminalBlock) "the block renders"
+                Expect.isTrue
+                    (html.Contains (Dom.attr Dom.Hooks.terminalBlockStatus Dom.Text.blockOk))
+                    "with its exit status"
+                Expect.isTrue (html.Contains "hello from the env") "and the command that ran"
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()
@@ -682,7 +605,7 @@ let private acceptancePort = 8125
 
 let private acceptanceTests =
     testList "Phase 2 acceptance" [
-        testCaseAsync "event offsets remain monotonic across message, agent, environment, and command events" <|
+        testCaseAsync "event offsets remain monotonic across message, agent, environment, and terminal events" <|
             async {
                 let sessionId = SessionId.create "mixed-offsets" |> expect
                 let log = Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
@@ -698,9 +621,21 @@ let private acceptanceTests =
                           TriggeredByMessageId = MessageId.create "m1" |> expect }
                       EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None }
                       EnvironmentStarted { EnvironmentId = "env"; ContainerRef = "ctr" }
-                      CommandRequested { CommandId = CommandId.create "c1" |> expect; Executable = "node"; Arguments = [] }
-                      CommandOutputReceived { CommandId = CommandId.create "c1" |> expect; Stream = Stdout; Text = "x" }
-                      CommandCompleted { CommandId = CommandId.create "c1" |> expect; Result = CommandSucceeded 0 } ]
+                      SessionEvent.TerminalOpened
+                        { TerminalId = TerminalId.create "t1" |> expect; OpenedBy = ActorRef.Agent; Title = "agent" }
+                      SessionEvent.TerminalBlockStarted
+                        { TerminalId = TerminalId.create "t1" |> expect
+                          BlockId = BlockId.create "b1" |> expect
+                          QueueId = None
+                          Author = ActorRef.Agent
+                          ApprovedBy = None
+                          Command = "true"
+                          FromSeq = 0 }
+                      SessionEvent.TerminalBlockCompleted
+                        { TerminalId = TerminalId.create "t1" |> expect
+                          BlockId = BlockId.create "b1" |> expect
+                          Result = CommandSucceeded 0
+                          ToSeq = 1 } ]
                 for event in mixed do
                     let! _ = log.Append ActorRef.SessionProcess event
                     ()
@@ -712,13 +647,12 @@ let private acceptanceTests =
 
 let private acceptanceE2eTests =
     testList "Phase 2 acceptance E2E" [
-        testCaseAsync "a disconnected client catches up on environment and command events (E2E-8)" <|
+        testCaseAsync "a disconnected client catches up on environment and terminal events (E2E-8)" <|
             async {
                 let devAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! _ = capabilities.EnsureEnvironment "work to do"
-                            let! _ = capabilities.ExecuteCommand (nodeCommand "cmd-catchup" "console.log('made progress')") ignore
+                            let! _ = capabilities.ExecuteCommand None "echo made progress"
                             onChunk { Text = "done" }
                             return AgentCompleted ("done", None)
                         }
@@ -742,14 +676,20 @@ let private acceptanceE2eTests =
                 let caughtUp (model: ClientModel) =
                     (model.Conversation.Items |> List.exists (fun i -> i.Body = "done"))
                     && (match model.Environment with EnvironmentRunning _ -> true | _ -> false)
-                    && (model.Commands.Entries
-                        |> List.exists (fun e ->
-                            e.Status = CommandFinished (CommandSucceeded 0)
-                            && (e.Output |> List.exists (fun (_, t) -> t.Contains "made progress"))))
+                    // The agent's command is a terminal BLOCK now, not a command-log entry:
+                    // that retirement is the point of stage 3b, and the catch-up property is
+                    // unchanged — a client that was away folds the block from the log by
+                    // offset exactly as it folded the command entry.
+                    && (model.Terminals.Terminals
+                        |> List.exists (fun t ->
+                            t.Blocks
+                            |> List.exists (fun b ->
+                                b.Command.Contains "made progress"
+                                && b.Status = BlockFinished (CommandSucceeded 0))))
                 do! a.Runner.WaitFor caughtUp
 
                 // Grace reconnects and catches up on the mixed message + environment +
-                // command events by offset.
+                // terminal events by offset.
                 let! b = reconnectClient signalUrl b
                 do! b.Runner.WaitFor caughtUp
 

@@ -85,7 +85,6 @@ let private withLiveTerminal
         | Ok sandbox ->
             let environment : SessionEnvironment.SessionEnvironment =
                 { Ensure = fun _ _ -> async { return EnvironmentAvailable }
-                  Execute = fun _ _ -> async { return CommandExecutionFailed "unused" }
                   Spawn = fun exec onChunk -> sandbox.Spawn exec onChunk
                   SpawnPty =
                     fun exec cols rows onOutput ->

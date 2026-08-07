@@ -1,9 +1,10 @@
 # Plan 13 — Terminals on the WorkSandbox
 
-> **Status: stage 1 implemented; stage 2 implemented through 2e** (rejection, the headless
-> emulator, `SpawnPty`, blocks on the pty, live mode). 2f (`IntegrationLost`) and stage 3
-> (one `execute_command`, as parts 3a–3e) remain — see [Delivery](#delivery) for the split
-> and what each part depends on.
+> **Status: stage 1 implemented; stage 2 implemented through 2e; stage 3 implemented
+> through 3b** (rejection, the headless emulator, `SpawnPty`, blocks on the pty, live mode,
+> the agent's terminal digest, and the merged `execute_command` with its retirements).
+> 2f (`IntegrationLost`) and 3c–3e remain — see [Delivery](#delivery) for the split and what
+> each part depends on.
 > Builds directly on the sandbox seam from
 > [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).

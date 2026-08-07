@@ -2,10 +2,9 @@ module Yession.Host.Agent
 
 // The real agent runner: an adapter from the `RunAgent` capability to the Claude Agent
 // SDK. The turn's typed capabilities are exposed to the model as MCP tools —
-// `ensure_environment`, `execute_command` and `queue_terminal_command` — so a live agent
-// can lazily start the
-// session environment and run commands, exactly like the scripted agents in the
-// deterministic suite. Requires ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN; the
+// `execute_command` and `read_terminal_block` (Plan 13, stage 3b) — so a live agent runs
+// commands through the session's terminals, where people can see them, exactly like the
+// scripted agents in the deterministic suite. Requires ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN; the
 // deterministic tests never call this, and the live smoke test is gated on credentials,
 // so verification stays repeatable.
 
@@ -36,16 +35,16 @@ type private RunOutcome =
       version: '1.0.0',
       tools: [
         sdk.tool(
-          'ensure_environment',
-          'Make sure this session has a running environment for command execution. Call it before execute_command, with the reason you need one. Do NOT call it for purely conversational answers.',
-          { reason: z.string().describe('why an environment is needed') },
-          async (args) => ({ content: [{ type: 'text', text: await $3(args.reason) }] })
+          'execute_command',
+          'Run a shell command in one of this session\'s terminals, where the people in the session can see it, edit it, and — depending on the terminal — approve it before it runs. This is the only way to run anything. It waits for the result and returns the exit code and output; if it is waiting on a person, or the terminal is busy, or the command is still going, it says so and returns a handle for read_terminal_block instead of hanging. Read what it returns: every answer states which of those happened.',
+          { command: z.string().describe('the shell command line to run, e.g. "npm test -- --watch=false"') },
+          async (args) => ({ content: [{ type: 'text', text: await $3(args.command) }] })
         ),
         sdk.tool(
-          'execute_command',
-          'Run a command in the session environment. Returns the exit result followed by the streamed output.',
-          { executable: z.string(), arguments: z.array(z.string()).describe('argv, one element per argument') },
-          async (args) => ({ content: [{ type: 'text', text: await $4(args.executable, args.arguments) }] })
+          'read_terminal_block',
+          'Pick a command back up by the handle execute_command returned — an approval that arrived late, or a long build. Returns the same thing execute_command does.',
+          { handle: z.string().describe('the handle from execute_command') },
+          async (args) => ({ content: [{ type: 'text', text: await $4(args.handle) }] })
         ),
         sdk.tool(
           'set_secret',
@@ -64,12 +63,6 @@ type private RunOutcome =
           'Delete one of this session\'s stored secrets by name.',
           { name: z.string().describe('the secret name to delete') },
           async (args) => ({ content: [{ type: 'text', text: await $9(args.name) }] })
-        ),
-        sdk.tool(
-          'queue_terminal_command',
-          'Put a shell command in a terminal queue, where the people in this session can read it, edit it, and (depending on the terminal) approve it before it runs. Returns as soon as it is queued — it does NOT wait for the command to run or return its output. Prefer this over execute_command whenever a human should see what you are about to run.',
-          { command: z.string().describe('the shell command line to queue') },
-          async (args) => ({ content: [{ type: 'text', text: await $10(args.command) }] })
         )
       ]
     })
@@ -81,18 +74,18 @@ type private RunOutcome =
         settingSources: [],
         includePartialMessages: true,
         mcpServers: { yession },
-        // The turn's ONLY tools are the six above. `tools: []` drops every built-in
+        // The turn's ONLY tools are the five above. `tools: []` drops every built-in
         // (Bash/Read/Glob/Grep/WebFetch/Agent/Skill) from the model's context; MCP
         // servers ride a separate channel, so `yession`'s tools survive it.
         // `allowedTools` is NOT a restriction — it is the auto-approve list, and on its
         // own it left the read-only built-ins reachable (a session could list the host
         // filesystem). It stays so our tools run without a permission round-trip.
         tools: [],
-        allowedTools: ['mcp__yession__ensure_environment', 'mcp__yession__execute_command', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__queue_terminal_command'],
+        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__read_terminal_block', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret'],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
         env: $1,
-        spawnClaudeCodeProcess: $11
+        spawnClaudeCodeProcess: $10
       }
     })
     let body = ''
@@ -132,14 +125,13 @@ let private runQuery
     (prompts: {| system: string; prompt: string |})
     (agentEnv: obj)
     (claudePath: string)
-    (ensure: string -> JS.Promise<string>)
-    (executeCommand: string -> string array -> JS.Promise<string>)
+    (executeCommand: string -> JS.Promise<string>)
+    (readTerminalBlock: string -> JS.Promise<string>)
     (onChunk: string -> unit)
     (registerAbort: (unit -> unit) -> unit)
     (setSecret: string -> string -> JS.Promise<string>)
     (listSecrets: unit -> JS.Promise<string>)
     (deleteSecret: string -> JS.Promise<string>)
-    (queueTerminalCommand: string -> JS.Promise<string>)
     (claudeSpawner: obj)
     : JS.Promise<RunOutcome> =
     jsNative
@@ -227,45 +219,64 @@ let private promptOf (context: AgentContextPack) : string =
         (label context.CurrentMessage.Author)
         context.CurrentMessage.Body
 
-/// The `ensure_environment` tool body: the typed capability, rendered as tool text.
-let private ensureFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
-    fun reason ->
+/// One outcome, rendered as tool text (Plan 13, stage 3b).
+///
+/// Every case says WHICH state it is in, and the wording is load-bearing rather than
+/// decorative: telling a model "queued" when its command is actually blocked on a person has
+/// it conclude, after a silent pause, that the command failed and try something else — which
+/// is exactly how a review gate turns into the agent routing around the review.
+let private renderOutcome (outcome: TerminalCommandOutcome) : string =
+    let where = sprintf "terminal %s" (TerminalId.value outcome.Terminal)
+    let handle = QueueId.value outcome.Handle
+    let output =
+        if outcome.OutputTail = "" then ""
+        else if outcome.Elided > 0 then
+            sprintf "\n[%d earlier characters omitted]\n%s" outcome.Elided outcome.OutputTail
+        else "\n" + outcome.OutputTail
+    match outcome.Status with
+    | TerminalCommandRan (CommandSucceeded code) -> sprintf "exit code %d in %s%s" code where output
+    | TerminalCommandRan (CommandFailed code) -> sprintf "FAILED with exit code %d in %s%s" code where output
+    | TerminalCommandRan CommandTimedOut -> sprintf "TIMED OUT in %s%s" where output
+    | TerminalCommandRan (CommandExecutionFailed reason) ->
+        sprintf "EXECUTION FAILED in %s: %s%s" where reason output
+    | TerminalCommandRunning ->
+        sprintf
+            "STILL RUNNING in %s. It has NOT finished; nothing was cancelled. Call read_terminal_block with handle '%s' to pick it up.%s"
+            where handle output
+    | TerminalCommandAwaitingApproval ->
+        sprintf
+            "WAITING FOR A HUMAN TO APPROVE IT in %s. It has not run. Do not wait for output — say what you queued and why. Call read_terminal_block with handle '%s' once they have had a chance to look."
+            where handle
+    | TerminalCommandAwaitingTerminal ->
+        sprintf
+            "WAITING FOR %s TO BE FREE — somebody is using it, or another command is running there. It has not run. Call read_terminal_block with handle '%s' later."
+            where handle
+    | TerminalCommandRefused (by, reason) ->
+        let who = ActorRef.token by
+        match reason with
+        | Some reason -> sprintf "REFUSED by %s in %s: %s. It did not run — do not try to run it another way." who where reason
+        | None -> sprintf "REFUSED by %s in %s. It did not run — do not try to run it another way." who where
+
+/// The `execute_command` tool body (Plan 13, stage 3b): the agent's ONE execution path.
+let private executeFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+    fun command ->
         async {
-            match! capabilities.EnsureEnvironment reason with
-            | EnvironmentAvailable -> return "environment available"
-            | EnvironmentUnavailable r -> return sprintf "environment unavailable: %s" r
+            match! capabilities.ExecuteCommand None command with
+            | Ok outcome -> return renderOutcome outcome
+            | Error reason -> return sprintf "could not run the command: %s" reason
         }
         |> Async.StartAsPromise
 
-/// The `execute_command` tool body: runs through the typed capability, returning the
-/// exit result plus the streamed output so the model can reason about it. The same
-/// output is recorded as events by the Session Process.
-let private executeFor (capabilities: AgentCapabilities) : string -> string array -> JS.Promise<string> =
-    fun executable arguments ->
+/// The `read_terminal_block` tool body: resume a handle the tool above yielded.
+let private readBlockFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+    fun handle ->
         async {
-            let commandId =
-                match CommandId.create (string (Guid.NewGuid ())) with
-                | Ok id -> id
-                | Error e -> failwithf "command id invariant violated: %s" e
-            let request =
-                { CommandId = commandId
-                  Executable = executable
-                  Arguments = List.ofArray arguments
-                  WorkingDirectory = None
-                  Environment = Map.empty
-                  Timeout = Some (TimeSpan.FromSeconds 120.0) }
-            let mutable output = ""
-            let! result =
-                capabilities.ExecuteCommand request (fun chunk ->
-                    let prefix = match chunk.Stream with Stdout -> "" | Stderr -> "[stderr] "
-                    output <- output + prefix + chunk.Text)
-            let summary =
-                match result with
-                | CommandSucceeded code -> sprintf "exit code %d" code
-                | CommandFailed code -> sprintf "FAILED with exit code %d" code
-                | CommandTimedOut -> "TIMED OUT"
-                | CommandExecutionFailed reason -> sprintf "EXECUTION FAILED: %s" reason
-            return sprintf "%s\n%s" summary output
+            match QueueId.create handle with
+            | Error e -> return sprintf "not a command handle: %s" e
+            | Ok handle ->
+                match! capabilities.ReadTerminalBlock handle with
+                | Ok outcome -> return renderOutcome outcome
+                | Error reason -> return sprintf "could not read that command: %s" reason
         }
         |> Async.StartAsPromise
 
@@ -310,28 +321,6 @@ let private deleteSecretFor (capabilities: AgentCapabilities) : string -> JS.Pro
         }
         |> Async.StartAsPromise
 
-/// The `queue_terminal_command` tool body (Plan 13). It reports the queue's OUTCOME, not
-/// the command's: the command has not run yet, and telling a model "queued" when it is
-/// actually waiting for a human would have it conclude, after a silent pause, that its
-/// command failed and try something else.
-let private queueTerminalCommandFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
-    fun command ->
-        async {
-            match! capabilities.QueueTerminalCommand None command with
-            | Ok queued when queued.AwaitingApproval ->
-                return
-                    sprintf
-                        "queued in terminal %s, WAITING FOR A HUMAN TO APPROVE IT. It has not run. Do not wait for output — say what you queued and why, and let them approve it."
-                        (TerminalId.value queued.Terminal)
-            | Ok queued ->
-                return
-                    sprintf
-                        "queued in terminal %s and will run shortly. It has not run yet, so no output is available in this turn."
-                        (TerminalId.value queued.Terminal)
-            | Error reason -> return sprintf "could not queue the command: %s" reason
-        }
-        |> Async.StartAsPromise
-
 /// The Claude Agent SDK–backed `RunAgent`, parameterized by the turn's credential:
 /// `None` = the ambient credential variables pass through (the documented last resort
 /// — how CI's LiveAgent tier feeds the agent); `Some (envVar, value)` = the spawned
@@ -356,14 +345,13 @@ let runWith (credential: (string * string) option) : RunAgent =
                     {| system = context.SystemPrompt; prompt = promptOf context |}
                     (toEnvObj (Map.toArray env))
                     (claudePath ())
-                    (ensureFor capabilities)
                     (executeFor capabilities)
+                    (readBlockFor capabilities)
                     (fun text -> onChunk { Text = text })
                     signal.OnAbort
                     (setSecretFor capabilities)
                     (listSecretsFor capabilities)
                     (deleteSecretFor capabilities)
-                    (queueTerminalCommandFor capabilities)
                     (Sandboxes.AgentSandbox.claudeSpawnerFor (agentBackend ()) ambient home env)
                 |> Interop.awaitPromise
             let usage =

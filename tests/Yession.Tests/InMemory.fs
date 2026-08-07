@@ -186,7 +186,6 @@ let tests =
             async {
                 let environment : SessionEnvironment.SessionEnvironment =
                     { Ensure = fun _ _ -> async { return EnvironmentAvailable }
-                      Execute = fun _ _ -> async { return CommandExecutionFailed "not used here" }
                       Spawn =
                         fun _ onChunk ->
                             async {
@@ -259,12 +258,112 @@ let tests =
                 do! host.Stop ()
             }
 
+        testCaseAsync "the agent chains: it runs a command, reads the real output, and runs a second on it" <|
+            async {
+                // THE property PR 1 gave up and stage 3b bought back. `queue_terminal_command`
+                // returned before anything had happened, so an agent that needed an answer
+                // took `execute_command` — the ungated door — and `ApproveAgent` was
+                // unenforceable as a result. One door only works if that door answers.
+                let ran = ResizeArray<string> ()
+                let environment : SessionEnvironment.SessionEnvironment =
+                    { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+                      Spawn =
+                        fun exec onChunk ->
+                            async {
+                                let line = exec.Arguments |> List.tryLast |> Option.defaultValue ""
+                                ran.Add line
+                                onChunk (Stdout, sprintf "ran<%s>" line)
+                                return
+                                    Ok
+                                        { WriteStdin = ignore
+                                          CloseStdin = ignore
+                                          Kill = ignore
+                                          Exited = async { return SandboxExited 0 } }
+                            }
+                      SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
+                      Stop = fun () -> async { return () }
+                      CurrentRef = fun () -> Some "scripted" }
+                let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
+                // No terminal is open, so the FIRST call opens the agent's own — titled with
+                // what it is for, and in `AutoRun`, which is what keeps the agent's autonomy
+                // exactly what it was before the tool changed.
+                match! host.TerminalCommands.Execute None "first" with
+                | Error reason -> failwith reason
+                | Ok first ->
+                    Expect.equal first.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran, inside the call"
+                    Expect.isTrue (first.OutputTail.Contains "ran<first>") "and its real output came back"
+                    // Conditioned on what the first one printed — the whole point of chaining.
+                    let next = if first.OutputTail.Contains "ran<first>" then "second" else "wrong"
+                    match! host.TerminalCommands.Execute (Some first.Terminal) next with
+                    | Error reason -> failwith reason
+                    | Ok second ->
+                        Expect.equal second.Status (TerminalCommandRan (CommandSucceeded 0)) "the second ran too"
+                        Expect.equal (List.ofSeq ran) [ "first"; "second" ] "both, in order, in that terminal"
+                do! host.Stop ()
+            }
+
+        testCaseAsync "ApproveAgent is now ENFORCEABLE: the agent's call yields, and resumes on the approval" <|
+            async {
+                // The defect stage 3b closes. A session could set every terminal to require
+                // approval and the agent routed around it, because it had a second door with
+                // no gate on it. With one door the gate is real — and the tool still does not
+                // deadlock the turn, because the approval wait is bounded and yields a handle.
+                let spawns = ref 0
+                let environment : SessionEnvironment.SessionEnvironment =
+                    { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+                      Spawn =
+                        fun _ onChunk ->
+                            async {
+                                spawns.Value <- spawns.Value + 1
+                                onChunk (Stdout, "approved output")
+                                return
+                                    Ok
+                                        { WriteStdin = ignore
+                                          CloseStdin = ignore
+                                          Kill = ignore
+                                          Exited = async { return SandboxExited 0 } }
+                            }
+                      SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
+                      Stop = fun () -> async { return () }
+                      CurrentRef = fun () -> Some "scripted" }
+                let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
+                let! a = connectInMemoryClient host "ada" "Ada"
+                // A terminal ADA opened keeps its own mode — the asymmetry that makes this
+                // useful: the agent's own scratch terminal is auto, a human's is gated by the
+                // policy that human set.
+                a.Connection.OpenTerminal "build"
+                do! a.Runner.WaitFor (fun m -> not (List.isEmpty (TerminalProjection.openTerminals m.Terminals)))
+                let terminal =
+                    (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
+                // ApproveAgent is the default, so this is the out-of-the-box case.
+                let! outcome = host.TerminalCommands.Execute (Some terminal) "rm -rf build"
+                match outcome with
+                | Error reason -> failwith reason
+                | Ok outcome ->
+                    Expect.equal outcome.Status TerminalCommandAwaitingApproval "the gate held it"
+                    Expect.equal spawns.Value 0 "and NOTHING ran — there is no second door"
+                    Expect.isNone outcome.Block "there is no block yet, so the handle is the request"
+
+                    // The approval is a plain CRDT write from the client. Resuming the handle
+                    // picks the same command up: nothing was lost by the deadline.
+                    do! a.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalQueue terminal m)))
+                    let entry = ClientModel.terminalQueue terminal (a.Runner.Model ()) |> List.head
+                    Expect.equal entry.QueueId outcome.Handle "the handle IS the queue entry a human is looking at"
+                    a.Runner.Dispatch (user (ApproveTerminalQueuedMsg (entry.QueueId, a.Hello.PeerId)))
+                    match! host.TerminalCommands.Read outcome.Handle with
+                    | Error reason -> failwith reason
+                    | Ok resumed ->
+                        Expect.equal resumed.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran on the approval"
+                        Expect.isTrue (resumed.OutputTail.Contains "approved output") "with its output"
+                        Expect.equal spawns.Value 1 "exactly once"
+                do! host.Stop ()
+            }
+
         testCaseAsync "the agent's queued command waits for a human, and running it is one approval away" <|
             async {
                 let spawns = ref 0
                 let environment : SessionEnvironment.SessionEnvironment =
                     { Ensure = fun _ _ -> async { return EnvironmentAvailable }
-                      Execute = fun _ _ -> async { return CommandExecutionFailed "not used here" }
                       Spawn =
                         fun _ _ ->
                             async {
@@ -286,11 +385,12 @@ let tests =
                 let terminal =
                     (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
 
-                // The agent queues through its capability, which writes the same doc state a
-                // person's send writes — so Ada sees it appear in her queue, awaiting her.
-                let! queued = host.QueueTerminalCommand (Some terminal) "rm -rf build"
-                let queued = queued |> expect
-                Expect.isTrue queued.AwaitingApproval "the agent is told it is waiting, not that it ran"
+                // The agent runs through its ONE capability (Plan 13, stage 3b), which writes
+                // the same doc state a person's send writes — so Ada sees it appear in her
+                // queue, awaiting her. Started in the background because it WAITS: that is the
+                // whole change, and the point of this test is that an approval arriving inside
+                // the grace is answered in the same call rather than yielding a handle.
+                let! running = Async.StartChild (host.TerminalCommands.Execute (Some terminal) "rm -rf build")
                 do! a.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalQueue terminal m)))
                 let entry = ClientModel.terminalQueue terminal (a.Runner.Model ()) |> List.head
                 Expect.isTrue (ClientModel.awaitsApproval entry (a.Runner.Model ())) "and Ada sees it waiting"
@@ -304,6 +404,15 @@ let tests =
                     | None -> false
                 do! a.Runner.WaitFor ran
                 Expect.equal spawns.Value 1 "the approval is what let it run"
+                // ...and the agent's own call, still waiting, answers with the outcome — not
+                // with "queued". The old tool returned before anything had happened, which is
+                // why an agent that needed an answer took the ungated path instead.
+                let! outcome = running
+                match outcome with
+                | Error reason -> failwith reason
+                | Ok outcome ->
+                    Expect.equal outcome.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran, and says so"
+                    Expect.isSome outcome.Block "with the block it became"
                 do! host.Stop ()
             }
 

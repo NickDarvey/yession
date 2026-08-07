@@ -137,15 +137,6 @@ module View =
         | EnvironmentFailed _ -> Dom.Text.envFailed
         | EnvironmentDown -> Dom.Text.envStopped
 
-    let private commandStatusLabel =
-        function
-        | CommandPending -> Dom.Text.cmdPending
-        | CommandRunning -> Dom.Text.cmdRunning
-        | CommandFinished (CommandSucceeded code) -> Dom.Text.cmdSucceeded code
-        | CommandFinished (CommandFailed code) -> Dom.Text.cmdFailed code
-        | CommandFinished CommandTimedOut -> Dom.Text.cmdTimedOut
-        | CommandFinished (CommandExecutionFailed _) -> Dom.Text.cmdExecutionFailed
-
     let private authorAvatar =
         function
         | UserRef u -> Style.humanAvatar (UserId.value u)
@@ -339,39 +330,6 @@ module View =
               <div class="{Style.sideRow}"><span class="{Style.label}">environment</span><span class="{statusClass}">{statusInner}</span></div>
             </section>"""
 
-    let private commandStatusInner =
-        function
-        | CommandPending -> html $"""<span class="{Style.statusFaint}">pending</span>"""
-        | CommandRunning -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>running</span>"""
-        | CommandFinished (CommandSucceeded code) -> html $"""<span class="{Style.statusOk}">{Icon.checkSm} {code}</span>"""
-        | CommandFinished (CommandFailed code) -> html $"""<span class="{Style.statusErr}">{Icon.crossSm} {code}</span>"""
-        | CommandFinished CommandTimedOut -> html $"""<span class="{Style.statusErr}">timed out</span>"""
-        | CommandFinished (CommandExecutionFailed _) -> html $"""<span class="{Style.statusErr}">failed</span>"""
-
-    let private commandsSection (log: CommandLog) : TemplateResult =
-        // An empty log keeps its hook (the contract) but takes no room: a bare "commands"
-        // heading over nothing is furniture, not information.
-        let sectionClass =
-            if List.isEmpty log.Entries then "hidden"
-            else Style.cls [ Style.sideSection; Style.navLane2 ]
-        let entries =
-            log.Entries
-            |> List.map (fun entry ->
-                let output =
-                    entry.Output
-                    |> List.map (fun (stream, text) ->
-                        html $"""<pre class="{Style.monoOut}" data-stream="{match stream with Stdout -> Dom.Text.stdout | Stderr -> Dom.Text.stderr}">{text}</pre>""")
-                html $"""
-                    <article class="{Style.commandCard}" data-command-id="{CommandId.value entry.CommandId}" data-command-status="{commandStatusLabel entry.Status}">
-                      <div class="{Style.sideRow}"><code class="{Style.mono}">{entry.Executable} {String.concat " " entry.Arguments}</code>{commandStatusInner entry.Status}</div>
-                      {output}
-                    </article>""")
-        html $"""
-            <section class="{sectionClass}" data-command-log>
-              <span class="{Style.label}">commands</span>
-              {entries}
-            </section>"""
-
     /// The Claude connection panel (Plan 08), living in the settings drawer: status per
     /// sign-in scope, the OAuth flow (approve on claude.ai → paste the shown code), and
     /// the paste-a-token fallback.
@@ -451,7 +409,6 @@ module View =
               {connectionSection actions model}
               {peopleSection actions model}
               {environmentSection model.Environment}
-              {commandsSection model.Commands}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.navLane2 ]}" data-settings-toggle="open" @click={Ev(fun _ -> actions.ToggleSettings ())}>settings<span class="{Style.pivotMarkForward}">{Icon.pivotRight}</span></button>
             </div>"""

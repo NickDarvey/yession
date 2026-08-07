@@ -54,22 +54,6 @@ module EnvironmentSpec =
           Mounts = []
           EnvironmentVariables = Map.empty }
 
-// --- Commands (Step 13 shapes). `CommandId` lives in Identity.fs and
-// `OutputStream`/`CommandResult` in Events.fs (the lifecycle is recorded as events). ---
-
-type CommandRequest =
-    { CommandId : CommandId
-      Executable : string
-      Arguments : string list
-      WorkingDirectory : string option
-      Environment : Map<string, string>
-      Timeout : TimeSpan option }
-
-type CommandOutputChunk =
-    { CommandId : CommandId
-      Stream : OutputStream
-      Text : string }
-
 // --- Environment UI state, projected from events (Step 12) ---------------------------
 
 type EnvironmentStatus =
@@ -90,47 +74,3 @@ module EnvironmentStatus =
         | SessionEvent.EnvironmentStartFailed e -> EnvironmentFailed e.Reason
         | SessionEvent.EnvironmentStopped _ -> EnvironmentDown
         | _ -> status
-
-// --- The read-only command log, projected from events (Step 13) ----------------------
-
-type CommandLogStatus =
-    | CommandPending
-    | CommandRunning
-    | CommandFinished of CommandResult
-
-type CommandLogEntry =
-    { CommandId : CommandId
-      Executable : string
-      Arguments : string list
-      Status : CommandLogStatus
-      /// Output chunks in arrival order (per-command ordering is a pinned contract).
-      Output : (OutputStream * string) list }
-
-type CommandLog = { Entries : CommandLogEntry list }
-
-module CommandLog =
-
-    let empty : CommandLog = { Entries = [] }
-
-    let private updateEntry (commandId: CommandId) (f: CommandLogEntry -> CommandLogEntry) (log: CommandLog) =
-        { Entries = log.Entries |> List.map (fun e -> if e.CommandId = commandId then f e else e) }
-
-    /// Fold one event into the command log. Deterministic and read-only by construction:
-    /// there is no other way to produce a log entry.
-    let applyEvent (log: CommandLog) (event: SessionEvent) : CommandLog =
-        match event with
-        | SessionEvent.CommandRequested c ->
-            { Entries =
-                log.Entries
-                @ [ { CommandId = c.CommandId
-                      Executable = c.Executable
-                      Arguments = c.Arguments
-                      Status = CommandPending
-                      Output = [] } ] }
-        | SessionEvent.CommandStarted c ->
-            log |> updateEntry c.CommandId (fun e -> { e with Status = CommandRunning })
-        | SessionEvent.CommandOutputReceived c ->
-            log |> updateEntry c.CommandId (fun e -> { e with Output = e.Output @ [ c.Stream, c.Text ] })
-        | SessionEvent.CommandCompleted c ->
-            log |> updateEntry c.CommandId (fun e -> { e with Status = CommandFinished c.Result })
-        | _ -> log

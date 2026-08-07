@@ -715,6 +715,111 @@ let private leaseGateTests =
             Expect.isEmpty plan.Ready "and still nothing runs"
     ]
 
+// --- The two waits (Plan 13, stage 3b) ---------------------------------------------------
+
+let private blockOf (status: TerminalBlockStatus) : TerminalBlock =
+    { BlockId = block "1"
+      QueueId = Some (queue "a1")
+      Author = ActorRef.Agent
+      ApprovedBy = None
+      Command = "make"
+      FromSeq = 0
+      ToSeq = None
+      Status = status }
+
+/// The observation of a request that is the head of its terminal's queue, held for `hold`.
+let private waitingOn (hold: TerminalQueueDrain.TerminalHold option) : TerminalCommandWait.Observation =
+    { TerminalCommandWait.Observation.Block = None; TerminalCommandWait.Observation.InQueue = true; TerminalCommandWait.Observation.IsHead = true; TerminalCommandWait.Observation.Hold = hold }
+
+let private waitTests =
+    testList "The command wait" [
+        testCase "an approval gets the GRACE, and yields a handle when it runs out" <| fun () ->
+            // Waiting on a person is unbounded in principle — they may be asleep — so the
+            // grace exists only so that a supervised session still chains.
+            let awaiting = waitingOn (Some TerminalQueueDrain.AwaitingApproval)
+            Expect.equal
+                (TerminalCommandWait.step false false awaiting)
+                TerminalCommandWait.KeepWaiting
+                "inside the grace it keeps waiting, so an approval in seconds still chains"
+            Expect.equal
+                (TerminalCommandWait.step true false awaiting)
+                (TerminalCommandWait.Return TerminalCommandAwaitingApproval)
+                "past it, the turn is handed back rather than held"
+
+        testCase "a held terminal does NOT get the grace — it returns at once" <| fun () ->
+            // A peer with a terminal open is mid-task and will not be done in five seconds.
+            // Burning the grace on that wait only makes the turn slower.
+            Expect.equal
+                (TerminalCommandWait.step false false (waitingOn (Some TerminalQueueDrain.AwaitingTerminal)))
+                (TerminalCommandWait.Return TerminalCommandAwaitingTerminal)
+                "no waiting at all"
+
+        testCase "waiting on a PROCESS gets the process deadline, not the grace" <| fun () ->
+            // A command running ahead of ours in the same terminal, and our own command once
+            // it starts: both are waits on a process, so a quick one still chains.
+            for observation in
+                [ waitingOn (Some TerminalQueueDrain.AwaitingBlock)
+                  { TerminalCommandWait.Observation.Block = Some (blockOf BlockRunning); TerminalCommandWait.Observation.InQueue = false; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = None } ] do
+                Expect.equal
+                    (TerminalCommandWait.step true false observation)
+                    TerminalCommandWait.KeepWaiting
+                    "an elapsed approval grace does not end a wait on a process"
+            Expect.equal
+                (TerminalCommandWait.step true true (waitingOn (Some TerminalQueueDrain.AwaitingBlock)))
+                (TerminalCommandWait.Return TerminalCommandAwaitingTerminal)
+                "the terminal was never free"
+            Expect.equal
+                (TerminalCommandWait.step
+                    true
+                    true
+                    { TerminalCommandWait.Observation.Block = Some (blockOf BlockRunning); TerminalCommandWait.Observation.InQueue = false; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = None })
+                (TerminalCommandWait.Return TerminalCommandRunning)
+                "and a running block yields — the deadline is a yield, not a cancellation"
+
+        testCase "an entry BEHIND another waits for the queue, whatever the head waits for" <| fun () ->
+            // Reporting the head's reason as ours would tell the agent its own command needs
+            // an approval when somebody else's does.
+            let behind =
+                { TerminalCommandWait.Observation.Block = None; TerminalCommandWait.Observation.InQueue = true; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = Some TerminalQueueDrain.AwaitingApproval }
+            Expect.equal (TerminalCommandWait.step true false behind) TerminalCommandWait.KeepWaiting "still queued"
+            Expect.equal
+                (TerminalCommandWait.step true true behind)
+                (TerminalCommandWait.Return TerminalCommandAwaitingTerminal)
+                "and it names the queue, not an approval it does not need"
+
+        testCase "an outcome ends the wait, whichever deadline is still running" <| fun () ->
+            for status, expected in
+                [ BlockFinished (CommandSucceeded 0), TerminalCommandRan (CommandSucceeded 0)
+                  BlockFinished (CommandFailed 3), TerminalCommandRan (CommandFailed 3)
+                  BlockRejected (PeerRef bob, Some "not on prod"), TerminalCommandRefused (PeerRef bob, Some "not on prod") ] do
+                Expect.equal
+                    (TerminalCommandWait.step false false { TerminalCommandWait.Observation.Block = Some (blockOf status); TerminalCommandWait.Observation.InQueue = false; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = None })
+                    (TerminalCommandWait.Return expected)
+                    "an answer is returned the moment it exists"
+
+        testCase "a withdrawn request is an absence, not an outcome" <| fun () ->
+            // Deleting a queued entry is withdrawal and has no event. Reporting it as any
+            // status would be inventing one.
+            Expect.equal
+                (TerminalCommandWait.step false false { TerminalCommandWait.Observation.Block = None; TerminalCommandWait.Observation.InQueue = false; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = None })
+                TerminalCommandWait.Gone
+                "the caller is told the request is gone"
+
+        testCase "every status the agent can be handed says which state it is in" <| fun () ->
+            // The wording is the mechanism, not decoration: told "queued" when it is blocked
+            // on a person, a model concludes after a silent pause that the command failed and
+            // tries something else — which is how a review gate becomes a thing to route
+            // around. Every case must be distinguishable, so none may collapse into another.
+            let statuses =
+                [ TerminalCommandRan (CommandSucceeded 0)
+                  TerminalCommandRan (CommandFailed 1)
+                  TerminalCommandRunning
+                  TerminalCommandAwaitingApproval
+                  TerminalCommandAwaitingTerminal
+                  TerminalCommandRefused (PeerRef bob, None) ]
+            Expect.equal (List.distinct statuses |> List.length) (List.length statuses) "no two are the same value"
+    ]
+
 let private leaseCommandTests =
     testList "Lease commands" [
         testCaseAsync "take and release route to the lease, attributed to the peer who asked" <|
@@ -1061,7 +1166,6 @@ let private scriptedEnvironment (script: string -> (OutputStream * string) list 
     let spawned = ResizeArray<SandboxExec> ()
     let environment : SessionEnvironment.SessionEnvironment =
         { Ensure = fun _ _ -> async { return EnvironmentAvailable }
-          Execute = fun _ _ -> async { return CommandExecutionFailed "not used here" }
           Spawn =
             fun exec onChunk ->
                 async {
@@ -1422,6 +1526,7 @@ let tests =
         flipTests
         leaseGateTests
         leaseCommandTests
+        waitTests
         digestTests
         ansiTests
         transcriptTests

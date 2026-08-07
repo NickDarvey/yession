@@ -285,10 +285,14 @@ let private controlRpcTests =
                         (m.Conversation.Items
                          |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "diagnostic-ok"))
                         && (match m.Environment with EnvironmentRunning ref -> ref = "srt" | _ -> false)
-                        && (m.Commands.Entries
-                            |> List.exists (fun e ->
-                                e.Status = CommandFinished (CommandSucceeded 0)
-                                && (e.Output |> List.exists (fun (_, text) -> text.Contains "diagnostic-ok")))))
+                        // The diagnostic agent's command is a terminal BLOCK now (Plan 13,
+                        // stage 3b): the read-only command log retired with the merged tool.
+                        && (m.Terminals.Terminals
+                            |> List.exists (fun t ->
+                                t.Blocks
+                                |> List.exists (fun b ->
+                                    b.Command.Contains "diagnostic-ok"
+                                    && b.Status = BlockFinished (CommandSucceeded 0)))))
 
                 do! a.Channel.Close ()
                 do! pm.StopAll ()
@@ -738,7 +742,9 @@ let private compositionTests =
                         && (m.Conversation.Items
                             |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "diagnostic-ok"))
                         && (match m.Environment with EnvironmentRunning _ -> true | _ -> false)
-                        && (m.Commands.Entries |> List.exists (fun e -> e.Status = CommandFinished (CommandSucceeded 0))))
+                        && (m.Terminals.Terminals
+                            |> List.exists (fun t ->
+                                t.Blocks |> List.exists (fun b -> b.Status = BlockFinished (CommandSucceeded 0)))))
                 do! a.Channel.Close ()
 
                 // Stop and resume from the UI; history replays into the fresh child.

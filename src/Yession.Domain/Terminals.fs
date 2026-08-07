@@ -85,6 +85,11 @@ type TerminalBlockStatus =
 /// One executed command and the transcript range it produced.
 type TerminalBlock =
     { BlockId : BlockId
+      /// The queue entry this block came from, when it came through a composer (Plan 13,
+      /// stage 3b). Projected rather than dropped because it is the handle the agent is given:
+      /// a block does not exist until the command runs, so resuming a command that is still
+      /// waiting has to be keyed on the request, and this is what joins the two afterwards.
+      QueueId : QueueId option
       /// Who wrote the command.
       Author : ActorRef
       /// Who approved it, when the mode required one.
@@ -174,6 +179,7 @@ module TerminalProjection =
                         Blocks =
                             t.Blocks
                             @ [ { BlockId = e.BlockId
+                                  QueueId = e.QueueId
                                   Author = e.Author
                                   ApprovedBy = e.ApprovedBy
                                   Command = e.Command
@@ -193,6 +199,7 @@ module TerminalProjection =
                         Blocks =
                             t.Blocks
                             @ [ { BlockId = e.BlockId
+                                  QueueId = Some e.QueueId
                                   Author = e.Author
                                   // Nobody approved it; someone did the opposite, and that
                                   // is on the status rather than smuggled in here.

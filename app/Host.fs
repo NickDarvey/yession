@@ -34,10 +34,10 @@ type SessionHost =
       Environment : SessionEnvironment.SessionEnvironment
       /// The session's terminals (Plan 13) — opening one starts the environment.
       Terminals : SessionTerminals.SessionTerminals
-      /// The agent's terminal capability, exposed so a test can drive the agent's HALF of
-      /// the approval flow without a model in the loop. Production reaches it through
-      /// `AgentCapabilities`, which is built from this same value.
-      QueueTerminalCommand : QueueTerminalCommand
+      /// The agent's terminal capabilities (Plan 13, stage 3b), exposed so a test can drive
+      /// the agent's HALF of the approval flow without a model in the loop. Production reaches
+      /// them through `AgentCapabilities`, which is built from this same value.
+      TerminalCommands : TerminalCommands.TerminalCommands
       /// Resolves when the next peer session ends. Register (call) it *before* triggering
       /// the disconnect you want to observe, then await it — this avoids any reliance on
       /// timing to see the resulting `PeerLeft`.
@@ -162,6 +162,23 @@ let startFull
             | Some user -> UserRef user
             | None -> PeerRef peerId
 
+        // The terminal projection as the Process itself has it, folded forward on every
+        // append. The Process is the log's only writer, so this is complete and ordered by
+        // construction — and it is what `execute_command`'s wait observes, which is why the
+        // wait holds no state of its own.
+        let mutable terminalProjection = TerminalProjection.empty
+        // Anything that could change a waiting command's outcome: an appended event, a doc
+        // update. One signal for both, because a waiter does not care which happened — it
+        // re-reads and decides.
+        let mutable changeListeners : Map<int, unit -> unit> = Map.empty
+        let mutable nextChangeListener = 0
+        let subscribeToChanges (listener: unit -> unit) : unit -> unit =
+            let id = nextChangeListener
+            nextChangeListener <- nextChangeListener + 1
+            changeListeners <- Map.add id listener changeListeners
+            fun () -> changeListeners <- Map.remove id changeListeners
+        let notifyChanged () = changeListeners |> Map.iter (fun _ listener -> listener ())
+
         let log =
             // Durable storage is injected (file-backed in the product); the in-memory
             // log remains the deterministic default.
@@ -175,7 +192,9 @@ let startFull
                         async {
                             recordAttribution event
                             let! appended = inner.Append actor event
+                            terminalProjection <- TerminalProjection.applyEvent terminalProjection event
                             broadcastEventsAvailable appended.Offset
+                            notifyChanged ()
                             return appended
                         } }
 
@@ -192,6 +211,7 @@ let startFull
         let replayedTerminals =
             replayed.Events
             |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) TerminalProjection.empty
+        terminalProjection <- replayedTerminals
 
         // The session's environment: the session-owned WorkSandbox, lazily created on
         // first need; absent a composition, needs are recorded as unavailable.
@@ -253,58 +273,55 @@ let startFull
                 (fun () -> reDrainTerminals ())
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 
-        // The agent's terminal capability (Plan 13): it QUEUES a command where people can
-        // see it, and returns. It does not wait for the command to run — waiting would make
-        // the turn block on a human pressing Approve, and a review gate that deadlocks when
-        // nobody is looking is not a review gate.
-        let queueTerminalCommand : QueueTerminalCommand =
-            fun requested command ->
-                async {
-                    let command = command.Trim ()
-                    if command = "" then return Error "a terminal command cannot be empty"
-                    else
-                        let synced = SyncedStateSync.ofDoc doc
-                        // Whichever terminal was asked for, else whichever is open, else a
-                        // new one — opening it starts the environment, exactly as a person
-                        // opening one does.
-                        let! terminal =
-                            async {
-                                match requested with
-                                | Some id when terminals.IsOpen id -> return Ok id
-                                | Some _ -> return Error "that terminal is not open"
-                                | None ->
-                                    match terminals.Lengths () |> List.map fst with
-                                    | id :: _ -> return Ok id
-                                    | [] -> return! terminals.Open ActorRef.Agent "agent"
-                            }
-                        match terminal, synced with
-                        | Error reason, _ -> return Error reason
-                        | Ok _, Error _ -> return Error "the session's collaborative state could not be read"
-                        | Ok terminal, Ok synced ->
-                            let queueId =
-                                match QueueId.create (string (Guid.NewGuid ())) with
-                                | Ok id -> id
-                                | Error e -> failwithf "queue id invariant violated: %s" e
-                            SyncedStateSync.enqueueTerminalCommand
-                                doc
-                                queueId
-                                terminal
-                                ActorRef.Agent
-                                (TerminalQueueOrder.nextFor terminal synced.TerminalQueue)
-                                command
-                            return
-                                Ok
-                                    { Terminal = terminal
-                                      AwaitingApproval =
-                                        TerminalApprovalMode.requiresApproval
-                                            (SyncedSessionState.modeOf terminal synced)
-                                            ActorRef.Agent }
-                }
+        // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
+        // people can see it and then WAITS — bounded twice over, once for a person and once
+        // for a process — so the agent gets its answer back without a turn ever hanging on
+        // somebody pressing Approve.
+        let agentTerminalId : TerminalId option ref = ref None
+
+        /// The session's agent terminal, opened on first use.
+        ///
+        /// Its title is the command that needed it, which is what the retired
+        /// `ensure_environment`'s `reason` argument becomes — the strip says "npm test" rather
+        /// than "agent", a better answer to "what is that terminal for" than the tool gave.
+        ///
+        /// It opens in `AutoRun`, NOT the `ApproveAgent` default every other terminal has. If
+        /// it inherited that, replacing the old tool would silently turn every agent command
+        /// into an approval prompt — a large change to autonomy smuggled in under a refactor.
+        /// What changes is that the gate becomes REAL: setting `ApproveAgent` on a terminal a
+        /// human opened now stops the agent, because there is no second door.
+        let openAgentTerminal (reason: string) : Async<Result<TerminalId, string>> =
+            async {
+                match agentTerminalId.Value with
+                | Some id when terminals.IsOpen id -> return Ok id
+                | _ ->
+                    let title = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
+                    match! terminals.Open ActorRef.Agent title with
+                    | Error reason -> return Error reason
+                    | Ok id ->
+                        agentTerminalId.Value <- Some id
+                        SyncedStateSync.setTerminalMode doc id AutoRun
+                        return Ok id
+            }
+
+        let terminalCommands =
+            TerminalCommands.create
+                doc
+                terminals
+                (fun () -> terminalProjection)
+                (fun () -> SyncedStateSync.ofDoc doc)
+                (fun id fromSeq toSeq -> transcripts.ReadRange id fromSeq toSeq |> Transcript.printed)
+                openAgentTerminal
+                (fun () ->
+                    match QueueId.create (string (Guid.NewGuid ())) with
+                    | Ok id -> id
+                    | Error e -> failwithf "queue id invariant violated: %s" e)
+                (fun () -> DateTimeOffset.UtcNow)
+                subscribeToChanges
 
         let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
-            { EnsureEnvironment = environment.Ensure (Some turnId)
-              ExecuteCommand = environment.Execute
-              QueueTerminalCommand = queueTerminalCommand
+            { ExecuteCommand = terminalCommands.Execute
+              ReadTerminalBlock = terminalCommands.Read
               SetSecret =
                 match secretsCapabilities with
                 | Some secrets -> secrets.SetSecret
@@ -342,6 +359,9 @@ let startFull
         DocSync.onAnyUpdate doc (fun () -> drain ())
         // The terminal queue re-arms on the same signal, for the same liveness reason.
         DocSync.onAnyUpdate doc (fun () -> drainTerminals ())
+        // ...and so does a command waiting on that queue: an approval a peer just granted is a
+        // doc write, and nothing else would tell the wait about it.
+        DocSync.onAnyUpdate doc notifyChanged
 
         // --- Is this session in use? (Plan 11) ---------------------------------------
         //
@@ -595,7 +615,7 @@ let startFull
               Doc = doc
               Environment = environment
               Terminals = terminals
-              QueueTerminalCommand = queueTerminalCommand
+              TerminalCommands = terminalCommands
               WaitForNextSessionEnd = waitForNextSessionEnd
               Connect = onConnection
               Stop =

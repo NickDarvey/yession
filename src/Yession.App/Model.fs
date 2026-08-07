@@ -175,8 +175,6 @@ type ClientModel =
       Composer      : ComposerChoice
       /// The session environment's UI status, folded from lifecycle events (Step 12).
       Environment   : EnvironmentStatus
-      /// The read-only command log, folded from command events (Step 13).
-      Commands      : CommandLog
       /// Terminals, folded from terminal events (Plan 13) — the panel's structure.
       Terminals     : TerminalProjection
       /// Each terminal's transcript as this client has it. Separate from the projection
@@ -324,7 +322,6 @@ module ClientModel =
           Peers = Map.empty
           Composer = Unchosen
           Environment = EnvironmentNotStarted
-          Commands = CommandLog.empty
           Terminals = TerminalProjection.empty
           TerminalFeeds = Map.empty
           TerminalChoice = None
@@ -530,9 +527,6 @@ module ClientModel =
             let environment =
                 freshEvents
                 |> List.fold (fun status e -> EnvironmentStatus.applyEvent status e.Event) model.Environment
-            let commands =
-                freshEvents
-                |> List.fold (fun log e -> CommandLog.applyEvent log e.Event) model.Commands
             let terminals =
                 freshEvents
                 |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) model.Terminals
@@ -552,7 +546,6 @@ module ClientModel =
                 Conversation = conversation
                 Agent = agent
                 Environment = environment
-                Commands = commands
                 Terminals = terminals
                 Peers = peers
                 EventConsumer =
