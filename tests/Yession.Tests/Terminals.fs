@@ -566,19 +566,23 @@ let private rejectionTests =
 
 // --- Live mode: leases, the flip, and the drain gate (Plan 13, stage 2e) -----------------
 
+/// A fixed instant for the lease transitions: none of them reads the clock for a decision —
+/// only the idle timeout does, and it gets its own tests.
+let private at0 = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Zero)
+
 let private leaseTests =
     testList "Terminal leases" [
         testCase "taking an unheld terminal writes one event; re-taking it writes none" <| fun () ->
-            let events, leases = TerminalLeases.take terminalA (PeerRef ada) false TerminalLeases.empty
+            let events, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
             Expect.equal (List.length events) 1 "one take"
             Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef ada)) "ada holds it"
             // Not a steal from yourself. A client re-sending the frame must not fill the log.
-            let again, _ = TerminalLeases.take terminalA (PeerRef ada) false leases
+            let again, _ = TerminalLeases.take terminalA (PeerRef ada) false at0 leases
             Expect.isEmpty again "re-taking your own lease records nothing"
 
         testCase "a steal ENDS the old lease before it starts the new one" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false TerminalLeases.empty
-            let events, leases = TerminalLeases.take terminalA (PeerRef bob) false held
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
+            let events, leases = TerminalLeases.take terminalA (PeerRef bob) false at0 held
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
@@ -594,7 +598,7 @@ let private leaseTests =
                 "the projection agrees"
 
         testCase "only the holder can release; a non-holder's release is not an event" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false TerminalLeases.empty
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
             let events, leases = TerminalLeases.release terminalA (PeerRef bob) held
             Expect.isEmpty events "bob cannot release ada's lease"
             Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef ada)) "and ada still holds it"
@@ -607,8 +611,8 @@ let private leaseTests =
             Expect.isEmpty (TerminalLeases.held leases) "and the terminal is free"
 
         testCase "a dropped peer's leases end, and only that peer's" <| fun () ->
-            let _, leases = TerminalLeases.take terminalA (PeerRef ada) false TerminalLeases.empty
-            let _, leases = TerminalLeases.take terminalB (PeerRef bob) false leases
+            let _, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
+            let _, leases = TerminalLeases.take terminalB (PeerRef bob) false at0 leases
             let events, leases = TerminalLeases.peerGone ada leases
             Expect.equal
                 events
@@ -641,6 +645,67 @@ let private leaseTests =
                 (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
                 None
                 "a closed terminal has no stdin to hold"
+    ]
+
+let private idleLeaseTests =
+    testList "The idle-lease timeout" [
+        let idle (minutes: float) = System.TimeSpan.FromMinutes minutes
+        let waiting = Some TerminalQueueDrain.AwaitingTerminal
+
+        testCase "an idle lease with something queued behind it is reclaimed" <| fun () ->
+            Expect.isTrue
+                (TerminalLeaseIdle.shouldReclaim (idle 6.0) false waiting)
+                "the bound on starvation, and the only case it fires in"
+
+        testCase "an idle lease with NOTHING queued is left alone, however long it idles" <| fun () ->
+            // The whole gate. A bare timer would take a terminal away from someone the moment
+            // they stopped typing whether or not anything was waiting — a worse behaviour than
+            // the starvation it prevents. It also dissolves the question a bare timer forces:
+            // whether to reclaim from a peer reading a man page in `less` for ten minutes.
+            for hold in [ None; Some TerminalQueueDrain.NotWaiting; Some TerminalQueueDrain.AwaitingApproval ] do
+                Expect.isFalse
+                    (TerminalLeaseIdle.shouldReclaim (idle 600.0) false hold)
+                    "nothing is waiting on this terminal, so there is nothing to buy"
+
+        testCase "a holder who is still typing keeps it" <| fun () ->
+            Expect.isFalse (TerminalLeaseIdle.shouldReclaim (idle 0.0) false waiting) "just typed"
+            Expect.isFalse
+                (TerminalLeaseIdle.shouldReclaim (TerminalLeaseIdle.window - idle 0.1) false waiting)
+                "and a moment short of the window is still inside it"
+
+        testCase "a running block is never interrupted" <| fun () ->
+            // It may be the holder's own long build. A busy terminal is a different wait with a
+            // different answer — `AwaitingBlock`, bounded by the block's own deadline.
+            Expect.isFalse
+                (TerminalLeaseIdle.shouldReclaim (idle 600.0) true waiting)
+                "typing stops while you watch a build; that is not abandoning the terminal"
+
+        testCase "a reclaim ends the lease under its own reason" <| fun () ->
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
+            let events, leases = TerminalLeases.reclaimIdle terminalA held
+            Expect.equal
+                events
+                [ SessionEvent.TerminalLeaseReleased
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle } ]
+                "not `LeaseReleased` — the holder decided nothing, they stopped"
+            Expect.isEmpty (TerminalLeases.held leases) "and the terminal is free"
+
+        testCase "typing resets the clock; a non-holder's keystroke does not" <| fun () ->
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
+            let later = at0.AddMinutes 4.0
+            let touched = TerminalLeases.touch terminalA (PeerRef ada) later held
+            Expect.equal
+                (TerminalLeases.idleFor terminalA (later.AddMinutes 1.0) touched)
+                (Some (idle 1.0))
+                "the window runs from the last keystroke, not from when the lease was taken"
+            // Bob's keystrokes are DROPPED by the lease check, so they must not keep ada's
+            // lease alive either — a lease kept warm by input nobody accepted is a lease held
+            // by nobody.
+            let untouched = TerminalLeases.touch terminalA (PeerRef bob) (later.AddMinutes 10.0) touched
+            Expect.equal
+                (TerminalLeases.idleFor terminalA (later.AddMinutes 1.0) untouched)
+                (Some (idle 1.0))
+                "a non-holder cannot refresh it"
     ]
 
 let private flipTests =
@@ -1076,7 +1141,9 @@ let private codecTests =
                   SessionEvent.TerminalLeaseReleased
                       { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) }
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = ActorRef.Agent; Reason = LeaseHolderGone } ]
+                      { TerminalId = terminalA; Was = ActorRef.Agent; Reason = LeaseHolderGone }
+                  SessionEvent.TerminalLeaseReleased
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle } ]
             for event in events do
                 let encoded = Codec.toString Codec.sessionEvent event
                 Expect.equal (Codec.fromString Codec.sessionEvent encoded) (Ok event) ("round-trips: " + encoded)
@@ -1524,6 +1591,7 @@ let tests =
         rejectionTests
         leaseTests
         flipTests
+        idleLeaseTests
         leaseGateTests
         leaseCommandTests
         waitTests

@@ -12,10 +12,19 @@ open Yession.SessionProcess
 [<Fable.Core.Emit("setInterval($1, $0)")>]
 let private setInterval (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
 
+[<Fable.Core.Emit("clearInterval($0)")>]
+let private clearInterval (handle: obj) : unit = Fable.Core.Util.jsNative
+
 /// How often a busy session repeats its activity report (Plan 11). Comfortably shorter
 /// than any sane idle window, so a Manager reaping on silence needs several missed beats
 /// in a row before it acts — one dropped request never costs a session.
 let private activityBeatMs = 30000
+
+/// How often the idle-lease sweep runs (Plan 13, stage 3c). Its own beat rather than the
+/// activity one, because that beat exists only for a session with a Manager to report to —
+/// and a terminal held open in a Manager-less session starves its queue exactly the same.
+/// Well under `TerminalLeaseIdle.window`, so the overshoot is bounded by the beat.
+let private idleLeaseBeatMs = 30000
 
 type SessionHost =
     { SessionId : SessionId
@@ -346,6 +355,13 @@ let startFull
         let terminalScheduler = TerminalScheduler.create doc terminals initialTerminalConsumed
         let drainTerminals () = terminalScheduler.Drain ()
         reDrainTerminals <- drainTerminals
+        // The bound on the starvation a live holder can cause (Plan 13, stage 3c). Reclaims
+        // only a lease that has gone idle WITH something queued behind it, so a peer nobody is
+        // waiting on keeps their terminal for as long as they like.
+        // Kept so `Stop` can clear it. Unlike the activity beat this one runs in EVERY
+        // session, so a timer left armed past the end of a session is a timer reading a doc
+        // and a log that nothing owns any more.
+        let idleLeaseBeat = setInterval idleLeaseBeatMs terminalScheduler.ReclaimIdleLeases
 
         // Process-originated doc writes (the drain's queue removals) broadcast to every
         // peer; peer payloads are relayed by the receiving connection.
@@ -621,6 +637,7 @@ let startFull
               Stop =
                 fun () ->
                     async {
+                        clearInterval idleLeaseBeat
                         notifications |> Option.iter (fun s -> s.Stop ())
                         mcpTools |> Option.iter (fun s -> s.Stop ())
                         // Sandbox lifetime = session lifetime: take the WorkSandbox (and

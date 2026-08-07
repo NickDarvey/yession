@@ -3,8 +3,8 @@
 > **Status: stage 1 implemented; stage 2 implemented through 2e; stage 3 implemented
 > through 3b** (rejection, the headless emulator, `SpawnPty`, blocks on the pty, live mode,
 > the agent's terminal digest, and the merged `execute_command` with its retirements).
-> 2f (`IntegrationLost`) and 3c–3e remain — see [Delivery](#delivery) for the split and what
-> each part depends on.
+> plus 3c's idle-lease timeout. 2f (`IntegrationLost`), 3d and 3e remain — see
+> [Delivery](#delivery) for the split and what each part depends on.
 > Builds directly on the sandbox seam from
 > [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
@@ -598,10 +598,24 @@ a fact the Process is already told. Without it a crashed tab leaves the composer
 release it and no signal that anything is wrong — a deadlock wearing a status message's
 face, and the first thing anyone would hit in a demo.
 
-**Starvation by a live holder is bounded by the idle-lease timeout** (3c), and until it
-lands a lease held indefinitely by a *connected* peer does starve its queue. That is
-acceptable only because it is *visible* — the composer names the holder — and because any
-peer can steal the lease. An invisible hold would not be.
+**Starvation by a live holder is bounded by the idle-lease timeout** (3c). Until it landed,
+a lease held indefinitely by a *connected* peer did starve its queue — acceptable only
+because it is *visible* (the composer names the holder) and because any peer can steal it.
+An invisible hold would not have been.
+
+The timeout, as shipped, **only fires when it buys something**: a lease is reclaimed when its
+holder has been silent through the window AND no block is running there AND
+`TerminalQueueDrain.holdOf` says a queued command is waiting on that terminal. A bare timer
+was rejected — it would take a terminal from someone the moment they stopped typing whether
+or not anything was waiting, which is a worse behaviour than the starvation it prevents, and
+it would force an answer to a question with no good one (do you reclaim from a peer reading a
+man page in `less` for ten minutes?). Gated on the queue, that question dissolves: nothing
+queued, no reason; something queued, and that wait is exactly what the bound exists for.
+A running block is never interrupted — it may be the holder's own long build, and a busy
+terminal is a different wait with a different answer. The reclaim is recorded as
+`LeaseIdle`, its own reason, because "the holder is still here and stopped" is a third answer
+to the question a reader asks afterwards and `LeaseReleased` would say they decided something
+they did not.
 
 Opening and closing terminals are durable facts the CRDT cannot express, so they are
 `SessionCommand`s (`OpenTerminal`, `CloseTerminal`, plus `TakeTerminalLease` /
