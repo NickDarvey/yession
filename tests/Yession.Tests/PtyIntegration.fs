@@ -63,7 +63,9 @@ let private runOnPty (executable: string) (arguments: string list) : Async<Resul
 /// production mechanism rather than a stub agreeing with itself.
 ///
 /// `body` receives the manager, the terminal it opened, the transcript records it wrote, the
-/// event log, and a count of how many times the drain was re-armed.
+/// event log, a count of how many times the drain was re-armed, and a way to ADVANCE the
+/// manager's clock — which is how the idle timeout is driven without a test that waits five
+/// real minutes.
 let private withLiveTerminal
     (name: string)
     (body: SessionTerminals.SessionTerminals
@@ -71,6 +73,7 @@ let private withLiveTerminal
              -> ResizeArray<TranscriptRecord>
              -> EventLog<SessionEvent>
              -> (unit -> int)
+             -> (System.TimeSpan -> unit)
              -> Async<unit>)
     : Async<unit> =
     async {
@@ -95,7 +98,9 @@ let private withLiveTerminal
                         }
                   Stop = fun () -> async { return () }
                   CurrentRef = fun () -> Some "host" }
-            let at () = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Zero)
+            let mutable now = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Zero)
+            let at () = now
+            let advance (by: System.TimeSpan) = now <- now + by
             let log = InMemoryEventLog.create (SessionId.create name |> expect) at
             let records = ResizeArray<TranscriptRecord> ()
             let transcript : Transcript =
@@ -119,7 +124,7 @@ let private withLiveTerminal
             match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) name with
             | Error e -> failwith e
             | Ok id ->
-                do! body terminals id records log (fun () -> reDrains)
+                do! body terminals id records log (fun () -> reDrains) advance
                 do! sandbox.Dispose ()
     }
 
@@ -150,7 +155,7 @@ let private until (budgetMs: int) (condition: unit -> bool) : Async<bool> =
 let private liveModeTests =
     testList "Live mode over a real pty (Plan 13, stage 2e)" [
         testCaseAsync "only the lease holder's keystrokes reach the shell, and none are recorded as input" <|
-            withLiveTerminal "lease" (fun terminals id records _ _ ->
+            withLiveTerminal "lease" (fun terminals id records _ _ _ ->
                 async {
                     let ada = PeerRef (PeerId.create "ada" |> expect)
                     let bob = PeerRef (PeerId.create "bob" |> expect)
@@ -191,7 +196,7 @@ let private liveModeTests =
                 })
 
         testCaseAsync "a lease gates the drain and its release re-arms it" <|
-            withLiveTerminal "gate" (fun terminals id _ _ reDrains ->
+            withLiveTerminal "gate" (fun terminals id _ _ reDrains _ ->
                 async {
                     let ada = PeerRef (PeerId.create "ada" |> expect)
                     Expect.isEmpty (terminals.Leased ()) "nothing is held to begin with"
@@ -214,7 +219,7 @@ let private liveModeTests =
                 })
 
         testCaseAsync "a block that takes the alternate screen hands its author the terminal, and gives it back" <|
-            withLiveTerminal "altscreen" (fun terminals id _ log _ ->
+            withLiveTerminal "altscreen" (fun terminals id _ log _ _ ->
                 async {
                     let ada = PeerRef (PeerId.create "ada" |> expect)
                     // A real TUI's entry and exit, without depending on `vim` being installed:
@@ -254,7 +259,7 @@ let private liveModeTests =
                 })
 
         testCaseAsync "a dropped holder's lease is released, and the drain re-armed" <|
-            withLiveTerminal "gone" (fun terminals id _ log reDrains ->
+            withLiveTerminal "gone" (fun terminals id _ log reDrains _ ->
                 async {
                     // What the Host runs from a peer's connection cleanup. Without it a
                     // crashed tab leaves the composer reading "bob is using this terminal" for
@@ -276,6 +281,47 @@ let private liveModeTests =
                                      r.Was = PeerRef bob && r.Reason = LeaseHolderGone
                                  | _ -> false))
                             "the record says nobody decided anything — the connection dropped"
+                })
+
+        testCaseAsync "an idle lease is reclaimed only when something is queued behind it" <|
+            withLiveTerminal "idle" (fun terminals id _ log reDrains advance ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    let nothingQueued (_: TerminalId) = None
+                    let queuedBehindIt (_: TerminalId) = Some TerminalQueueDrain.AwaitingTerminal
+                    let stillHeld () = terminals.Leased () = Set.singleton (TerminalId.value id)
+                    match! terminals.Take id ada with
+                    | Error e -> failwith e
+                    | Ok () ->
+                        // Long past the window, but nobody is waiting. THE gate: a bare timer
+                        // would take the terminal here, which is a worse behaviour than the
+                        // starvation it prevents.
+                        advance (TerminalLeaseIdle.window + System.TimeSpan.FromMinutes 10.0)
+                        do! terminals.ReclaimIdle nothingQueued
+                        Expect.isTrue (stillHeld ()) "nothing was waiting, so ada keeps it"
+
+                        // Ada types: the window runs from the last keystroke, so the queue
+                        // appearing now does not make her instantly idle.
+                        Expect.isTrue (terminals.Input id ada "\r") "the holder's keystroke lands"
+                        do! terminals.ReclaimIdle queuedBehindIt
+                        Expect.isTrue (stillHeld ()) "queued, but she just typed"
+
+                        // ...and once she has been silent through the window with that command
+                        // still waiting, the lease is reclaimed and the queue re-armed.
+                        let before = reDrains ()
+                        advance (TerminalLeaseIdle.window + System.TimeSpan.FromSeconds 1.0)
+                        do! terminals.ReclaimIdle queuedBehindIt
+                        Expect.isEmpty (terminals.Leased ()) "the terminal goes back to block mode"
+                        Expect.isTrue (reDrains () > before) "and whatever was queued starts now"
+                        let! page = log.Read None 1000
+                        Expect.isTrue
+                            (page.Events
+                             |> List.exists (fun e ->
+                                 match e.Event with
+                                 | SessionEvent.TerminalLeaseReleased r ->
+                                     r.Was = ada && r.Reason = LeaseIdle
+                                 | _ -> false))
+                            "recorded under its own reason: she did not decide anything, she stopped"
                 })
 
         testCaseAsync "a terminal with no shell refuses the lease rather than granting a dead one" <|
@@ -462,7 +508,7 @@ let tests =
             // that proves blocks really moved onto one shared shell. Under stage 1 each block
             // was its own process, so `cd` died with it; here the second block is typed into
             // the same shell the first one changed.
-            withLiveTerminal "cd" (fun terminals id records _ _ ->
+            withLiveTerminal "cd" (fun terminals id records _ _ _ ->
                 async {
                     let ada = PeerRef (PeerId.create "ada" |> expect)
                     do! terminals.RunBlock (queueEntry id ada "1") "cd /tmp" ignore

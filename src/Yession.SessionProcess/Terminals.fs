@@ -344,6 +344,42 @@ module TerminalCommandWait =
             | Some TerminalQueueDrain.NotWaiting
             | None -> if deadlineElapsed then Return TerminalCommandRunning else KeepWaiting
 
+/// When an idle lease is reclaimed (Plan 13, stage 3c) — the bound on the starvation stage 2e
+/// leaves open.
+///
+/// A live holder can hold a terminal indefinitely. 2e made that ACCEPTABLE rather than fine,
+/// on two grounds: it is visible (the composer names the holder) and any peer may steal it.
+/// This is the backstop for when nobody is watching to do either.
+///
+/// The rule is that the timeout **only fires when it buys something**. A bare timer would take
+/// a terminal away from someone the moment they stopped typing, whether or not anything was
+/// waiting — which is a worse behaviour than the starvation it prevents, and it would also
+/// force an answer to a question with no good one: do you reclaim from a peer who is reading a
+/// man page in `less` for ten minutes? Gated on the queue, that question dissolves. Nothing
+/// queued, no reason to reclaim. Something queued, and that wait is exactly what the bound
+/// exists for — and the holder can take it straight back, because stealing is how leases work.
+module TerminalLeaseIdle =
+
+    /// How long a lease may sit idle WITH SOMETHING WAITING before it is reclaimed. Generous,
+    /// because it interrupts a person: long enough that someone who stepped away is the case
+    /// it catches, and someone thinking is not.
+    let window = TimeSpan.FromMinutes 5.0
+
+    /// Whether to reclaim, given how long since the holder last typed, whether a block is
+    /// running there, and what the drain says is holding the terminal's head.
+    ///
+    /// A running block is never interrupted — it may be the holder's own long build, and the
+    /// terminal is `busy` rather than merely held, which is a different wait with a different
+    /// answer (`AwaitingBlock`, and the block's own deadline).
+    let shouldReclaim
+        (idleFor: TimeSpan)
+        (blockRunning: bool)
+        (hold: TerminalQueueDrain.TerminalHold option)
+        : bool =
+        not blockRunning
+        && idleFor >= window
+        && hold = Some TerminalQueueDrain.AwaitingTerminal
+
 /// Who holds each terminal's stdin (Plan 13, stage 2e), as a pure transition over a map.
 ///
 /// Pure rather than a mutable corner of the terminal manager because every interesting
@@ -352,15 +388,37 @@ module TerminalCommandWait =
 /// read from. The manager holds the map and calls these.
 module TerminalLeases =
 
-    /// Terminal id -> its holder, and whether detection gave it to them rather than them
-    /// asking. The flag never leaves the process: it decides only whether the alt-screen flip
-    /// may take the lease back, and "the program exited" is not a durable fact about a person.
-    type Leases = Map<string, ActorRef * bool>
+    /// One held terminal.
+    type Lease =
+        { Holder : ActorRef
+          /// Whether detection gave it to them rather than them asking. Never leaves the
+          /// process: it decides only whether the alt-screen flip may take the lease back, and
+          /// "the program they were in exited" is not a durable fact about a person.
+          Auto : bool
+          /// When the holder last typed into it — the moment they took it, until they do. Also
+          /// process-only: the idle timeout reads it, and a durable "last keystroke at" would
+          /// be the keystroke log the transcript narrowing exists to avoid.
+          LastInput : DateTimeOffset }
+
+    /// Terminal id -> its lease.
+    type Leases = Map<string, Lease>
 
     let empty : Leases = Map.empty
 
     let holderOf (id: TerminalId) (leases: Leases) : ActorRef option =
-        leases |> Map.tryFind (TerminalId.value id) |> Option.map fst
+        leases |> Map.tryFind (TerminalId.value id) |> Option.map (fun lease -> lease.Holder)
+
+    /// Stamp a keystroke, so the idle timeout measures from the last one rather than from when
+    /// the lease was taken. A no-op for anyone who is not the holder — their keystrokes were
+    /// dropped, and a dropped keystroke must not keep somebody else's lease alive.
+    let touch (id: TerminalId) (by: ActorRef) (at: DateTimeOffset) (leases: Leases) : Leases =
+        match Map.tryFind (TerminalId.value id) leases with
+        | Some lease when lease.Holder = by -> Map.add (TerminalId.value id) { lease with LastInput = at } leases
+        | _ -> leases
+
+    /// How long the holder has been silent. `None` when nobody holds it.
+    let idleFor (id: TerminalId) (now: DateTimeOffset) (leases: Leases) : TimeSpan option =
+        leases |> Map.tryFind (TerminalId.value id) |> Option.map (fun lease -> now - lease.LastInput)
 
     /// Terminals someone is typing into — the drain's `leased` set, the exact counterpart of
     /// its `busy` one.
@@ -373,27 +431,27 @@ module TerminalLeases =
     ///
     /// Re-taking a lease you already hold writes nothing. It is not a steal from yourself, and
     /// a log that said so would be noise the second time a client sent the frame.
-    let take (id: TerminalId) (by: ActorRef) (auto: bool) (leases: Leases) : SessionEvent list * Leases =
+    let take (id: TerminalId) (by: ActorRef) (auto: bool) (at: DateTimeOffset) (leases: Leases) : SessionEvent list * Leases =
         let key = TerminalId.value id
         match Map.tryFind key leases with
-        | Some (holder, _) when holder = by -> [], leases
+        | Some lease when lease.Holder = by -> [], leases
         | previous ->
             let ending =
                 match previous with
-                | Some (holder, _) ->
+                | Some lease ->
                     [ SessionEvent.TerminalLeaseReleased
-                        { TerminalId = id; Was = holder; Reason = LeaseStolen by } ]
+                        { TerminalId = id; Was = lease.Holder; Reason = LeaseStolen by } ]
                 | None -> []
             ending @ [ SessionEvent.TerminalLeaseTaken { TerminalId = id; By = by } ],
-            Map.add key (by, auto) leases
+            Map.add key { Holder = by; Auto = auto; LastInput = at } leases
 
     /// Hand the terminal back. Only the holder can: releasing someone else's lease is a steal
     /// wearing a polite word, and a steal is `take`, which says so on the record.
     let release (id: TerminalId) (by: ActorRef) (leases: Leases) : SessionEvent list * Leases =
         let key = TerminalId.value id
         match Map.tryFind key leases with
-        | Some (holder, _) when holder = by ->
-            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = holder; Reason = LeaseReleased } ],
+        | Some lease when lease.Holder = by ->
+            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = lease.Holder; Reason = LeaseReleased } ],
             Map.remove key leases
         | _ -> [], leases
 
@@ -403,10 +461,20 @@ module TerminalLeases =
     /// would distinguish something no reader of the log is asking.
     let autoRelease (id: TerminalId) (leases: Leases) : SessionEvent list * Leases =
         match Map.tryFind (TerminalId.value id) leases with
-        | Some (holder, true) ->
-            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = holder; Reason = LeaseReleased } ],
+        | Some lease when lease.Auto ->
+            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = lease.Holder; Reason = LeaseReleased } ],
             Map.remove (TerminalId.value id) leases
         | _ -> [], leases
+
+    /// The idle timeout's reclaim (Plan 13, stage 3c). Its own reason, because "the holder is
+    /// still here and stopped" is a third answer to the question a reader asks afterwards, and
+    /// recording it as `LeaseReleased` would say they decided something they did not.
+    let reclaimIdle (id: TerminalId) (leases: Leases) : SessionEvent list * Leases =
+        match Map.tryFind (TerminalId.value id) leases with
+        | Some lease ->
+            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = lease.Holder; Reason = LeaseIdle } ],
+            Map.remove (TerminalId.value id) leases
+        | None -> [], leases
 
     /// A peer's connection dropped: every lease it held ends. Without this a crashed tab
     /// leaves the composer reading "nick is using this terminal" for ever, with the queue held
@@ -415,16 +483,16 @@ module TerminalLeases =
         let mine =
             leases
             |> Map.toList
-            |> List.filter (fun (_, (holder, _)) -> holder = PeerRef peer)
+            |> List.filter (fun (_, lease) -> lease.Holder = PeerRef peer)
             |> List.sortBy fst
         let events =
             mine
-            |> List.choose (fun (key, (holder, _)) ->
+            |> List.choose (fun (key, lease) ->
                 match TerminalId.create key with
                 | Ok id ->
                     Some (
                         SessionEvent.TerminalLeaseReleased
-                            { TerminalId = id; Was = holder; Reason = LeaseHolderGone })
+                            { TerminalId = id; Was = lease.Holder; Reason = LeaseHolderGone })
                 | Error _ -> None)
         events, mine |> List.fold (fun acc (key, _) -> Map.remove key acc) leases
 
@@ -556,6 +624,11 @@ module SessionTerminals =
           Busy : unit -> Set<string>
           /// Terminals a peer is typing into — the drain's `leased` set, `busy`'s counterpart.
           Leased : unit -> Set<string>
+          /// Reclaim any lease that has gone idle with something queued behind it (Plan 13,
+          /// stage 3c). Called on a beat; a no-op when nothing qualifies, which is the usual
+          /// case. `holdOf` is passed in rather than computed here because it needs the doc,
+          /// which the terminal manager deliberately does not read.
+          ReclaimIdle : (TerminalId -> TerminalQueueDrain.TerminalHold option) -> Async<unit>
           IsOpen : TerminalId -> bool
           /// Every open terminal's id and current transcript length, for a joining peer's
           /// catch-up hints.
@@ -587,6 +660,7 @@ module SessionTerminals =
           ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
           Leased = fun () -> Set.empty
+          ReclaimIdle = fun _ -> async { return () }
           IsOpen = fun _ -> false
           Lengths = fun () -> []
           Snapshot = fun _ -> async { return None }
@@ -686,7 +760,8 @@ module SessionTerminals =
                 match r.Reason with
                 | LeaseReleased -> r.Was
                 | LeaseStolen by -> by
-                | LeaseHolderGone -> ActorRef.SessionProcess
+                // Neither a decision by the holder nor by anyone else — the Process noticed.
+                | LeaseHolderGone | LeaseIdle -> ActorRef.SessionProcess
             | _ -> ActorRef.SessionProcess
 
         /// Commit a lease transition: the map first, then its events, then the re-arm.
@@ -711,13 +786,13 @@ module SessionTerminals =
             async {
                 let key = TerminalId.value id
                 let holder = TerminalLeases.holderOf id leases
-                let autoHeld = leases |> Map.tryFind key |> Option.map snd |> Option.defaultValue false
+                let autoHeld = leases |> Map.tryFind key |> Option.map (fun lease -> lease.Auto) |> Option.defaultValue false
                 let author =
                     match runningAuthor.TryGetValue key with
                     | true, actor -> Some actor
                     | _ -> None
                 match TerminalFlip.propose altScreen holder autoHeld author with
-                | FlipToLive by -> do! applyLease (TerminalLeases.take id by true leases)
+                | FlipToLive by -> do! applyLease (TerminalLeases.take id by true (clock ()) leases)
                 | FlipToBlock -> do! applyLease (TerminalLeases.autoRelease id leases)
                 | FlipNothing -> return ()
             }
@@ -988,6 +1063,24 @@ module SessionTerminals =
                     busy <- Set.remove key busy
             }
 
+        let reclaimIdle (holdOf: TerminalId -> TerminalQueueDrain.TerminalHold option) : Async<unit> =
+            async {
+                let now = clock ()
+                // Snapshotted first: `applyLease` rewrites the map, and reclaiming one
+                // terminal must not change what is decided about another.
+                let candidates =
+                    leases
+                    |> Map.toList
+                    |> List.choose (fun (key, lease) ->
+                        match TerminalId.create key with
+                        | Ok id -> Some (id, now - lease.LastInput)
+                        | Error _ -> None)
+                for id, idleFor in candidates do
+                    let blockRunning = Set.contains (TerminalId.value id) busy
+                    if TerminalLeaseIdle.shouldReclaim idleFor blockRunning (holdOf id) then
+                        do! applyLease (TerminalLeases.reclaimIdle id leases)
+            }
+
         let take (id: TerminalId) (by: ActorRef) : Async<Result<unit, string>> =
             async {
                 match live.TryGetValue (TerminalId.value id) with
@@ -999,7 +1092,7 @@ module SessionTerminals =
                 | true, terminal when Option.isNone terminal.Shell ->
                     return Error "this terminal has no interactive shell"
                 | true, _ ->
-                    do! applyLease (TerminalLeases.take id by false leases)
+                    do! applyLease (TerminalLeases.take id by false (clock ()) leases)
                     return Ok ()
             }
 
@@ -1027,6 +1120,9 @@ module SessionTerminals =
         let input (id: TerminalId) (by: ActorRef) (data: string) : bool =
             match heldPty id by with
             | Some pty ->
+                // Stamped BEFORE the write, so the idle timeout measures from the last
+                // keystroke rather than from when the lease was taken.
+                leases <- TerminalLeases.touch id by (clock ()) leases
                 pty.Write data
                 true
             | None -> false
@@ -1114,6 +1210,7 @@ module SessionTerminals =
           ApplySize = applySize
           Busy = fun () -> busy
           Leased = fun () -> TerminalLeases.held leases
+          ReclaimIdle = reclaimIdle
           IsOpen = isOpen
           Lengths =
             fun () ->
@@ -1156,7 +1253,11 @@ module TerminalScheduler =
         { /// Re-examine the terminal queues now. Called on every doc update, and again
           /// whenever a block finishes (which is what lets a terminal's next queued
           /// command start immediately).
-          Drain : unit -> unit }
+          Drain : unit -> unit
+          /// Reclaim any lease idle with something queued behind it (Plan 13, stage 3c).
+          /// Lives here rather than on the manager because the decision needs the QUEUE, and
+          /// the doc is the scheduler's to read — the manager owns processes, not policy.
+          ReclaimIdleLeases : unit -> unit }
 
     /// `initialConsumed` seeds the log-anchored exactly-once set from the durable log at
     /// boot — every `QueueId` a `TerminalBlockStarted` already names.
@@ -1229,7 +1330,22 @@ module TerminalScheduler =
                             drain ()
                         })
 
-        { Drain = drain }
+        let reclaimIdleLeases () =
+            match SyncedStateSync.ofDoc doc with
+            | Error _ -> ()
+            | Ok synced ->
+                let holdOf terminal =
+                    TerminalQueueDrain.holdOf
+                        consumed
+                        (terminals.Busy ())
+                        (terminals.Leased ())
+                        terminals.IsOpen
+                        (fun t -> SyncedSessionState.modeOf t synced)
+                        synced.TerminalQueue
+                        terminal
+                Async.StartImmediate (terminals.ReclaimIdle holdOf)
+
+        { Drain = drain; ReclaimIdleLeases = reclaimIdleLeases }
 
 /// The agent's ONE execution path (Plan 13, stage 3b): queue a command where everyone can see
 /// it, wait as long as it is worth waiting, and answer with what happened.

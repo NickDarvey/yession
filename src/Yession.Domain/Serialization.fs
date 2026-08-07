@@ -423,13 +423,15 @@ module Codec =
                 match e with
                 | LeaseReleased -> Encode.object [ "kind", Encode.string "released" ]
                 | LeaseStolen by -> Encode.object [ "kind", Encode.string "stolen"; "by", actor.Encode by ]
-                | LeaseHolderGone -> Encode.object [ "kind", Encode.string "holderGone" ])
+                | LeaseHolderGone -> Encode.object [ "kind", Encode.string "holderGone" ]
+                | LeaseIdle -> Encode.object [ "kind", Encode.string "idle" ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "released" -> Decode.succeed LeaseReleased
                 | "stolen" -> Decode.field "by" actor.Decode |> Decode.map LeaseStolen
                 | "holderGone" -> Decode.succeed LeaseHolderGone
+                | "idle" -> Decode.succeed LeaseIdle
                 | other -> Decode.fail (sprintf "Unknown lease end: %s" other)) }
 
     let private terminalLeaseTaken : Codec<TerminalLeaseTaken> =

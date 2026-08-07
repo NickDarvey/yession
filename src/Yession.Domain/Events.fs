@@ -204,12 +204,18 @@ and TerminalLeaseReleased =
       Reason : TerminalLeaseEnd }
 
 /// Why a lease ended. Distinguished because they read differently in a log: a release is a
-/// person finishing, a steal is another person taking over, and a drop is nobody deciding
-/// anything at all.
+/// person finishing, a steal is another person taking over, a drop is nobody deciding
+/// anything at all, and an idle reclaim is a person who is still here and has stopped.
 and TerminalLeaseEnd =
     | LeaseReleased
     | LeaseStolen of by: ActorRef
     | LeaseHolderGone
+    /// Reclaimed by the idle timeout (Plan 13, stage 3c): the holder is still connected and
+    /// simply stopped typing while something was queued behind them. Its own case because the
+    /// question a reader asks afterwards — "did nick finish, drop out, or just wander off?" —
+    /// has three different answers, and answering it as `LeaseReleased` would say the holder
+    /// decided something they did not.
+    | LeaseIdle
 
 and TerminalBlockStarted =
     { TerminalId : TerminalId
