@@ -365,16 +365,14 @@ let private lazyLifecycleTests =
         testCaseAsync "a development task identifies need and starts the environment (E2E-2)" <|
             async {
                 let recorder = SandboxRecorder ()
-                // A task agent: signals need through the typed capability, twice — the
-                // second need must reuse the running environment.
+                // A task agent that runs a command. `ensure_environment` retired with stage
+                // 3b — opening a terminal IS the need, and running a command opens the
+                // agent's — so the need now arrives through the one door that is left. It
+                // runs twice to pin the other half: the agent terminal is opened once and
+                // reused, so a second command is not a second need.
                 let taskAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            // Two commands, and the SECOND must reuse the environment the
-                            // first started. `ensure_environment` retired with stage 3b —
-                            // running a command opens the agent terminal, and opening a
-                            // terminal is what identifies the need — so this now asserts the
-                            // same property through the one door that is left.
                             let! first = capabilities.ExecuteCommand None "true"
                             let! second = capabilities.ExecuteCommand None "true"
                             match first, second with
@@ -395,6 +393,15 @@ let private lazyLifecycleTests =
                 do! a.Runner.WaitFor (fun model ->
                         model.Conversation.Items |> List.exists (fun i -> i.Body = "environment is up")
                         && (match model.Environment with EnvironmentRunning _ -> true | _ -> false))
+
+                // A SECOND need, from a different actor and against a different terminal:
+                // Ada opens her own. This is the half E2E-2 is really about — a need arriving
+                // while an environment is already running must reuse it rather than start a
+                // second one — and it is a stronger case than the agent's own second command,
+                // which reuses a terminal it already has and is therefore no need at all.
+                a.Connection.OpenTerminal "ada's"
+                do! a.Runner.WaitFor (fun model ->
+                        (TerminalProjection.openTerminals model.Terminals |> List.length) = 2)
 
                 Expect.equal recorder.Created 1 "exactly one sandbox created across two needs"
                 let! envEvents = environmentEventsOf managed.Host.Log
