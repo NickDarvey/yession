@@ -875,6 +875,7 @@ let private scriptedEnvironment (script: string -> (OutputStream * string) list 
                               Kill = ignore
                               Exited = async { return SandboxExited code } }
                 }
+          SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
           Stop = fun () -> async { return () }
           CurrentRef = fun () -> Some "scripted" }
     environment, spawned

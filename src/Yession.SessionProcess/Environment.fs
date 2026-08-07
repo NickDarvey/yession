@@ -28,6 +28,12 @@ module SessionEnvironment =
           /// The environment is still the one gate — a spawn with nothing running is an
           /// error here exactly as it is there.
           Spawn : SandboxExec -> (OutputStream * string -> unit) -> Async<Result<SandboxProcessHandle, string>>
+          /// Spawn on a pseudo-terminal, when the running backend has one (Plan 13, stage
+          /// 2d). `Error` rather than an option, because whether a pty is available is a
+          /// property of the RUNNING sandbox and there may not be one yet — a caller has to
+          /// handle "no environment" regardless, and folding "this backend has no pty" into
+          /// the same shape keeps it from needing two ways to be told no.
+          SpawnPty : SandboxExec -> int -> int -> (string -> unit) -> Async<Result<PtyHandle, string>>
           /// Stop the environment if it is running (recorded as events).
           Stop : unit -> Async<unit>
           /// The running sandbox's backend reference, if any.
@@ -39,6 +45,7 @@ module SessionEnvironment =
         { Ensure = fun _ _ -> async { return EnvironmentUnavailable "this session has no environment" }
           Execute = fun _ _ -> async { return CommandExecutionFailed "this session has no environment" }
           Spawn = fun _ _ -> async { return Error "this session has no environment" }
+          SpawnPty = fun _ _ _ _ -> async { return Error "this session has no environment" }
           Stop = fun () -> async { return () }
           CurrentRef = fun () -> None }
 
@@ -181,8 +188,19 @@ module SessionEnvironment =
                 | Some sandbox -> return! sandbox.Spawn exec onChunk
             }
 
+        let spawnPty (exec: SandboxExec) (cols: int) (rows: int) (onOutput: string -> unit) =
+            async {
+                match running with
+                | None -> return Error "no running environment"
+                | Some sandbox ->
+                    match sandbox.SpawnPty with
+                    | None -> return Error "this backend cannot open a pseudo-terminal"
+                    | Some spawn -> return! spawn exec cols rows onOutput
+            }
+
         { Ensure = ensure
           Execute = execute
           Spawn = spawn
+          SpawnPty = spawnPty
           Stop = stop
           CurrentRef = fun () -> running |> Option.map (fun s -> s.Ref) }
