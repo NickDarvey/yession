@@ -41,6 +41,7 @@ type Need =
     | Keyring     // a usable OS credential manager (Keychain / Credential Manager / Secret Service)
     | Nix         // the nix CLI, to evaluate/build this repo's derivations against the working tree
     | Srt         // OS-level confinement: bubblewrap + socat on Linux, Seatbelt on macOS
+    | Pty         // the native `node-pty` addon — a real pseudo-terminal, not a pipe
 
 // process.env under Node; the CLR reads it through System.Environment below. Guarded so this
 // branch is dead-code-eliminated out of the .NET build path — jsNative would throw there.
@@ -53,7 +54,7 @@ let private getEnv (name: string) : string =
         match System.Environment.GetEnvironmentVariable name with null -> "" | v -> v
     else jsEnv name
 
-let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix; Srt ]
+let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix; Srt; Pty ]
 
 let private parseNeed (s: string) : Need option =
     match s.Trim().ToLowerInvariant () with
@@ -65,6 +66,7 @@ let private parseNeed (s: string) : Need option =
     | "keyring"   -> Some Keyring
     | "nix"       -> Some Nix
     | "srt"       -> Some Srt
+    | "pty"       -> Some Pty
     | _           -> None
 
 /// The capabilities THIS run declares it has. `YESSION_TEST_CAPS` is the primary API (a

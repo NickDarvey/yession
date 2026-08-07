@@ -213,8 +213,26 @@ module private Children =
 // reports `SpawnPty = None` instead of throwing when someone runs `vim`.
 module private Pty =
 
-    [<Emit("(() => { try { return require('node-pty') } catch { return null } })()")>]
-    let private tryRequire () : obj = jsNative
+    // `createRequire`, not a bare `require`. Fable emits ESM and the test bundle runs as
+    // ESM, where `require` is simply not defined — so a bare one throws ReferenceError,
+    // which the try below would swallow into "the addon is absent" on a box that has it.
+    // That is exactly what happened: the standalone probe passed (`node -e` runs as CJS)
+    // while every pty test reported no pty support.
+    //
+    // A static `import` is the other option and is worse here: node-pty is CJS-only and a
+    // missing package would fail the whole module's load rather than this one lookup, which
+    // would turn "no addon" from an answer into a crash.
+    // Typed `obj`, not `string -> (string -> obj)`: Fable sees a curried arrow and wraps the
+    // import in `uncurry2`, which rewrites the call into `createRequire(url, name)` — one
+    // call where two were meant. It fails, the try below catches it, and the addon reports
+    // absent on a box that has it. Opaque here, applied in the emit.
+    [<Import("createRequire", "node:module")>]
+    let private createRequire : obj = jsNative
+
+    [<Emit("(() => { try { return $0(import.meta.url)('node-pty') } catch { return null } })()")>]
+    let private tryRequireWith (mk: obj) : obj = jsNative
+
+    let private tryRequire () : obj = tryRequireWith createRequire
 
     /// Resolved once. `require` is not free and the answer cannot change within a process.
     let private modul = lazy (tryRequire ())
@@ -312,6 +330,12 @@ module HostSandbox =
             }
 
 // --- Docker: a full isolated userland ----------------------------------------------------
+
+/// `exec.resize({ h, w })` — the Engine API's exec-resize endpoint, which is what raises
+/// SIGWINCH in the program on the other side. Fire-and-forget: a resize that loses a race
+/// with the process exiting is not an error worth failing a terminal over.
+[<Emit("$0.resize({ h: $1, w: $2 }).catch(() => {})")>]
+let private execResize (exec: obj) (rows: int) (cols: int) : unit = jsNative
 
 /// Docker-backed sandboxes through the `Fable.Dockerode` bindings (the Engine API over
 /// the local socket — no `docker` CLI). The container and its workspace volume are
@@ -496,17 +520,63 @@ module DockerSandbox =
                                               Exited = ended.Await }
                                 with ex -> return Error ex.Message
                             }
+
+                        // The same exec, on a terminal. Three things differ from the piped
+                        // spawn above, and all three are what a tty IS rather than options.
+                        //
+                        // `Tty: true` gives the process a controlling terminal, so it can ask
+                        // whether it is interactive and take the alternate screen. There is NO
+                        // demux: docker multiplexes stdout and stderr only when there is no
+                        // tty, because a terminal has one device and the two streams are
+                        // indistinguishable on it — running the demuxer here would parse
+                        // ordinary output as though it were frame headers. And the exec-resize
+                        // endpoint is what makes SIGWINCH reach the program.
+                        let spawnPty (exec: SandboxExec) (cols: int) (rows: int) (onOutput: string -> unit) =
+                            async {
+                                try
+                                    let execOpts =
+                                        [ "Cmd", box (List.toArray (exec.Executable :: exec.Arguments))
+                                          "AttachStdin", box true
+                                          "AttachStdout", box true
+                                          "AttachStderr", box true
+                                          "Tty", box true
+                                          "Env", box (exec.Env |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> List.toArray) ]
+                                        @ (match exec.WorkingDirectory with Some w -> [ "WorkingDir", box w ] | None -> [])
+                                        |> createObj
+                                    let! started = container.exec execOpts |> Interop.awaitPromise
+                                    let! stream = started.start (createObj [ "hijack", box true; "stdin", box true ]) |> Interop.awaitPromise
+                                    stream.on ("data", fun d -> onOutput (bufToStr d)) |> ignore
+                                    // Size it before anything runs: a program that reads its
+                                    // dimensions at startup must not read 80x24 and then be
+                                    // told the truth afterwards.
+                                    execResize started rows cols
+                                    let ended = OneShot<SandboxRun> ()
+                                    let finish () =
+                                        Async.StartImmediate (
+                                            async {
+                                                try
+                                                    let! inspect = started.inspect () |> Interop.awaitPromise
+                                                    ended.Settle (SandboxExited (exitCodeOf inspect))
+                                                with ex -> ended.Settle (SandboxRunFailed ex.Message)
+                                            })
+                                    stream.on ("end", fun _ -> finish ()) |> ignore
+                                    stream.on ("error", fun e -> ended.Settle (SandboxRunFailed (string e))) |> ignore
+                                    return
+                                        Ok
+                                            { Write = fun text -> stream.write (box text) |> ignore
+                                              Resize = fun c r -> execResize started r c
+                                              // As with the piped exec: the Engine API cannot
+                                              // signal an exec's process, so closing our side
+                                              // of the stream is the most Kill can do.
+                                              Kill = fun () -> stream.``end`` ()
+                                              Exited = ended.Await }
+                                with ex -> return Error ex.Message
+                            }
                         return
                             Ok
                                 { Ref = container.id
                                   Spawn = spawn
-                                  // Not yet. docker gets a pty free — exec with `Tty: true`
-                                  // plus the exec-resize endpoint, both already in dockerode
-                                  // — and it is the remaining piece of stage 2c. Until it is
-                                  // written, this backend says so rather than pretending: a
-                                  // `None` here is a terminal that runs blocks and refuses
-                                  // live mode, which is exactly what it can currently do.
-                                  SpawnPty = None
+                                  SpawnPty = Some spawnPty
                                   Dispose =
                                     fun () ->
                                         async {
