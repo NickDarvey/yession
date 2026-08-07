@@ -712,6 +712,7 @@ module View =
         | BlockRunning -> Dom.Text.blockRunning
         | BlockFinished (CommandSucceeded _) -> Dom.Text.blockOk
         | BlockFinished _ -> Dom.Text.blockFailed
+        | BlockRejected _ -> Dom.Text.blockRejected
 
     let private terminalBlockStatus =
         function
@@ -720,6 +721,9 @@ module View =
         | BlockFinished (CommandFailed code) -> html $"""<span class="{Style.statusErr}">{Icon.crossSm} {code}</span>"""
         | BlockFinished CommandTimedOut -> html $"""<span class="{Style.statusErr}">timed out</span>"""
         | BlockFinished (CommandExecutionFailed _) -> html $"""<span class="{Style.statusErr}">failed</span>"""
+        // Named, not merely absent. "rejected by nick" in line with the commands that ran
+        // is the whole reason a refusal mints a block at all.
+        | BlockRejected (by, _) -> html $"""<span class="{Style.statusErr}">rejected by {authorLabel by}</span>"""
 
     /// One block: the command that ran, then everything it printed.
     let private terminalBlockView (feed: TerminalFeed) (block: TerminalBlock) : TemplateResult =
@@ -733,6 +737,12 @@ module View =
                 match block.Status with
                 | BlockRunning -> html $"""<div class="{Style.terminalOutputEmpty}" data-terminal-output>…</div>"""
                 | BlockFinished _ -> html $"""<div class="{Style.terminalOutputEmpty}" data-terminal-output>no output</div>"""
+                // "no output" would be true and useless. A refused command has no output
+                // because it never ran, and the reason — when one was given — is the thing
+                // the next reader actually wants.
+                | BlockRejected (_, reason) ->
+                    let text = reason |> Option.defaultValue "did not run"
+                    html $"""<div class="{Style.terminalOutputEmpty}" data-terminal-output>{text}</div>"""
             else html $"""<div class="{Style.terminalOutput}" data-terminal-output>{ansiText output}</div>"""
         html $"""
             <article class="{Style.terminalBlock}" data-terminal-block="{BlockId.value block.BlockId}"
@@ -765,6 +775,15 @@ module View =
                         <button type="button" class="{Style.btn}" data-terminal-unapprove="{QueueId.value id}"
                                 @click={Ev(fun _ -> dispatch (UnapproveTerminalQueuedMsg id))}>Hold</button>"""
                 else Lit.nothing
+            // Reject sits beside approve wherever a verdict is possible, and it is offered
+            // on every entry rather than only awaiting ones: under AutoRun nothing is ever
+            // "awaiting", and that is exactly where being able to say no matters most.
+            // Deleting is still there and still means withdrawal — this means refusal, and
+            // the log records the difference.
+            let reject =
+                html $"""
+                    <button type="button" class="{Style.btn}" data-terminal-reject="{QueueId.value id}"
+                            @click={Ev(fun _ -> dispatch (RejectTerminalQueuedMsg (id, model.Peer.PeerId, None)))}>Reject</button>"""
             html $"""
                 <article class="{if awaiting then Style.terminalQueuedAwaiting else Style.terminalQueuedReady}"
                          data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
@@ -777,6 +796,7 @@ module View =
                     <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if awaiting then "waiting for approval" else "queued"}</span>
                     <span class="{Style.small}">{authorLabel entry.Author}</span>
                     <div class="ml-auto flex items-center gap-2">
+                      {reject}
                       {approval}
                       <button type="button" class="{Style.btnIcon}" aria-label="Move up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.TerminalQueue id with Some o -> dispatch (ReorderTerminalQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
                       <button type="button" class="{Style.btnIcon}" aria-label="Move down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.TerminalQueue id with Some o -> dispatch (ReorderTerminalQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>

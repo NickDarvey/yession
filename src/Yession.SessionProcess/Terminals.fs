@@ -66,6 +66,11 @@ module TerminalQueueDrain =
     type TerminalDrainPlan =
         { /// The entries to start now — at most one per terminal, in terminal order.
           Ready : TerminalQueued list
+          /// Entries a peer has refused: appended as `TerminalCommandRejected`, then
+          /// removed. Separate from `Removals` because they are opposite facts — a removal
+          /// is repair for something that already happened, a rejection is a decision that
+          /// has not been recorded yet.
+          Rejections : TerminalQueued list
           /// Doc keys to remove without running: entries a `TerminalBlockStarted` already
           /// names (a crash between the append and the removal), repaired rather than run
           /// a second time.
@@ -92,28 +97,56 @@ module TerminalQueueDrain =
             |> List.distinct
             |> List.sortBy TerminalId.value
 
+        // A refusal outranks every other gate. It touches no terminal, so it does not wait
+        // on `busy` or on the terminal being open, and it is checked before the mode gate
+        // because a policy that would have auto-run the command must not beat a person who
+        // said no. Under `AutoRun` that is the whole difference between the two.
+        let rejections =
+            queue
+            |> Map.toList
+            |> List.map snd
+            |> List.filter (fun entry -> Option.isSome entry.RejectedBy && not (alreadyConsumed entry))
+            |> List.sortBy (fun entry -> QueueId.value entry.QueueId)
+
+        let rejected =
+            rejections |> List.map (fun entry -> QueueId.value entry.QueueId) |> Set.ofList
+
         let ready =
             terminals
             |> List.choose (fun terminal ->
                 if not (isOpen terminal) || Set.contains (TerminalId.value terminal) busy then None
                 else
-                    // The head is the first entry this drain has not already consumed.
+                    // The head is the first entry this drain has not already consumed. A
+                    // refused entry is not skipped over: it is still the head, and it stops
+                    // the queue exactly as an unapproved one does until the drain removes
+                    // it. Running the entry behind it first would reorder execution because
+                    // of a verdict, which is the thing the approval gate promises not to do.
                     TerminalQueueOrder.sortedFor terminal queue
                     |> List.filter (alreadyConsumed >> not)
                     |> List.tryHead
                     |> Option.filter (fun entry ->
-                        not (TerminalApprovalMode.requiresApproval (modeOf terminal) entry.Author)
-                        || Option.isSome entry.ApprovedBy))
+                        not (Set.contains (QueueId.value entry.QueueId) rejected)
+                        && (not (TerminalApprovalMode.requiresApproval (modeOf terminal) entry.Author)
+                            || Option.isSome entry.ApprovedBy)))
 
         { Ready = ready
+          Rejections = rejections
           Removals = queue |> Map.toList |> List.map snd |> List.filter alreadyConsumed |> List.map (fun e -> e.QueueId) }
 
     /// The consumed-set contribution of one event: a terminal drain dedups against every
     /// `TerminalBlockStarted` that names a queue entry — anchored in the log, never in the
     /// doc, so a replica that never saw the removal cannot re-run the command.
+    /// A rejection joins the same set, and that is what settles the reject/drain race with
+    /// no lock anywhere. Under `AutoRun` a human can press reject in the very tick the
+    /// drain takes the entry; whichever event reaches the append-only log first wins and
+    /// the second is dropped as already consumed. The Session Process is the log's only
+    /// writer, so check-and-append is serial there by construction. A rejected `QueueId`
+    /// can therefore never run afterwards, and a started one can never be retro-rejected —
+    /// stopping something already running is `kill`, a different verb.
     let consumedOf (event: SessionEvent) : string option =
         match event with
         | SessionEvent.TerminalBlockStarted b -> b.QueueId |> Option.map QueueId.value
+        | SessionEvent.TerminalCommandRejected r -> Some (QueueId.value r.QueueId)
         | _ -> None
 
 /// The session's terminals: opening and closing them, and running one queued command at a
@@ -150,6 +183,15 @@ module SessionTerminals =
           /// and its doc key may be removed, which is why it is a callback and not
           /// something the caller can do before or after the whole run.
           RunBlock : TerminalQueued -> string -> (unit -> unit) -> Async<unit>
+          /// Record a peer's refusal of a queued command, minting the `BlockId` that names
+          /// it. `onRecorded` fires once the event is durable — the moment the entry has
+          /// been consumed and its doc key may go, exactly as `RunBlock`'s `onStarted`
+          /// marks that moment for a command which ran.
+          ///
+          /// Needs no terminal: refusing a command touches no process, so it works on a
+          /// terminal that is busy, leased (stage 2e) or closed. Someone can clear a bad
+          /// queue while a colleague is inside vim.
+          Reject : TerminalQueued -> string -> (unit -> unit) -> Async<unit>
           /// Terminals with a block running — the drain's `busy` set.
           Busy : unit -> Set<string>
           IsOpen : TerminalId -> bool
@@ -166,6 +208,7 @@ module SessionTerminals =
         { Open = fun _ _ -> async { return Error "this session has no environment" }
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ -> async { return () }
+          Reject = fun _ _ _ -> async { return () }
           Busy = fun () -> Set.empty
           IsOpen = fun _ -> false
           Lengths = fun () -> []
@@ -333,6 +376,27 @@ module SessionTerminals =
                     busy <- Set.remove key busy
             }
 
+        let reject (entry: TerminalQueued) (command: string) (onRecorded: unit -> unit) : Async<unit> =
+            async {
+                match entry.RejectedBy with
+                | None -> return ()
+                | Some by ->
+                    // Attributed to the peer who refused, exactly as an approval is: the
+                    // doc holds the connection fact and the event carries the actor.
+                    do!
+                        appendAs
+                            (PeerRef by)
+                            (SessionEvent.TerminalCommandRejected
+                                { TerminalId = entry.Terminal
+                                  QueueId = entry.QueueId
+                                  BlockId = mintBlockId ()
+                                  Author = entry.Author
+                                  RejectedBy = PeerRef by
+                                  Command = command
+                                  Reason = entry.RejectedReason })
+                    onRecorded ()
+            }
+
         let reconcileAtBoot () : Async<unit> =
             async {
                 // Every terminal the log still calls open belongs to a process that is
@@ -349,6 +413,7 @@ module SessionTerminals =
         { Open = openTerminal
           Close = closeTerminal
           RunBlock = runBlock
+          Reject = reject
           Busy = fun () -> busy
           IsOpen = isOpen
           Lengths =
@@ -399,6 +464,22 @@ module TerminalScheduler =
                 // Leftovers first: a crash between the start append and the doc removal
                 // leaves an entry that is already a block, and repairing it is free.
                 SyncedStateSync.removeTerminalQueued doc plan.Removals
+                // Refusals next, and before anything runs: they are what a person decided,
+                // and they free the head of a queue that a `Ready` entry may be sitting
+                // behind. Same snapshot-then-consume shape as a command that runs.
+                for entry in plan.Rejections do
+                    let command = SyncedStateSync.terminalQueuedText doc entry.QueueId
+                    consumed <- Set.add (QueueId.value entry.QueueId) consumed
+                    Async.StartImmediate (
+                        async {
+                            do!
+                                terminals.Reject
+                                    entry
+                                    command
+                                    (fun () -> SyncedStateSync.removeTerminalQueued doc [ entry.QueueId ])
+                            // The head may now be a different entry, and it may be ready.
+                            drain ()
+                        })
                 for entry in plan.Ready do
                     // Snapshot the command from THIS replica at the instant it is
                     // consumed, exactly as the message drain snapshots a body: what runs

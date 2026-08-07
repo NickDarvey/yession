@@ -54,9 +54,15 @@ module TerminalApprovalMode =
             | UserRef _ | PeerRef _ | SessionProcess | System -> false
 
 /// Where a block is in its life.
+///
+/// `BlockRejected` widens what a block IS, deliberately: a `BlockId` names a proposed
+/// command and its outcome, not a process. A refusal shown in line with the commands that
+/// did run reads as *"agent: `rm -rf /` — rejected by nick"*; without it the entry simply
+/// vanishes from every screen, which is indistinguishable from a bug.
 type TerminalBlockStatus =
     | BlockRunning
     | BlockFinished of CommandResult
+    | BlockRejected of by: ActorRef * reason: string option
 
 /// One executed command and the transcript range it produced.
 type TerminalBlock =
@@ -140,6 +146,26 @@ module TerminalProjection =
             proj
             |> updateTerminal e.TerminalId (fun t ->
                 t |> updateBlock e.BlockId (fun b -> { b with ToSeq = Some e.ToSeq; Status = BlockFinished e.Result }))
+        | SessionEvent.TerminalCommandRejected e ->
+            proj
+            |> updateTerminal e.TerminalId (fun t ->
+                if t.Blocks |> List.exists (fun b -> b.BlockId = e.BlockId) then t
+                else
+                    { t with
+                        Blocks =
+                            t.Blocks
+                            @ [ { BlockId = e.BlockId
+                                  Author = e.Author
+                                  // Nobody approved it; someone did the opposite, and that
+                                  // is on the status rather than smuggled in here.
+                                  ApprovedBy = None
+                                  Command = e.Command
+                                  // An EMPTY range, not a missing one: a command that never
+                                  // ran produced no output, so every reader that slices
+                                  // [From, To) gets nothing without a special case.
+                                  FromSeq = 0
+                                  ToSeq = Some 0
+                                  Status = BlockRejected (e.RejectedBy, e.Reason) } ] })
         | SessionEvent.TerminalTranscriptTruncated e ->
             proj |> updateTerminal e.TerminalId (fun t -> { t with DroppedBytes = t.DroppedBytes + e.DroppedBytes })
         | _ -> proj

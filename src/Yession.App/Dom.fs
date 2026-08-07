@@ -137,6 +137,7 @@ module Dom =
         let terminalQueuedStatus = "data-terminal-queued-status"
         let terminalApprove = "data-terminal-approve"
         let terminalUnapprove = "data-terminal-unapprove"
+        let terminalReject = "data-terminal-reject"
         let terminalQueueDelete = "data-terminal-queue-delete"
 
     /// Observable text/value tokens the session view emits (labels and status words that
@@ -178,6 +179,7 @@ module Dom =
         let blockRunning = "running"
         let blockOk = "ok"
         let blockFailed = "failed"
+        let blockRejected = "rejected"
         /// A queued command whose terminal's mode demands an approval it has not got.
         let queuedAwaitingApproval = "awaiting-approval"
         /// A queued command that will run as soon as the terminal is free.
