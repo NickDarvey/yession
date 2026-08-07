@@ -569,6 +569,7 @@ let private commandFoldTests =
                                                           Kill = fun () -> killed <- true
                                                           Exited = Async.FromContinuations (fun _ -> ()) }
                                             }
+                                      SpawnPty = None
                                       Dispose = fun () -> async { recorder.Disposed <- recorder.Disposed + 1 } }
                         }
                 let sessionId = SessionId.create "cmd-timeout" |> expect

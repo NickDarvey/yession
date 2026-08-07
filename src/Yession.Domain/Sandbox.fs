@@ -88,6 +88,28 @@ type SandboxProcessHandle =
       /// Resolves exactly once, when the process ends.
       Exited : Async<SandboxRun> }
 
+/// A live process on a PSEUDO-TERMINAL (Plan 13, stage 2c).
+///
+/// Distinct from `SandboxProcessHandle` because a pty is not a pipe, and the difference is
+/// not cosmetic: a pty has a line discipline, a size, and a controlling terminal, so a
+/// program can ask whether it is interactive, redraw on `SIGWINCH`, and take the alternate
+/// screen. Over pipes most full-screen programs refuse or degrade — which is why a terminal
+/// that wants to run `vim` needs this shape and not the other one.
+///
+/// There is no stdout/stderr split, and that is a property of ptys rather than an omission:
+/// both streams share one terminal device, which is what a tty IS. The piped handle keeps
+/// the distinction because it genuinely has it.
+type PtyHandle =
+    { /// Raw bytes to the pty master — a command line, a keystroke, a control character.
+      Write : string -> unit
+      /// Tell the pty its new size, which is what raises `SIGWINCH` in the foreground
+      /// program. A terminal whose program never learns its size is the one that redraws
+      /// wrongly.
+      Resize : int -> int -> unit
+      Kill : unit -> unit
+      /// Resolves exactly once, when the process ends.
+      Exited : Async<SandboxRun> }
+
 /// One confined place to run processes. Created by, and dying with, its session.
 type Sandbox =
     { /// The backend's reference for this sandbox (a container id, "host", ...) —
@@ -95,6 +117,17 @@ type Sandbox =
       Ref : string
       /// Spawn a process, streaming its output through the callback in order.
       Spawn : SandboxExec -> (OutputStream * string -> unit) -> Async<Result<SandboxProcessHandle, string>>
+      /// Spawn a process on a pty of the given size, streaming everything the terminal
+      /// emits through the callback (Plan 13, stage 2c).
+      ///
+      /// An OPTION because pty support is genuinely per-backend, not because it is
+      /// optional to care about. docker has it free (exec with `Tty: true`, plus the
+      /// exec-resize endpoint); the host needs a native addon that may not be installed;
+      /// srt wraps the host spawn and so inherits whatever the host answered. `None` is a
+      /// backend saying it cannot host a live terminal — declared up front rather than
+      /// discovered when someone runs `vim`, which is the same declare-and-skip honesty the
+      /// capability-tagged test tiers use.
+      SpawnPty : (SandboxExec -> int -> int -> (string -> unit) -> Async<Result<PtyHandle, string>>) option
       Dispose : unit -> Async<unit> }
 
 /// Create a sandbox under a policy. The policy is assembled fresh per creation —

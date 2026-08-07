@@ -22,6 +22,7 @@
     "lib0": "^0.2.99",
     "lit": "^2.8.0",
     "node-datachannel": "^0.32.3",
+    "node-pty": "^1.1.0",
     "openid-client": "^6.8.4",
     "prosemirror-commands": "^1.6.0",
     "prosemirror-history": "^1.4.1",
