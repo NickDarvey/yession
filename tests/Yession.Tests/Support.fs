@@ -119,12 +119,37 @@ module Harness =
     [<Fable.Core.Emit("queueMicrotask($0)")>]
     let private defer (f: unit -> unit) : unit = Fable.Core.Util.jsNative
 
+    [<Fable.Core.Emit("setTimeout($0, $1)")>]
+    let private setTimer (f: unit -> unit) (ms: int) : float = Fable.Core.Util.jsNative
+
+    [<Fable.Core.Emit("clearTimeout($0)")>]
+    let private clearTimer (handle: float) : unit = Fable.Core.Util.jsNative
+
+    /// How long a single `WaitFor` may wait before it is a FAILURE rather than a wait.
+    ///
+    /// A condition that never arrives used to hang for ever, and the run's own budget
+    /// (`tasks.fsx`, 240s for the whole Node suite) was the only thing that stopped it — so
+    /// one stuck predicate killed every suite after it and reported "tests timed out" with no
+    /// name attached. Finding which test it was meant reading a process table. A deadline here
+    /// costs nothing when things work and turns that into one named failing test.
+    ///
+    /// 30s is deliberately far above anything real: the slowest whole test in a healthy
+    /// `check Ports Native Srt` run — a packaged manager launching real child processes over
+    /// real WebRTC, with several waits inside it — is under 9s, and a single wait is
+    /// milliseconds. It is a hang detector, not a performance budget.
+    let waitForTimeoutMs = 30000
+
     type Runner<'model, 'msg> =
         { Model : unit -> 'model
           Dispatch : 'msg -> unit
+          /// Resolve the first time the model satisfies the predicate, or FAIL after
+          /// `waitForTimeoutMs`. Never waits for ever.
           WaitFor : ('model -> bool) -> Async<unit> }
 
-    let run (program: Program<unit, 'model, 'msg, unit>) : Runner<'model, 'msg> =
+    /// The runner, with the wait deadline as a parameter — so the deadline itself can be
+    /// tested (a 30s one cannot be, in a cheap tier measured in milliseconds) without any
+    /// suite having to reach for a different mechanism. `run` is this at the real deadline.
+    let runWith (timeoutMs: int) (program: Program<unit, 'model, 'msg, unit>) : Runner<'model, 'msg> =
         let mutable model = Unchecked.defaultof<'model>
         let mutable dispatch : 'msg -> unit = ignore
         let mutable waiters : (('model -> bool) * (unit -> unit)) list = []
@@ -143,9 +168,42 @@ module Harness =
           Dispatch = fun msg -> dispatch msg
           WaitFor =
             fun predicate ->
-                Async.FromContinuations (fun (cont, _, _) ->
+                Async.FromContinuations (fun (cont, econt, _) ->
                     if predicate model then cont ()
-                    else waiters <- (predicate, fun () -> cont ()) :: waiters) }
+                    else
+                        // Settled exactly once, by whichever comes first — the model or the
+                        // clock. `settled` is what makes that true: the timer cannot resume a
+                        // continuation the model already resumed, and a model update cannot
+                        // resume one the timer already failed.
+                        let settled = ref false
+                        let timer = ref 0.0
+                        let resume () =
+                            if not settled.Value then
+                                settled.Value <- true
+                                clearTimer timer.Value
+                                cont ()
+                        waiters <- (predicate, resume) :: waiters
+                        timer.Value <-
+                            setTimer
+                                (fun () ->
+                                    if not settled.Value then
+                                        settled.Value <- true
+                                        // Drop the waiter before failing: a predicate left in
+                                        // the list would be re-evaluated on every later
+                                        // setState, for a test that is already over.
+                                        waiters <-
+                                            waiters
+                                            |> List.filter (fun (_, r) ->
+                                                not (System.Object.ReferenceEquals (r, resume)))
+                                        econt (
+                                            exn (
+                                                sprintf
+                                                    "WaitFor timed out after %dms: the model never satisfied the predicate"
+                                                    timeoutMs)))
+                                timeoutMs) }
+
+    let run (program: Program<unit, 'model, 'msg, unit>) : Runner<'model, 'msg> =
+        runWith waitForTimeoutMs program
 
 /// Render the client view to an HTML string for markup assertions — through the very
 /// renderer the served bootstrap uses (`Ssr`), so tests exercise the shipped SSR path.

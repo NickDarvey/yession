@@ -79,6 +79,9 @@ let private representativeModel : ClientModel =
         { LastProcessedOffset = Some (EventOffset.create 5L |> expect)
           LatestKnownOffset = Some (EventOffset.create 7L |> expect)
           IsCatchingUp = true
+          // Long enough to be worth saying, so the catch-up status and its offsets are on
+          // screen for the checklist. A brief one is deliberately silent (`CatchUpIsSlow`).
+          CatchUpIsSlow = true
           Feed = FeedLive }
       Agent = { ActiveTurn = Some turnId }
       Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } } } ]
@@ -412,9 +415,172 @@ let private shellTests =
                 "absence is the good case, so the client reads false"
     ]
 
+// Where everyone IS. Presence already drove per-field overlays, but each of those is only
+// visible from inside the surface it is about — so the thing pinned here is that a peer is
+// findable from OUTSIDE it: the roster names what they are doing, and a terminal's tab shows
+// who is in it whether or not that terminal is the one on screen.
+let private presenceTests =
+    testList "Peer presence" [
+        let withBobIn (field: FocusField) =
+            { representativeModel with
+                Presence =
+                    Map.ofList [ bob, { DisplayName = "brave-owl"; Focus = { Field = field; Pos = { Anchor = "AQI="; Head = "AQI=" } } } ] }
+
+        testCase "a peer is in the roster with where they are" <| fun () ->
+            let html = Support.render (withBobIn Title)
+            Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.peerPresence "bob")) "the peer has a roster row"
+            Expect.isTrue
+                (html.Contains (Dom.hookText (Dom.attr Dom.Hooks.peerAt Dom.Text.atTitle) Dom.Text.renamingSession))
+                "and it says they are renaming the session"
+
+        testCase "a peer writing their own message reads differently from one in yours" <| fun () ->
+            let own = Support.render (withBobIn (DraftBody bob))
+            Expect.isTrue (own.Contains (Dom.hookText (Dom.attr Dom.Hooks.peerAt Dom.Text.atDraft) Dom.Text.writing)) "their own draft is 'writing'"
+            let mine = Support.render (withBobIn (DraftBody ada))
+            Expect.isTrue
+                (mine.Contains (Dom.hookText (Dom.attr Dom.Hooks.peerAt Dom.Text.atDraft) Dom.Text.inYourDraft))
+                "being in the LOCAL peer's draft is said as yours, not as a name"
+
+        testCase "a peer in a terminal is named by the terminal they are in" <| fun () ->
+            let html = Support.render (withBobIn (TerminalDraftBody (terminalId, bob)))
+            Expect.isTrue
+                (html.Contains (Dom.hookText (Dom.attr Dom.Hooks.peerAt Dom.Text.atTerminal) (Dom.Text.inTerminal "build")))
+                "the roster names the terminal, not just 'a terminal'"
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.terminalTabPeer "bob"))
+                "and the terminal's own tab carries their mark"
+
+        // A queued command names only its entry; the entry names the terminal. That join is
+        // the one thing that could quietly return "somewhere" instead of a name.
+        testCase "a peer editing a queued command is still placed in its terminal" <| fun () ->
+            let html = Support.render (withBobIn (TerminalQueuedBody terminalQueueId))
+            Expect.isTrue
+                (html.Contains (Dom.hookText (Dom.attr Dom.Hooks.peerAt Dom.Text.atTerminalQueued) (Dom.Text.inTerminal "build")))
+                "the queued command's terminal is resolved through the entry"
+            Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.terminalTabPeer "bob")) "and shows on that terminal's tab"
+
+        // Presence is who is here NOW. `Peers` deliberately keeps the departed so a draft's
+        // author still has a name — reporting them as present would make the roster a
+        // guest book.
+        testCase "a peer with no live caret is not reported as being anywhere" <| fun () ->
+            let html = Support.render { representativeModel with Presence = Map.empty }
+            Expect.isFalse (html.Contains Dom.Hooks.peerPresence) "nobody else is claimed to be here"
+            Expect.isTrue (html.Contains "swift-heron") "the local peer's own row is untouched"
+
+        testCase "the local peer never appears as their own collaborator" <| fun () ->
+            let html = Support.render (withBobIn Title)
+            Expect.isFalse (html.Contains (Dom.attr Dom.Hooks.peerPresence "ada")) "you are 'you', not a peer row"
+    ]
+
+// Sync status, said ONCE. Both halves of this used to be wrong at the same time: "up to date"
+// appeared in the header AND the sidebar, and the catch-up that replaces it flickered on
+// every send (a client is behind its own event for one round trip).
+let private syncStatusTests =
+    testList "Sync status" [
+        let settled =
+            { representativeModel with
+                EventConsumer =
+                    { representativeModel.EventConsumer with
+                        LatestKnownOffset = representativeModel.EventConsumer.LastProcessedOffset
+                        IsCatchingUp = false
+                        CatchUpIsSlow = false } }
+
+        // Case-INSENSITIVE on purpose: the two reports differed in their capitals (one used
+        // the shared token, the other a literal), so a case-sensitive count saw one of each
+        // and called it fine.
+        testCase "'up to date' is said exactly once on the screen" <| fun () ->
+            let html = (Support.render settled).ToLowerInvariant ()
+            let rec count (from: int) (n: int) =
+                match html.IndexOf ("up to date", from) with
+                | -1 -> n
+                | i -> count (i + 1) (n + 1)
+            Expect.equal (count 0 0) 1 "one report of a healthy sync, not one per surface"
+
+        testCase "a brief catch-up says nothing at all" <| fun () ->
+            let html = Support.render { representativeModel with EventConsumer = { representativeModel.EventConsumer with CatchUpIsSlow = false } }
+            Expect.isFalse (html.Contains Dom.Hooks.catchUp) "the sidebar line stays put"
+            Expect.isFalse (html.Contains "catching up") "and the header keeps saying what it was saying"
+
+        testCase "a catch-up worth waiting on is reported, with its progress" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains (Dom.hookText Dom.Hooks.catchUp Dom.Text.catchingUp)) "the sidebar names it"
+            Expect.isTrue (html.Contains "catching up") "and so does the header"
+            Expect.isTrue (html.Contains Dom.Hooks.lastProcessedOffset) "with how far it has got"
+
+        // The flag describes a catch-up that is RUNNING, so it cannot outlive one: a timer
+        // that fires just as the page lands must not leave a status nothing can clear.
+        testCase "'slow' cannot be claimed once there is nothing left to catch up on" <| fun () ->
+            let model = ClientModel.update (CatchUpSlowMsg true) settled
+            Expect.isFalse model.EventConsumer.CatchUpIsSlow "a late timer is refused, not stored"
+            Expect.isFalse ((Support.render model).Contains Dom.Hooks.catchUp) "and nothing is shown"
+    ]
+
+// The chrome's shared vocabulary (`Style.Stroke` and the phrases over it), asserted where it
+// is observable: the rendered markup. These are invariants about EVERY control of a kind, so
+// they catch the next surface that invents its own field or forgets a focus state — which is
+// exactly how the inputs drifted apart in the first place.
+let private chromeTests =
+    testList "Chrome consistency" [
+        /// The `class="…"` of every tag whose name is in `names`.
+        let classesOf (names: string list) (html: string) : string list =
+            let rec collect (from: int) (acc: string list) =
+                let starts =
+                    names
+                    |> List.choose (fun name ->
+                        match html.IndexOf ("<" + name, from) with
+                        | -1 -> None
+                        | i -> Some i)
+                match starts with
+                | [] -> List.rev acc
+                | starts ->
+                    let start = List.min starts
+                    let tagEnd = html.IndexOf ('>', start)
+                    let tag = html.Substring (start, tagEnd - start)
+                    let classes =
+                        match tag.IndexOf "class=\"" with
+                        | -1 -> ""
+                        | i ->
+                            let from = i + 7
+                            tag.Substring (from, tag.IndexOf ('"', from) - from)
+                    collect (tagEnd + 1) (classes :: acc)
+            collect 0 []
+
+        let shell = Support.render representativeModel
+        let settingsShell = Support.render { representativeModel with Claude = { representativeModel.Claude with Flow = ClaudeAwaitingCode ("https://claude.ai/auth", "mine") } }
+
+        // Every input either wears the ONE field face (a ring that goes blue on focus) or
+        // wears nothing at all, because the row around it carries the stroke. What is ruled
+        // out is the third thing: a control that invents its own border, or one that draws a
+        // box with no focus state.
+        testCase "every input draws the one field face, or draws nothing" <| fun () ->
+            for classes in classesOf [ "input"; "select"; "textarea" ] (shell + settingsShell) do
+                let isField = classes.Contains "focus:border-blue"
+                let isBare = classes.Contains "border-0"
+                Expect.isTrue (isField || isBare) (sprintf "an input is neither the field face nor bare: %s" classes)
+
+        // Every pressable thing has a visible keyboard focus state (AGENTS.md's UI baseline).
+        // The failure this pins is silent by nature: a control with `outline-2` and no
+        // `outline` draws nothing, and you only find out with a keyboard.
+        testCase "every button and link declares a visible focus ring" <| fun () ->
+            for classes in classesOf [ "button"; "a " ] (shell + settingsShell) do
+                Expect.isTrue
+                    (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
+                    (sprintf "a control has no visible focus ring: %s" classes)
+
+        // Blue is interactive, and focus is the most interactive a thing gets. A field that
+        // went green (or anything else) on focus would make the same event mean two things.
+        testCase "focus is blue, everywhere" <| fun () ->
+            for tone in [ "focus:border-green"; "focus:border-ink"; "focus:border-err"
+                          "focus-within:border-green"; "focus-within:border-ink" ] do
+                Expect.isFalse ((shell + settingsShell).Contains tone) (sprintf "focus must not be %s" tone)
+    ]
+
 let tests =
     testList "Acceptance" [
         uiChecklistTests
+        presenceTests
+        syncStatusTests
+        chromeTests
         reconnectOfferTests
         shellTests
     ]

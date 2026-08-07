@@ -51,6 +51,12 @@ module Dom =
         let degraded = "data-degraded"
         let lastProcessedOffset = "data-last-processed-offset"
         let latestKnownOffset = "data-latest-known-offset"
+        /// A roster row for a peer that is here NOW, valued by peer id, and the where-they-are
+        /// slot on it — valued by a `Text.at*` field token, with the words for people beside
+        /// it. Presence is what makes a collaborator visible from outside the surface they
+        /// are in; without it, someone typing a command in another terminal is invisible.
+        let peerPresence = "data-peer-presence"
+        let peerAt = "data-peer-at"
         let environment = "data-environment"
         let commandLog = "data-command-log"
         let commandId = "data-command-id"
@@ -119,6 +125,9 @@ module Dom =
         let terminalPanel = "data-terminal-panel"
         let terminalToggle = "data-terminal-toggle"
         let terminalTab = "data-terminal-tab"
+        /// One per peer whose caret is in THAT terminal, on its tab — the strip's share of
+        /// the same presence the roster reports.
+        let terminalTabPeer = "data-terminal-tab-peer"
         let terminalNew = "data-terminal-new"
         let terminalClose = "data-terminal-close"
         let terminalId = "data-terminal-id"
@@ -148,9 +157,31 @@ module Dom =
         let connecting = "Connecting"
         let connected = "Connected"
         let reconnecting = "Reconnecting"
-        // Catch-up.
+        // Catch-up. Said in ONE place — the header — because "everything is fine" is the
+        // least actionable thing a screen can carry and it used to be on screen twice at
+        // once (the header's status and the sidebar's sync row).
         let catchingUp = "Catching up"
         let upToDate = "Up to date"
+
+        // Where a peer is (presence, in the roster and on a terminal tab). The VALUE of
+        // `data-peer-at` is one of these FIELD tokens — stable, one per collaborative field
+        // — and the words beside it are for people, so they may name a terminal or a
+        // collaborator and are composed rather than fixed.
+        let atTitle = "title"
+        let atDraft = "draft"
+        let atQueued = "queued"
+        let atTerminal = "terminal"
+        let atTerminalQueued = "terminal-queued"
+
+        let renamingSession = "renaming"
+        /// Writing their own message — the plain case, and the one worth the fewest words.
+        let writing = "writing"
+        let inYourDraft = "in your message"
+        let inDraftOf (name: string) : string = "in " + name + "'s message"
+        let editingQueued = "in the queue"
+        /// In a terminal, named when the terminal is known to this client.
+        let inTerminal (title: string) : string = "in " + title
+        let atSomeTerminal = "at a terminal"
         // Event-feed health tokens (the HTTP leg that carries history). `IsCatchingUp` says
         // there is more to read; these say whether reading is getting through.
         let feedLive = "live"
@@ -170,6 +201,11 @@ module Dom =
         /// meantime. Everything already sent is safe; it is on the server.
         let localFallbackEphemeral =
             "You can keep writing, but this session reopens at a new address — anything written here while it is away will not come back with it."
+        /// What the composer's keys do, shown in the composer while you are in it. Enter is
+        /// the send because that is what every chat surface's Enter is; what it used to do
+        /// did not disappear, it split in two — a line break and a paragraph, which Enter
+        /// alone could never tell apart.
+        let composerKeys = "Enter sends · Shift+Enter line · Alt+Enter paragraph"
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.
