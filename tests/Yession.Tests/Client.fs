@@ -73,12 +73,20 @@ let tests =
                 Expect.equal model.EventConsumer.LastProcessedOffset None "nothing consumed yet"
                 Expect.isTrue model.EventConsumer.IsCatchingUp "catch-up active while behind the known offset"
 
-                // The UI renders both offset displays and the catch-up indicator.
-                let html = Support.render model
+                // The UI renders both offset displays and the catch-up indicator — once the
+                // catch-up has lasted long enough to be worth reporting, which is the only
+                // state that shows them (a catch-up too brief to wait on is silent, so that
+                // sending a message does not flicker the status).
+                let html = Support.render (ClientModel.update (CatchUpSlowMsg true) model)
                 Expect.isTrue (html.Contains Dom.Hooks.lastProcessedOffset) "last-processed offset display rendered"
                 Expect.isTrue (html.Contains Dom.Hooks.latestKnownOffset) "latest-known offset display rendered"
                 Expect.isTrue (html.Contains Dom.Hooks.catchUp) "catch-up indicator rendered"
                 Expect.isTrue (html.Contains Dom.Hooks.connection) "connection status rendered"
+                // ...and stays silent while it is brief, which is what stops the header
+                // flickering green→blue→green on every message sent.
+                Expect.isFalse
+                    ((Support.render model).Contains Dom.Hooks.catchUp)
+                    "a catch-up too brief to wait on says nothing"
 
                 // A dropped channel moves the model to Reconnecting.
                 do! channel.Close ()

@@ -1406,12 +1406,21 @@ let tests =
         mcpTests
         registryTests
         Tag.needs "Session Process as an OS process (Step 23)" [ Tag.Ports; Tag.Native ] (fun () -> processTests)
-        Tag.needs "Session-owned environment across real processes" [ Tag.Ports; Tag.Native ] (fun () -> controlRpcTests)
+        // `Srt` because this is the one suite that lets a real child session pick its own
+        // sandbox DEFAULT, and that default has been srt since "confine by default" (#83).
+        // Untagged, on a box that cannot build the nested sandbox, the child's environment
+        // never reaches Running and the suite's `WaitFor` waits out the whole run's budget —
+        // taking every suite after it down with a timeout, which is the least legible way a
+        // missing capability could possibly report itself.
+        Tag.needs "Session-owned environment across real processes" [ Tag.Ports; Tag.Native; Tag.Srt ] (fun () -> controlRpcTests)
         Tag.needs "Manager→Session notifications over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> notificationStreamTests)
         Tag.needs "MCP tool stream over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Idle reaping over the process boundary (Plan 11)" [ Tag.Ports; Tag.Native ] (fun () -> reapingTests)
-        Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports; Tag.Native ] (fun () -> compositionTests)
+        // `Srt` for the same reason: the packaged child picks the sandbox DEFAULT, and this
+        // suite waits on an environment that reached Running and a command that exited 0 —
+        // neither of which happens on a box that cannot build the nested sandbox.
+        Tag.needs "Executable composition (Step 27/28)" [ Tag.Ports; Tag.Native; Tag.Srt ] (fun () -> compositionTests)
         Tag.needs "Telemetry over the process boundary (Plan 04)" [ Tag.Ports; Tag.Native ] (fun () -> telemetryTests)
     ]

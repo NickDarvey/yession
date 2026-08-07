@@ -210,15 +210,18 @@ module View =
             | Connected -> html $"""<span class="{Style.syncDot} bg-green"></span>""", Style.statusFaint
             | Connecting | Reconnecting -> html $"""<span class="{Style.syncDotPulse} bg-blue"></span>""", Style.statusRun
             | Disconnected _ -> html $"""<span class="{Style.syncDot} bg-err"></span>""", Style.statusErr
-        // Catch-up rides the same line. The raw offsets are progress, so they exist only
-        // while catch-up is running; offline, freshness is unknowable and nothing is said.
+        // Catch-up rides the same line, and ONLY while it is worth reporting: the offsets are
+        // progress, so they exist while there is progress to describe, and a catch-up too
+        // brief to have been waited on (every send is one) says nothing rather than blinking
+        // the line. Offline, freshness is unknowable and nothing is said either.
+        //
+        // "Up to date" is deliberately absent: the header says it, and a green dot beside
+        // the word "connected" already says it here.
         let catchUp =
-            match model.Connection, consumer.IsCatchingUp with
-            | Disconnected _, _ -> Lit.nothing
+            match model.Connection, consumer.IsCatchingUp && consumer.CatchUpIsSlow with
+            | Disconnected _, _ | _, false -> Lit.nothing
             | _, true ->
                 html $"""<span class="{Style.statusFaint}">·</span><span class="{Style.statusRun}" data-catch-up>{Dom.Text.catchingUp}</span><span class="{Style.label} tabular-nums"><b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> / <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>"""
-            | _, false ->
-                html $"""<span class="{Style.statusFaint}">·</span><span class="{Style.statusFaint}" data-catch-up>{Dom.Text.upToDate}</span>"""
         // A reason is only ever known for a settled disconnection; `data-connection` keeps its
         // exact one-word token so the reason is additive, never a rewrite of the status.
         let connectionReason =
@@ -249,6 +252,28 @@ module View =
               {feedLine}
             </section>"""
 
+    /// Where a peer is, as the roster says it: a stable field token for the markup contract,
+    /// and the words for a person. The words name things when naming them helps — the
+    /// terminal they are in, whose message they are co-writing — because "somewhere" is not
+    /// what anyone wanted to know.
+    let private whereIs (model: ClientModel) (peer: PeerId) (field: FocusField) : string * string =
+        // A terminal is NAMED when this client knows it. One that has not folded the
+        // `TerminalOpened` event yet knows the peer is in some terminal and says exactly
+        // that, rather than inventing a title or going quiet.
+        let terminalWords () =
+            ClientModel.terminalOfFocus field model
+            |> Option.bind (fun terminal -> TerminalProjection.tryFind terminal model.Terminals)
+            |> Option.map (fun view -> Dom.Text.inTerminal view.Title)
+            |> Option.defaultValue Dom.Text.atSomeTerminal
+        match field with
+        | Title -> Dom.Text.atTitle, Dom.Text.renamingSession
+        | DraftBody author when author = peer -> Dom.Text.atDraft, Dom.Text.writing
+        | DraftBody author when author = model.Peer.PeerId -> Dom.Text.atDraft, Dom.Text.inYourDraft
+        | DraftBody author -> Dom.Text.atDraft, Dom.Text.inDraftOf (ClientModel.nameOf author model)
+        | QueueBody _ -> Dom.Text.atQueued, Dom.Text.editingQueued
+        | TerminalDraftBody _ -> Dom.Text.atTerminal, terminalWords ()
+        | TerminalQueuedBody _ -> Dom.Text.atTerminalQueued, terminalWords ()
+
     /// Who is in this session — and, when the agent is not, the ONE place the product asks for
     /// a connection. A missing member belongs in the membership list, so all three agent states
     /// wear the SAME roster row — avatar cell, name, right-aligned status — and only the words
@@ -277,10 +302,25 @@ module View =
                     </div>"""
             | None ->
                 html $"""<div class="{Style.person}" data-agent-presence="unknown"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]} opacity-40"></span><span class="text-ink-faint">agent</span></div>"""
+        // Everyone else who is here, and WHERE. The same roster row as yours and the agent's
+        // — avatar, name, right-aligned slot — so the section is one list rather than a list
+        // with an appendix, and a collaborator moving from the composer to a terminal changes
+        // the words in place without moving anything.
+        let peerRows =
+            ClientModel.presentPeers model
+            |> List.map (fun (peer, name, field) ->
+                let token, words = whereIs model peer field
+                html $"""
+                    <div class="{Style.person}" data-peer-presence="{PeerId.value peer}">
+                      <span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value peer); Style.personAvatar ]}"></span>
+                      <span class="truncate min-w-0">{name}</span>
+                      <span class="{Style.label} ml-auto shrink-0" data-peer-at="{token}">{words}</span>
+                    </div>""")
         html $"""
             <section class="{Style.cls [ Style.sideSection; Style.navLane1 ]}">
               <span class="{Style.label}">in this session</span>
               <div class="{Style.person}"><span class="{Style.cls [ Style.avatar; Style.humanAvatar (PeerId.value model.Peer.PeerId); Style.personAvatar ]}"></span><span class="truncate" data-display-name>{model.Peer.DisplayName}</span><span class="{Style.label} ml-auto">you</span></div>
+              {peerRows}
               {agentRow}
             </section>"""
 
@@ -480,14 +520,20 @@ module View =
             html $"""<span class="{Style.cls [ Style.statusErr; Style.headerStatus ]}">history paused</span>"""
         | FeedRetrying _, _ ->
             html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>history retrying</span>"""
-        | FeedLive, Connected when model.EventConsumer.IsCatchingUp ->
+        // Catching up is the NORMAL state for a moment after anything happens — your own
+        // send puts you behind your own event until the page comes back — so it is reported
+        // only once it has lasted long enough to be something you are waiting on
+        // (`CatchUpIsSlow`). Reporting the raw truth made the header flicker green → blue →
+        // green on every message sent, which reads as a fault rather than as progress.
+        | FeedLive, Connected when model.EventConsumer.IsCatchingUp && model.EventConsumer.CatchUpIsSlow ->
             html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>catching up</span>"""
         | FeedLive, Connected ->
-            // The one status worth suppressing on a phone: "everything is fine" is the least
-            // actionable thing in a 390px header, and it costs the session title the room it
-            // needs. Every UNhealthy state above stays, at every width, and the sidebar still
-            // reports this one in full.
-            html $"""<span class="{Style.cls [ Style.statusOk; Style.headerStatus ]} max-md:hidden"><span class="{Style.statusDot}"></span>up to date</span>"""
+            // The ONE place this is said (the sidebar's sync row used to say it too, three
+            // words away from the same green dot). Suppressed on a phone: "everything is
+            // fine" is the least actionable thing in a 390px header, and it costs the
+            // session title the room it needs. Every UNhealthy state above stays, at every
+            // width.
+            html $"""<span class="{Style.cls [ Style.statusOk; Style.headerStatus ]} max-md:hidden"><span class="{Style.statusDot}"></span>{Dom.Text.upToDate}</span>"""
         | FeedLive, Connecting ->
             html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>connecting</span>"""
         | FeedLive, Reconnecting ->
@@ -646,7 +692,8 @@ module View =
         // collapses whatever was open — including your own composer.
         let summary (peerId: PeerId) =
             html $"""
-                <button type="button" class="{Style.draftSummary}" data-draft-summary="{PeerId.value peerId}"
+                <button type="button" class="{Style.draftSummary}" style="border-left-color:{PeerColour.ofPeer peerId}"
+                        data-draft-summary="{PeerId.value peerId}"
                         data-draft-expand="{PeerId.value peerId}" @click={Ev(fun _ -> dispatch (ExpandDraftMsg peerId))}>
                   <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value peerId) ]}"></span>
                   <span class="{Style.draftSummaryName}">{ClientModel.nameOf peerId model}</span>
@@ -672,9 +719,11 @@ module View =
                   <div class="{Style.draftActions}">
                     <span class="{Style.draftEditors}">{editors target}</span>
                     {author}
+                    <span class="{Style.draftHint}">{Dom.Text.composerKeys}</span>
                     <div class="{Style.draftCommit}">
                       {discard}
-                      <button type="button" class="{Style.btnPrimary} gap-2" data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send{Icon.send}</button>
+                      <button type="button" class="{Style.btnPrimary} gap-2" aria-keyshortcuts="Enter"
+                              data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send{Icon.send}</button>
                     </div>
                   </div>
                 </article>"""
@@ -803,7 +852,7 @@ module View =
                          data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
                   <div class="{Style.terminalQueuedRow}">
                     <span class="{Style.terminalPrompt}">$</span>
-                    <input type="text" class="{Style.terminalInput}" aria-label="Queued command"
+                    <input type="text" class="{Style.fieldMonoBare}" aria-label="Queued command"
                            data-terminal-input="{BodyKey.terminalQueued id}">
                   </div>
                   <div class="{Style.terminalQueuedRow}">
@@ -865,7 +914,7 @@ module View =
                 <div class="{Style.terminalPeerDraft}" style="border-left-color:{PeerColour.ofPeer author}"
                      data-terminal-draft-author="{PeerId.value author}">
                   <span class="{Style.terminalPrompt}">$</span>
-                  <input type="text" class="{Style.terminalInput}" readonly aria-label="{ClientModel.nameOf author model}'s command"
+                  <input type="text" class="{Style.fieldMonoBare}" readonly aria-label="{ClientModel.nameOf author model}'s command"
                          data-terminal-input="{BodyKey.terminalDraft terminal author}">
                   <span class="{Style.terminalEditors}">{editors author}</span>
                   <button type="button" class="{Style.btn}" data-terminal-send="{PeerId.value author}"
@@ -891,11 +940,12 @@ module View =
                       {others |> List.map peerDraft}
                       <div class="{Style.terminalQueuedRow}">
                         <span class="{Style.terminalPrompt}">$</span>
-                        <input type="text" class="{Style.terminalInput}" aria-label="Command"
+                        <input type="text" class="{Style.fieldMono}" aria-label="Command"
                                placeholder="a command to run here"
                                data-terminal-input="{BodyKey.terminalDraft terminal mine}">
                         <span class="{Style.terminalEditors}">{editors mine}</span>
-                        <button type="button" class="{Style.btnPrimary}" data-terminal-send="{PeerId.value mine}"
+                        <button type="button" class="{Style.btnPrimary}" aria-keyshortcuts="Enter"
+                                data-terminal-send="{PeerId.value mine}"
                                 @click={Ev(fun _ -> actions.SendTerminalDraft terminal mine)}>Run</button>
                       </div>
                     </div>"""
@@ -921,10 +971,19 @@ module View =
         let selected = ClientModel.selectedTerminal model
         let tab (view: TerminalView) =
             let isSelected = selected = Some view.TerminalId
+            // Who is in THIS terminal, on its tab — the same presence the roster reports, put
+            // where you would look for it. Without it, a collaborator typing a command in a
+            // terminal you are not showing is visible nowhere in this column.
+            let peers =
+                ClientModel.peersInTerminal view.TerminalId model
+                |> List.map (fun (peer, name) ->
+                    html $"""
+                        <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer peer}"
+                              title="{name}" data-terminal-tab-peer="{PeerId.value peer}"></span>""")
             html $"""
                 <button type="button" class="{if isSelected then Style.terminalTabActive else Style.terminalTab}"
                         data-terminal-tab="{TerminalId.value view.TerminalId}" aria-pressed="{if isSelected then "true" else "false"}"
-                        @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}</button>"""
+                        @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
         let body =
             match selected |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals) with
             | None ->

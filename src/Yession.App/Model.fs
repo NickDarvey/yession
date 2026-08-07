@@ -38,6 +38,17 @@ type EventConsumerState =
     { LastProcessedOffset : EventOffset option
       LatestKnownOffset   : EventOffset option
       IsCatchingUp        : bool
+      /// Whether catch-up has lasted long enough to be worth SAYING. Sending a message puts
+      /// the client behind its own event for a round trip, so `IsCatchingUp` is true for a
+      /// few dozen milliseconds every time anyone sends anything — and a status that flips
+      /// to "catching up" and back on every send is a flicker, not information. The truth
+      /// stays in `IsCatchingUp` (the read loop reads it); this is what the UI reports.
+      ///
+      /// Set by a timer the client arms when catch-up begins and disarms when it ends, so
+      /// the threshold is one number in one place (`Browser.catchUpQuietMs`). It can only
+      /// ever be true WHILE catching up — the reducer enforces that, so a timer that fires
+      /// just after the page landed is harmless rather than a stuck indicator.
+      CatchUpIsSlow       : bool
       /// Whether reads are getting through at all. `IsCatchingUp` says there is more to
       /// read; this says whether reading is possible — the distinction the old design had
       /// no way to express, because a failed fetch was reported as an empty final page.
@@ -204,6 +215,11 @@ type ClientMsg =
     /// the read loop, which is the one place that knows a read is over). A successful page
     /// needs no message — `EventsPageMsg` itself proves the feed is live.
     | EventFeedMsg of FeedHealth
+    /// Catch-up has been running long enough to be worth saying (or has stopped being).
+    /// The client arms a timer when catch-up begins; this is what the timer reports, and
+    /// it is the ONLY thing that lights the "catching up" status — see
+    /// `EventConsumerState.CatchUpIsSlow` for why the truth alone is too noisy to show.
+    | CatchUpSlowMsg of bool
     | DisconnectedMsg
     /// Edit the session title (collaborative text, merges like a draft body). A pure CRDT
     /// write; the Session Process reports the settled title to the Manager for the list.
@@ -300,6 +316,7 @@ module ClientModel =
             { LastProcessedOffset = None
               LatestKnownOffset = None
               IsCatchingUp = false
+              CatchUpIsSlow = false
               // Nothing has failed yet; the first read decides.
               Feed = FeedLive }
           Agent = { ActiveTurn = None }
@@ -316,11 +333,15 @@ module ClientModel =
             { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
               Flow = ClaudeIdle } }
 
-    /// Advance the latest-known offset and recompute the catch-up indicator.
+    /// Advance the latest-known offset and recompute the catch-up indicator. "Slow" is a
+    /// property of a catch-up that is STILL RUNNING, so it dies with the catch-up it
+    /// described — the timer that set it never has to be raced.
     let private withLatestKnown (latest: EventOffset option) (consumer: EventConsumerState) : EventConsumerState =
+        let catchingUp = isBehind consumer.LastProcessedOffset latest
         { consumer with
             LatestKnownOffset = latest
-            IsCatchingUp = isBehind consumer.LastProcessedOffset latest }
+            IsCatchingUp = catchingUp
+            CatchUpIsSlow = catchingUp && consumer.CatchUpIsSlow }
 
     let private withSynced (synced: SyncedSessionState) (model: ClientModel) : ClientModel =
         { model with Synced = synced }
@@ -414,6 +435,46 @@ module ClientModel =
         |> List.filter (fun (_, presence) -> presence.Focus.Field = TerminalDraftBody (terminal, author))
         |> List.map (fun (editor, presence) -> editor, presence.DisplayName)
 
+    // --- Where everyone is ------------------------------------------------------------------
+    // Presence already drove the per-field overlays (a caret in a body, a dot on a draft), but
+    // each of those is only visible from INSIDE the surface it is about — so a collaborator
+    // typing a command in a terminal you are not looking at, or renaming the session while you
+    // read the timeline, was invisible. These three answer "where is everyone" from the model,
+    // and the roster and the terminal strip render it.
+    //
+    // A peer appears exactly while its caret is in a collaborative field, because that is
+    // precisely what the session knows: presence clears when the caret leaves (`Focus = None`)
+    // and when the peer goes. Listing everyone who has EVER joined (`Peers`, which deliberately
+    // keeps the departed so a draft's author still has a name) would report people who left
+    // days ago as being in the room.
+
+    /// Every peer that is somewhere collaborative right now, with its name and where —
+    /// never the local peer, who is not their own collaborator. Ordered by name so the
+    /// roster does not reshuffle when a map's internal order changes.
+    let presentPeers (model: ClientModel) : (PeerId * string * FocusField) list =
+        model.Presence
+        |> Map.toList
+        |> List.filter (fun (peer, _) -> peer <> model.Peer.PeerId)
+        |> List.map (fun (peer, presence) -> peer, presence.DisplayName, presence.Focus.Field)
+        |> List.sortBy (fun (peer, name, _) -> name, PeerId.value peer)
+
+    /// The terminal a focus is in, when it is in one. A composer slot names its terminal
+    /// directly; a queued command names only its entry, and the entry names the terminal —
+    /// so this is the one place that join lives.
+    let terminalOfFocus (field: FocusField) (model: ClientModel) : TerminalId option =
+        match field with
+        | TerminalDraftBody (terminal, _) -> Some terminal
+        | TerminalQueuedBody queueId ->
+            model.Synced.TerminalQueue |> Map.tryFind queueId |> Option.map (fun entry -> entry.Terminal)
+        | Title | DraftBody _ | QueueBody _ -> None
+
+    /// Who is in a given terminal right now — whether writing a new command or editing a
+    /// queued one, because from the strip they are the same fact: someone is in there.
+    let peersInTerminal (terminal: TerminalId) (model: ClientModel) : (PeerId * string) list =
+        presentPeers model
+        |> List.filter (fun (_, _, field) -> terminalOfFocus field model = Some terminal)
+        |> List.map (fun (peer, name, _) -> peer, name)
+
     /// A peer's display name: the roster's, else the peer's own live presence, else the raw id
     /// (an id is a last resort, not a label — `PEER-129755065` is not a person).
     let nameOf (peer: PeerId) (model: ClientModel) : string =
@@ -498,11 +559,22 @@ module ClientModel =
                     { LastProcessedOffset = highWater
                       LatestKnownOffset = latestKnown
                       IsCatchingUp = isBehind highWater latestKnown
+                      // A catch-up that has finished was never slow, whatever the timer
+                      // was about to say.
+                      CatchUpIsSlow =
+                        isBehind highWater latestKnown && model.EventConsumer.CatchUpIsSlow
                       // A page arrived, so the feed is live by construction — recovery from
                       // a stall needs no separate signal.
                       Feed = FeedLive } }
         | EventFeedMsg health ->
             { model with EventConsumer = { model.EventConsumer with Feed = health } }
+        | CatchUpSlowMsg slow ->
+            // Gated on still being behind, so a timer that fires just after the page landed
+            // cannot light an indicator with nothing left to report.
+            { model with
+                EventConsumer =
+                    { model.EventConsumer with
+                        CatchUpIsSlow = slow && model.EventConsumer.IsCatchingUp } }
         | DisconnectedMsg ->
             { model with Connection = Reconnecting }
         | EditTitleMsg title ->

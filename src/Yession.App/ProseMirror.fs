@@ -114,6 +114,51 @@ module ProseMirror =
     [<Import("toggleMark", "prosemirror-commands")>]
     let toggleMark (mark: MarkType) : Command = jsNative
 
+    /// What plain Enter does in a bare ProseMirror — split the block, make a paragraph,
+    /// lift an empty one, break a line inside code. Read off `baseKeymap` rather than
+    /// reassembled from its four parts, so rebinding Enter can hand the ORIGINAL behaviour
+    /// to another key without a second definition of it drifting from ProseMirror's.
+    [<Emit("$0.Enter")>]
+    let baseEnter (bindings: obj) : Command = jsNative
+
+    /// `chainCommands(a, b)`: try `a`, fall through to `b` when it declines. Variadic in JS,
+    /// so it is called explicitly rather than imported as a curried F# function.
+    [<Import("chainCommands", "prosemirror-commands")>]
+    let private chainCommandsFn : obj = jsNative
+    [<Emit("$0($1, $2)")>]
+    let private callChain (fn: obj) (a: Command) (b: Command) : Command = jsNative
+    let chain (a: Command) (b: Command) : Command = callChain chainCommandsFn a b
+
+    /// Steps out of a code block rather than typing into it — chained ahead of a command the
+    /// schema would refuse inside one (a hard break, which `code_block`'s `text*` content
+    /// cannot hold).
+    [<Import("exitCode", "prosemirror-commands")>]
+    let exitCode : Command = jsNative
+
+    /// A command that always handles the key by running an effect — how a keystroke reaches
+    /// the app (Enter sends). Returning `true` is what stops ProseMirror inserting anything.
+    /// A `System.Func` because ProseMirror calls it with three arguments, not curried.
+    let effectCommand (run: unit -> unit) : Command =
+        box (System.Func<EditorState, obj, obj, bool>(fun _ _ _ -> run (); true))
+
+    /// `nodeType.create()` — a leaf node to insert (the hard break).
+    [<Emit("$0.create()")>]
+    let nodeCreate (n: NodeType) : Node = jsNative
+
+    [<Emit("$0.scrollIntoView()")>]
+    let trScrollIntoView (tr: Transaction) : Transaction = jsNative
+
+    [<Emit("$0($1)")>]
+    let private applyDispatch (dispatch: obj) (tr: Transaction) : unit = jsNative
+
+    /// A command that EDITS the document, written the way ProseMirror expects: `dispatch` is
+    /// absent when the editor is only asking whether the command applies, and a command that
+    /// edited anyway would change the document on a mere probe.
+    let editCommand (edit: EditorState -> Transaction) : Command =
+        box (System.Func<EditorState, obj, obj, bool>(fun state dispatch _ ->
+            if present dispatch then applyDispatch dispatch (edit state)
+            true))
+
     // --- prosemirror-inputrules ------------------------------------------------------------
 
     [<Import("inputRules", "prosemirror-inputrules")>]

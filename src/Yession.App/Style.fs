@@ -21,6 +21,14 @@ open Yession.Domain
 ///   never boxed). Buttons are bordered Metro rectangles (transparent; hover brightens
 ///   the border; press fills solid). Nothing else carries a border.
 ///
+///   Strokes — every border in the product is composed from the `Stroke` vocabulary
+///   below (width, tone, and what interaction does to it) into a handful of phrases —
+///   `field`/`fieldMono`/`fieldBare`, `rowBase`/`rowLift`, `focusRing` — and those
+///   phrases are what surfaces wear. No bare `border-*` utility is written outside
+///   `Stroke`, and none at all in the views. The two remaining literals are variant-
+///   PREFIXED (`md:[.nav-alt_&]:border-r-0`), undoing a column's divider while it is
+///   shut: the variant is part of the class name, so there is no token to compose.
+///
 ///   Colour — technocool: blue is interactive and the agent's voice; green is live/ok
 ///   and the human pulse. People are identified by tiny square display pics, not name
 ///   colours. The blue→green gradient appears exactly ONCE: the composer's focus edge.
@@ -28,6 +36,77 @@ module Style =
 
     /// Join utility groups into a class attribute value.
     let cls (groups: string list) : string = String.concat " " groups
+
+    // --- Strokes: the border vocabulary every bordered thing is built from ---------------
+    //
+    // A stroke is three independent choices — a WIDTH, a TONE at rest, and what happens
+    // under interaction — and naming the three separately is what stops a settings field,
+    // a queued row and a terminal composer from each inventing their own. Nothing below
+    // this section writes a `border-*` utility directly; it composes these.
+    //
+    // Two widths, and only two:
+    //   `ring` — 1px on all four sides. What you TYPE IN or PRESS (fields, buttons).
+    //   `lead` — 2px on the leading edge. What is LISTED (queued messages and commands,
+    //            a collaborator's collapsed draft), where the edge says what the row IS.
+    //   `underline` — the single exception, and it is a shape not a third width: a heading
+    //            that edits in place (the session title), where a rectangle drawn round
+    //            28px type reads as a box rather than a field.
+    //
+    // Two rules keep the states honest, and they are opposites on purpose:
+    //   * A RING answers to INTERACTION. It brightens on hover and goes blue while
+    //     focused — every field, every button, no exceptions. Blue is interactive, and
+    //     focus is the most interactive a thing gets.
+    //   * A LEAD answers to the MODEL and never to the pointer: green = live and still
+    //     editable, blue = waiting on you, err = wrong, a peer's colour = whose it is.
+    //     Interaction lifts the SURFACE instead (`rowLift`), so a row's tone can never be
+    //     misread as "the mouse happens to be here".
+    module Stroke =
+
+        // Widths.
+        let ring = "border"
+        let lead = "border-l-2"
+        let underline = "border-0 border-b"
+
+        // Tones at rest. `hair` is the quiet separator, `rim` a step brighter for a
+        // control at rest; the rest carry the meanings they carry everywhere else.
+        let hair = "border-hair"
+        let rim = "border-edge"
+        let faint = "border-ink-faint"
+        let blue = "border-blue"
+        let green = "border-green"
+        /// Present but unpainted — a tab that is not the selected one still occupies its
+        /// border box, so selecting it moves no text.
+        let clear = "border-transparent"
+
+        // What a RING does under interaction. `focus:` fires on a control that takes focus
+        // ITSELF — which is every ring in the product, because a host whose real input is a
+        // descendant (a mounted ProseMirror) draws no ring at all: it wears `fieldBare` and
+        // lets its container carry the signal.
+        let hoverRim = "hover:border-edge"
+        let hoverInk = "hover:border-ink"
+        let hoverErr = "hover:border-err"
+        let focus = "focus:border-blue"
+        /// The title's affordance: dotted until you are in it, then solid blue.
+        let dotted = "border-dotted focus:border-solid"
+
+        /// The region divider: a hairline on ONE side, separating two surfaces rather than
+        /// enclosing a control. Named per side because which side it is on is structural,
+        /// and it answers to nothing — not hover, not focus, not the model.
+        let dividerTop = "border-t border-hair"
+        let dividerBottom = "border-b border-hair"
+        let dividerLeft = "border-l border-hair"
+        let dividerRight = "border-r border-hair"
+
+    /// The keyboard focus ring, worn by every control that can take focus. One value, so a
+    /// control cannot ship with half a ring (`outline-2` with no `outline`, which is how the
+    /// terminal tabs used to draw nothing at all).
+    let focusRing =
+        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
+
+    /// The same ring held further off — for type with no box of its own, where a ring on the
+    /// glyphs' own edge reads as an underline.
+    let private focusRingFar =
+        "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-4"
 
     // --- Typography (the ramp lives as `--text-*` tokens in app/tailwind.css) -----------
     // Each `text-<step>` utility sets size AND line-height together, so a size can never
@@ -70,24 +149,33 @@ module Style =
     /// composer's large icon button and the Send row share) with the line flex-centred in
     /// it — the old `py-[7px]` was that same 32px, hand-derived and easy to break.
     let private btnBase =
-        "bg-transparent cursor-pointer font-sans " + caps + " "
-        + "h-8 px-3.5 inline-flex items-center justify-center transition-colors border "
-        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
+        cls [ "bg-transparent cursor-pointer font-sans"; caps
+              "h-8 px-3.5 inline-flex items-center justify-center transition-colors"
+              Stroke.ring; focusRing ]
 
-    let btn = btnBase + " border-edge text-ink-dim hover:border-ink hover:text-ink active:bg-ink active:text-bg"
-    let btnPrimary = btnBase + " border-blue text-blue hover:text-blue-bright active:bg-blue active:text-bg"
-    let btnDanger = btnBase + " border-edge text-ink-dim hover:border-err hover:text-err active:bg-err active:text-bg"
+    /// The three faces, as (rest tone, hover, press) — the only thing that varies between
+    /// them, so a fourth would be three tokens rather than another hand-written string.
+    let btn =
+        cls [ btnBase; Stroke.rim; "text-ink-dim"; Stroke.hoverInk; "hover:text-ink active:bg-ink active:text-bg" ]
+
+    let btnPrimary =
+        cls [ btnBase; Stroke.blue; "text-blue hover:text-blue-bright active:bg-blue active:text-bg" ]
+
+    let btnDanger =
+        cls [ btnBase; Stroke.rim; "text-ink-dim"; Stroke.hoverErr; "hover:text-err active:bg-err active:text-bg" ]
 
     /// Square icon buttons — self-contained, NOT composed over `btn`: Tailwind emits `p-0`
     /// BEFORE `px-*`/`py-*` in the stylesheet, so "btn + p-0" kept the text button's padding
     /// and crushed the glyph into a corner of a lopsided box (measured live: 30×24, ×
     /// touching the bottom-right edge).
     let private btnIconBase =
-        "bg-transparent cursor-pointer border p-0 grid place-items-center transition-colors "
-        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
+        cls [ "bg-transparent cursor-pointer p-0 grid place-items-center transition-colors"; Stroke.ring; focusRing ]
 
-    let private btnIconNeutralFace = " border-edge text-ink-dim hover:border-ink hover:text-ink active:bg-ink active:text-bg"
-    let private btnIconDangerFace = " border-edge text-ink-dim hover:border-err hover:text-err active:bg-err active:text-bg"
+    let private btnIconNeutralFace =
+        " " + cls [ Stroke.rim; "text-ink-dim"; Stroke.hoverInk; "hover:text-ink active:bg-ink active:text-bg" ]
+
+    let private btnIconDangerFace =
+        " " + cls [ Stroke.rim; "text-ink-dim"; Stroke.hoverErr; "hover:text-err active:bg-err active:text-bg" ]
 
     /// 24px square: the queue's reorder controls.
     let btnIcon = btnIconBase + " w-6 h-6" + btnIconNeutralFace
@@ -102,11 +190,55 @@ module Style =
     let private navChevronBase =
         "bg-transparent border-0 cursor-pointer text-ink-faint hover:text-ink text-small px-1 "
         + "flex items-center gap-1 transition-[translate,color] duration-150 ease-out "
-        + "motion-reduce:transition-none "
-        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
+        + "motion-reduce:transition-none " + focusRing
 
     let navChevronBack = navChevronBase + " hover:-translate-x-0.5 active:-translate-x-1"
     let navChevronForward = navChevronBase + " hover:translate-x-0.5 active:translate-x-1"
+
+    // --- Fields: ONE face, worn by every input in the product ----------------------------
+    // A field is the surface tone inside a hairline ring that brightens on hover and goes
+    // blue while focused. The settings inputs, the terminal command line and the queued
+    // command all wear it; what varies is the TYPE it holds and the WIDTH its row gives it,
+    // never the chrome. `fieldFace` therefore sets no width and no font — those belong to
+    // the caller, and baking them in is how the three drifted apart in the first place.
+
+    let private fieldFace =
+        cls [ "bg-surface outline-none appearance-none px-3 py-2 transition-colors"
+              Stroke.ring; Stroke.hair; Stroke.hoverRim; Stroke.focus ]
+
+    /// A settings field (input/select): the body scale, never the title's, full width in
+    /// the column it sits in.
+    let field = cls [ fieldFace; "w-full font-light text-small leading-5 text-ink placeholder:text-ink-faint" ]
+
+    /// The same field in mono, sized by the flex row that holds it — a command line is a
+    /// field, not a terminal.
+    let fieldMono = cls [ fieldFace; "flex-1 min-w-0 font-mono text-code text-ink placeholder:text-ink-faint" ]
+
+    /// The chrome-LESS field: an input whose CONTAINER already carries the stroke (the
+    /// composer's box, a listed row's leading edge), so the control itself must draw
+    /// nothing. `[&_.ProseMirror]:outline-none` is not tidying: a mounted editor puts its
+    /// `contenteditable` INSIDE this host, so an `outline-none` on the host never reaches
+    /// it and the browser draws its default focus box — a white rectangle, in a design
+    /// with no rectangles. The focus signal is the container's (a gradient edge, a lift).
+    let private fieldBare =
+        "bg-transparent border-0 outline-none resize-none [&_.ProseMirror]:outline-none"
+
+    /// The mono field, chrome-less — a command line inside a row that already has a leading
+    /// edge (a queued command, a collaborator's slot). Double chrome, a bordered field inside
+    /// an edged card, is what made a queued COMMAND look like a different kind of thing from
+    /// a queued MESSAGE, which is the one thing they are not.
+    let fieldMonoBare =
+        cls [ "flex-1 min-w-0"; fieldBare; "font-mono text-code text-ink placeholder:text-ink-faint" ]
+
+    // --- Listed rows: the leading edge says what the row IS ------------------------------
+    // Every row in a list — a queued message, a queued command, a peer's collapsed draft —
+    // is this: a surface with a 2px leading edge whose TONE is the row's state, lifting a
+    // tone while the pointer or the caret is in it. The tone is composed at the use site
+    // (`Stroke.green`, `Stroke.blue`) or set inline when it is a peer's own colour.
+
+    let private rowBase = cls [ "flex bg-surface transition-colors"; Stroke.lead ]
+    /// A row you can act on: the surface lifts, the edge does not move.
+    let private rowLift = "hover:bg-surface-2 focus-within:bg-surface-2"
 
     // --- Pivots: the sidebar's two destinations, set as type ----------------------------
     // Zune navigated by WORDS — big, quiet, lowercase, with a thin chevron pointing the way the
@@ -127,8 +259,7 @@ module Style =
         "group bg-transparent border-0 cursor-pointer flex items-center gap-2 "
         + "font-extralight text-pivot tracking-[-0.01em] lowercase "
         + "text-ink-faint hover:text-ink focus-visible:text-ink transition-colors duration-150 ease-out "
-        + "motion-reduce:transition-none "
-        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-4"
+        + "motion-reduce:transition-none " + focusRingFar
 
     let navPivot = pivotBase
 
@@ -188,7 +319,7 @@ module Style =
     /// were reading. Collapsing on desktop animates the column's width shut; on mobile the
     /// column is an off-canvas drawer that slides over the conversation.
     let sidebar =
-        "relative w-side shrink-0 bg-panel h-full overflow-hidden z-40 border-r border-hair "
+        "relative w-side shrink-0 bg-panel h-full overflow-hidden z-40 " + Stroke.dividerRight + " "
         + "md:transition-[width] md:duration-200 md:ease-out "
         + "md:[.nav-alt_&]:w-0 md:[.nav-alt_&]:border-r-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:w-[min(var(--spacing-side),84vw)] "
@@ -243,7 +374,7 @@ module Style =
     /// The shared header band (`--spacing-band`): baselines align across the sidebar/main
     /// hairline because all three heads compose the same token.
     let sideHead = "h-band shrink-0 flex items-end justify-between pb-5"
-    let sideSection = "flex flex-col gap-2 py-4 border-t border-hair"
+    let sideSection = "flex flex-col gap-2 py-4 " + Stroke.dividerTop
     let sideSectionFirst = "flex flex-col gap-2 pb-4"
     let sideRow = "flex items-baseline justify-between gap-2"
     /// A roster row aligns on the TEXT BASELINE, so the 11px caps ("you", a status) sit on
@@ -257,7 +388,7 @@ module Style =
     let mainColumn = "flex-1 flex flex-col min-w-0 h-full"
 
     let header =
-        "relative h-band shrink-0 flex items-end gap-4 px-8 pb-5 border-b border-hair max-md:h-16 max-md:px-4 max-md:pb-3"
+        "relative h-band shrink-0 flex items-end gap-4 px-8 pb-5 max-md:h-16 max-md:px-4 max-md:pb-3 " + Stroke.dividerBottom
 
     /// Indent the heading one avatar column (20px + 12px gutter) so its left edge sits
     /// exactly on the message-text column below.
@@ -274,13 +405,13 @@ module Style =
     /// Same visibility rule as `navReopen`, for the same reason.
     let headerNoAgent =
         "bg-transparent border-0 cursor-pointer " + caps + " text-blue hover:text-blue-bright transition-colors "
-        + "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2 "
+        + focusRing + " "
         + "hidden md:[.nav-alt_&]:block max-md:block max-md:[.nav-alt_&]:hidden"
 
     /// The degradation strip between the header and the timeline: a hairline notice, never a
     /// modal and never a blocker — the client below it stays fully usable.
     let degradedBanner =
-        "shrink-0 flex items-baseline gap-3 px-8 py-2 border-b border-hair bg-surface max-md:px-4"
+        "shrink-0 flex items-baseline gap-3 px-8 py-2 bg-surface max-md:px-4 " + Stroke.dividerBottom
 
     // --- Editable session title ------------------------------------------------------------
 
@@ -295,10 +426,10 @@ module Style =
     /// wordmark's 32/36 does, so the input steps down to put both on one line (measured
     /// live; mobile has no cross-column baseline to meet, so no nudge there).
     let titleInput =
-        "w-full min-w-0 bg-transparent border-0 border-b border-dotted border-ink-faint "
-        + "focus:border-solid focus:border-blue outline-none px-0 py-0 "
-        + "font-extralight text-heading tracking-[-0.01em] lowercase text-ink "
-        + "placeholder:text-ink-faint truncate relative md:top-[2px]"
+        cls [ "w-full min-w-0 bg-transparent outline-none px-0 py-0"
+              Stroke.underline; Stroke.dotted; Stroke.faint; Stroke.focus
+              "font-extralight text-heading tracking-[-0.01em] lowercase text-ink"
+              "placeholder:text-ink-faint truncate relative md:top-[2px]" ]
 
     /// The session id, shown small and dim under the title as a stable secondary identifier.
     /// On md+ it hangs OUT OF FLOW below the title, into the header band's bottom padding:
@@ -363,33 +494,36 @@ module Style =
     // is set — 13px, the small step, but written bare to leave line-height inherited.
     let proseCode = "font-mono text-[13px] bg-surface-2 text-ink px-1 py-0.5"
     let prosePre = "font-mono text-code leading-5 bg-surface-2 text-ink p-3 [&:not(:first-child)]:mt-2 overflow-x-auto whitespace-pre-wrap"
-    let proseQuote = "border-l-2 border-hair pl-3 text-ink-dim [&:not(:first-child)]:mt-2"
+    let proseQuote = Stroke.lead + " " + Stroke.hair + " pl-3 text-ink-dim [&:not(:first-child)]:mt-2"
     let proseLink = "text-blue underline decoration-1 underline-offset-2 hover:text-blue-bright"
-    let proseHr = "border-0 border-t border-hair my-3"
+    let proseHr = "border-0 " + Stroke.dividerTop + " my-3"
 
     // --- Agent activity strip ----------------------------------------------------------------
 
     let activity =
-        "h-12 shrink-0 flex items-center gap-3 px-8 border-t border-hair bg-panel max-md:px-4"
+        "h-12 shrink-0 flex items-center gap-3 px-8 bg-panel max-md:px-4 " + Stroke.dividerTop
 
     let activityPulse = "w-2 h-2 bg-blue animate-pulse2 motion-reduce:animate-none"
     let activityText = "font-light text-small text-blue"
     let activityTurn = "text-label text-ink-faint tabular-nums max-md:hidden"
 
-    // --- Queue: editable until drained; the green left edge encodes editability ---------------
+    // --- Queue: editable until drained; the green leading edge says so ------------------------
 
     let queue = "shrink-0 flex flex-col gap-0.5 px-8 pt-4 max-md:px-4"
     let queueHead = "flex items-baseline gap-3 pb-2"
     let queueCount = caps + " text-green"
 
+    /// Green AT REST, not on hover: "still editable" is a fact about the entry, and the
+    /// terminal's queued commands (`terminalQueuedReady`) already said it that way — a
+    /// queued message and a queued command are the same act, so they wear the same edge.
     let queueItem =
-        "group flex items-center gap-3 bg-surface h-10 px-3 border-l-2 border-hair "
-        + "hover:border-green focus-within:border-green hover:bg-surface-2 focus-within:bg-surface-2 transition-colors"
+        cls [ "group items-center gap-3 h-10 px-3"; rowBase; Stroke.green; rowLift ]
 
+    /// `focus-within`, not `focus`: the caret lands in the editor MOUNTED INSIDE this host,
+    /// so `focus:` on the host never fires and the brightening never happened.
     let queueInput =
-        "flex-1 min-w-0 self-center h-5 bg-transparent border-0 outline-none resize-none "
-        + "[&_.ProseMirror]:outline-none "
-        + "font-sans font-light text-small leading-5 text-ink-dim focus:text-ink"
+        cls [ "flex-1 min-w-0 self-center h-5"; fieldBare
+              "font-sans font-light text-small leading-5 text-ink-dim focus-within:text-ink" ]
 
     let queueTools =
         "flex gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 transition-opacity"
@@ -407,17 +541,20 @@ module Style =
         "absolute left-0 inset-y-0 w-0.5 bg-grad scale-y-0 origin-top transition-transform "
         + "duration-300 ease-out group-focus-within:scale-y-100 motion-reduce:transition-none"
 
-    /// `[&_.ProseMirror]:outline-none` is not cosmetic tidying: the editor mounts its own
-    /// `contenteditable` INSIDE this host, so `outline-none` here never reached it and the
-    /// browser drew its default focus box around the composer — a white rectangle across the
-    /// whole width, in a design with no rectangles. The focus signal is the gradient edge and
-    /// the box's lift (`draftBox`), both of which stay.
+    /// Chrome-less by construction (`fieldBare`): the box around it carries the stroke, and
+    /// the focus signal is the gradient edge plus the box's lift.
     let draftInput =
-        "block w-full bg-transparent border-0 outline-none resize-none font-sans font-light "
-        + "[&_.ProseMirror]:outline-none "
-        + "text-body text-ink placeholder:text-ink-faint px-4 pt-3 pb-1"
+        cls [ "block w-full"; fieldBare
+              "font-sans font-light text-body text-ink placeholder:text-ink-faint px-4 pt-3 pb-1" ]
 
     let draftActions = "flex items-center gap-2 pl-4 pr-2 pb-2"
+
+    /// What the keys do, said where the keys are — and only while you are in the composer,
+    /// so it teaches once and then gets out of the way. Never the only route: every action
+    /// it names has a button on this same row.
+    let draftHint =
+        "hidden md:block min-w-0 truncate " + caps + " text-ink-faint opacity-0 transition-opacity "
+        + "group-focus-within:opacity-100 motion-reduce:transition-none"
 
     /// Send sits at the TRAILING edge — where the eye ends the line it just wrote, and where
     /// every send button a person has ever used lives — with discard as its quiet neighbour.
@@ -427,9 +564,14 @@ module Style =
 
     // A draft nobody has open here: one line of it, so the composer reads as "what is being
     // written" rather than a stack of boxes. Clicking it opens it (and closes whatever was).
+    //
+    // Its leading edge is the AUTHOR'S colour (set inline, from `PeerColour`) — the same
+    // move the terminal's peer-draft row makes, and the reason is the same: the row's whole
+    // subject is whose words these are, so the edge should say it rather than repeat a
+    // generic hover tint.
     let draftSummary =
-        "group w-full flex items-center gap-3 h-8 pl-4 pr-2 bg-surface/60 text-left border-l-2 "
-        + "border-hair hover:border-blue hover:bg-surface transition-colors cursor-pointer"
+        cls [ "group w-full items-center gap-3 h-8 pl-4 pr-2 text-left cursor-pointer"
+              rowBase; rowLift; focusRing ]
 
     let draftSummaryName = "shrink-0 " + caps + " text-ink-faint"
 
@@ -444,7 +586,9 @@ module Style =
     let draftEditorDot = "inline-block w-1.5 h-1.5 rounded-full"
 
     /// Starts your own draft, collapsing whoever's is open — the escape hatch from joining.
-    let draftNew = "self-end " + caps + " text-ink-faint hover:text-blue transition-colors"
+    let draftNew =
+        "self-end bg-transparent border-0 cursor-pointer " + caps
+        + " text-ink-faint hover:text-blue transition-colors " + focusRing
 
     // --- Settings ------------------------------------------------------------------------------
     // Settings is the column's other face, not a drawer over the conversation: you go there and
@@ -455,12 +599,6 @@ module Style =
     /// the three baselines still align when the column changes face.
     let settingsHead = "h-band shrink-0 flex items-end justify-between pb-5"
     let settingsTitle = "font-extralight text-heading tracking-[-0.01em] lowercase text-ink"
-
-    /// A settings field (input/select): a quiet Metro rectangle on the surface tone,
-    /// border brightening to blue on focus — the body scale, never the title's.
-    let field =
-        "w-full bg-surface border border-hair focus:border-blue outline-none appearance-none "
-        + "px-3 py-2 font-light text-small leading-5 text-ink placeholder:text-ink-faint"
 
     // --- The agent's absence -------------------------------------------------------------------
     // Said ONCE, in the section that lists who is in this session, because that is where a
@@ -499,7 +637,7 @@ module Style =
     /// The terminals column. Mirrors `sidebar`'s geometry (a fixed column on desktop that
     /// animates shut, an off-canvas drawer on mobile) reflected to the right edge.
     let terminalPanel =
-        "relative w-term shrink-0 bg-panel h-full overflow-hidden z-40 border-l border-hair flex flex-col "
+        "relative w-term shrink-0 bg-panel h-full overflow-hidden z-40 flex flex-col " + Stroke.dividerLeft + " "
         + "md:transition-[width] md:duration-200 md:ease-out "
         + "md:[.term-closed_&]:w-0 md:[.term-closed_&]:border-l-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-[min(var(--spacing-term),92vw)] "
@@ -510,17 +648,22 @@ module Style =
     let terminalPane = "absolute inset-0 w-term max-md:w-[min(var(--spacing-term),92vw)] flex flex-col"
 
     /// The column's head, on the same 88px band as the sidebar and the main header.
-    let terminalHead = "h-band shrink-0 flex items-end justify-between gap-2 px-5 pb-5 border-b border-hair"
+    let terminalHead = "h-band shrink-0 flex items-end justify-between gap-2 px-5 pb-5 " + Stroke.dividerBottom
 
     /// The open-terminal strip: one chip per terminal, scrolling horizontally when there are
     /// more than fit rather than wrapping into a second band that shifts the whole column.
-    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 py-2 overflow-x-auto border-b border-hair"
+    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 py-2 overflow-x-auto " + Stroke.dividerBottom
     let private tabBase =
-        caps + " px-2.5 py-1.5 max-w-40 truncate border transition-colors focus-visible:outline-2 focus-visible:outline-blue"
-    let terminalTab = tabBase + " border-transparent text-ink-faint hover:text-ink"
-    let terminalTabActive = tabBase + " border-blue text-blue"
+        cls [ caps; "bg-transparent cursor-pointer px-2.5 py-1.5 max-w-40 truncate transition-colors"
+              Stroke.ring; focusRing ]
+    let terminalTab = cls [ tabBase; Stroke.clear; "text-ink-faint hover:text-ink" ]
+    let terminalTabActive = cls [ tabBase; Stroke.blue; "text-blue" ]
     /// Adds a terminal. The one action in the strip that is not a selection.
-    let terminalTabNew = tabBase + " border-edge text-ink-dim hover:border-ink hover:text-ink"
+    let terminalTabNew = cls [ tabBase; Stroke.rim; "text-ink-dim"; Stroke.hoverInk; "hover:text-ink" ]
+    /// A tab's presence marks: one dot per peer whose caret is in THAT terminal, so a
+    /// collaborator typing a command in a terminal you are not looking at is visible from
+    /// the strip rather than only from inside it.
+    let terminalTabPeers = "inline-flex items-center gap-0.5 ml-1.5 align-[1px]"
 
     /// The scrolling block history.
     let terminalBlocks = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
@@ -529,7 +672,7 @@ module Style =
     let terminalBlock = "flex flex-col bg-surface"
     /// The command line as it was run — mono, and marked with a prompt glyph so a command
     /// is never mistaken for the output above it.
-    let terminalBlockCommand = "flex items-baseline gap-2 px-3 py-2 border-b border-hair"
+    let terminalBlockCommand = "flex items-baseline gap-2 px-3 py-2 " + Stroke.dividerBottom
     let terminalPrompt = "shrink-0 font-mono text-code text-green select-none"
     let terminalCommandText = "font-mono text-code text-ink break-all"
     /// Output: preformatted, wrapping, and horizontally scrollable for the lines that will
@@ -541,20 +684,17 @@ module Style =
     let terminalTruncated = caps + " px-3 py-2 text-err"
 
     /// The composer area beneath the blocks.
-    let terminalComposer = "shrink-0 flex flex-col gap-2 px-3 py-3 border-t border-hair"
-    /// A queued command awaiting its turn (or its approval).
-    let terminalQueued = "flex flex-col gap-1 px-3 py-2 bg-surface border-l-2"
-    let terminalQueuedReady = terminalQueued + " border-l-green"
-    let terminalQueuedAwaiting = terminalQueued + " border-l-blue"
+    let terminalComposer = "shrink-0 flex flex-col gap-2 px-3 py-3 " + Stroke.dividerTop
+    /// A queued command awaiting its turn (or its approval) — a listed row, so its leading
+    /// edge carries its state: green ready, blue waiting on someone.
+    let private terminalQueued = cls [ "flex-col gap-1 px-3 py-2"; rowBase ]
+    let terminalQueuedReady = cls [ terminalQueued; Stroke.green ]
+    let terminalQueuedAwaiting = cls [ terminalQueued; Stroke.blue ]
     let terminalQueuedRow = "flex items-center gap-2"
-    /// The command input itself: mono, on the surface tone, blue focus edge like every
-    /// other field — a terminal composer is a field, not a terminal.
-    let terminalInput =
-        "flex-1 min-w-0 bg-surface border border-hair focus:border-blue outline-none "
-        + "px-3 py-2 font-mono text-code text-ink placeholder:text-ink-faint"
     /// Someone else's composer slot in this terminal: shown, not editable-by-mistake — it is
     /// the same live text, so it is the terminal's version of watching a draft being written.
-    let terminalPeerDraft = "flex items-center gap-2 px-3 py-2 bg-surface border-l-2"
+    /// Its leading edge is the author's own colour, set inline.
+    let terminalPeerDraft = cls [ "items-center gap-2 px-3 py-2"; rowBase ]
     /// Who is in a slot right now, by live caret — one dot per peer, coloured by peer.
     let terminalEditors = "shrink-0 flex items-center gap-1"
 

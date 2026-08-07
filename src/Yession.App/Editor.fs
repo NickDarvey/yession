@@ -76,21 +76,64 @@ module Editor =
         if present (m "code") then rules.Add (markRule "`([^`]+)`$" (m "code"))
         inputRules (createObj [ "rules" ==> rules.ToArray () ])
 
-    /// Base editing keys + list handling + Yjs-aware undo/redo.
-    let private editorKeymap () : obj =
+    /// A LINE BREAK inside the current block: a `hard_break`, which Markdown serializes as a
+    /// trailing backslash and parses straight back — so the break survives the round trip into
+    /// the timeline (`RichText` renders it as `<br>`) rather than being a thing you can only
+    /// see while you type it. `None` when the schema has no such node, because an unbound key
+    /// is honest and a key that silently does nothing is not.
+    ///
+    /// Chained after `exitCode` so the same keystroke steps OUT of a code block, whose `text*`
+    /// content cannot hold a break at all.
+    let private lineBreak () : Command option =
+        let br = nodeType schema "hard_break"
+        if not (present br) then None
+        else
+            Some (
+                chain
+                    exitCode
+                    (editCommand (fun state ->
+                        trScrollIntoView ((state.tr).replaceSelectionWith (nodeCreate br, false)))))
+
+    /// Base editing keys + list handling + Yjs-aware undo/redo, and Enter's three jobs.
+    ///
+    /// Enter used to mean both "commit" and "new block", and nothing meant "new line". It now
+    /// means one thing per key:
+    ///
+    ///   Enter        — send, in a COMPOSER. What Enter does in every chat surface.
+    ///   Alt-Enter    — a new PARAGRAPH: exactly the behaviour Enter used to have (split the
+    ///                  list item, else split the block), read off `baseKeymap` rather than
+    ///                  rebuilt, so the two can never drift.
+    ///   Shift-Enter  — a LINE BREAK within the block. Bound in every body, composer or not:
+    ///                  it is an editing key, not part of the send bargain.
+    ///
+    /// A body with nothing to send (a queued message being edited in place) passes `None` for
+    /// `onSubmit` and keeps plain Enter as the paragraph: binding a send there would fire an
+    /// action that does not exist.
+    let private editorKeymap (onSubmit: (unit -> unit) option) : obj =
         let keys = createObj []
         keys?("Mod-z") <- yUndo
         keys?("Mod-y") <- yRedo
         keys?("Mod-Shift-z") <- yRedo
         keys?("Mod-b") <- toggleMark (markType schema "strong")
         keys?("Mod-i") <- toggleMark (markType schema "em")
+        // What a plain Enter always meant in prose: split the list item when in one, else
+        // whatever ProseMirror's own Enter does.
+        let newParagraph =
+            if present (nodeType schema "list_item") then
+                chain (splitListItem (nodeType schema "list_item")) (baseEnter baseKeymap)
+            else baseEnter baseKeymap
         if present (nodeType schema "list_item") then
             let li = nodeType schema "list_item"
-            keys?("Enter") <- splitListItem li
             keys?("Tab") <- sinkListItem li
             keys?("Shift-Tab") <- liftListItem li
             keys?("Mod-[") <- liftListItem li
             keys?("Mod-]") <- sinkListItem li
+        lineBreak () |> Option.iter (fun command -> keys?("Shift-Enter") <- command)
+        match onSubmit with
+        | Some submit ->
+            keys?("Enter") <- effectCommand submit
+            keys?("Alt-Enter") <- newParagraph
+        | None -> keys?("Enter") <- newParagraph
         keys
 
     // --- Presence: report the local selection, overlay remote ones -------------------------
@@ -148,13 +191,17 @@ module Editor =
             "props" ==> createObj [
                 "decorations" ==> System.Func<EditorState, obj>(fun s -> pluginKeyGetState presenceDecoKey s) ] ])
 
-    let private plugins (fragment: Y.XmlFragment) (report: ((string * string) option -> unit) option) : Plugin[] =
+    let private plugins
+        (fragment: Y.XmlFragment)
+        (report: ((string * string) option -> unit) option)
+        (onSubmit: (unit -> unit) option)
+        : Plugin[] =
         let ps =
             ResizeArray<Plugin> [
                 ySyncPlugin fragment
                 yUndoPlugin ()
                 markdownInputRules ()
-                keymap (editorKeymap ())
+                keymap (editorKeymap onSubmit)
                 keymap baseKeymap
                 presenceDecorationsPlugin () ]
         report |> Option.iter (fun r -> ps.Add (presenceReportPlugin r))
@@ -178,12 +225,21 @@ module Editor =
     /// Mount a ProseMirror editor onto `host`, bound to the live `fragment`. The fragment is
     /// the synced, doc-backed body, so edits flow straight into the CRDT and to peers through
     /// the doc — no change callback. `readOnly` renders another peer's content without an edit
-    /// surface (and without reporting presence). `reportFocus` receives the local selection as
-    /// base64 relative anchor/head (or `None`); the returned handle pushes remote cursors in.
-    /// Serialization for the drain lives in `Domain.Markdown`.
-    let mountEditor (host: obj) (fragment: Y.XmlFragment) (readOnly: bool) (reportFocus: (string * string) option -> unit) : EditorHandle =
+    /// surface (and without reporting presence, and with no Enter binding: there is nothing to
+    /// send from a body you cannot type in). `reportFocus` receives the local selection as
+    /// base64 relative anchor/head (or `None`); `onSubmit` is what Enter does, when this body
+    /// has something to send. The returned handle pushes remote cursors in. Serialization for
+    /// the drain lives in `Domain.Markdown`.
+    let mountEditor
+        (host: obj)
+        (fragment: Y.XmlFragment)
+        (readOnly: bool)
+        (reportFocus: (string * string) option -> unit)
+        (onSubmit: (unit -> unit) option)
+        : EditorHandle =
         let report = if readOnly then None else Some reportFocus
-        let state = createState (createObj [ "schema" ==> schema; "plugins" ==> plugins fragment report ])
+        let submit = if readOnly then None else onSubmit
+        let state = createState (createObj [ "schema" ==> schema; "plugins" ==> plugins fragment report submit ])
         let view =
             createView host (createObj [
                 "state" ==> state

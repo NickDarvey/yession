@@ -176,6 +176,12 @@ let private setTimeoutJs (f: unit -> unit) (ms: int) : float = jsNative
 [<Emit("clearTimeout($0)")>]
 let private clearTimeoutJs (handle: float) : unit = jsNative
 
+/// How long catch-up must run before it is worth SAYING (see `EventConsumerState.CatchUpIsSlow`).
+/// Long enough that a send — which puts this client one event behind itself for a round trip —
+/// never lights it; short enough that a real wait is reported rather than sat through in
+/// silence.
+let private catchUpQuietMs = 500
+
 // The sidebar/drawer state is one bit on the root element, outside `#app`, so it survives
 // every re-render: default = sidebar visible on desktop, off-canvas on mobile; `nav-alt`
 // = the inverse (see Style.sidebar).
@@ -315,6 +321,11 @@ let private setInputValue (el: obj) (value: string) : unit = jsNative
 /// Attach a listener once. The flag lives on the element, so a Lit re-render that reuses the
 /// same element does not stack a second handler on it — and one that creates a fresh element
 /// gets its own.
+///
+/// Enter RUNS the command, the same bargain the message composer strikes (`Editor`'s keymap).
+/// A command line is one line, so there is no new line for Alt-Enter to insert and none is
+/// bound. `isComposing` guards the IME: mid-composition Enter commits the candidate word, and
+/// running a half-typed command because someone accepted a suggestion is not a thing to do.
 [<Emit("""(() => {
   const __yBind = $0;
   if (__yBind.__yessionBound) return false;
@@ -325,9 +336,18 @@ let private setInputValue (el: obj) (value: string) : unit = jsNative
   __yBind.addEventListener('select', $2);
   __yBind.addEventListener('focus', $2);
   __yBind.addEventListener('blur', $3);
+  __yBind.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); $4() }
+  });
   return true;
 })()""")>]
-let private bindTerminalInput (el: obj) (onInput: unit -> unit) (onSelect: unit -> unit) (onBlur: unit -> unit) : bool = jsNative
+let private bindTerminalInput
+    (el: obj)
+    (onInput: unit -> unit)
+    (onSelect: unit -> unit)
+    (onBlur: unit -> unit)
+    (onEnter: unit -> unit)
+    : bool = jsNative
 
 [<Emit("($0 && typeof $0.selectionStart === 'number') ? [$0.selectionStart, $0.selectionEnd] : null")>]
 let private inputSelection (el: obj) : (int * int) option = jsNative
@@ -554,8 +574,17 @@ let private start () =
                         match fieldOfKey key, sel with
                         | Some field, Some (a, h) -> sendFocus (Some { Field = field; Pos = { Anchor = a; Head = h } })
                         | _ -> sendFocus None
+                    // Enter sends — but only from a DRAFT, which is the only body with a send.
+                    // A queued message is edited in place and has nothing to commit, so it
+                    // keeps plain Enter (and Alt-Enter never has to be learned there).
+                    let onSubmit =
+                        match fieldOfKey key with
+                        | Some (DraftBody author) ->
+                            Some (fun () -> connectionRef |> Option.iter (fun c -> c.SendDraft author))
+                        | _ -> None
                     let readOnly = hostReadOnly host
-                    mountedBodies.[key] <- (fragment, readOnly, Editor.mountEditor host fragment readOnly reportFocus)
+                    mountedBodies.[key] <-
+                        (fragment, readOnly, Editor.mountEditor host fragment readOnly reportFocus onSubmit)
                 match mountedBodies.TryGetValue key with
                 | true, (bound, readOnly, handle) when
                     not (System.Object.ReferenceEquals (bound, fragment)) || readOnly <> hostReadOnly host ->
@@ -587,6 +616,14 @@ let private start () =
                             let enc i = ProseMirror.relPosFromTypeIndex root i |> ProseMirror.encodeRel
                             sendFocus (Some { Field = field; Pos = { Anchor = enc anchor; Head = enc head } })
                         | _ -> sendFocus None
+                    // Enter runs a command from a composer SLOT — the line you are writing.
+                    // A queued command's line has already been sent; Enter there does
+                    // nothing rather than queueing it twice.
+                    let onEnter () =
+                        match fieldOfKey key with
+                        | Some (TerminalDraftBody (terminal, author)) ->
+                            connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
+                        | _ -> ()
                     // A read-only line (a collaborator's slot) still shows live text; it just
                     // never writes back, and never claims a caret.
                     if not (terminalInputReadOnly el) then
@@ -595,6 +632,7 @@ let private start () =
                             (fun () -> TerminalText.setTo texts key (inputValue el))
                             reportFocus
                             (fun () -> sendFocus None)
+                            onEnter
                         |> ignore
                     setInputValue el (TerminalText.read texts key)
 
@@ -629,6 +667,30 @@ let private start () =
                        Anchor = p.Focus.Pos.Anchor
                        Head = p.Focus.Pos.Head } : Editor.RemoteBodyCursor))
             | None -> []
+
+        // Catch-up is the normal state for a moment after anything happens — your own send
+        // puts you behind your own event until the page comes back — so the status is armed
+        // rather than mirrored: a timer starts when catch-up begins and only if it is STILL
+        // running when the timer fires does the UI say so. Without this the header flickered
+        // "up to date" → "catching up" → "up to date" on every message sent, which reads as a
+        // fault. Disarmed the moment catch-up ends, and the reducer refuses a late `true`
+        // anyway (`CatchUpSlowMsg`), so a fire that races a landing page changes nothing.
+        let mutable catchUpTimer = 0.0
+        let syncCatchUpTimer (model: ClientModel) =
+            let consumer = model.EventConsumer
+            if consumer.IsCatchingUp && not consumer.CatchUpIsSlow then
+                // Idempotent: an armed timer is left to run, or a stream of pages would keep
+                // pushing the deadline out and it would never fire.
+                if catchUpTimer = 0.0 then
+                    catchUpTimer <-
+                        setTimeoutJs
+                            (fun () ->
+                                catchUpTimer <- 0.0
+                                dispatchRef (CatchUpSlowMsg true))
+                            catchUpQuietMs
+            elif catchUpTimer <> 0.0 then
+                clearTimeoutJs catchUpTimer
+                catchUpTimer <- 0.0
 
         // Overlay each body's remote cursors, DEBOUNCED: every render (re)arms a short timer, so
         // the decoration dispatch fires only once the model — and thus the doc — has gone quiet.
@@ -813,6 +875,7 @@ let private start () =
             // Keep a slot rule running for every open terminal: a person may be mid-command
             // in more than one, and each slot follows its own command line.
             syncTerminalSlots model
+            syncCatchUpTimer model
             pushPresences ()
             placeTitleCursorsAll ()
 
