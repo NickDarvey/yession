@@ -233,10 +233,15 @@ let startFull
                 log
                 environment
                 transcripts.Open
+                Emulator.openEmulator
                 SessionTerminals.TerminalShell.posix
                 (fun () -> DateTimeOffset.UtcNow)
                 TerminalId.mint
                 mintBlockId
+                // Cryptographically random, and not a counter: a guessable nonce is no nonce
+                // at all, since the whole point is that output nobody trusted cannot forge a
+                // block's outcome.
+                Interop.randomSecret
                 broadcastTerminalRecord
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 
@@ -309,7 +314,7 @@ let startFull
         // `Scheduler` (shared with the property harness); the Host wires it to this
         // session's doc, log, environment capabilities, and command surface.
         let scheduler =
-            Scheduler.create sessionId doc log runAgent capabilitiesFor emitUsage mintTurnId mintMessageId actorFor initialConsumed
+            Scheduler.create sessionId doc log runAgent capabilitiesFor emitUsage mintTurnId mintMessageId actorFor transcripts.ReadRange initialConsumed
         let drain () = scheduler.Drain ()
         let requestInterrupt = scheduler.RequestInterrupt
 

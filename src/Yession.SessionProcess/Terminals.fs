@@ -24,6 +24,64 @@ type Transcript =
 /// the process that wrote it and an audit trail that restarts at zero is not one.
 type OpenTranscript = TerminalId -> TranscriptHeader -> Transcript
 
+/// Read back what a terminal printed, over a half-open line range — `None` as the end
+/// meaning "to whatever it has now", which is what a still-running block has.
+///
+/// Separate from `Transcript` rather than a method on it, because the two have opposite
+/// shapes: appends are hot, per-terminal and held open, while reads are rare, bounded and
+/// addressed by id (a digest tail, a chunk request). Giving the append path a read it does
+/// not use would make every writer carry a reader it must implement.
+type ReadTranscript = TerminalId -> int -> int option -> TranscriptRecord list
+
+/// One terminal's screen, as the Session Process keeps it (Plan 13, stage 2b).
+///
+/// The transcript is the audit trail and the screen is not: ANSI moves the cursor and
+/// overwrites what was printed a moment ago, so what a terminal DISPLAYS is a projection
+/// with lossy history while what it EMITTED is the record. Both are wanted, for different
+/// questions — "what happened here" is the transcript, "what does it look like right now"
+/// is this.
+///
+/// A capability rather than a concrete type because it is a real terminal emulator
+/// (`@xterm/headless`) at the composition boundary, and because that keeps the Process's
+/// own logic free of a JS dependency it would otherwise have to be tested around.
+type Emulator =
+    { /// Feed output bytes, exactly as they were written to the transcript.
+      Write : string -> unit
+      /// The screen and its scrollback, serialized — what a joining peer is sent so it can
+      /// render the terminal without replaying every byte that ever reached it.
+      ///
+      /// Async because the emulator parses writes asynchronously: reading the screen without
+      /// waiting for what has been fed to be applied returns a screen that has not been
+      /// drawn yet, which is not a snapshot of anything.
+      Serialize : unit -> Async<string>
+      Resize : int -> int -> unit
+      Dispose : unit -> unit }
+
+/// Open an emulator of a given size (cols, rows).
+type OpenEmulator = int -> int -> Emulator
+
+module Emulator =
+
+    /// An emulator that keeps nothing. For a host with no emulator available: terminals
+    /// still run, and the only thing missing is the join snapshot — the same declare-and-skip
+    /// honesty a backend without a pty gets.
+    let none : Emulator =
+        { Write = ignore
+          Serialize = fun () -> async { return "" }
+          Resize = fun _ _ -> ()
+          Dispose = ignore }
+
+module Transcript =
+
+    /// What a range of records PRINTED. Input records are skipped — the command is already
+    /// carried on the block, and echoing it back into its own output would have a reader
+    /// count it twice — and a resize is not output at all.
+    let printed (records: TranscriptRecord list) : string =
+        records
+        |> List.filter (fun r -> r.Kind = TranscriptOutput || r.Kind = TranscriptStderr)
+        |> List.map (fun r -> r.Data)
+        |> String.concat ""
+
 /// The terminal queue's drain decision, as a pure function (Plan 13). The Session Process
 /// is the single consumer of the terminal queue exactly as it is of the message queue,
 /// and this is the whole policy: what runs next, and what is merely left over.
@@ -46,6 +104,11 @@ module TerminalQueueDrain =
     type TerminalDrainPlan =
         { /// The entries to start now — at most one per terminal, in terminal order.
           Ready : TerminalQueued list
+          /// Entries a peer has refused: appended as `TerminalCommandRejected`, then
+          /// removed. Separate from `Removals` because they are opposite facts — a removal
+          /// is repair for something that already happened, a rejection is a decision that
+          /// has not been recorded yet.
+          Rejections : TerminalQueued list
           /// Doc keys to remove without running: entries a `TerminalBlockStarted` already
           /// names (a crash between the append and the removal), repaired rather than run
           /// a second time.
@@ -72,28 +135,56 @@ module TerminalQueueDrain =
             |> List.distinct
             |> List.sortBy TerminalId.value
 
+        // A refusal outranks every other gate. It touches no terminal, so it does not wait
+        // on `busy` or on the terminal being open, and it is checked before the mode gate
+        // because a policy that would have auto-run the command must not beat a person who
+        // said no. Under `AutoRun` that is the whole difference between the two.
+        let rejections =
+            queue
+            |> Map.toList
+            |> List.map snd
+            |> List.filter (fun entry -> Option.isSome entry.RejectedBy && not (alreadyConsumed entry))
+            |> List.sortBy (fun entry -> QueueId.value entry.QueueId)
+
+        let rejected =
+            rejections |> List.map (fun entry -> QueueId.value entry.QueueId) |> Set.ofList
+
         let ready =
             terminals
             |> List.choose (fun terminal ->
                 if not (isOpen terminal) || Set.contains (TerminalId.value terminal) busy then None
                 else
-                    // The head is the first entry this drain has not already consumed.
+                    // The head is the first entry this drain has not already consumed. A
+                    // refused entry is not skipped over: it is still the head, and it stops
+                    // the queue exactly as an unapproved one does until the drain removes
+                    // it. Running the entry behind it first would reorder execution because
+                    // of a verdict, which is the thing the approval gate promises not to do.
                     TerminalQueueOrder.sortedFor terminal queue
                     |> List.filter (alreadyConsumed >> not)
                     |> List.tryHead
                     |> Option.filter (fun entry ->
-                        not (TerminalApprovalMode.requiresApproval (modeOf terminal) entry.Author)
-                        || Option.isSome entry.ApprovedBy))
+                        not (Set.contains (QueueId.value entry.QueueId) rejected)
+                        && (not (TerminalApprovalMode.requiresApproval (modeOf terminal) entry.Author)
+                            || Option.isSome entry.ApprovedBy)))
 
         { Ready = ready
+          Rejections = rejections
           Removals = queue |> Map.toList |> List.map snd |> List.filter alreadyConsumed |> List.map (fun e -> e.QueueId) }
 
     /// The consumed-set contribution of one event: a terminal drain dedups against every
     /// `TerminalBlockStarted` that names a queue entry — anchored in the log, never in the
     /// doc, so a replica that never saw the removal cannot re-run the command.
+    /// A rejection joins the same set, and that is what settles the reject/drain race with
+    /// no lock anywhere. Under `AutoRun` a human can press reject in the very tick the
+    /// drain takes the entry; whichever event reaches the append-only log first wins and
+    /// the second is dropped as already consumed. The Session Process is the log's only
+    /// writer, so check-and-append is serial there by construction. A rejected `QueueId`
+    /// can therefore never run afterwards, and a started one can never be retro-rejected —
+    /// stopping something already running is `kill`, a different verb.
     let consumedOf (event: SessionEvent) : string option =
         match event with
         | SessionEvent.TerminalBlockStarted b -> b.QueueId |> Option.map QueueId.value
+        | SessionEvent.TerminalCommandRejected r -> Some (QueueId.value r.QueueId)
         | _ -> None
 
 /// The session's terminals: opening and closing them, and running one queued command at a
@@ -107,16 +198,71 @@ module SessionTerminals =
     type TerminalShell =
         { Executable : string
           /// Arguments before the command line itself.
-          Arguments : string list }
+          Arguments : string list
+          /// Which instrumentation dialect this shell speaks — the key `TerminalMarks.rcFor`
+          /// is asked for. A name we do not know means no instrumentation, and therefore a
+          /// terminal that keeps the per-block path.
+          Name : string
+          /// How to launch this shell INTERACTIVELY, with its own startup files suppressed
+          /// so ours is the only instrumentation in play.
+          InteractiveArguments : string list }
 
     module TerminalShell =
-        let posix : TerminalShell = { Executable = "/bin/sh"; Arguments = [ "-c" ] }
+        let posix : TerminalShell =
+            { Executable = "/bin/sh"
+              Arguments = [ "-c" ]
+              Name = "sh"
+              InteractiveArguments = [ "-i" ] }
+
+        let bash : TerminalShell =
+            { Executable = "/bin/bash"
+              Arguments = [ "-c" ]
+              Name = "bash"
+              InteractiveArguments = [ "--noprofile"; "--norc"; "-i" ] }
+
+    /// What the manager holds per live terminal (Plan 13, stage 2d).
+    ///
+    /// `Shell = None` is the DEGRADED terminal, and it is a complete answer rather than a
+    /// broken one: blocks run as stage 1 ran them, one piped `Spawn` each. What it gives up
+    /// is exactly what needs a shared shell — state carried between blocks, and a tty for a
+    /// foreground program — so both are stateable at open rather than discovered later.
+    ///
+    /// Mutable, because the pty is spawned AFTER the terminal is in the live map: its output
+    /// callback looks the terminal up by id, so the terminal has to exist before the first
+    /// byte can arrive.
+    type LiveTerminal =
+        { Transcript : Transcript
+          OpenedAt : DateTimeOffset
+          Emulator : Emulator
+          mutable Shell : PtyHandle option }
 
     /// Bytes of output one block may write to the transcript. Beyond it, output is dropped
     /// and the drop is RECORDED (`TerminalTranscriptTruncated`) — a runaway `yes` must not
     /// fill a disk, and an audit trail with a hole in it must say so rather than read as a
     /// complete record of a command that printed less than it did.
     let private blockOutputCap = 4 * 1024 * 1024
+
+    /// A command line, as bytes to type into a shell's line editor. Three things, and none of
+    /// them is cosmetic.
+    ///
+    /// Kill-line FIRST (`^U`), because the editor may already hold a half-typed line — a peer
+    /// mid-keystroke in live mode, or a previous write that was never submitted.
+    ///
+    /// Control characters are STRIPPED, newline excepted. A terminal composer is
+    /// collaborative and the agent writes into one, so command text is attacker-reachable in
+    /// a way a locally typed line is not: an `ESC` in it could emit a forged mark from the
+    /// INPUT side, where no nonce check can help because we are the one writing.
+    ///
+    /// Newline survives and becomes `\r`, because a heredoc IS a multi-line command and the
+    /// shell reads its body from the lines that follow.
+    let internal writeFor (command: string) : string =
+        let kept =
+            command
+            |> Seq.filter (fun c -> c = '\n' || not (System.Char.IsControl c))
+            |> Seq.map (fun c -> if c = '\n' then '\r' else c)
+            |> Seq.toArray
+            |> System.String
+        "\u0015" + kept + "\r" 
 
     type SessionTerminals =
         { /// Open a terminal, ensuring the WorkSandbox exists first — opening one IS a
@@ -130,6 +276,15 @@ module SessionTerminals =
           /// and its doc key may be removed, which is why it is a callback and not
           /// something the caller can do before or after the whole run.
           RunBlock : TerminalQueued -> string -> (unit -> unit) -> Async<unit>
+          /// Record a peer's refusal of a queued command, minting the `BlockId` that names
+          /// it. `onRecorded` fires once the event is durable — the moment the entry has
+          /// been consumed and its doc key may go, exactly as `RunBlock`'s `onStarted`
+          /// marks that moment for a command which ran.
+          ///
+          /// Needs no terminal: refusing a command touches no process, so it works on a
+          /// terminal that is busy, leased (stage 2e) or closed. Someone can clear a bad
+          /// queue while a colleague is inside vim.
+          Reject : TerminalQueued -> string -> (unit -> unit) -> Async<unit>
           /// Terminals with a block running — the drain's `busy` set.
           Busy : unit -> Set<string>
           IsOpen : TerminalId -> bool
@@ -139,6 +294,14 @@ module SessionTerminals =
           /// Close every terminal left open by a previous process, at boot. A terminal is
           /// a live process in a sandbox that died with its session, so an event log that
           /// still says "open" is describing something that no longer exists.
+          /// The current screen of an open terminal, with the transcript position it
+          /// represents — what a joining peer is sent instead of replaying every byte
+          /// (Plan 13, stage 2b). `None` for a terminal that is not open here.
+          ///
+          /// The seq is what makes the snapshot composable with the live feed: a client
+          /// renders this, then folds records ABOVE that seq, exactly as it does with an
+          /// event-offset catch-up.
+          Snapshot : TerminalId -> Async<(int * string) option>
           ReconcileAtBoot : unit -> Async<unit> }
 
     /// A session with no terminals: every operation refuses, nothing is ever open.
@@ -146,9 +309,11 @@ module SessionTerminals =
         { Open = fun _ _ -> async { return Error "this session has no environment" }
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ -> async { return () }
+          Reject = fun _ _ _ -> async { return () }
           Busy = fun () -> Set.empty
           IsOpen = fun _ -> false
           Lengths = fun () -> []
+          Snapshot = fun _ -> async { return None }
           ReconcileAtBoot = fun () -> async { return () } }
 
     /// Create the terminal manager for one session.
@@ -161,17 +326,27 @@ module SessionTerminals =
         (log: EventLog<SessionEvent>)
         (environment: SessionEnvironment.SessionEnvironment)
         (openTranscript: OpenTranscript)
+        (openEmulator: OpenEmulator)
         (shell: TerminalShell)
         (clock: unit -> DateTimeOffset)
         (mintTerminalId: unit -> TerminalId)
         (mintBlockId: unit -> BlockId)
+        // The per-terminal mark nonce (Plan 13, stage 2d). Injected like every other mint so
+        // tests are deterministic; the Host supplies a cryptographically random one, because
+        // a guessable nonce is no nonce at all — the whole point is that output nobody
+        // trusted cannot forge a block's outcome.
+        (mintNonce: unit -> string)
         (onRecord: TerminalId -> int -> TranscriptRecord -> unit)
         (openAtBoot: TerminalId list)
         : SessionTerminals =
 
-        /// What the manager holds per live terminal: its transcript, the instant every
-        /// record's `At` is relative to, and whether a block is running in it.
-        let live = Collections.Generic.Dictionary<string, Transcript * DateTimeOffset> ()
+        let live = Collections.Generic.Dictionary<string, LiveTerminal> ()
+
+        /// The block a pty terminal is waiting on: what to call when its `D` mark lands, and
+        /// the per-block output accounting the piped path keeps in locals. Keyed by terminal,
+        /// because a terminal runs one block at a time — which is the same invariant `busy`
+        /// already states.
+        let pending = Collections.Generic.Dictionary<string, (int -> unit) * (unit -> int) * (int -> unit)> ()
         let mutable busy : Set<string> = Set.empty
         let mutable leftOpen : Set<string> = openAtBoot |> List.map TerminalId.value |> Set.ofList
 
@@ -191,13 +366,123 @@ module SessionTerminals =
             live.ContainsKey (TerminalId.value id) || Set.contains (TerminalId.value id) leftOpen
 
         /// Write a record and tell the peers. Durable first, visible second.
-        let emit (id: TerminalId) (transcript: Transcript) (openedAt: DateTimeOffset) (kind: TranscriptKind) (data: string) =
+        ///
+        /// The emulator is fed here and only here, which is what makes the screen a pure
+        /// function of the transcript: every byte that reaches one reaches the other, in the
+        /// same order, so folding the transcript through a fresh emulator reproduces this
+        /// one. That property is what the join snapshot rests on, and it is pinned by a test.
+        let emit (id: TerminalId) (terminal: LiveTerminal) (kind: TranscriptKind) (data: string) =
+            let transcript = terminal.Transcript
+            let emulator = terminal.Emulator
             let record =
-                { At = (clock () - openedAt).TotalSeconds
+                { At = (clock () - terminal.OpenedAt).TotalSeconds
                   Kind = kind
                   Data = data }
             let seq = transcript.Append record
+            // Only what the terminal PRINTED shapes the screen. An input record is what we
+            // wrote to the process, not what came back; feeding it here would draw the
+            // command twice on a pty, which echoes it itself.
+            match kind with
+            | TranscriptOutput | TranscriptStderr -> emulator.Write data
+            | TranscriptInput | TranscriptResize -> ()
             onRecord id seq record
+
+        /// Open the terminal's ONE instrumented shell, and report whether it took.
+        ///
+        /// Probed by RUNNING it: the shell is launched with our rc file and we wait, bounded,
+        /// for its first prompt mark. Arrived, the terminal is instrumented. Absent — an image
+        /// whose shell we cannot instrument, or which ignores the mechanism — the pty is torn
+        /// down and the terminal keeps the per-block path. Deciding by observation rather than
+        /// by shell name is the point: a POSIX `sh` has no prompt hook at all and rides its
+        /// marks in PS1, which is the shakiest of the three and cannot be trusted on a name.
+        let openShell (id: TerminalId) (terminal: LiveTerminal) : Async<unit> =
+            async {
+                let key = TerminalId.value id
+                let nonce = mintNonce ()
+                match TerminalMarks.rcFor shell.Name nonce with
+                | None -> return ()
+                | Some rc ->
+                    let carry = ref ""
+                    let ready = ref false
+                    let onOutput (data: string) =
+                        match live.TryGetValue key with
+                        | false, _ -> ()
+                        | true, current ->
+                            let marks, clean, rest = TerminalMarks.scan nonce carry.Value data
+                            carry.Value <- rest
+                            for m in marks do
+                                match m with
+                                | MarkPromptStart -> ready.Value <- true
+                                // A second `C` inside an open block is dropped rather than
+                                // repaired: the Process knows what it wrote, so a surprise is
+                                // evidence about the shell, never something to act on.
+                                | MarkCommandStart -> ()
+                                | MarkCommandDone code ->
+                                    match pending.TryGetValue key with
+                                    | true, (complete, _, _) ->
+                                        pending.Remove key |> ignore
+                                        complete code
+                                    // A `D` with no block open is the shell's own prompt
+                                    // cycle — at startup, or after a peer typed something in
+                                    // live mode. Not ours to act on.
+                                    | _ -> ()
+                            // Nothing before the first prompt mark reaches the transcript.
+                            // What arrives then is the shell's own startup and the echo of
+                            // the bootstrap we just typed — it belongs to no block, and
+                            // recording it would put our instrumentation in the audit trail.
+                            if clean <> "" && ready.Value then
+                                // Per-block output accounting lives with the pending block,
+                                // because on a pty the stream belongs to the TERMINAL and the
+                                // cap is a property of the block.
+                                match pending.TryGetValue key with
+                                | true, (_, written, note) ->
+                                    let room = blockOutputCap - written ()
+                                    if room <= 0 then note clean.Length
+                                    else
+                                        let kept = if clean.Length <= room then clean else clean.Substring (0, room)
+                                        note (clean.Length - kept.Length)
+                                        emit id current TranscriptOutput kept
+                                | _ -> emit id current TranscriptOutput clean
+                    let! spawned =
+                        environment.SpawnPty
+                            { Executable = shell.Executable
+                              Arguments = shell.InteractiveArguments
+                              Env = Map.empty
+                              WorkingDirectory = None }
+                            80
+                            24
+                            onOutput
+                    match spawned with
+                    | Error _ -> return ()
+                    | Ok pty ->
+                        terminal.Shell <- Some pty
+                        // TYPED into the shell rather than written to a file it is launched
+                        // with. No temp file to place inside a sandbox this Process cannot
+                        // reach, no second spawn to set one up, and it works for any shell
+                        // that has a prompt — which is Warp's approach for the same reasons.
+                        // Every line starts with a space, so the shell's own
+                        // ignore-duplicates-and-space history setting keeps our bootstrap out
+                        // of the user's history.
+                        for line in rc.Split '\n' do
+                            pty.Write (line + "\r")
+                        // Poll rather than race: this is the open path, not a hot one, and a
+                        // 50ms granularity beats carrying cancellation machinery Fable would
+                        // have to reproduce.
+                        let rec await (remaining: int) =
+                            async {
+                                if ready.Value then return true
+                                elif remaining <= 0 then return false
+                                else
+                                    do! Async.Sleep 50
+                                    return! await (remaining - 50)
+                            }
+                        let! instrumented = await 3000
+                        if not instrumented then
+                            // Uninstrumented. Tear the shell down and keep the per-block
+                            // path, which answers a smaller question completely.
+                            pty.Kill ()
+                            terminal.Shell <- None
+            }
 
         let openTerminal (openedBy: ActorRef) (title: string) : Async<Result<TerminalId, string>> =
             async {
@@ -215,7 +500,15 @@ module SessionTerminals =
                             { Width = 80
                               Height = 24
                               Timestamp = openedAt.ToUnixTimeSeconds () }
-                    live.[TerminalId.value id] <- (transcript, openedAt)
+                    let terminal =
+                        { Transcript = transcript
+                          OpenedAt = openedAt
+                          Emulator = openEmulator 80 24
+                          Shell = None }
+                    // In the live map BEFORE the shell starts: the pty's output callback finds
+                    // the terminal by id, and bytes can arrive the instant it spawns.
+                    live.[TerminalId.value id] <- terminal
+                    do! openShell id terminal
                     do! appendAs openedBy (SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = openedBy; Title = title })
                     return Ok id
             }
@@ -224,6 +517,14 @@ module SessionTerminals =
             async {
                 if not (isOpen id) then return Error "terminal is not open"
                 else
+                    // The emulator is a live JS object; a closed terminal keeps its blocks
+                    // (the audit outlives the process) but not its screen.
+                    match live.TryGetValue (TerminalId.value id) with
+                    | true, terminal ->
+                        terminal.Emulator.Dispose ()
+                        terminal.Shell |> Option.iter (fun pty -> pty.Kill ())
+                    | _ -> ()
+                    pending.Remove (TerminalId.value id) |> ignore
                     live.Remove (TerminalId.value id) |> ignore
                     leftOpen <- Set.remove (TerminalId.value id) leftOpen
                     busy <- Set.remove (TerminalId.value id) busy
@@ -240,9 +541,16 @@ module SessionTerminals =
                     // the doc (nothing consumed it), and the next drain will find the
                     // terminal shut and leave it alone.
                     return ()
-                | true, (transcript, openedAt) ->
+                | true, terminal ->
+                    let transcript = terminal.Transcript
                     busy <- Set.add key busy
                     let blockId = mintBlockId ()
+                    // Taken BEFORE the command is written, which is forced by the anchor
+                    // ordering below and is the honest reading anyway: on a pty the shell
+                    // echoes the command itself, and that echo is part of what this block put
+                    // on the screen. The alternative — starting the range at the `C` mark —
+                    // cannot be reconciled with appending the anchor first, because `C` does
+                    // not exist until after the write.
                     let fromSeq = transcript.NextSeq ()
                     // Durable BEFORE the process starts: the block event is the
                     // exactly-once anchor, so a crash between here and the spawn leaves a
@@ -267,37 +575,56 @@ module SessionTerminals =
                     // The command line is echoed into the transcript as INPUT, so a replay
                     // shows what was typed as well as what came back — the same reason
                     // asciinema records `"i"` events at all.
-                    emit entry.Terminal transcript openedAt TranscriptInput (command + "\n")
+                    emit entry.Terminal terminal TranscriptInput (command + "\n")
 
                     let mutable written = 0
                     let mutable dropped = 0
-                    let onChunk (stream: OutputStream, text: string) =
-                        if written >= blockOutputCap then dropped <- dropped + text.Length
-                        else
-                            let room = blockOutputCap - written
-                            let kept = if text.Length <= room then text else text.Substring (0, room)
-                            dropped <- dropped + (text.Length - kept.Length)
-                            written <- written + kept.Length
-                            let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
-                            emit entry.Terminal transcript openedAt kind kept
 
-                    let! spawned =
-                        environment.Spawn
-                            { Executable = shell.Executable
-                              Arguments = shell.Arguments @ [ command ]
-                              Env = Map.empty
-                              WorkingDirectory = None }
-                            onChunk
                     let! result =
-                        async {
-                            match spawned with
-                            | Error reason -> return CommandExecutionFailed reason
-                            | Ok handle ->
-                                match! handle.Exited with
-                                | SandboxExited 0 -> return CommandSucceeded 0
-                                | SandboxExited code -> return CommandFailed code
-                                | SandboxRunFailed reason -> return CommandExecutionFailed reason
-                        }
+                        match terminal.Shell with
+                        | Some pty ->
+                            // TYPED into the terminal's one shell, which is what makes `cd`
+                            // in this block move the next one — the property a per-block
+                            // spawn structurally cannot have.
+                            async {
+                                let complete = Async.FromContinuations (fun (cont, _, _) ->
+                                    pending.[key] <-
+                                        ((fun code -> cont code),
+                                         (fun () -> written),
+                                         (fun extra ->
+                                             dropped <- dropped + extra
+                                             written <- written + extra)))
+                                pty.Write (writeFor command)
+                                let! code = complete
+                                return (if code = 0 then CommandSucceeded 0 else CommandFailed code)
+                            }
+                        | None ->
+                            // The degraded terminal: stage 1's path, unchanged.
+                            async {
+                                let onChunk (stream: OutputStream, text: string) =
+                                    if written >= blockOutputCap then dropped <- dropped + text.Length
+                                    else
+                                        let room = blockOutputCap - written
+                                        let kept = if text.Length <= room then text else text.Substring (0, room)
+                                        dropped <- dropped + (text.Length - kept.Length)
+                                        written <- written + kept.Length
+                                        let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
+                                        emit entry.Terminal terminal kind kept
+                                let! spawned =
+                                    environment.Spawn
+                                        { Executable = shell.Executable
+                                          Arguments = shell.Arguments @ [ command ]
+                                          Env = Map.empty
+                                          WorkingDirectory = None }
+                                        onChunk
+                                match spawned with
+                                | Error reason -> return CommandExecutionFailed reason
+                                | Ok handle ->
+                                    match! handle.Exited with
+                                    | SandboxExited 0 -> return CommandSucceeded 0
+                                    | SandboxExited code -> return CommandFailed code
+                                    | SandboxRunFailed reason -> return CommandExecutionFailed reason
+                            }
                     if dropped > 0 then
                         do!
                             append
@@ -311,6 +638,27 @@ module SessionTerminals =
                                   Result = result
                                   ToSeq = transcript.NextSeq () })
                     busy <- Set.remove key busy
+            }
+
+        let reject (entry: TerminalQueued) (command: string) (onRecorded: unit -> unit) : Async<unit> =
+            async {
+                match entry.RejectedBy with
+                | None -> return ()
+                | Some by ->
+                    // Attributed to the peer who refused, exactly as an approval is: the
+                    // doc holds the connection fact and the event carries the actor.
+                    do!
+                        appendAs
+                            (PeerRef by)
+                            (SessionEvent.TerminalCommandRejected
+                                { TerminalId = entry.Terminal
+                                  QueueId = entry.QueueId
+                                  BlockId = mintBlockId ()
+                                  Author = entry.Author
+                                  RejectedBy = PeerRef by
+                                  Command = command
+                                  Reason = entry.RejectedReason })
+                    onRecorded ()
             }
 
         let reconcileAtBoot () : Async<unit> =
@@ -329,6 +677,7 @@ module SessionTerminals =
         { Open = openTerminal
           Close = closeTerminal
           RunBlock = runBlock
+          Reject = reject
           Busy = fun () -> busy
           IsOpen = isOpen
           Lengths =
@@ -336,9 +685,29 @@ module SessionTerminals =
                 live
                 |> Seq.choose (fun kv ->
                     match TerminalId.create kv.Key with
-                    | Ok id -> Some (id, (fst kv.Value).NextSeq ())
+                    | Ok id -> Some (id, kv.Value.Transcript.NextSeq ())
                     | Error _ -> None)
                 |> List.ofSeq
+          Snapshot =
+            fun id ->
+                async {
+                match live.TryGetValue (TerminalId.value id) with
+                | false, _ -> return None
+                // Read the length FIRST, then serialize. The two are taken under no lock —
+                // there is none to take — so the only ordering that cannot lie is the one
+                // that reports a screen at least as new as the seq it claims: a client that
+                // re-folds a record already drawn here is idempotent, while one that misses
+                // a record drawn after the seq would never draw it at all.
+                | true, terminal ->
+                    // Seq FIRST, then the screen. Records written while the barrier drains
+                    // land on the screen but not in the seq, so the snapshot is at worst
+                    // NEWER than it claims — a client re-folds what it already drew, which
+                    // is idempotent. The other order would report a seq for a record the
+                    // screen has not drawn, and the client would skip it for ever.
+                    let seq = terminal.Transcript.NextSeq ()
+                    let! screen = terminal.Emulator.Serialize ()
+                    return Some (seq, screen)
+                }
           ReconcileAtBoot = reconcileAtBoot }
 
 /// The terminal queue's consumer loop — the message scheduler's sibling, and deliberately
@@ -379,6 +748,22 @@ module TerminalScheduler =
                 // Leftovers first: a crash between the start append and the doc removal
                 // leaves an entry that is already a block, and repairing it is free.
                 SyncedStateSync.removeTerminalQueued doc plan.Removals
+                // Refusals next, and before anything runs: they are what a person decided,
+                // and they free the head of a queue that a `Ready` entry may be sitting
+                // behind. Same snapshot-then-consume shape as a command that runs.
+                for entry in plan.Rejections do
+                    let command = SyncedStateSync.terminalQueuedText doc entry.QueueId
+                    consumed <- Set.add (QueueId.value entry.QueueId) consumed
+                    Async.StartImmediate (
+                        async {
+                            do!
+                                terminals.Reject
+                                    entry
+                                    command
+                                    (fun () -> SyncedStateSync.removeTerminalQueued doc [ entry.QueueId ])
+                            // The head may now be a different entry, and it may be ready.
+                            drain ()
+                        })
                 for entry in plan.Ready do
                     // Snapshot the command from THIS replica at the instant it is
                     // consumed, exactly as the message drain snapshots a body: what runs

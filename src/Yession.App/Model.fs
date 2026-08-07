@@ -281,6 +281,10 @@ type ClientMsg =
     /// Withdraw an approval — the mirror of granting one, so a mis-click is undoable for
     /// as long as the command has not been consumed.
     | UnapproveTerminalQueuedMsg of QueueId
+    /// Refuse a queued command, by the peer refusing it. Not a deletion: the drain observes
+    /// the refusal, records who said no and why, and only then removes the entry — so the
+    /// log that captures every yes captures the noes too.
+    | RejectTerminalQueuedMsg of QueueId * PeerId * reason: string option
     /// Delete a queued command. Until consumed, deletion wins.
     | DeleteTerminalQueuedMsg of QueueId
     /// Reorder a queued command within its terminal: one fractional-index register write.
@@ -684,7 +688,9 @@ module ClientModel =
                       // binding — the doc only ever knows connections.
                       Author = PeerRef author
                       Order = TerminalQueueOrder.nextFor terminal model.Synced.TerminalQueue
-                      ApprovedBy = None }
+                      ApprovedBy = None
+                      RejectedBy = None
+                      RejectedReason = None }
                 model
                 |> withSynced
                     { model.Synced with
@@ -711,6 +717,18 @@ module ClientModel =
                 |> withSynced
                     { model.Synced with
                         TerminalQueue = Map.add queueId { entry with ApprovedBy = None } model.Synced.TerminalQueue }
+            | None -> model
+        | RejectTerminalQueuedMsg (queueId, rejector, reason) ->
+            match Map.tryFind queueId model.Synced.TerminalQueue with
+            | Some entry ->
+                model
+                |> withSynced
+                    { model.Synced with
+                        TerminalQueue =
+                            Map.add
+                                queueId
+                                { entry with RejectedBy = Some rejector; RejectedReason = reason }
+                                model.Synced.TerminalQueue }
             | None -> model
         | DeleteTerminalQueuedMsg queueId ->
             model |> withSynced { model.Synced with TerminalQueue = Map.remove queueId model.Synced.TerminalQueue }

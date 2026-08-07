@@ -69,6 +69,7 @@ let scriptedSandbox
                                           Kill = ignore
                                           Exited = script exec onChunk }
                             }
+                      SpawnPty = None
                       Dispose = fun () -> async { recorder.Disposed <- recorder.Disposed + 1 } }
         }
 

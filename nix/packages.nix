@@ -19,6 +19,8 @@ let
   # The native WebRTC addon, built from source (its npm prebuild is github-bound).
   node-datachannel = pkgs.callPackage ./node-datachannel.nix { inherit libdatachannel; };
 
+  node-pty = pkgs.callPackage ./node-pty.nix { };
+
   # claude-code is unfree; instantiate a nixpkgs that allows just that package (the agent
   # points at it so the SDK never needs its own native binary).
   claude-code = (import pkgs.path {
@@ -153,7 +155,7 @@ let
   npmDeps = pkgs.fetchNpmDeps {
     src = npmManifests;
     name = "yession-npm-deps";
-    hash = "sha256-CfON1xpe52KHCPRdtXaDhC1Is5FOr3OcmNBSKAirgIs=";
+    hash = "sha256-1rk59mDb4/yCiQSCnVew0JEoz0OxBrHNqJtaPHG6FbA=";
   };
 
   # node_modules as a Nix artifact: the offline npm tree (npmConfigHook installs it from npmDeps
@@ -176,6 +178,13 @@ let
       mkdir -p node_modules/node-datachannel/build/Release
       cp ${node-datachannel}/build/Release/node_datachannel.node \
          node_modules/node-datachannel/build/Release/node_datachannel.node
+      # node-pty is replaced WHOLE rather than patched with a .node, unlike the addon above.
+      # Its unix backend execs a `spawn-helper` binary that sits beside the addon, so the
+      # built package is a pair and dropping half of it in would leave a pty that opens and
+      # then cannot start a child.
+      rm -rf node_modules/node-pty
+      cp -r ${node-pty} node_modules/node-pty
+      chmod -R u+w node_modules/node-pty
       # Ship it AS `$out/node_modules` so that, once symlinked in, a package's realpath parent is
       # literally `node_modules` — Node resolves siblings (e.g. esbuild → @esbuild/linux-x64) only
       # by that name, so `$out/<pkgs>` directly would break self-resolution.
@@ -295,5 +304,5 @@ in
   # nugetDeps is exposed for one reason: its `outputHash` can only be re-derived by building it
   # (`nix build --file nix/worktree.nix nugetDeps`), and a hash you cannot rebuild on demand is
   # a hash nobody updates until a release job fails.
-  inherit libdatachannel node-datachannel claude-code nugetDeps nodeModules staged nix npm;
+  inherit libdatachannel node-datachannel node-pty claude-code nugetDeps nodeModules staged nix npm;
 }

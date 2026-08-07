@@ -205,6 +205,90 @@ module private Children =
             live |> List.iter (fun (_, kill) -> kill ())
             live <- []
 
+// --- Pseudo-terminals: the one place this module opens a pty -----------------------------
+//
+// `node-pty`, built from source into the Nix `nodeModules` derivation (nix/node-pty.nix).
+// It is loaded LAZILY and through a try, because its absence is a first-class answer rather
+// than a failure: off Nix the addon may not be there, and a backend that cannot open a pty
+// reports `SpawnPty = None` instead of throwing when someone runs `vim`.
+module private Pty =
+
+    // `createRequire`, not a bare `require`. Fable emits ESM and the test bundle runs as
+    // ESM, where `require` is simply not defined — so a bare one throws ReferenceError,
+    // which the try below would swallow into "the addon is absent" on a box that has it.
+    // That is exactly what happened: the standalone probe passed (`node -e` runs as CJS)
+    // while every pty test reported no pty support.
+    //
+    // A static `import` is the other option and is worse here: node-pty is CJS-only and a
+    // missing package would fail the whole module's load rather than this one lookup, which
+    // would turn "no addon" from an answer into a crash.
+    // Typed `obj`, not `string -> (string -> obj)`: Fable sees a curried arrow and wraps the
+    // import in `uncurry2`, which rewrites the call into `createRequire(url, name)` — one
+    // call where two were meant. It fails, the try below catches it, and the addon reports
+    // absent on a box that has it. Opaque here, applied in the emit.
+    [<Import("createRequire", "node:module")>]
+    let private createRequire : obj = jsNative
+
+    [<Emit("(() => { try { return $0(import.meta.url)('node-pty') } catch { return null } })()")>]
+    let private tryRequireWith (mk: obj) : obj = jsNative
+
+    let private tryRequire () : obj = tryRequireWith createRequire
+
+    /// Resolved once. `require` is not free and the answer cannot change within a process.
+    let private modul = lazy (tryRequire ())
+
+    let available () : bool = not (isNull (modul.Force ()))
+
+    [<Emit("$0.spawn($1, $2, { name: 'xterm-256color', cols: $3, rows: $4, cwd: $5 || undefined, env: Object.fromEntries($6) })")>]
+    let private ptySpawn
+        (m: obj) (file: string) (args: string[]) (cols: int) (rows: int) (cwd: string) (env: (string * string)[]) : obj =
+        jsNative
+
+    [<Emit("$0.onData($1)")>]
+    let private onData (p: obj) (cb: string -> unit) : unit = jsNative
+
+    /// node-pty reports an exit code AND a signal; a process killed by a signal has no
+    /// meaningful code, so it is reported the way `SandboxExited` reports one everywhere
+    /// else — -1, "the OS gave us none".
+    [<Emit("$0.onExit(({ exitCode, signal }) => $1(signal ? -1 : exitCode))")>]
+    let private onExit (p: obj) (cb: int -> unit) : unit = jsNative
+
+    [<Emit("$0.write($1)")>]
+    let private write (p: obj) (data: string) : unit = jsNative
+
+    [<Emit("$0.resize($1, $2)")>]
+    let private resize (p: obj) (cols: int) (rows: int) : unit = jsNative
+
+    [<Emit("$0.kill()")>]
+    let private kill (p: obj) : unit = jsNative
+
+    /// Open a pty running `executable args`. Output is one stream, not two: a tty has a
+    /// single device and stdout/stderr are indistinguishable on it by construction.
+    let spawn
+        (executable: string)
+        (arguments: string list)
+        (cwd: string)
+        (env: Map<string, string>)
+        (cols: int)
+        (rows: int)
+        (onOutput: string -> unit)
+        : Result<PtyHandle, string> =
+        match modul.Force () with
+        | null -> Error "node-pty is not available on this host"
+        | m ->
+            try
+                let exited = OneShot<SandboxRun> ()
+                let proc =
+                    ptySpawn m executable (Array.ofList arguments) cols rows cwd (Map.toArray env)
+                onData proc onOutput
+                onExit proc (fun code -> exited.Settle (SandboxExited code))
+                Ok
+                    { Write = write proc
+                      Resize = resize proc
+                      Kill = fun () -> kill proc
+                      Exited = exited.Await }
+            with ex -> Error ex.Message
+
 // --- Host: explicitly unsandboxed --------------------------------------------------------
 
 /// Plain child processes of the Session Process. No confinement — chosen deliberately
@@ -230,10 +314,28 @@ module HostSandbox =
                     Ok
                         { Ref = "host"
                           Spawn = spawn
+                          SpawnPty =
+                            if not (Pty.available ()) then None
+                            else
+                                Some (fun exec cols rows onOutput ->
+                                    async {
+                                        let env = mergeEnv policy.Env exec.Env
+                                        let cwd =
+                                            exec.WorkingDirectory
+                                            |> Option.orElse policy.WorkingDirectory
+                                            |> Option.defaultValue ""
+                                        return Pty.spawn exec.Executable exec.Arguments cwd env cols rows onOutput
+                                    })
                           Dispose = fun () -> async { children.KillAll () } }
             }
 
 // --- Docker: a full isolated userland ----------------------------------------------------
+
+/// `exec.resize({ h, w })` — the Engine API's exec-resize endpoint, which is what raises
+/// SIGWINCH in the program on the other side. Fire-and-forget: a resize that loses a race
+/// with the process exiting is not an error worth failing a terminal over.
+[<Emit("$0.resize({ h: $1, w: $2 }).catch(() => {})")>]
+let private execResize (exec: obj) (rows: int) (cols: int) : unit = jsNative
 
 /// Docker-backed sandboxes through the `Fable.Dockerode` bindings (the Engine API over
 /// the local socket — no `docker` CLI). The container and its workspace volume are
@@ -418,10 +520,63 @@ module DockerSandbox =
                                               Exited = ended.Await }
                                 with ex -> return Error ex.Message
                             }
+
+                        // The same exec, on a terminal. Three things differ from the piped
+                        // spawn above, and all three are what a tty IS rather than options.
+                        //
+                        // `Tty: true` gives the process a controlling terminal, so it can ask
+                        // whether it is interactive and take the alternate screen. There is NO
+                        // demux: docker multiplexes stdout and stderr only when there is no
+                        // tty, because a terminal has one device and the two streams are
+                        // indistinguishable on it — running the demuxer here would parse
+                        // ordinary output as though it were frame headers. And the exec-resize
+                        // endpoint is what makes SIGWINCH reach the program.
+                        let spawnPty (exec: SandboxExec) (cols: int) (rows: int) (onOutput: string -> unit) =
+                            async {
+                                try
+                                    let execOpts =
+                                        [ "Cmd", box (List.toArray (exec.Executable :: exec.Arguments))
+                                          "AttachStdin", box true
+                                          "AttachStdout", box true
+                                          "AttachStderr", box true
+                                          "Tty", box true
+                                          "Env", box (exec.Env |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> List.toArray) ]
+                                        @ (match exec.WorkingDirectory with Some w -> [ "WorkingDir", box w ] | None -> [])
+                                        |> createObj
+                                    let! started = container.exec execOpts |> Interop.awaitPromise
+                                    let! stream = started.start (createObj [ "hijack", box true; "stdin", box true ]) |> Interop.awaitPromise
+                                    stream.on ("data", fun d -> onOutput (bufToStr d)) |> ignore
+                                    // Size it before anything runs: a program that reads its
+                                    // dimensions at startup must not read 80x24 and then be
+                                    // told the truth afterwards.
+                                    execResize started rows cols
+                                    let ended = OneShot<SandboxRun> ()
+                                    let finish () =
+                                        Async.StartImmediate (
+                                            async {
+                                                try
+                                                    let! inspect = started.inspect () |> Interop.awaitPromise
+                                                    ended.Settle (SandboxExited (exitCodeOf inspect))
+                                                with ex -> ended.Settle (SandboxRunFailed ex.Message)
+                                            })
+                                    stream.on ("end", fun _ -> finish ()) |> ignore
+                                    stream.on ("error", fun e -> ended.Settle (SandboxRunFailed (string e))) |> ignore
+                                    return
+                                        Ok
+                                            { Write = fun text -> stream.write (box text) |> ignore
+                                              Resize = fun c r -> execResize started r c
+                                              // As with the piped exec: the Engine API cannot
+                                              // signal an exec's process, so closing our side
+                                              // of the stream is the most Kill can do.
+                                              Kill = fun () -> stream.``end`` ()
+                                              Exited = ended.Await }
+                                with ex -> return Error ex.Message
+                            }
                         return
                             Ok
                                 { Ref = container.id
                                   Spawn = spawn
+                                  SpawnPty = Some spawnPty
                                   Dispose =
                                     fun () ->
                                         async {
@@ -671,6 +826,30 @@ module SrtSandbox =
                         Ok
                             { Ref = "srt"
                               Spawn = spawn
+                              // srt confines by REWRITING the argv, so a pty costs nothing
+                              // extra here: wrap exactly as `spawn` does, then open the pty
+                              // on what came back. The confinement is in the argv, not in
+                              // how the process is attached to a terminal.
+                              SpawnPty =
+                                if not (Pty.available ()) then None
+                                else
+                                    Some (fun exec cols rows onOutput ->
+                                        async {
+                                            try
+                                                let env = mergeEnv policy.Env exec.Env
+                                                let cwd =
+                                                    exec.WorkingDirectory
+                                                    |> Option.orElse policy.WorkingDirectory
+                                                    |> Option.defaultValue ""
+                                                let! wrapped =
+                                                    Interop.awaitPromise
+                                                        (wrapArgv srt (commandLine exec.Executable exec.Arguments) (toJs config) cwd)
+                                                match List.ofArray (argvOf wrapped) with
+                                                | [] -> return Error "srt returned an empty argv"
+                                                | executable :: arguments ->
+                                                    return Pty.spawn executable arguments cwd env cols rows onOutput
+                                            with ex -> return Error ex.Message
+                                        })
                               // The manager stays up: it is process-wide, and a sibling
                               // sandbox may still be running under it. Its proxies die
                               // with the Session Process, which is the lifetime they are

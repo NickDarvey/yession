@@ -21,6 +21,7 @@
     <Compile Include="EventStore.fs" />
     <Compile Include="DocStore.fs" />
     <Compile Include="TranscriptStore.fs" />
+    <Compile Include="Emulator.fs" />
     <Compile Include="Fs.fs" />
     <Compile Include="Sandboxes.fs" />
     <Compile Include="Agent.fs" />

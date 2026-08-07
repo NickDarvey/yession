@@ -522,6 +522,16 @@ let private dockerReachable () = probeSucceeds "docker" [ "info" ]
 // new CLI still runs the gate rather than failing on an unrecognised subcommand.
 let private nixAvailable () = probeSucceeds "nix" [ "--version" ]
 
+// A pty is probed by OPENING one, not by looking for the addon's file. `require` succeeding
+// proves the package resolved; it does not prove the compiled `.node` beside it matches this
+// Node's ABI, and it certainly does not prove the kernel will hand out a pty — which is the
+// thing the suites need and the thing a container can be configured without.
+let private ptyAvailable () =
+    probeSucceeds
+        "node"
+        [ "-e"
+          "const p=require('node-pty');const t=p.spawn('/bin/sh',['-c','exit 0'],{cols:80,rows:24});t.kill()" ]
+
 // The live agent suites need a real credential; the SDK reads either of these.
 let private agentCredentials () =
     [ "ANTHROPIC_API_KEY"; "CLAUDE_CODE_OAUTH_TOKEN" ]
@@ -572,6 +582,9 @@ let private requireCapabilities (caps: string list) =
             "Nix: no `nix` on PATH"
           if List.contains "LiveAgent" caps && not (agentCredentials ()) then
             "LiveAgent: no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in the environment"
+          if List.contains "Pty" caps && not (ptyAvailable ()) then
+            "Pty: node-pty could not open a pseudo-terminal (is the native addon built, and "
+            + "does this box allow /dev/pts?)"
           if List.contains "Srt" caps && not (srtAvailable ()) then
             "Srt: no working confinement (bubblewrap, socat, ripgrep, and — under the strict "
             + "profile — a nested user namespace; an unprivileged container needs "
@@ -721,7 +734,7 @@ let check (caps: string list) =
     restore ()
     runCheckOnce caps
 
-let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt" ]
+let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt"; "Pty" ]
 
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 

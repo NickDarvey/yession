@@ -50,7 +50,30 @@ type TranscriptStore =
       /// is full (and therefore immutable and cacheable for ever). `None` for a terminal
       /// with no transcript — which is a 404, not an empty chunk: those mean different
       /// things to a client catching up.
-      ReadChunk : TerminalId -> int -> (string list * bool) option }
+      ReadChunk : TerminalId -> int -> (string list * bool) option
+      /// Decoded records over a half-open line range, for a caller that wants what a
+      /// block PRINTED rather than a cacheable slice of file (Plan 13, stage 3a).
+      /// A line that will not decode is skipped rather than failing the read: this
+      /// serves a context pack, and one unreadable record must not cost the agent
+      /// every other block's output.
+      ReadRange : ReadTranscript }
+
+/// Decode the records in `[fromSeq, toSeq)` of a transcript's lines. `None` as the end
+/// means "whatever it has now", which is what a still-running block has. The header sits
+/// at line 0 and simply does not decode as a record, so it needs no special case.
+let private recordsIn (fromSeq: int) (toSeq: int option) (lines: string list) : TranscriptRecord list =
+    let total = List.length lines
+    let last = min total (defaultArg toSeq total)
+    let first = max 0 fromSeq
+    if last <= first then []
+    else
+        lines
+        |> List.skip first
+        |> List.truncate (last - first)
+        |> List.choose (fun line ->
+            match Codec.fromString Codec.transcriptLine line with
+            | Ok (TranscriptRecordLine record) -> Some record
+            | _ -> None)
 
 /// A transcript held only in memory: nothing is written, everything is readable for the
 /// life of the process. The default when a session has no data directory — a test host,
@@ -87,7 +110,12 @@ let inMemory () : TranscriptStore =
                 let chunk =
                     if first >= lines.Count then []
                     else lines.GetRange (first, min TranscriptChunk.size (lines.Count - first)) |> List.ofSeq
-                Some (chunk, List.length chunk = TranscriptChunk.size) }
+                Some (chunk, List.length chunk = TranscriptChunk.size)
+      ReadRange =
+        fun id fromSeq toSeq ->
+            match files.TryGetValue (TerminalId.value id) with
+            | false, _ -> []
+            | true, lines -> lines |> List.ofSeq |> recordsIn fromSeq toSeq }
 
 /// A transcript store backed by `<directory>/<terminal>.cast` files.
 ///
@@ -158,4 +186,11 @@ let openStore (directory: string) : TranscriptStore =
                 let lines, _ = readLines path
                 let first = TranscriptChunk.firstSeq index
                 let chunk = lines |> List.skip (min first (List.length lines)) |> List.truncate TranscriptChunk.size
-                Some (chunk, List.length chunk = TranscriptChunk.size) }
+                Some (chunk, List.length chunk = TranscriptChunk.size)
+      ReadRange =
+        fun id fromSeq toSeq ->
+            let path = pathOf id
+            if not (existsSync path) then []
+            else
+                let lines, _ = readLines path
+                lines |> recordsIn fromSeq toSeq }
