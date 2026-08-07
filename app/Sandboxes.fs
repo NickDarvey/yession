@@ -205,6 +205,72 @@ module private Children =
             live |> List.iter (fun (_, kill) -> kill ())
             live <- []
 
+// --- Pseudo-terminals: the one place this module opens a pty -----------------------------
+//
+// `node-pty`, built from source into the Nix `nodeModules` derivation (nix/node-pty.nix).
+// It is loaded LAZILY and through a try, because its absence is a first-class answer rather
+// than a failure: off Nix the addon may not be there, and a backend that cannot open a pty
+// reports `SpawnPty = None` instead of throwing when someone runs `vim`.
+module private Pty =
+
+    [<Emit("(() => { try { return require('node-pty') } catch { return null } })()")>]
+    let private tryRequire () : obj = jsNative
+
+    /// Resolved once. `require` is not free and the answer cannot change within a process.
+    let private modul = lazy (tryRequire ())
+
+    let available () : bool = not (isNull (modul.Force ()))
+
+    [<Emit("$0.spawn($1, $2, { name: 'xterm-256color', cols: $3, rows: $4, cwd: $5 || undefined, env: Object.fromEntries($6) })")>]
+    let private ptySpawn
+        (m: obj) (file: string) (args: string[]) (cols: int) (rows: int) (cwd: string) (env: (string * string)[]) : obj =
+        jsNative
+
+    [<Emit("$0.onData($1)")>]
+    let private onData (p: obj) (cb: string -> unit) : unit = jsNative
+
+    /// node-pty reports an exit code AND a signal; a process killed by a signal has no
+    /// meaningful code, so it is reported the way `SandboxExited` reports one everywhere
+    /// else — -1, "the OS gave us none".
+    [<Emit("$0.onExit(({ exitCode, signal }) => $1(signal ? -1 : exitCode))")>]
+    let private onExit (p: obj) (cb: int -> unit) : unit = jsNative
+
+    [<Emit("$0.write($1)")>]
+    let private write (p: obj) (data: string) : unit = jsNative
+
+    [<Emit("$0.resize($1, $2)")>]
+    let private resize (p: obj) (cols: int) (rows: int) : unit = jsNative
+
+    [<Emit("$0.kill()")>]
+    let private kill (p: obj) : unit = jsNative
+
+    /// Open a pty running `executable args`. Output is one stream, not two: a tty has a
+    /// single device and stdout/stderr are indistinguishable on it by construction.
+    let spawn
+        (executable: string)
+        (arguments: string list)
+        (cwd: string)
+        (env: Map<string, string>)
+        (cols: int)
+        (rows: int)
+        (onOutput: string -> unit)
+        : Result<PtyHandle, string> =
+        match modul.Force () with
+        | null -> Error "node-pty is not available on this host"
+        | m ->
+            try
+                let exited = OneShot<SandboxRun> ()
+                let proc =
+                    ptySpawn m executable (Array.ofList arguments) cols rows cwd (Map.toArray env)
+                onData proc onOutput
+                onExit proc (fun code -> exited.Settle (SandboxExited code))
+                Ok
+                    { Write = write proc
+                      Resize = resize proc
+                      Kill = fun () -> kill proc
+                      Exited = exited.Await }
+            with ex -> Error ex.Message
+
 // --- Host: explicitly unsandboxed --------------------------------------------------------
 
 /// Plain child processes of the Session Process. No confinement — chosen deliberately
@@ -230,6 +296,18 @@ module HostSandbox =
                     Ok
                         { Ref = "host"
                           Spawn = spawn
+                          SpawnPty =
+                            if not (Pty.available ()) then None
+                            else
+                                Some (fun exec cols rows onOutput ->
+                                    async {
+                                        let env = mergeEnv policy.Env exec.Env
+                                        let cwd =
+                                            exec.WorkingDirectory
+                                            |> Option.orElse policy.WorkingDirectory
+                                            |> Option.defaultValue ""
+                                        return Pty.spawn exec.Executable exec.Arguments cwd env cols rows onOutput
+                                    })
                           Dispose = fun () -> async { children.KillAll () } }
             }
 
@@ -422,6 +500,13 @@ module DockerSandbox =
                             Ok
                                 { Ref = container.id
                                   Spawn = spawn
+                                  // Not yet. docker gets a pty free — exec with `Tty: true`
+                                  // plus the exec-resize endpoint, both already in dockerode
+                                  // — and it is the remaining piece of stage 2c. Until it is
+                                  // written, this backend says so rather than pretending: a
+                                  // `None` here is a terminal that runs blocks and refuses
+                                  // live mode, which is exactly what it can currently do.
+                                  SpawnPty = None
                                   Dispose =
                                     fun () ->
                                         async {
@@ -671,6 +756,30 @@ module SrtSandbox =
                         Ok
                             { Ref = "srt"
                               Spawn = spawn
+                              // srt confines by REWRITING the argv, so a pty costs nothing
+                              // extra here: wrap exactly as `spawn` does, then open the pty
+                              // on what came back. The confinement is in the argv, not in
+                              // how the process is attached to a terminal.
+                              SpawnPty =
+                                if not (Pty.available ()) then None
+                                else
+                                    Some (fun exec cols rows onOutput ->
+                                        async {
+                                            try
+                                                let env = mergeEnv policy.Env exec.Env
+                                                let cwd =
+                                                    exec.WorkingDirectory
+                                                    |> Option.orElse policy.WorkingDirectory
+                                                    |> Option.defaultValue ""
+                                                let! wrapped =
+                                                    Interop.awaitPromise
+                                                        (wrapArgv srt (commandLine exec.Executable exec.Arguments) (toJs config) cwd)
+                                                match List.ofArray (argvOf wrapped) with
+                                                | [] -> return Error "srt returned an empty argv"
+                                                | executable :: arguments ->
+                                                    return Pty.spawn executable arguments cwd env cols rows onOutput
+                                            with ex -> return Error ex.Message
+                                        })
                               // The manager stays up: it is process-wide, and a sibling
                               // sandbox may still be running under it. Its proxies die
                               // with the Session Process, which is the lifetime they are
