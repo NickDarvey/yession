@@ -42,6 +42,10 @@ let private openAppend (path: string) : int = openSyncAppend (box fs) path
 let private writeAndSync (fd: int) (text: string) : unit = writeSyncFsync (box fs) fd text
 let private mkdirSync (path: string) : unit = mkdirRecursive (box fs) path
 
+[<Emit("$0.unlinkSync($1)")>]
+let private unlinkFile (fs: obj) (path: string) : unit = jsNative
+let private unlinkSync (path: string) : unit = unlinkFile (box fs) path
+
 /// Everything the Session Process and its HTTP surface need from transcript storage.
 type TranscriptStore =
     { /// Open (or reopen) one terminal's transcript.
@@ -56,7 +60,15 @@ type TranscriptStore =
       /// A line that will not decode is skipped rather than failing the read: this
       /// serves a context pack, and one unreadable record must not cost the agent
       /// every other block's output.
-      ReadRange : ReadTranscript }
+      ReadRange : ReadTranscript
+      /// Delete a terminal's transcript WHOLE, returning the characters of output it held —
+      /// `None` when there was nothing to delete (Plan 13, stage 3d).
+      ///
+      /// Whole, because a line index is a sequence number: removing lines from the front or
+      /// the middle would renumber every block range in the event log and every cached chunk.
+      /// Deleting the file renumbers nothing, and a request for it is then a 404 — which is
+      /// what `ReadChunk` already distinguishes from an empty chunk.
+      Forget : TerminalId -> int option }
 
 /// Decode the records in `[fromSeq, toSeq)` of a transcript's lines. `None` as the end
 /// means "whatever it has now", which is what a still-running block has. The header sits
@@ -115,7 +127,20 @@ let inMemory () : TranscriptStore =
         fun id fromSeq toSeq ->
             match files.TryGetValue (TerminalId.value id) with
             | false, _ -> []
-            | true, lines -> lines |> List.ofSeq |> recordsIn fromSeq toSeq }
+            | true, lines -> lines |> List.ofSeq |> recordsIn fromSeq toSeq
+      Forget =
+        fun id ->
+            match files.TryGetValue (TerminalId.value id) with
+            | false, _ -> None
+            | true, lines ->
+                let held =
+                    lines
+                    |> Seq.sumBy (fun line ->
+                        match Codec.fromString Codec.transcriptLine line with
+                        | Ok (TranscriptRecordLine r) -> r.Data.Length
+                        | _ -> 0)
+                files.Remove (TerminalId.value id) |> ignore
+                Some held }
 
 /// A transcript store backed by `<directory>/<terminal>.cast` files.
 ///
@@ -193,4 +218,24 @@ let openStore (directory: string) : TranscriptStore =
             if not (existsSync path) then []
             else
                 let lines, _ = readLines path
-                lines |> recordsIn fromSeq toSeq }
+                lines |> recordsIn fromSeq toSeq
+      Forget =
+        fun id ->
+            let path = pathOf id
+            if not (existsSync path) then None
+            else
+                // Measured before the delete, so the truncation event can say how much the
+                // record lost rather than merely that it lost something.
+                let held =
+                    readLines path
+                    |> fst
+                    |> List.sumBy (fun line ->
+                        match Codec.fromString Codec.transcriptLine line with
+                        | Ok (TranscriptRecordLine r) -> r.Data.Length
+                        | _ -> 0)
+                // A live terminal is still being written and must never be forgotten from
+                // under its own file descriptor; the caller only offers closed ones, and this
+                // drops the handle so a reopen starts clean if one ever comes.
+                handles.Remove (TerminalId.value id) |> ignore
+                unlinkSync path
+                Some held }

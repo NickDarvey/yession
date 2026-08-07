@@ -69,6 +69,65 @@ type TranscriptLine =
     | TranscriptHeaderLine of TranscriptHeader
     | TranscriptRecordLine of TranscriptRecord
 
+/// What a transcript keeps, and for how long (Plan 13, stage 3d).
+///
+/// The shape of this is forced by one fact: **a line index IS a sequence number**. It is what
+/// `TerminalBlockStarted.FromSeq` and `TerminalBlockCompleted.ToSeq` point at, what
+/// `TranscriptChunk.firstSeq` slices on, and what every chunk URL is keyed by. So compaction
+/// that removes lines from the front or the middle would renumber everything after it,
+/// invalidating every block range in the event log and every cached chunk at once. A rolling
+/// window over a live transcript is therefore not available, however natural it sounds.
+///
+/// What is available is two things that never renumber anything:
+///
+///   * **A ceiling while the terminal is live.** Past the cap, output stops being kept. What
+///     is given up is the NEWEST output rather than the oldest, which is the opposite of a
+///     window and the only direction that preserves numbering. The same idea the per-block cap
+///     already applies, across a terminal's whole life.
+///   * **Deleting a closed terminal's transcript whole**, once it is older than the retention
+///     age. Numbering cannot shift because the file is gone rather than edited.
+///
+/// Both record what was lost as `TerminalTranscriptTruncated`, which already exists and
+/// already means exactly "output this terminal produced and the transcript did not keep" — a
+/// gap in an audit trail is a stated fact, never a silent one.
+///
+/// **This keeps the chunk route's promise.** `immutable` says a chunk's BYTES never change,
+/// not that a chunk exists for ever: a cache can never serve wrong bytes, and a request for a
+/// deleted transcript is a 404, which is what `ReadChunk` already distinguishes from an empty
+/// chunk. Rewriting a chunk in place would break the promise; deleting one does not.
+module TranscriptRetention =
+
+    /// Bytes of OUTPUT one terminal's transcript keeps across its whole life. Generous enough
+    /// that an ordinary session never meets it, and finite so a runaway `yes` cannot fill a
+    /// disk between the per-block cap and the end of the session.
+    let outputCap = 64 * 1024 * 1024
+
+    /// How long a CLOSED terminal's transcript is kept before it is deleted whole. A week: an
+    /// audit read is a thing people do days later, and a session resumed after a weekend still
+    /// replays. Only closed terminals are ever eligible — a live one is still being written.
+    let closedFor = System.TimeSpan.FromDays 7.0
+
+    /// What survives the cap, and what did not. Both, because the boundary record is PARTLY
+    /// kept — a `Result` could carry one or the other and would have to lie about that one.
+    type Admission =
+        { /// The part written to the transcript. Empty once the cap is met.
+          Keep : string
+          /// Characters dropped, for `TerminalTranscriptTruncated`.
+          Dropped : int }
+
+    /// What to keep of an incoming output record, given how much this terminal's transcript
+    /// has kept already.
+    ///
+    /// Only OUTPUT is capped. Input and resize records are the audit's spine — what the Process
+    /// wrote, and what shape the screen was — and they are tiny, bounded by the number of
+    /// commands rather than by what any of them printed. Dropping those to save space would
+    /// give up the part that answers questions.
+    let admit (kept: int) (incoming: string) : Admission =
+        let room = outputCap - kept
+        if room <= 0 then { Keep = ""; Dropped = incoming.Length }
+        elif incoming.Length <= room then { Keep = incoming; Dropped = 0 }
+        else { Keep = incoming.Substring (0, room); Dropped = incoming.Length - room }
+
 /// Fixed-size chunking of a transcript, for HTTP-cacheable reads — the same construction
 /// `EventChunk` applies to the event log, for the same reason and with the same payoff.
 ///
