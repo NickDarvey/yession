@@ -53,6 +53,24 @@ module TerminalApprovalMode =
             // waiting for a human to approve the runtime's own housekeeping.
             | UserRef _ | PeerRef _ | SessionProcess | System -> false
 
+/// A terminal's screen size in character cells (Plan 13, stage 2b).
+///
+/// One size per terminal, not one per viewer. A pty has a single size and every peer is
+/// looking at the same screen, so a viewer with a smaller viewport scrolls rather than
+/// shrinking everyone else's — resizing the terminal down to its smallest viewer is tmux's
+/// worst inheritance and the reason a shared session there is unusable on a phone.
+type TerminalSize = { Cols : int; Rows : int }
+
+module TerminalSize =
+
+    /// 80x24: what every terminal has defaulted to since the VT100, and what the transcript
+    /// header records when one opens.
+    let default' : TerminalSize = { Cols = 80; Rows = 24 }
+
+    /// Sizes a terminal can actually be. A zero or negative dimension is not a small
+    /// terminal, it is a broken one — and it reaches us from a doc any peer can write.
+    let isValid (size: TerminalSize) : bool = size.Cols > 0 && size.Rows > 0
+
 /// Where a block is in its life.
 ///
 /// `BlockRejected` widens what a block IS, deliberately: a `BlockId` names a proposed

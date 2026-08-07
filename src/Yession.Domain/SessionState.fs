@@ -117,7 +117,12 @@ type SyncedSessionState =
       /// Per-terminal approval mode. An absent entry is `ApproveAgent` — the default is
       /// the absence, so a terminal nobody has configured carries no register restating
       /// what the default already says.
-      TerminalModes : Map<TerminalId, TerminalApprovalMode> }
+      TerminalModes : Map<TerminalId, TerminalApprovalMode>
+      /// Each terminal's size, as a synced register (Plan 13, stage 2b). Synced rather than
+      /// per-viewer because a pty has ONE size and every peer is looking at the same screen:
+      /// resizing to the smallest viewer is tmux's worst inheritance, so a viewer with less
+      /// room scrolls instead. Absent means the default.
+      TerminalSizes : Map<TerminalId, TerminalSize> }
 
 module SyncedSessionState =
 
@@ -130,11 +135,17 @@ module SyncedSessionState =
           SharedBrief = None
           TerminalDrafts = Map.empty
           TerminalQueue = Map.empty
-          TerminalModes = Map.empty }
+          TerminalModes = Map.empty
+          TerminalSizes = Map.empty }
 
     /// A terminal's approval mode, defaulting where none is set.
     let modeOf (terminal: TerminalId) (state: SyncedSessionState) : TerminalApprovalMode =
         state.TerminalModes |> Map.tryFind terminal |> Option.defaultValue ApproveAgent
+
+    /// A terminal's size, defaulting to 80x24 — the size every terminal has ever defaulted
+    /// to, and the one the transcript header records when a terminal opens.
+    let sizeOf (terminal: TerminalId) (state: SyncedSessionState) : TerminalSize =
+        state.TerminalSizes |> Map.tryFind terminal |> Option.defaultValue TerminalSize.default'
 
 /// The queue's total order. `Order` is a float register; ties (possible when two peers
 /// mint concurrently) are broken by `QueueId`, so the order is always a total,

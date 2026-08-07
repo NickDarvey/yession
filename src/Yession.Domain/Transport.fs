@@ -80,6 +80,16 @@ type TerminalFrame =
     /// behind. The exact counterpart of `EventsAvailable`: a hint that triggers a read,
     /// never data.
     | TerminalTranscriptAvailable of TerminalId * nextSeq: int
+    /// The terminal's screen as the Session Process has it, with the transcript position
+    /// it represents (Plan 13, stage 2b) — what a peer joining mid-session renders instead
+    /// of replaying every byte the terminal ever printed.
+    ///
+    /// The seq is what makes it composable with the live feed, exactly as an event offset
+    /// is: render this, then fold records ABOVE that seq. The snapshot may be NEWER than
+    /// its seq (the screen is read after the position is taken), which is the safe
+    /// direction — a client re-folds a record already drawn, and drawing it twice is
+    /// idempotent, whereas a seq ahead of the screen would skip a record for ever.
+    | TerminalSnapshot of TerminalId * seq: int * screen: string
 
 /// The collaborative field a peer's cursor is in — the extension point for presence "in many
 /// places": add a case plus its report/render sites. `DraftBody`/`QueueBody` name the same body

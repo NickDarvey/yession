@@ -22,7 +22,8 @@ type AdaptiveSyncedState =
       SharedBrief : cval<SharedBrief option>
       TerminalDrafts : cmap<string, TerminalDraft>
       TerminalQueue : cmap<string, TerminalQueued>
-      TerminalModes : cmap<string, TerminalApprovalMode> }
+      TerminalModes : cmap<string, TerminalApprovalMode>
+      TerminalSizes : cmap<string, TerminalSize> }
 
 module SyncedStateSync =
 
@@ -61,6 +62,9 @@ module SyncedStateSync =
     let private terminalModesByKey (m: SyncedSessionState) : HashMap<string, TerminalApprovalMode> =
         m.TerminalModes |> Map.toSeq |> Seq.map (fun (k, v) -> TerminalId.value k, v) |> HashMap.ofSeq
 
+    let private terminalSizesByKey (m: SyncedSessionState) : HashMap<string, TerminalSize> =
+        m.TerminalSizes |> Map.toSeq |> Seq.map (fun (k, v) -> TerminalId.value k, v) |> HashMap.ofSeq
+
     /// `Create` for Ylmish's options: build the adaptive companion from a model.
     let create (m: SyncedSessionState) : AdaptiveSyncedState =
         { Drafts = cmap (draftsByKey m)
@@ -69,7 +73,8 @@ module SyncedStateSync =
           SharedBrief = cval m.SharedBrief
           TerminalDrafts = cmap (terminalDraftsByKey m)
           TerminalQueue = cmap (terminalQueueByKey m)
-          TerminalModes = cmap (terminalModesByKey m) }
+          TerminalModes = cmap (terminalModesByKey m)
+          TerminalSizes = cmap (terminalSizesByKey m) }
 
     /// `Update` for Ylmish's options: fold the next model into the companion. Setting
     /// `cmap.Value` yields keyed deltas, so only changed entries re-encode.
@@ -81,6 +86,7 @@ module SyncedStateSync =
         a.TerminalDrafts.Value <- terminalDraftsByKey m
         a.TerminalQueue.Value <- terminalQueueByKey m
         a.TerminalModes.Value <- terminalModesByKey m
+        a.TerminalSizes.Value <- terminalSizesByKey m
 
     /// Per-draft encoding: the map key *is* the author (one draft per client), so `author` is
     /// re-stated only because an empty object would write no Yjs key at all (Ylmish creates a
@@ -132,6 +138,11 @@ module SyncedStateSync =
               "rejectedReason",
               Encode.string (AVal.constant (q.RejectedReason |> Option.defaultValue "")) ]
 
+    let private encodeTerminalSize (s: TerminalSize) : Encoded =
+        Encode.object
+            [ "cols", Encode.int (AVal.constant s.Cols)
+              "rows", Encode.int (AVal.constant s.Rows) ]
+
     let private encodeTerminalMode (m: TerminalApprovalMode) : Encoded =
         Encode.object [ "mode", Encode.string (AVal.constant (TerminalApprovalMode.describe m)) ]
 
@@ -149,7 +160,8 @@ module SyncedStateSync =
               "sharedBrief", Encode.option encodeBrief a.SharedBrief
               "terminalDrafts", Encode.map encodeTerminalDraft (a.TerminalDrafts :> amap<_, _>)
               "terminalQueue", Encode.map encodeTerminalQueued (a.TerminalQueue :> amap<_, _>)
-              "terminalModes", Encode.map encodeTerminalMode (a.TerminalModes :> amap<_, _>) ]
+              "terminalModes", Encode.map encodeTerminalMode (a.TerminalModes :> amap<_, _>)
+              "terminalSizes", Encode.map encodeTerminalSize (a.TerminalSizes :> amap<_, _>) ]
 
     /// The doc-side field shapes, before identifier validation. Bodies are omitted here: they
     /// are top-level `Y.XmlFragment` roots the app resolves via the `BodyRegistry`, never part
@@ -213,6 +225,13 @@ module SyncedStateSync =
                   ApprovedBy = defaultArg approvedBy ""
                   RejectedBy = defaultArg rejectedBy ""
                   RejectedReason = defaultArg rejectedReason "" }
+        }
+
+    let private decodeTerminalSize<'m> : Decoder<'m, TerminalSize> =
+        Decode.object {
+            let! cols = Decode.object.optional "cols" Decode.int
+            let! rows = Decode.object.optional "rows" Decode.int
+            return { Cols = defaultArg cols 0; Rows = defaultArg rows 0 }
         }
 
     let private decodeTerminalMode<'m> : Decoder<'m, string> =
@@ -290,6 +309,16 @@ module SyncedStateSync =
                       RejectedReason = (if f.RejectedReason = "" then None else Some f.RejectedReason) }
             | _ -> acc)
 
+    let private terminalSizesToDomain (h: HashMap<string, TerminalSize>) : Map<TerminalId, TerminalSize> =
+        (Map.empty, HashMap.toSeq h)
+        ||> Seq.fold (fun acc (key, size) ->
+            match TerminalId.create key with
+            // An unusable size is dropped, which reads back as the DEFAULT rather than as a
+            // terminal zero columns wide. Same direction as an unreadable mode: absent means
+            // the default, and the default is always something a terminal can be.
+            | Ok terminal when TerminalSize.isValid size -> acc |> Map.add terminal size
+            | _ -> acc)
+
     let private terminalModesToDomain (h: HashMap<string, string>) : Map<TerminalId, TerminalApprovalMode> =
         (Map.empty, HashMap.toSeq h)
         ||> Seq.fold (fun acc (key, raw) ->
@@ -310,6 +339,7 @@ module SyncedStateSync =
             let! terminalDrafts = Decode.object.optional "terminalDrafts" (Decode.map decodeTerminalDraft)
             let! terminalQueue = Decode.object.optional "terminalQueue" (Decode.map decodeTerminalQueued)
             let! terminalModes = Decode.object.optional "terminalModes" (Decode.map decodeTerminalMode)
+            let! terminalSizes = Decode.object.optional "terminalSizes" (Decode.map decodeTerminalSize)
             return
                 { Drafts = drafts |> Option.map draftsToDomain |> Option.defaultValue Map.empty
                   Queue = queue |> Option.map queueToDomain |> Option.defaultValue Map.empty
@@ -320,7 +350,9 @@ module SyncedStateSync =
                   TerminalQueue =
                     terminalQueue |> Option.map terminalQueueToDomain |> Option.defaultValue Map.empty
                   TerminalModes =
-                    terminalModes |> Option.map terminalModesToDomain |> Option.defaultValue Map.empty }
+                    terminalModes |> Option.map terminalModesToDomain |> Option.defaultValue Map.empty
+                  TerminalSizes =
+                    terminalSizes |> Option.map terminalSizesToDomain |> Option.defaultValue Map.empty }
         }
 
     open Fable.Core
@@ -417,6 +449,10 @@ module SyncedStateSync =
                   RejectedBy = entryString entry "rejectedBy"
                   RejectedReason = entryString entry "rejectedReason" })
         let terminalModesH = foldRoot doc "terminalModes" (fun entry -> entryString entry "mode")
+        let terminalSizesH =
+            foldRoot doc "terminalSizes" (fun entry ->
+                { Cols = entry.get "cols" |> Option.map (unbox<int>) |> Option.defaultValue 0
+                  Rows = entry.get "rows" |> Option.map (unbox<int>) |> Option.defaultValue 0 })
         Ok
             { Drafts = draftsToDomain draftsH
               Queue = queueToDomain queueH
@@ -424,7 +460,8 @@ module SyncedStateSync =
               SharedBrief = brief
               TerminalDrafts = terminalDraftsToDomain terminalDraftsH
               TerminalQueue = terminalQueueToDomain terminalQueueH
-              TerminalModes = terminalModesToDomain terminalModesH }
+              TerminalModes = terminalModesToDomain terminalModesH
+              TerminalSizes = terminalSizesToDomain terminalSizesH }
 
     /// The origin tag on the Session Process's own doc writes (the drain's removals),
     /// distinct from the remote-apply origin so they broadcast like any local update.
