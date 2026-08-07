@@ -76,6 +76,7 @@ type SessionEvent =
     | TerminalClosed of TerminalClosed
     | TerminalBlockStarted of TerminalBlockStarted
     | TerminalBlockCompleted of TerminalBlockCompleted
+    | TerminalCommandRejected of TerminalCommandRejected
     | TerminalTranscriptTruncated of TerminalTranscriptTruncated
 
 and SessionCreated =
@@ -199,6 +200,31 @@ and TerminalBlockStarted =
       Command : string
       /// The transcript line index at which this block's output begins.
       FromSeq : int }
+
+/// A queued command a peer refused (Plan 13, stage 2a). The other half of the approval
+/// gate: a log that records every yes and no no is the weaker thing wearing the stronger
+/// thing's face, and "the agent proposed this and a human said no" is the more interesting
+/// half of the two.
+///
+/// Deliberately NOT a `SessionCommand`. A command frame from a peer that drops mid-flight
+/// is lost, and the log stays the Session Process's alone to write — so a peer writes
+/// `RejectedBy` on the doc entry and the drain, which is already the queue's single
+/// consumer, observes it and appends this.
+and TerminalCommandRejected =
+    { TerminalId : TerminalId
+      QueueId : QueueId
+      /// Minted here, exactly as `TerminalBlockStarted` mints one, rather than derived by
+      /// each client's fold from the `QueueId`. A `BlockId` names a proposed command and
+      /// its outcome, not a process — so a refusal has one, and a handle that is
+      /// addressable later does not depend on a derivation rule living nowhere in the data.
+      BlockId : BlockId
+      /// Whose command it was. Usually the agent's; that is the point of recording this.
+      Author : ActorRef
+      RejectedBy : ActorRef
+      /// The command line, snapshotted because the doc entry is deleted immediately after.
+      /// A record saying *something* was rejected is not a record.
+      Command : string
+      Reason : string option }
 
 and TerminalBlockCompleted =
     { TerminalId : TerminalId

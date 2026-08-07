@@ -66,7 +66,19 @@ type TerminalQueued =
       /// stored: it is computed from the terminal's mode and `Author` at drain time
       /// (`TerminalApprovalMode.requiresApproval`), so changing the mode re-decides every
       /// waiting entry instead of leaving stale verdicts behind.
-      ApprovedBy : PeerId option }
+      ApprovedBy : PeerId option
+      /// The peer who refused it, if one has. A register beside `ApprovedBy` rather than a
+      /// deletion, so a refusal merges and survives a disconnect exactly as an approval
+      /// does, and every peer sees WHO said no before the entry goes.
+      ///
+      /// Deleting the entry was the old answer and it was the wrong symmetry: a queued
+      /// message is your own text and removing it is a withdrawal, but a queued command is
+      /// frequently the agent's, and refusing it is the review gate doing the one thing it
+      /// exists for. The queue could not even tell the two apart.
+      RejectedBy : PeerId option
+      /// Why it was refused, when the peer said. Optional because "no" is a complete
+      /// answer; the reason is what makes it a useful one.
+      RejectedReason : string option }
 
 /// The name of the top-level `Y.XmlFragment` root that holds a draft/queue body. Stable across
 /// peers so every replica's `BodyRegistry` and editor bind to the same fragment (root types

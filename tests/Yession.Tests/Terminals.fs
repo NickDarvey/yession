@@ -95,7 +95,19 @@ let private approvalTests =
 // --- The drain's decision ------------------------------------------------------------------
 
 let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order: float) (approved: PeerId option) =
-    { QueueId = queue id; Terminal = terminal; Author = author; Order = order; ApprovedBy = approved }
+    { QueueId = queue id
+      Terminal = terminal
+      Author = author
+      Order = order
+      ApprovedBy = approved
+      RejectedBy = None
+      RejectedReason = None }
+
+/// The same entry, refused. Kept beside `entry` so a test says which of the two verdicts
+/// it is exercising rather than threading a `None` through every call that is not about
+/// rejection.
+let private rejected (e: TerminalQueued) (by: PeerId) (reason: string option) =
+    { e with RejectedBy = Some by; RejectedReason = reason }
 
 let private queueOf entries =
     entries |> List.map (fun (e: TerminalQueued) -> e.QueueId, e) |> Map.ofList
@@ -243,6 +255,124 @@ let private projectionTests =
                       SessionEvent.TerminalTranscriptTruncated
                           { TerminalId = terminalA; BlockId = Some (block "1"); DroppedBytes = 512 } ]
             Expect.equal (TerminalProjection.tryFind terminalA proj |> Option.get).DroppedBytes 512 "the loss is counted"
+    ]
+
+// --- Rejection as an answer (Plan 13, stage 2a) ------------------------------------------
+
+let private rejectedEvent (id: TerminalId) (q: string) (b: string) (by: PeerId) (reason: string option) =
+    SessionEvent.TerminalCommandRejected
+        { TerminalId = id
+          QueueId = queue q
+          BlockId = block b
+          Author = ActorRef.Agent
+          RejectedBy = PeerRef by
+          Command = "rm -rf /"
+          Reason = reason }
+
+let private rejectionTests =
+    testList "Terminal rejection" [
+        testCase "a refused entry never runs, under ANY mode — AutoRun included" <| fun () ->
+            // The whole point of the gate order: a refusal outranks a policy that would
+            // otherwise have run the command without asking anyone.
+            for mode in [ AutoRun; ApproveAgent; ApproveAll ] do
+                let plan =
+                    planWith Set.empty Set.empty allOpen (fun _ -> mode)
+                        [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 (Some ada)) bob (Some "no") ]
+                Expect.isEmpty plan.Ready (sprintf "nothing runs under %A" mode)
+                Expect.equal
+                    (plan.Rejections |> List.map (fun e -> QueueId.value e.QueueId))
+                    [ "q-a1" ]
+                    (sprintf "and the refusal is planned under %A" mode)
+
+        testCase "an approval already granted does not override a later refusal" <| fun () ->
+            let plan =
+                planWith Set.empty Set.empty allOpen (fun _ -> ApproveAll)
+                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 (Some ada)) bob None ]
+            Expect.isEmpty plan.Ready "approved and then refused is refused"
+
+        testCase "a refused head holds its queue rather than being skipped over" <| fun () ->
+            // Same property the approval gate has: a verdict must not silently REORDER
+            // execution. The entry behind it waits until the refusal is drained away.
+            let plan =
+                planWith Set.empty Set.empty allOpen (fun _ -> AutoRun)
+                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None
+                      entry "a2" terminalA (PeerRef ada) 2.0 None ]
+            Expect.isEmpty plan.Ready "the terminal waits at its refused head"
+
+        testCase "a refusal is planned for a terminal that is busy or closed" <| fun () ->
+            // Refusing touches no process, so it does not queue behind one. Someone can
+            // clear a bad queue while a colleague's command is still running.
+            let plan =
+                planWith Set.empty (Set.singleton (TerminalId.value terminalA)) (fun _ -> false) (fun _ -> AutoRun)
+                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None ]
+            Expect.equal (List.length plan.Rejections) 1 "the refusal is recorded regardless"
+            Expect.isEmpty plan.Ready "and nothing runs"
+
+        testCase "a rejected QueueId folds into the consumed set, so it can never run after" <| fun () ->
+            let consumed = rejectedEvent terminalA "a1" "1" bob None |> TerminalQueueDrain.consumedOf
+            Expect.equal consumed (Some "q-a1") "the rejection is the exactly-once anchor"
+            let plan =
+                planWith (Set.singleton "q-a1") Set.empty allOpen (fun _ -> AutoRun)
+                    [ entry "a1" terminalA ActorRef.Agent 1.0 None ]
+            Expect.isEmpty plan.Ready "an entry already refused in the log never runs"
+            Expect.isEmpty plan.Rejections "nor is it refused a second time"
+            Expect.equal
+                (plan.Removals |> List.map QueueId.value)
+                [ "q-a1" ]
+                "it is simply swept out of the doc"
+
+        testCase "the reject/drain race leaves exactly one outcome, either way round" <| fun () ->
+            // Under AutoRun a human can press reject in the same tick the drain takes the
+            // entry. Whichever event reaches the log first wins; the loser is dropped as
+            // already consumed. Neither side needs a lock.
+            let started =
+                SessionEvent.TerminalBlockStarted
+                    { TerminalId = terminalA
+                      BlockId = block "1"
+                      QueueId = Some (queue "a1")
+                      Author = ActorRef.Agent
+                      ApprovedBy = None
+                      Command = "make"
+                      FromSeq = 0 }
+            let rejection = rejectedEvent terminalA "a1" "2" bob None
+            for winner in [ started; rejection ] do
+                let consumed =
+                    [ winner ] |> List.choose TerminalQueueDrain.consumedOf |> Set.ofList
+                let plan =
+                    planWith consumed Set.empty allOpen (fun _ -> AutoRun)
+                        [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None ]
+                Expect.isEmpty plan.Ready "the loser does not run it"
+                Expect.isEmpty plan.Rejections "and does not record a second verdict"
+
+        testCase "the projection shows the refusal in line, with who and why" <| fun () ->
+            let proj =
+                fold
+                    [ opened terminalA "build"
+                      started terminalA "1" "make" 0
+                      completed terminalA "1" (CommandSucceeded 0) 3
+                      rejectedEvent terminalA "a1" "2" bob (Some "not on prod") ]
+            let view = TerminalProjection.tryFind terminalA proj |> Option.get
+            Expect.equal (view.Blocks |> List.map (fun b -> b.Command)) [ "make"; "rm -rf /" ] "beside what did run"
+            let refusal = view.Blocks |> List.last
+            Expect.equal refusal.Status (BlockRejected (PeerRef bob, Some "not on prod")) "named, with the reason"
+            Expect.equal refusal.Author ActorRef.Agent "and whose command it was"
+            Expect.equal refusal.ApprovedBy None "nobody approved it — someone did the opposite"
+            Expect.equal (refusal.FromSeq, refusal.ToSeq) (0, Some 0) "an empty range, because it produced nothing"
+
+        testCase "the rejection fold is idempotent, so overlapping pages are safe" <| fun () ->
+            let events = [ opened terminalA "build"; rejectedEvent terminalA "a1" "2" bob None ]
+            let twice = fold (events @ events)
+            Expect.equal
+                (List.length (TerminalProjection.tryFind terminalA twice |> Option.get).Blocks)
+                1
+                "a replayed refusal is not a second block"
+
+        testCase "the event round-trips" <| fun () ->
+            let event = rejectedEvent terminalA "a1" "2" bob (Some "not on prod")
+            let encoded = Codec.toString Codec.sessionEvent event
+            match Codec.fromString Codec.sessionEvent encoded with
+            | Ok decoded -> Expect.equal decoded event "actor, reason and command all survive"
+            | Error e -> failwith e
     ]
 
 // --- The agent's terminal digest (Plan 13, stage 3a) -------------------------------------
@@ -887,6 +1017,7 @@ let tests =
         approvalTests
         drainTests
         projectionTests
+        rejectionTests
         digestTests
         ansiTests
         transcriptTests

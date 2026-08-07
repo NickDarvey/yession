@@ -126,7 +126,11 @@ module SyncedStateSync =
               "author", Encode.string (AVal.constant (ActorRef.token q.Author))
               "order", Encode.float (AVal.constant q.Order)
               "approvedBy",
-              Encode.string (AVal.constant (q.ApprovedBy |> Option.map PeerId.value |> Option.defaultValue "")) ]
+              Encode.string (AVal.constant (q.ApprovedBy |> Option.map PeerId.value |> Option.defaultValue ""))
+              "rejectedBy",
+              Encode.string (AVal.constant (q.RejectedBy |> Option.map PeerId.value |> Option.defaultValue ""))
+              "rejectedReason",
+              Encode.string (AVal.constant (q.RejectedReason |> Option.defaultValue "")) ]
 
     let private encodeTerminalMode (m: TerminalApprovalMode) : Encoded =
         Encode.object [ "mode", Encode.string (AVal.constant (TerminalApprovalMode.describe m)) ]
@@ -182,7 +186,9 @@ module SyncedStateSync =
         { Terminal : string
           Author : string
           Order : float
-          ApprovedBy : string }
+          ApprovedBy : string
+          RejectedBy : string
+          RejectedReason : string }
 
     /// A terminal draft entry: the queue key it becomes when sent. Both ids come from the
     /// map key, so only this crosses.
@@ -198,11 +204,15 @@ module SyncedStateSync =
             let! author = Decode.object.required "author" Decode.string
             let! order = Decode.object.optional "order" Decode.float
             let! approvedBy = Decode.object.optional "approvedBy" Decode.string
+            let! rejectedBy = Decode.object.optional "rejectedBy" Decode.string
+            let! rejectedReason = Decode.object.optional "rejectedReason" Decode.string
             return
                 { Terminal = terminal
                   Author = author
                   Order = defaultArg order 0.0
-                  ApprovedBy = defaultArg approvedBy "" }
+                  ApprovedBy = defaultArg approvedBy ""
+                  RejectedBy = defaultArg rejectedBy ""
+                  RejectedReason = defaultArg rejectedReason "" }
         }
 
     let private decodeTerminalMode<'m> : Decoder<'m, string> =
@@ -256,10 +266,28 @@ module SyncedStateSync =
                 let approvedBy =
                     if f.ApprovedBy = "" then None
                     else match PeerId.create f.ApprovedBy with Ok p -> Some p | Error _ -> None
+                // A refusal reads the same way, and the direction is worth stating because
+                // it is NOT the same safety argument. An unreadable approver fails safe by
+                // construction — no approval, nothing runs. An unreadable refuser falls
+                // back to the approval gate instead, which under `AutoRun` means the
+                // command runs. That is acceptable only because the value round-trips
+                // through our own encoder (`PeerId.value`), so a non-empty one that will
+                // not parse means a doc somebody corrupted by hand rather than anything a
+                // replica can produce — and in that case the entry has exactly the
+                // protection it had before the refusal was written.
+                let rejectedBy =
+                    if f.RejectedBy = "" then None
+                    else match PeerId.create f.RejectedBy with Ok p -> Some p | Error _ -> None
                 acc
                 |> Map.add
                     id
-                    { QueueId = id; Terminal = terminal; Author = author; Order = f.Order; ApprovedBy = approvedBy }
+                    { QueueId = id
+                      Terminal = terminal
+                      Author = author
+                      Order = f.Order
+                      ApprovedBy = approvedBy
+                      RejectedBy = rejectedBy
+                      RejectedReason = (if f.RejectedReason = "" then None else Some f.RejectedReason) }
             | _ -> acc)
 
     let private terminalModesToDomain (h: HashMap<string, string>) : Map<TerminalId, TerminalApprovalMode> =
@@ -385,7 +413,9 @@ module SyncedStateSync =
                 { Terminal = entryString entry "terminal"
                   Author = entryString entry "author"
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
-                  ApprovedBy = entryString entry "approvedBy" })
+                  ApprovedBy = entryString entry "approvedBy"
+                  RejectedBy = entryString entry "rejectedBy"
+                  RejectedReason = entryString entry "rejectedReason" })
         let terminalModesH = foldRoot doc "terminalModes" (fun entry -> entryString entry "mode")
         Ok
             { Drafts = draftsToDomain draftsH

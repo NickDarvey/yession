@@ -194,6 +194,12 @@ let private promptOf (context: AgentContextPack) : string =
                     | BlockFinished (CommandFailed code) -> sprintf "exit %d" code
                     | BlockFinished (CommandExecutionFailed reason) -> sprintf "could not run: %s" reason
                     | BlockFinished CommandTimedOut -> "timed out"
+                    // The agent is told it was refused, and by whom. This is the feedback
+                    // the review gate owes whoever it refused: without it a rejected
+                    // command is indistinguishable from one that vanished, and the model
+                    // reasonably tries again.
+                    | BlockRejected (by, Some why) -> sprintf "refused by %s: %s" (label by) why
+                    | BlockRejected (by, None) -> sprintf "refused by %s" (label by)
                 let approved =
                     match block.ApprovedBy with
                     | Some actor -> sprintf ", approved by %s" (label actor)

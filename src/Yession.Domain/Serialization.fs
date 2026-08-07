@@ -417,6 +417,27 @@ module Codec =
                   TerminalBlockCompleted.Result = get.Required.Field "result" commandResult.Decode
                   TerminalBlockCompleted.ToSeq = get.Required.Field "toSeq" Decode.int }) }
 
+    let private terminalCommandRejected : Codec<TerminalCommandRejected> =
+        { Encode =
+            fun (p: TerminalCommandRejected) ->
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "queueId", queueId.Encode p.QueueId
+                      "blockId", blockId.Encode p.BlockId
+                      "author", actor.Encode p.Author
+                      "rejectedBy", actor.Encode p.RejectedBy
+                      "command", Encode.string p.Command
+                      "reason", Encode.option Encode.string p.Reason ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalCommandRejected.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalCommandRejected.QueueId = get.Required.Field "queueId" queueId.Decode
+                  TerminalCommandRejected.BlockId = get.Required.Field "blockId" blockId.Decode
+                  TerminalCommandRejected.Author = get.Required.Field "author" actor.Decode
+                  TerminalCommandRejected.RejectedBy = get.Required.Field "rejectedBy" actor.Decode
+                  TerminalCommandRejected.Command = get.Required.Field "command" Decode.string
+                  TerminalCommandRejected.Reason = get.Required.Field "reason" (Decode.option Decode.string) }) }
+
     let private terminalTranscriptTruncated : Codec<TerminalTranscriptTruncated> =
         { Encode =
             fun (p: TerminalTranscriptTruncated) ->
@@ -484,6 +505,8 @@ module Codec =
                     Encode.object [ "type", Encode.string "terminalBlockStarted"; "payload", terminalBlockStarted.Encode p ]
                 | TerminalBlockCompleted p ->
                     Encode.object [ "type", Encode.string "terminalBlockCompleted"; "payload", terminalBlockCompleted.Encode p ]
+                | TerminalCommandRejected p ->
+                    Encode.object [ "type", Encode.string "terminalCommandRejected"; "payload", terminalCommandRejected.Encode p ]
                 | TerminalTranscriptTruncated p ->
                     Encode.object [ "type", Encode.string "terminalTranscriptTruncated"; "payload", terminalTranscriptTruncated.Encode p ])
           Decode =
@@ -515,6 +538,7 @@ module Codec =
                 | "terminalClosed" -> Decode.field "payload" terminalClosed.Decode |> Decode.map TerminalClosed
                 | "terminalBlockStarted" -> Decode.field "payload" terminalBlockStarted.Decode |> Decode.map TerminalBlockStarted
                 | "terminalBlockCompleted" -> Decode.field "payload" terminalBlockCompleted.Decode |> Decode.map TerminalBlockCompleted
+                | "terminalCommandRejected" -> Decode.field "payload" terminalCommandRejected.Decode |> Decode.map TerminalCommandRejected
                 | "terminalTranscriptTruncated" ->
                     Decode.field "payload" terminalTranscriptTruncated.Decode |> Decode.map TerminalTranscriptTruncated
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }

@@ -67,6 +67,7 @@ module ConversationProjection =
         | SessionEvent.TerminalClosed _
         | SessionEvent.TerminalBlockStarted _
         | SessionEvent.TerminalBlockCompleted _
+        | SessionEvent.TerminalCommandRejected _
         | SessionEvent.TerminalTranscriptTruncated _ -> proj
         | AgentMessageStarted a ->
             { Items =
