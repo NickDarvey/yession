@@ -339,26 +339,30 @@ let private liveTests =
                         { SessionLaunchRequest.SessionId = SessionId.create "live-tools" |> expect }
                 let managed = (m.Registered ()) |> List.head
                 let! a = connectClient (managed.BootstrapUri + "signal") (managed.Host.MintPeerToken ()) "ada" "Ada"
-                do! compose a a.Hello.PeerId "Use your execute_command tool to run the executable `node` with arguments `-e` and `console.log(6*7)`, then reply with just the number it printed."
+                // A shell command LINE, not an executable plus argv — that is what
+                // `execute_command` takes after Plan 13 stage 3b.
+                do! compose a a.Hello.PeerId "Use your execute_command tool to run `node -e 'console.log(6*7)'`, then reply with just the number it printed."
                 a.Connection.SendDraft a.Hello.PeerId
 
                 do! a.Runner.WaitFor (fun model ->
                         model.Conversation.Items
                         |> List.exists (fun i -> i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "42"))
 
-                // The command ran through the scoped capability: its lifecycle is
-                // in the event log and the environment started lazily for it.
+                // The command ran through the scoped capability, and its lifecycle is a
+                // TERMINAL BLOCK in the event log (Plan 13, stage 3b): the Step-13 command
+                // events retired with the merged tool. The environment still started lazily
+                // for it — opening the agent's terminal is what identifies the need now.
                 let! page = managed.Host.Log.Read None Int32.MaxValue
                 let sawCommand =
                     page.Events
                     |> List.exists (fun e ->
                         match e.Event with
-                        | CommandCompleted c -> c.Result = CommandSucceeded 0
+                        | SessionEvent.TerminalBlockCompleted b -> b.Result = CommandSucceeded 0
                         | _ -> false)
                 let sawEnvironment =
                     page.Events
                     |> List.exists (fun e -> match e.Event with EnvironmentStarted _ -> true | _ -> false)
-                Expect.isTrue sawCommand "the command lifecycle is events"
+                Expect.isTrue sawCommand "the command ran as a block, and its lifecycle is events"
                 Expect.isTrue sawEnvironment "the environment started lazily for the tool call"
 
                 do! a.Channel.Close ()
