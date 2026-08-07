@@ -114,11 +114,15 @@ let private queueOf entries =
 
 let private allOpen (_: TerminalId) = true
 let private planWith consumed busy isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed busy Set.empty isOpen modeOf (queueOf entries)
+    TerminalQueueDrain.plan consumed busy Set.empty Set.empty isOpen modeOf (queueOf entries)
 
 /// The same plan with a lease in play (Plan 13, stage 2e).
 let private planLeased consumed busy leased isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed busy leased isOpen modeOf (queueOf entries)
+    TerminalQueueDrain.plan consumed busy leased Set.empty isOpen modeOf (queueOf entries)
+
+/// ...and with the shell's marks gone (Plan 13, stage 2f).
+let private planLost consumed lost isOpen modeOf entries =
+    TerminalQueueDrain.plan consumed Set.empty Set.empty lost isOpen modeOf (queueOf entries)
 
 let private drainTests =
     testList "Terminal drain plan" [
@@ -647,6 +651,68 @@ let private leaseTests =
                 "a closed terminal has no stdin to hold"
     ]
 
+let private integrationTests =
+    testList "Integration lost (Plan 13, stage 2f)" [
+        testCase "a terminal that stopped marking holds its queue" <| fun () ->
+            // Draining into an unmarked shell would produce blocks that never close: the
+            // Process would not know when the command started or finished. Holding says so.
+            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
+            let lost = Set.singleton (TerminalId.value terminalA)
+            Expect.isEmpty (planLost Set.empty lost allOpen (fun _ -> AutoRun) entries).Ready "nothing runs"
+            Expect.equal
+                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty lost allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (Some TerminalQueueDrain.AwaitingIntegration)
+                "and the hold names the repair, not a person"
+
+        testCase "re-arming yields the entry Ready, unchanged" <| fun () ->
+            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
+            Expect.equal
+                ((planLost Set.empty Set.empty allOpen (fun _ -> AutoRun) entries).Ready
+                 |> List.map (fun e -> QueueId.value e.QueueId))
+                [ "q-a1" ]
+                "the command that was held runs once marking is back"
+
+        testCase "a refusal is planned even while the terminal is not marking" <| fun () ->
+            // Refusing touches no pty, so it outranks this exactly as it outranks the lease
+            // and the mode: a bad queue can be cleared on a terminal nobody can run in.
+            let plan =
+                planLost Set.empty (Set.singleton (TerminalId.value terminalA)) allOpen (fun _ -> AutoRun)
+                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None ]
+            Expect.equal (List.length plan.Rejections) 1 "the refusal is recorded"
+            Expect.isEmpty plan.Ready "and still nothing runs"
+
+        testCase "the agent is told the terminal is not free, and does not wait on it" <| fun () ->
+            // Only a person re-arming brings marking back, so this is an unbounded wait like
+            // an approval — it returns at once rather than burning a deadline.
+            Expect.equal
+                (TerminalCommandWait.step
+                    false
+                    false
+                    { TerminalCommandWait.Observation.Block = None
+                      TerminalCommandWait.Observation.InQueue = true
+                      TerminalCommandWait.Observation.IsHead = true
+                      TerminalCommandWait.Observation.Hold = Some TerminalQueueDrain.AwaitingIntegration })
+                (TerminalCommandWait.Return TerminalCommandAwaitingTerminal)
+                "no waiting at all"
+
+        testCase "the projection remembers, and forgets on repair" <| fun () ->
+            let lost =
+                fold
+                    [ opened terminalA "build"
+                      SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = Some (block "1") } ]
+            Expect.isTrue
+                (TerminalProjection.tryFind terminalA lost |> Option.map (fun t -> t.IntegrationLost) |> Option.defaultValue false)
+                "every client sees it, because it is an event rather than a screen"
+            let repaired =
+                fold
+                    [ opened terminalA "build"
+                      SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = None }
+                      SessionEvent.TerminalIntegrationRestored { TerminalId = terminalA } ]
+            Expect.isFalse
+                (TerminalProjection.tryFind terminalA repaired |> Option.map (fun t -> t.IntegrationLost) |> Option.defaultValue true)
+                "and stops seeing it once somebody re-armed"
+    ]
+
 let private idleLeaseTests =
     testList "The idle-lease timeout" [
         let idle (minutes: float) = System.TimeSpan.FromMinutes minutes
@@ -744,7 +810,7 @@ let private leaseGateTests =
             let plan = planLeased Set.empty Set.empty leased allOpen (fun _ -> AutoRun) entries
             Expect.isEmpty plan.Ready "the queue waits for the terminal"
             Expect.equal
-                (TerminalQueueDrain.holdOf Set.empty Set.empty leased allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (TerminalQueueDrain.holdOf Set.empty Set.empty leased Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
                 (Some TerminalQueueDrain.AwaitingTerminal)
                 "and the hold names the terminal, not an approval"
 
@@ -753,14 +819,14 @@ let private leaseGateTests =
             let plan = planLeased Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) entries
             Expect.equal (plan.Ready |> List.map (fun e -> QueueId.value e.QueueId)) [ "q-a1" ] "it runs on release"
             Expect.equal
-                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
                 None
                 "nothing is holding it"
 
         testCase "the three holds are told apart" <| fun () ->
             let entries = [ entry "a1" terminalA ActorRef.Agent 1.0 None ]
             let hold busy leased mode =
-                TerminalQueueDrain.holdOf Set.empty busy leased allOpen (fun _ -> mode) (queueOf entries) terminalA
+                TerminalQueueDrain.holdOf Set.empty busy leased Set.empty allOpen (fun _ -> mode) (queueOf entries) terminalA
             let busyA = Set.singleton (TerminalId.value terminalA)
             Expect.equal (hold busyA Set.empty AutoRun) (Some TerminalQueueDrain.AwaitingBlock) "a block is running"
             Expect.equal (hold Set.empty busyA AutoRun) (Some TerminalQueueDrain.AwaitingTerminal) "a peer is typing"
@@ -901,6 +967,11 @@ let private leaseCommandTests =
                                 calls.Add (sprintf "release:%s:%A" (TerminalId.value id) by)
                                 return Error "another peer holds this terminal"
                             })
+                        (fun id ->
+                            async {
+                                calls.Add (sprintf "rearm:%s" (TerminalId.value id))
+                                return Ok ()
+                            })
                         PeerRef
                 let! taken = handle ada (TakeTerminalLease terminalA)
                 Expect.equal taken CommandAccepted "a take always succeeds — it steals rather than asks"
@@ -909,11 +980,16 @@ let private leaseCommandTests =
                     released
                     (CommandRejected "another peer holds this terminal")
                     "and a release you are not entitled to is refused, with the reason"
+                // Re-arming carries no actor at all: it repairs a terminal rather than taking
+                // anything from anyone, so who pressed it decides nothing.
+                let! rearmed = handle bob (RearmTerminal terminalA)
+                Expect.equal rearmed CommandAccepted "any peer may re-arm"
                 Expect.equal
                     (List.ofSeq calls)
                     [ sprintf "take:%s:%A" (TerminalId.value terminalA) (PeerRef ada)
-                      sprintf "release:%s:%A" (TerminalId.value terminalA) (PeerRef ada) ]
-                    "both carry the asking peer's actor, not the terminal's owner"
+                      sprintf "release:%s:%A" (TerminalId.value terminalA) (PeerRef ada)
+                      sprintf "rearm:%s" (TerminalId.value terminalA) ]
+                    "the lease commands carry the asking peer's actor; the repair carries none"
             }
     ]
 
@@ -1143,7 +1219,10 @@ let private codecTests =
                   SessionEvent.TerminalLeaseReleased
                       { TerminalId = terminalA; Was = ActorRef.Agent; Reason = LeaseHolderGone }
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle } ]
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle }
+                  SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = Some (block "1") }
+                  SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = None }
+                  SessionEvent.TerminalIntegrationRestored { TerminalId = terminalA } ]
             for event in events do
                 let encoded = Codec.toString Codec.sessionEvent event
                 Expect.equal (Codec.fromString Codec.sessionEvent encoded) (Ok event) ("round-trips: " + encoded)
@@ -1169,6 +1248,7 @@ let private codecTests =
                   Command (Request (RequestId.fresh (), CloseTerminal terminalA))
                   Command (Request (RequestId.fresh (), TakeTerminalLease terminalA))
                   Command (Request (RequestId.fresh (), ReleaseTerminalLease terminalA))
+                  Command (Request (RequestId.fresh (), RearmTerminal terminalA))
                   Presence
                       { PeerId = ada
                         DisplayName = "Ada"
@@ -1592,6 +1672,7 @@ let tests =
         leaseTests
         flipTests
         idleLeaseTests
+        integrationTests
         leaseGateTests
         leaseCommandTests
         waitTests

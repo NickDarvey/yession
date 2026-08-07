@@ -125,6 +125,11 @@ module TerminalQueueDrain =
         | AwaitingTerminal
         /// A block is already running here. One at a time, per terminal.
         | AwaitingBlock
+        /// The shell stopped emitting marks (Plan 13, stage 2f). Sits beside `AwaitingTerminal`
+        /// because both say the same thing — the pty is not ours to type into — but it is
+        /// reported apart because they resolve differently: one ends when a person finishes,
+        /// this one when somebody re-arms the instrumentation.
+        | AwaitingIntegration
         /// The terminal is closed, or has nothing queued.
         | NotWaiting
 
@@ -152,6 +157,7 @@ module TerminalQueueDrain =
         (rejected: Set<string>)
         (busy: Set<string>)
         (leased: Set<string>)
+        (lost: Set<string>)
         (isOpen: TerminalId -> bool)
         (modeOf: TerminalApprovalMode)
         (queue: Map<QueueId, TerminalQueued>)
@@ -173,6 +179,10 @@ module TerminalQueueDrain =
             // is already held by `busy`. The gap this closes is a terminal live with NO block
             // running: someone pressed "take terminal" and is typing at the shell.
             elif Set.contains (TerminalId.value terminal) leased then Choice2Of2 AwaitingTerminal
+            // Marks are gone, so a command written here could not be bounded: we would not
+            // know when it started or finished. Holding is the honest answer — draining into
+            // an unmarked shell would produce blocks that never close.
+            elif Set.contains (TerminalId.value terminal) lost then Choice2Of2 AwaitingIntegration
             elif TerminalApprovalMode.requiresApproval modeOf entry.Author && Option.isNone entry.ApprovedBy then
                 Choice2Of2 AwaitingApproval
             else Choice1Of2 entry
@@ -183,6 +193,7 @@ module TerminalQueueDrain =
         (consumed: Set<string>)
         (busy: Set<string>)
         (leased: Set<string>)
+        (lost: Set<string>)
         (isOpen: TerminalId -> bool)
         (modeOf: TerminalId -> TerminalApprovalMode)
         (queue: Map<QueueId, TerminalQueued>)
@@ -196,7 +207,7 @@ module TerminalQueueDrain =
             |> List.filter (fun entry -> Option.isSome entry.RejectedBy && not (alreadyConsumed entry))
             |> List.map (fun entry -> QueueId.value entry.QueueId)
             |> Set.ofList
-        match gate alreadyConsumed rejected busy leased isOpen (modeOf terminal) queue terminal with
+        match gate alreadyConsumed rejected busy leased lost isOpen (modeOf terminal) queue terminal with
         | Choice1Of2 _ -> None
         | Choice2Of2 hold -> Some hold
 
@@ -208,6 +219,7 @@ module TerminalQueueDrain =
         (consumed: Set<string>)
         (busy: Set<string>)
         (leased: Set<string>)
+        (lost: Set<string>)
         (isOpen: TerminalId -> bool)
         (modeOf: TerminalId -> TerminalApprovalMode)
         (queue: Map<QueueId, TerminalQueued>)
@@ -239,7 +251,7 @@ module TerminalQueueDrain =
         let ready =
             terminals
             |> List.choose (fun terminal ->
-                match gate alreadyConsumed rejected busy leased isOpen (modeOf terminal) queue terminal with
+                match gate alreadyConsumed rejected busy leased lost isOpen (modeOf terminal) queue terminal with
                 | Choice1Of2 entry -> Some entry
                 | Choice2Of2 _ -> None)
 
@@ -338,6 +350,9 @@ module TerminalCommandWait =
             // say the same thing: the terminal is not free.
             | Some TerminalQueueDrain.AwaitingBlock ->
                 if deadlineElapsed then Return TerminalCommandAwaitingTerminal else KeepWaiting
+            // Marks are gone here and only a person re-arming brings them back — an unbounded
+            // wait, like an approval, so it returns at once rather than burning a deadline.
+            | Some TerminalQueueDrain.AwaitingIntegration -> Return TerminalCommandAwaitingTerminal
             // Nothing is holding it — it is about to run, or has just been consumed and the
             // block event has not landed yet. Bounded by the process deadline, because what is
             // being waited for is the run.
@@ -551,6 +566,16 @@ module SessionTerminals =
     /// complete record of a command that printed less than it did.
     let private blockOutputCap = 4 * 1024 * 1024
 
+    /// How long after writing a command line we wait for its `C` mark before concluding the
+    /// shell has stopped marking (Plan 13, stage 2f).
+    ///
+    /// This is not a heuristic about runtime, and that is the whole reason it can be short: the
+    /// shell emits `C` when it STARTS the command, so a two-hour build and a hung one are
+    /// indistinguishable by output but identical here — both mark immediately. `ssh somebox`
+    /// therefore does not trip it either; the LOCAL shell marks, and `D` arrives when `ssh`
+    /// exits, hours later, correctly.
+    let private integrationWindowMs = 2000
+
     /// A command line, as bytes to type into a shell's line editor. Three things, and none of
     /// them is cosmetic.
     ///
@@ -624,6 +649,13 @@ module SessionTerminals =
           Busy : unit -> Set<string>
           /// Terminals a peer is typing into — the drain's `leased` set, `busy`'s counterpart.
           Leased : unit -> Set<string>
+          /// Terminals whose shell has stopped marking (Plan 13, stage 2f) — the drain's
+          /// `lost` set, which holds the queue rather than draining into a shell that cannot
+          /// bound what it runs.
+          Lost : unit -> Set<string>
+          /// Type the instrumentation into the shell that is there now. Refused when the
+          /// terminal is not lost, or has no persistent shell to type into.
+          Rearm : TerminalId -> Async<Result<unit, string>>
           /// Reclaim any lease that has gone idle with something queued behind it (Plan 13,
           /// stage 3c). Called on a beat; a no-op when nothing qualifies, which is the usual
           /// case. `holdOf` is passed in rather than computed here because it needs the doc,
@@ -660,6 +692,8 @@ module SessionTerminals =
           ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
           Leased = fun () -> Set.empty
+          Lost = fun () -> Set.empty
+          Rearm = fun _ -> async { return Error "this session has no terminals" }
           ReclaimIdle = fun _ -> async { return () }
           IsOpen = fun _ -> false
           Lengths = fun () -> []
@@ -709,7 +743,15 @@ module SessionTerminals =
         /// The size last applied to each pty, so the block-mode register watcher can run on
         /// every doc update without resizing a terminal that has not changed size.
         let appliedSize = Collections.Generic.Dictionary<string, TerminalSize> ()
+        /// Terminals whose current block has seen its `C` mark. The detector's input: the
+        /// shell emits `C` when it STARTS a command, so its absence is about instrumentation
+        /// rather than about how long the command runs.
+        let sawCommandStart = Collections.Generic.HashSet<string> ()
+        /// The re-arm closure per terminal, built in `openShell` because it needs that
+        /// terminal's nonce and rc — the same ones its output scanner is bound to.
+        let rearmers = Collections.Generic.Dictionary<string, unit -> Async<bool>> ()
         let mutable busy : Set<string> = Set.empty
+        let mutable lost : Set<string> = Set.empty
         let mutable leases = TerminalLeases.empty
         let mutable leftOpen : Set<string> = openAtBoot |> List.map TerminalId.value |> Set.ofList
 
@@ -823,10 +865,19 @@ module SessionTerminals =
                             for m in marks do
                                 match m with
                                 | MarkPromptStart -> ready.Value <- true
-                                // A second `C` inside an open block is dropped rather than
-                                // repaired: the Process knows what it wrote, so a surprise is
-                                // evidence about the shell, never something to act on.
-                                | MarkCommandStart -> ()
+                                // Recorded, not acted on. A second `C` inside an open block is
+                                // still not repaired into anything — the Process knows what it
+                                // wrote — but that the mark ARRIVED is the one thing the
+                                // integration detector needs (Plan 13, stage 2f).
+                                //
+                                // Only while a block is OPEN, for the same reason the `D`
+                                // handler below ignores a mark with no block: a `C` from
+                                // something a peer typed in live mode, or from the command
+                                // before this one arriving late, says nothing about whether
+                                // THIS block was marked. Counting it would let a lost shell
+                                // hide behind the previous command's mark.
+                                | MarkCommandStart ->
+                                    if pending.ContainsKey key then sawCommandStart.Add key |> ignore
                                 | MarkCommandDone code ->
                                     match pending.TryGetValue key with
                                     | true, (complete, _, _) ->
@@ -886,12 +937,33 @@ module SessionTerminals =
                                     do! Async.Sleep 50
                                     return! await (remaining - 50)
                             }
+                        // The same bootstrap, typed into whatever shell is there NOW. Warp's
+                        // move for the same problem, minus the rc-file edit — ours is a few
+                        // lines and the shell is in front of us.
+                        rearmers.[key] <-
+                            fun () ->
+                                async {
+                                    ready.Value <- false
+                                    carry.Value <- ""
+                                    for line in rc.Split '\n' do
+                                        pty.Write (line + "\r")
+                                    let rec awaitMark (remaining: int) =
+                                        async {
+                                            if ready.Value then return true
+                                            elif remaining <= 0 then return false
+                                            else
+                                                do! Async.Sleep 50
+                                                return! awaitMark (remaining - 50)
+                                        }
+                                    return! awaitMark 3000
+                                }
                         let! instrumented = await 3000
                         if not instrumented then
                             // Uninstrumented. Tear the shell down and keep the per-block
                             // path, which answers a smaller question completely.
                             pty.Kill ()
                             terminal.Shell <- None
+                            rearmers.Remove key |> ignore
             }
 
         let openTerminal (openedBy: ActorRef) (title: string) : Async<Result<TerminalId, string>> =
@@ -947,6 +1019,9 @@ module SessionTerminals =
                     // beside it would be two mechanisms for one fact — free to disagree the
                     // moment one of them is missed.
                     leases <- Map.remove (TerminalId.value id) leases
+                    lost <- Set.remove (TerminalId.value id) lost
+                    sawCommandStart.Remove (TerminalId.value id) |> ignore
+                    rearmers.Remove (TerminalId.value id) |> ignore
                     do! append (SessionEvent.TerminalClosed { TerminalId = id; Reason = reason })
                     return Ok ()
             }
@@ -1009,14 +1084,39 @@ module SessionTerminals =
                             // in this block move the next one — the property a per-block
                             // spawn structurally cannot have.
                             async {
+                                // THIS block's own state, not the terminal's: `pending` is
+                                // per-terminal and a later block repopulates it, so a detector
+                                // keyed on it would be asking about the wrong command.
+                                let mutable settled = false
                                 let complete = Async.FromContinuations (fun (cont, _, _) ->
                                     pending.[key] <-
-                                        ((fun code -> cont code),
+                                        ((fun code ->
+                                             settled <- true
+                                             cont code),
                                          (fun () -> written),
                                          (fun extra ->
                                              dropped <- dropped + extra
                                              written <- written + extra)))
+                                sawCommandStart.Remove key |> ignore
                                 pty.Write (writeFor command)
+                                // The integration detector (Plan 13, stage 2f), armed beside
+                                // the block rather than awaited: a lost shell must not make
+                                // this block wait, because the block is precisely what can no
+                                // longer be bounded. It stays open, which is the honest
+                                // rendering of "we no longer know when this finished".
+                                Async.StartImmediate (
+                                    async {
+                                        do! Async.Sleep integrationWindowMs
+                                        if not (sawCommandStart.Contains key)
+                                           && not settled
+                                           && not (Set.contains key lost) then
+                                            lost <- Set.add key lost
+                                            do!
+                                                append
+                                                    (SessionEvent.TerminalIntegrationLost
+                                                        { TerminalId = entry.Terminal; BlockId = Some blockId })
+                                            reDrain ()
+                                    })
                                 let! code = complete
                                 return (if code = 0 then CommandSucceeded 0 else CommandFailed code)
                             }
@@ -1079,6 +1179,25 @@ module SessionTerminals =
                     let blockRunning = Set.contains (TerminalId.value id) busy
                     if TerminalLeaseIdle.shouldReclaim idleFor blockRunning (holdOf id) then
                         do! applyLease (TerminalLeases.reclaimIdle id leases)
+            }
+
+        /// Type the instrumentation into the shell that is there NOW, and report whether it
+        /// answered. On success the queue is released and the drain re-armed.
+        let rearm (id: TerminalId) : Async<Result<unit, string>> =
+            async {
+                let key = TerminalId.value id
+                if not (Set.contains key lost) then return Error "this terminal is not waiting to be re-armed"
+                else
+                    match rearmers.TryGetValue key with
+                    | false, _ -> return Error "this terminal has no interactive shell"
+                    | true, rearmer ->
+                        match! rearmer () with
+                        | false -> return Error "the shell did not answer the instrumentation"
+                        | true ->
+                            lost <- Set.remove key lost
+                            do! append (SessionEvent.TerminalIntegrationRestored { TerminalId = id })
+                            reDrain ()
+                            return Ok ()
             }
 
         let take (id: TerminalId) (by: ActorRef) : Async<Result<unit, string>> =
@@ -1210,6 +1329,8 @@ module SessionTerminals =
           ApplySize = applySize
           Busy = fun () -> busy
           Leased = fun () -> TerminalLeases.held leases
+          Lost = fun () -> lost
+          Rearm = rearm
           ReclaimIdle = reclaimIdle
           IsOpen = isOpen
           Lengths =
@@ -1289,6 +1410,7 @@ module TerminalScheduler =
                         consumed
                         (terminals.Busy ())
                         (terminals.Leased ())
+                        (terminals.Lost ())
                         terminals.IsOpen
                         (fun terminal -> SyncedSessionState.modeOf terminal synced)
                         synced.TerminalQueue
@@ -1339,6 +1461,7 @@ module TerminalScheduler =
                         consumed
                         (terminals.Busy ())
                         (terminals.Leased ())
+                        (terminals.Lost ())
                         terminals.IsOpen
                         (fun t -> SyncedSessionState.modeOf t synced)
                         synced.TerminalQueue
@@ -1457,6 +1580,7 @@ module TerminalCommands =
                         consumed
                         (terminals.Busy ())
                         (terminals.Leased ())
+                        (terminals.Lost ())
                         terminals.IsOpen
                         (fun t -> SyncedSessionState.modeOf t synced)
                         synced.TerminalQueue

@@ -434,6 +434,23 @@ module Codec =
                 | "idle" -> Decode.succeed LeaseIdle
                 | other -> Decode.fail (sprintf "Unknown lease end: %s" other)) }
 
+    let private terminalIntegrationLost : Codec<TerminalIntegrationLost> =
+        { Encode =
+            fun (p: TerminalIntegrationLost) ->
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "blockId", Encode.option blockId.Encode p.BlockId ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalIntegrationLost.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalIntegrationLost.BlockId = get.Optional.Field "blockId" blockId.Decode }) }
+
+    let private terminalIntegrationRestored : Codec<TerminalIntegrationRestored> =
+        { Encode = fun (p: TerminalIntegrationRestored) -> Encode.object [ "terminalId", terminalId.Encode p.TerminalId ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalIntegrationRestored.TerminalId = get.Required.Field "terminalId" terminalId.Decode }) }
+
     let private terminalLeaseTaken : Codec<TerminalLeaseTaken> =
         { Encode =
             fun (p: TerminalLeaseTaken) ->
@@ -546,6 +563,14 @@ module Codec =
                     Encode.object [ "type", Encode.string "terminalBlockCompleted"; "payload", terminalBlockCompleted.Encode p ]
                 | TerminalCommandRejected p ->
                     Encode.object [ "type", Encode.string "terminalCommandRejected"; "payload", terminalCommandRejected.Encode p ]
+                | SessionEvent.TerminalIntegrationLost p ->
+                    Encode.object
+                        [ "type", Encode.string "terminalIntegrationLost"
+                          "payload", terminalIntegrationLost.Encode p ]
+                | SessionEvent.TerminalIntegrationRestored p ->
+                    Encode.object
+                        [ "type", Encode.string "terminalIntegrationRestored"
+                          "payload", terminalIntegrationRestored.Encode p ]
                 | TerminalLeaseTaken p ->
                     Encode.object [ "type", Encode.string "terminalLeaseTaken"; "payload", terminalLeaseTaken.Encode p ]
                 | TerminalLeaseReleased p ->
@@ -582,6 +607,10 @@ module Codec =
                 | "terminalBlockStarted" -> Decode.field "payload" terminalBlockStarted.Decode |> Decode.map TerminalBlockStarted
                 | "terminalBlockCompleted" -> Decode.field "payload" terminalBlockCompleted.Decode |> Decode.map TerminalBlockCompleted
                 | "terminalCommandRejected" -> Decode.field "payload" terminalCommandRejected.Decode |> Decode.map TerminalCommandRejected
+                | "terminalIntegrationLost" ->
+                    Decode.field "payload" terminalIntegrationLost.Decode |> Decode.map TerminalIntegrationLost
+                | "terminalIntegrationRestored" ->
+                    Decode.field "payload" terminalIntegrationRestored.Decode |> Decode.map TerminalIntegrationRestored
                 | "terminalLeaseTaken" -> Decode.field "payload" terminalLeaseTaken.Decode |> Decode.map TerminalLeaseTaken
                 | "terminalLeaseReleased" -> Decode.field "payload" terminalLeaseReleased.Decode |> Decode.map TerminalLeaseReleased
                 | "terminalTranscriptTruncated" ->
@@ -760,7 +789,9 @@ module Codec =
                     Encode.object [ "kind", Encode.string "takeTerminalLease"; "terminalId", terminalId.Encode id ]
                 | ReleaseTerminalLease id ->
                     Encode.object
-                        [ "kind", Encode.string "releaseTerminalLease"; "terminalId", terminalId.Encode id ])
+                        [ "kind", Encode.string "releaseTerminalLease"; "terminalId", terminalId.Encode id ]
+                | RearmTerminal id ->
+                    Encode.object [ "kind", Encode.string "rearmTerminal"; "terminalId", terminalId.Encode id ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
@@ -770,6 +801,7 @@ module Codec =
                 | "takeTerminalLease" -> Decode.field "terminalId" terminalId.Decode |> Decode.map TakeTerminalLease
                 | "releaseTerminalLease" ->
                     Decode.field "terminalId" terminalId.Decode |> Decode.map ReleaseTerminalLease
+                | "rearmTerminal" -> Decode.field "terminalId" terminalId.Decode |> Decode.map RearmTerminal
                 | other -> Decode.fail (sprintf "Unknown session command: %s" other)) }
 
     let private sessionCommandResult : Codec<SessionCommandResult> =

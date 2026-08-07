@@ -152,6 +152,73 @@ let private until (budgetMs: int) (condition: unit -> bool) : Async<bool> =
         }
     go budgetMs
 
+let private integrationLostTests =
+    testList "Integration lost over a real pty (Plan 13, stage 2f)" [
+        testCaseAsync "a shell replaced mid-session is detected, holds the queue, and is repaired by re-arming" <|
+            withLiveTerminal "lost" (fun terminals id _ log reDrains _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    // A genuinely long-running command must NOT trip the detector — the `C`
+                    // mark comes when the shell STARTS a command, so runtime is irrelevant.
+                    // Run it in the background so the block does not hold this test open.
+                    do! terminals.RunBlock (queueEntry id ada "1") "sleep 5 &" ignore
+                    Expect.isEmpty (terminals.Lost ()) "a slow command marks like any other"
+
+                    // Now replace the instrumented shell while the pty stays open. `Exited`
+                    // never fires and the marks simply stop — the exact failure this detects.
+                    let before = reDrains ()
+                    match! terminals.Take id ada with
+                    | Error e -> failwith e
+                    | Ok () ->
+                        // A fresh, UNINSTRUMENTED shell — the case the plan describes: an
+                        // image whose shell drops into another one. `--noprofile --norc` is
+                        // what makes it uninstrumented rather than accidentally inheriting
+                        // anything, and `exec` is what makes `Exited` never fire: the pty
+                        // stays open around a process we never bootstrapped.
+                        terminals.Input id ada "exec bash --noprofile --norc -i\r" |> ignore
+                        // Let the shell ACT on what was just typed before typing the next
+                        // thing. The drain never has to: it awaits a block's `D` before
+                        // starting the next, so the previous command's `C` has always landed.
+                        // Typing in live mode and draining immediately is the one ordering
+                        // that has no such barrier, and without this the `C` bash emits for
+                        // `exec cat` arrives inside the next block's window and looks like it.
+                        do! Async.Sleep 1000
+                        match! terminals.Release id ada with
+                        | Error e -> failwith e
+                        | Ok () ->
+                            // A command written into the shell that is there now produces no
+                            // `C`, because nothing instrumented it.
+                            let running = terminals.RunBlock (queueEntry id ada "2") "echo after-exec" ignore
+                            Async.StartImmediate running
+                            let! detected = until 8000 (fun () -> not (Set.isEmpty (terminals.Lost ())))
+                            Expect.isTrue detected "the missing `C` is what gives it away"
+                            Expect.isTrue (reDrains () > before) "and the drain is re-armed so the queue can be held"
+                            let! page = log.Read None 1000
+                            Expect.isTrue
+                                (page.Events
+                                 |> List.exists (fun e ->
+                                     match e.Event with
+                                     | SessionEvent.TerminalIntegrationLost l -> l.TerminalId = id
+                                     | _ -> false))
+                                "recorded, because it is a GAP in what the record can say"
+
+                            // The re-arm control types the instrumentation into the shell that
+                            // is actually there now — Warp's move, minus the rc-file edit.
+                            match! terminals.Rearm id with
+                            | Error e -> failwithf "re-arm failed: %s" e
+                            | Ok () ->
+                                Expect.isEmpty (terminals.Lost ()) "marking is back"
+                                let! page = log.Read None 1000
+                                Expect.isTrue
+                                    (page.Events
+                                     |> List.exists (fun e ->
+                                         match e.Event with
+                                         | SessionEvent.TerminalIntegrationRestored r -> r.TerminalId = id
+                                         | _ -> false))
+                                    "and every client is told, by the same route it was told it was lost"
+                })
+    ]
+
 let private liveModeTests =
     testList "Live mode over a real pty (Plan 13, stage 2e)" [
         testCaseAsync "only the lease holder's keystrokes reach the shell, and none are recorded as input" <|
@@ -545,4 +612,5 @@ let tests =
             }
 
         liveModeTests
+        integrationLostTests
     ]

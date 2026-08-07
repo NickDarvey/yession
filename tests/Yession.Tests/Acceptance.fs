@@ -97,6 +97,7 @@ let private representativeModel : ClientModel =
                 IsOpen = true
                 ClosedReason = None
                 Lease = None
+                IntegrationLost = false
                 Blocks =
                   [ { BlockId = blockId
                       QueueId = None
@@ -150,6 +151,21 @@ let private leasedTerminalModel : ClientModel =
             { Terminals =
                 representativeModel.Terminals.Terminals
                 |> List.map (fun t -> { t with Lease = Some (PeerRef bob) }) } }
+
+/// The same session with the terminal's shell no longer marking (Plan 13, stage 2f). The
+/// queued command is a PEER's, so it needs no approval — otherwise the approval hold would
+/// be the one reported, which is the correct precedence and not what this case is about.
+let private lostIntegrationModel : ClientModel =
+    { representativeModel with
+        Synced =
+            { representativeModel.Synced with
+                TerminalQueue =
+                    representativeModel.Synced.TerminalQueue
+                    |> Map.map (fun _ entry -> { entry with Author = PeerRef ada }) }
+        Terminals =
+            { Terminals =
+                representativeModel.Terminals.Terminals
+                |> List.map (fun t -> { t with IntegrationLost = true }) } }
 
 let private uiChecklistTests =
     testList "UI checklist" [
@@ -251,6 +267,19 @@ let private uiChecklistTests =
             Expect.isFalse
                 (html.Contains (Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingApproval))
                 "and not an approval it does not need"
+
+        testCase "a terminal that stopped marking says so, and offers the repair" <| fun () ->
+            // Named, not shown as a stall. The queue really is held, and a surface that only
+            // showed "pending" would be indistinguishable from a bug.
+            let html = Support.render lostIntegrationModel
+            for label, marker in
+                [ "the state is named", Dom.attr Dom.Hooks.terminalLost (TerminalId.value terminalId)
+                  "with the control that repairs it", Dom.attr Dom.Hooks.terminalRearm (TerminalId.value terminalId)
+                  // ...and the held command says WHICH hold it is under: this one ends when
+                  // somebody re-arms the terminal, not when a person finishes a task.
+                  "the held command names this hold",
+                  Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingIntegration ] do
+                Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
 
         testCase "the random peer display name is human-readable" <| fun () ->
             let rng = Random 1234

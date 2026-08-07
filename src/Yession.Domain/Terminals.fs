@@ -114,6 +114,10 @@ type TerminalView =
       /// live mode: there is no separate mode flag, because a mode nobody holds and a lease
       /// nobody holds would be two names for one fact, free to disagree.
       Lease : ActorRef option
+      /// Whether the shell has stopped emitting marks (Plan 13, stage 2f). While true the
+      /// Process cannot tell when a command starts or finishes here, so the queue is held and
+      /// the surface says so — a stall with a name beats a stall.
+      IntegrationLost : bool
       /// Blocks in the order they ran.
       Blocks : TerminalBlock list
       /// Output this terminal produced that the transcript did not keep. Non-zero means
@@ -151,6 +155,7 @@ module TerminalProjection =
                           IsOpen = true
                           ClosedReason = None
                           Lease = None
+                          IntegrationLost = false
                           Blocks = []
                           DroppedBytes = 0 } ] }
         | SessionEvent.TerminalClosed e ->
@@ -211,6 +216,10 @@ module TerminalProjection =
                                   FromSeq = 0
                                   ToSeq = Some 0
                                   Status = BlockRejected (e.RejectedBy, e.Reason) } ] })
+        | SessionEvent.TerminalIntegrationLost e ->
+            proj |> updateTerminal e.TerminalId (fun t -> { t with IntegrationLost = true })
+        | SessionEvent.TerminalIntegrationRestored e ->
+            proj |> updateTerminal e.TerminalId (fun t -> { t with IntegrationLost = false })
         | SessionEvent.TerminalTranscriptTruncated e ->
             proj |> updateTerminal e.TerminalId (fun t -> { t with DroppedBytes = t.DroppedBytes + e.DroppedBytes })
         | _ -> proj

@@ -70,6 +70,8 @@ module ConversationProjection =
         | SessionEvent.TerminalLeaseTaken _
         | SessionEvent.TerminalLeaseReleased _
         | SessionEvent.TerminalCommandRejected _
+        | SessionEvent.TerminalIntegrationLost _
+        | SessionEvent.TerminalIntegrationRestored _
         | SessionEvent.TerminalTranscriptTruncated _ -> proj
         | AgentMessageStarted a ->
             { Items =

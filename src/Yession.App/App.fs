@@ -78,6 +78,8 @@ module App =
           TakeTerminal : TerminalId -> unit
           /// Hand the terminal back to block mode. Refused unless this peer is the holder.
           ReleaseTerminal : TerminalId -> unit
+          /// Type the shell instrumentation in again (Plan 13, stage 2f).
+          RearmTerminal : TerminalId -> unit
           /// Send the command in a terminal composer slot: enqueue it. ANY co-editor may
           /// send, so the `PeerId` names whose slot it is. A pure CRDT write under the key
           /// the slot has carried since publication.
@@ -590,6 +592,9 @@ module App =
             fun terminalId ->
                 Async.StartImmediate (
                     channel.Send (Command (Request (RequestId.fresh (), ReleaseTerminalLease terminalId))))
+          RearmTerminal =
+            fun terminalId ->
+                Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), RearmTerminal terminalId))))
           SendTerminalDraft =
             fun terminal author ->
                 // Enqueue under the key the slot has carried since publication — read from

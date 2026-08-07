@@ -38,4 +38,6 @@ module Bootstrap =
         | SessionEvent.TerminalBlockStarted _ -> "terminal-block-started"
         | SessionEvent.TerminalBlockCompleted _ -> "terminal-block-completed"
         | SessionEvent.TerminalCommandRejected _ -> "terminal-command-rejected"
+        | SessionEvent.TerminalIntegrationLost _ -> "terminal-integration-lost"
+        | SessionEvent.TerminalIntegrationRestored _ -> "terminal-integration-restored"
         | SessionEvent.TerminalTranscriptTruncated _ -> "terminal-transcript-truncated"
