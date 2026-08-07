@@ -18,6 +18,12 @@ module PeerSession =
           /// Called with every ephemeral presence update the peer sends (relay to other
           /// peers); never durable, so nothing is appended.
           OnPresence : PresencePayload -> unit
+          /// Called with every terminal frame the peer sends (Plan 13, stage 2e): keystrokes
+          /// and viewport resizes for a terminal it believes it holds. Answered by no response
+          /// frame at all, deliberately — a keystroke that needed an acknowledgement would make
+          /// typing a round trip, and the authority on whether it lands is the lease, which
+          /// only the Process can check. A frame from a non-holder is dropped there.
+          OnTerminal : PeerId -> TerminalFrame -> unit
           /// Called once after `PeerAccepted` is sent, with the peer's channel (e.g. to
           /// send the initial state and register the peer for relay). Returns the
           /// cleanup to run when the peer disconnects.
@@ -31,6 +37,7 @@ module PeerSession =
             { OnState = ignore
               OnCommand = fun _ _ -> async { return CommandRejected "commands are not handled" }
               OnPresence = ignore
+              OnTerminal = fun _ _ -> ()
               OnAccepted = fun _ _ -> async { return fun () -> () } }
 
     /// Run a peer session over a connected channel until the peer disconnects.
@@ -83,6 +90,9 @@ module PeerSession =
                             return! pump ()
                         | Some (Presence payload) ->
                             handlers.OnPresence payload
+                            return! pump ()
+                        | Some (Terminal frame) ->
+                            handlers.OnTerminal hello.PeerId frame
                             return! pump ()
                         | Some (EventLog (ReadEventsAfter (requestId, after, limit))) ->
                             // Clients are read-only consumers: reads are served, and no

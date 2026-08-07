@@ -64,7 +64,12 @@ type ViewActions =
       CloseTerminal : TerminalId -> unit
       /// Send a terminal composer slot: enqueue its command. Imperative for exactly the
       /// reason `SendDraft` is — the command text is a shared type the reducer cannot move.
-      SendTerminalDraft : TerminalId -> PeerId -> unit }
+      SendTerminalDraft : TerminalId -> PeerId -> unit
+      /// Take the terminal's stdin — enter live mode (Plan 13, stage 2e). Also the STEAL:
+      /// there is one control because there is one act, and any peer may perform it.
+      TakeTerminal : TerminalId -> unit
+      /// Hand it back to block mode.
+      ReleaseTerminal : TerminalId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -83,7 +88,9 @@ module ViewActions =
           ReopenSession = ignore
           OpenTerminal = ignore
           CloseTerminal = ignore
-          SendTerminalDraft = fun _ _ -> () }
+          SendTerminalDraft = fun _ _ -> ()
+          TakeTerminal = ignore
+          ReleaseTerminal = ignore }
 
 module View =
 
@@ -764,7 +771,14 @@ module View =
         |> List.map (fun entry ->
             let id = entry.QueueId
             let awaiting = ClientModel.awaitsApproval entry model
-            let statusToken = if awaiting then Dom.Text.queuedAwaitingApproval else Dom.Text.queuedReady
+            // Approval outranks the lease in what is REPORTED, matching the drain's own gate
+            // order in reverse: an entry that needs a yes needs it whether or not the terminal
+            // is free, so saying "waiting for the terminal" would name the hold that will
+            // resolve first rather than the one that is actually blocking.
+            let statusToken =
+                if awaiting then Dom.Text.queuedAwaitingApproval
+                elif ClientModel.awaitsTerminal entry model then Dom.Text.queuedAwaitingTerminal
+                else Dom.Text.queuedReady
             let approval =
                 if awaiting then
                     html $"""
@@ -793,7 +807,7 @@ module View =
                            data-terminal-input="{BodyKey.terminalQueued id}">
                   </div>
                   <div class="{Style.terminalQueuedRow}">
-                    <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if awaiting then "waiting for approval" else "queued"}</span>
+                    <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if statusToken = Dom.Text.queuedAwaitingApproval then "waiting for approval" elif statusToken = Dom.Text.queuedAwaitingTerminal then "waiting for the terminal" else "queued"}</span>
                     <span class="{Style.small}">{authorLabel entry.Author}</span>
                     <div class="ml-auto flex items-center gap-2">
                       {reject}
@@ -805,10 +819,38 @@ module View =
                   </div>
                 </article>""")
 
+    /// The lease bar (Plan 13, stage 2e): who is typing here, and the one control that
+    /// changes it. Shown in place of the command lines — never in place of the queue, which
+    /// keeps working while a peer is live and is precisely what the release will run.
+    let private terminalLeaseBar (actions: ViewActions) (model: ClientModel) (terminal: TerminalId) (holder: ActorRef) : TemplateResult =
+        let mine = ActorRef.PeerRef model.Peer.PeerId
+        let label = authorLabel holder
+        let who = if holder = mine then "You are typing here" else sprintf "%s is using this terminal" label
+        let control =
+            if holder = mine then
+                html $"""
+                    <button type="button" class="{Style.btnPrimary}" data-terminal-release="{TerminalId.value terminal}"
+                            @click={Ev(fun _ -> actions.ReleaseTerminal terminal)}>Hand it back</button>"""
+            else
+                // Any peer may take it, and no permission is asked for: collaborators are
+                // trusted, so a steal needs to be VISIBLE rather than authorised — which the
+                // event log is, and this button says so plainly.
+                html $"""
+                    <button type="button" class="{Style.btn}" data-terminal-take="{TerminalId.value terminal}"
+                            @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take over</button>"""
+        html $"""
+            <div class="{Style.terminalQueuedRow}" data-terminal-lease="{label}" aria-live="polite">
+              <span class="{Style.statusRun}">live</span>
+              <span class="{Style.small}">{who}</span>
+              <div class="ml-auto flex items-center gap-2">{control}</div>
+            </div>"""
+
     /// The terminal composer: your command line, and everyone else's as they type them.
     let private terminalComposer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult =
         let mine = model.Peer.PeerId
         let mode = SyncedSessionState.modeOf terminal model.Synced
+        let lease =
+            TerminalProjection.tryFind terminal model.Terminals |> Option.bind (fun view -> view.Lease)
         let editors (author: PeerId) =
             ClientModel.terminalEditorsOf terminal author model
             |> List.map (fun (editor, name) ->
@@ -830,6 +872,33 @@ module View =
                           @click={Ev(fun _ -> actions.SendTerminalDraft terminal author)}>Run</button>
                 </div>"""
         let others = ClientModel.terminalDrafts terminal model |> List.filter (fun author -> author <> mine)
+        let takeControl =
+            if Option.isSome lease then Lit.nothing
+            else
+                html $"""
+                    <button type="button" class="{Style.cls [ Style.btn; "ml-auto" ]}" data-terminal-take="{TerminalId.value terminal}"
+                            @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take terminal</button>"""
+        // In live mode the command lines give way to the lease bar. Drafting into a box marked
+        // "Run" that cannot run anything is the misleading half; the QUEUE above stays, because
+        // queueing during a live session is meaningful — the entry runs the moment the terminal
+        // comes back.
+        let commandLines =
+            match lease with
+            | Some holder -> terminalLeaseBar actions model terminal holder
+            | None ->
+                html $"""
+                    <div>
+                      {others |> List.map peerDraft}
+                      <div class="{Style.terminalQueuedRow}">
+                        <span class="{Style.terminalPrompt}">$</span>
+                        <input type="text" class="{Style.terminalInput}" aria-label="Command"
+                               placeholder="a command to run here"
+                               data-terminal-input="{BodyKey.terminalDraft terminal mine}">
+                        <span class="{Style.terminalEditors}">{editors mine}</span>
+                        <button type="button" class="{Style.btnPrimary}" data-terminal-send="{PeerId.value mine}"
+                                @click={Ev(fun _ -> actions.SendTerminalDraft terminal mine)}>Run</button>
+                      </div>
+                    </div>"""
         html $"""
             <section class="{Style.terminalComposer}">
               <div class="{Style.sideRow}">
@@ -840,18 +909,10 @@ module View =
                   <option value="approve-all" ?selected={mode = ApproveAll}>every command</option>
                   <option value="auto" ?selected={mode = AutoRun}>nothing — run them</option>
                 </select>
+                {takeControl}
               </div>
               {terminalQueue dispatch model terminal}
-              {others |> List.map peerDraft}
-              <div class="{Style.terminalQueuedRow}">
-                <span class="{Style.terminalPrompt}">$</span>
-                <input type="text" class="{Style.terminalInput}" aria-label="Command"
-                       placeholder="a command to run here"
-                       data-terminal-input="{BodyKey.terminalDraft terminal mine}">
-                <span class="{Style.terminalEditors}">{editors mine}</span>
-                <button type="button" class="{Style.btnPrimary}" data-terminal-send="{PeerId.value mine}"
-                        @click={Ev(fun _ -> actions.SendTerminalDraft terminal mine)}>Run</button>
-              </div>
+              {commandLines}
             </section>"""
 
     /// The terminals column: the conversation's mirror on the right.

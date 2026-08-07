@@ -139,6 +139,12 @@ module Dom =
         let terminalUnapprove = "data-terminal-unapprove"
         let terminalReject = "data-terminal-reject"
         let terminalQueueDelete = "data-terminal-queue-delete"
+        /// The lease bar shown instead of the composer in live mode (Plan 13, stage 2e); its
+        /// value is the holder's label, so a test can assert WHO without scraping prose.
+        let terminalLease = "data-terminal-lease"
+        /// Enter live mode, or steal it. One control, because it is one act.
+        let terminalTake = "data-terminal-take"
+        let terminalRelease = "data-terminal-release"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
@@ -184,6 +190,11 @@ module Dom =
         let queuedAwaitingApproval = "awaiting-approval"
         /// A queued command that will run as soon as the terminal is free.
         let queuedReady = "ready"
+        /// A queued command held because a peer is typing in its terminal (Plan 13, stage
+        /// 2e). Distinct from `queuedAwaitingApproval` on purpose: one resolves when a person
+        /// makes a decision, the other when a person finishes a task, and a queue that said
+        /// only *pending* would leave both looking like a stall.
+        let queuedAwaitingTerminal = "awaiting-terminal"
         let system = "system"
         // Conversation item status.
         let complete = "complete"

@@ -74,6 +74,8 @@ type SessionEvent =
     // log and the transcript together.
     | TerminalOpened of TerminalOpened
     | TerminalClosed of TerminalClosed
+    | TerminalLeaseTaken of TerminalLeaseTaken
+    | TerminalLeaseReleased of TerminalLeaseReleased
     | TerminalBlockStarted of TerminalBlockStarted
     | TerminalBlockCompleted of TerminalBlockCompleted
     | TerminalCommandRejected of TerminalCommandRejected
@@ -182,6 +184,32 @@ and TerminalOpened =
 and TerminalClosed =
     { TerminalId : TerminalId
       Reason : string }
+
+/// A peer took the terminal's stdin (Plan 13, stage 2e) — live mode entered, or STOLEN from
+/// whoever held it before. One event for both, because they are the same fact: from this
+/// moment these keystrokes are that peer's. Collaborators are trusted, so a steal needs no
+/// permission; what it needs is to be on the record, which is this.
+and TerminalLeaseTaken =
+    { TerminalId : TerminalId
+      By : ActorRef }
+
+/// The terminal is back in block mode. Appended when the holder releases it, when a peer
+/// steals it (the previous holder's lease ends), and when the holder's CONNECTION drops —
+/// a lease held by someone who is gone is the one hold nobody should have to clear by hand.
+and TerminalLeaseReleased =
+    { TerminalId : TerminalId
+      /// Who held it. Kept because the interesting question afterwards is whose keystrokes
+      /// the bracketed transcript range belongs to, and an empty release cannot answer it.
+      Was : ActorRef
+      Reason : TerminalLeaseEnd }
+
+/// Why a lease ended. Distinguished because they read differently in a log: a release is a
+/// person finishing, a steal is another person taking over, and a drop is nobody deciding
+/// anything at all.
+and TerminalLeaseEnd =
+    | LeaseReleased
+    | LeaseStolen of by: ActorRef
+    | LeaseHolderGone
 
 and TerminalBlockStarted =
     { TerminalId : TerminalId

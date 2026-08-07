@@ -94,6 +94,7 @@ let private representativeModel : ClientModel =
                 OpenedBy = PeerRef ada
                 IsOpen = true
                 ClosedReason = None
+                Lease = None
                 Blocks =
                   [ { BlockId = blockId
                       Author = PeerRef ada
@@ -137,6 +138,15 @@ let private joinedComposerModel : ClientModel =
                   { DisplayName = "brave-owl"
                     Focus = { Field = DraftBody bob; Pos = { Anchor = "AQI="; Head = "AQI=" } } } ]
         Composer = Joined bob }
+
+/// The same session with bob typing in the terminal (Plan 13, stage 2e) — live mode as every
+/// OTHER peer sees it, which is the case the lease bar exists for.
+let private leasedTerminalModel : ClientModel =
+    { representativeModel with
+        Terminals =
+            { Terminals =
+                representativeModel.Terminals.Terminals
+                |> List.map (fun t -> { t with Lease = Some (PeerRef bob) }) } }
 
 let private uiChecklistTests =
     testList "UI checklist" [
@@ -202,6 +212,43 @@ let private uiChecklistTests =
                   "no-agent connect call-to-action", Dom.Hooks.noAgentConnect ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+
+        testCase "live mode: the lease bar names the holder and offers the steal" <| fun () ->
+            let html = Support.render leasedTerminalModel
+            let required =
+                [ "the lease bar names who holds it", Dom.attr Dom.Hooks.terminalLease (PeerId.value bob)
+                  // Any peer may take it, so the control is offered rather than gated —
+                  // collaborators are trusted, and the event log is what makes a steal safe.
+                  "the steal control", Dom.attr Dom.Hooks.terminalTake (TerminalId.value terminalId)
+                  // The queue survives live mode: an entry queued now runs the moment the
+                  // terminal comes back, and it says which of the two holds it is under.
+                  "the queue is still there", Dom.attr Dom.Hooks.terminalQueued "queue-ui-term" ]
+            for label, marker in required do
+                Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+            // The command line is gone, not disabled: a box marked "Run" that cannot run
+            // anything is the misleading half of live mode.
+            Expect.isFalse
+                (html.Contains (Dom.attr Dom.Hooks.terminalInput (BodyKey.terminalDraft terminalId ada)))
+                "the composer's own command line gives way to the bar"
+
+        testCase "a queued command in a leased terminal says it waits for the TERMINAL" <| fun () ->
+            // Not "waiting for approval": one resolves when a person makes a decision, the
+            // other when a person finishes a task, and a queue that said only *pending* would
+            // leave both looking like a stall.
+            let model =
+                { leasedTerminalModel with
+                    Synced =
+                        { leasedTerminalModel.Synced with
+                            TerminalQueue =
+                                leasedTerminalModel.Synced.TerminalQueue
+                                |> Map.map (fun _ entry -> { entry with Author = PeerRef ada }) } }
+            let html = Support.render model
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingTerminal))
+                "the hold names the terminal"
+            Expect.isFalse
+                (html.Contains (Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingApproval))
+                "and not an approval it does not need"
 
         testCase "the random peer display name is human-readable" <| fun () ->
             let rng = Random 1234

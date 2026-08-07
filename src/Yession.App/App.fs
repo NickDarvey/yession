@@ -72,6 +72,12 @@ module App =
           OpenTerminal : string -> unit
           /// Ask the Session Process to close a terminal.
           CloseTerminal : TerminalId -> unit
+          /// Take a terminal's stdin — enter live mode, stealing the lease if another peer
+          /// holds it (Plan 13, stage 2e). The outcome arrives as a `TerminalLeaseTaken`
+          /// event, on the same one-source-of-truth rule as opening a terminal.
+          TakeTerminal : TerminalId -> unit
+          /// Hand the terminal back to block mode. Refused unless this peer is the holder.
+          ReleaseTerminal : TerminalId -> unit
           /// Send the command in a terminal composer slot: enqueue it. ANY co-editor may
           /// send, so the `PeerId` names whose slot it is. A pure CRDT write under the key
           /// the slot has carried since publication.
@@ -577,6 +583,13 @@ module App =
           CloseTerminal =
             fun terminalId ->
                 Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), CloseTerminal terminalId))))
+          TakeTerminal =
+            fun terminalId ->
+                Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), TakeTerminalLease terminalId))))
+          ReleaseTerminal =
+            fun terminalId ->
+                Async.StartImmediate (
+                    channel.Send (Command (Request (RequestId.fresh (), ReleaseTerminalLease terminalId))))
           SendTerminalDraft =
             fun terminal author ->
                 // Enqueue under the key the slot has carried since publication — read from

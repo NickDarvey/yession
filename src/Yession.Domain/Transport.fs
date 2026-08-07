@@ -21,6 +21,15 @@ type SessionCommand =
     | OpenTerminal of title: string
     /// Close a terminal. Rejected if it is already closed or was never opened.
     | CloseTerminal of TerminalId
+    /// Take the terminal's stdin — enter live mode (Plan 13, stage 2e). Succeeds even when
+    /// another peer holds it: collaborators are trusted, so this STEALS rather than queues,
+    /// and the previous holder's lease ends on the record. Rejected only when the terminal
+    /// is not open, or is degraded (no shell to type into).
+    | TakeTerminalLease of TerminalId
+    /// Hand the terminal back to block mode. Rejected when this peer is not the holder —
+    /// releasing someone else's lease is a steal wearing a polite word, and a steal is
+    /// `TakeTerminalLease`, which says so on the record.
+    | ReleaseTerminalLease of TerminalId
 
 type SessionCommandResult =
     | CommandAccepted
@@ -90,6 +99,23 @@ type TerminalFrame =
     /// direction — a client re-folds a record already drawn, and drawing it twice is
     /// idempotent, whereas a seq ahead of the screen would skip a record for ever.
     | TerminalSnapshot of TerminalId * seq: int * screen: string
+    /// Keystrokes from the lease holder, relayed straight to the pty (Plan 13, stage 2e).
+    ///
+    /// Lease-checked at the Session Process, which is the only place it CAN be checked: a
+    /// client that believes it holds the lease may be wrong (a steal it has not seen yet),
+    /// and the pty is the Process's. A frame from a non-holder is dropped, not answered —
+    /// there is no response frame here by design, because a keystroke that needed an
+    /// acknowledgement would make typing a round trip.
+    ///
+    /// Never recorded as a transcript `"i"` record. The shell echoes what is typed at it, so
+    /// ordinary keystrokes already appear as OUTPUT; what would be added by recording these
+    /// is precisely what the terminal deliberately did not display — a password at an `ssh`
+    /// prompt. See "Durable capture" in the plan.
+    | TerminalInput of TerminalId * data: string
+    /// The lease holder's viewport size, relayed to the pty (Plan 13, stage 2e). Live-mode
+    /// only: their foreground program is the one that has to agree with the pty, so in block
+    /// mode the size comes from the synced register instead and this frame is dropped.
+    | TerminalResize of TerminalId * cols: int * rows: int
 
 /// The collaborative field a peer's cursor is in — the extension point for presence "in many
 /// places": add a case plus its report/render sites. `DraftBody`/`QueueBody` name the same body

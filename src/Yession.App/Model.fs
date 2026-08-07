@@ -398,6 +398,15 @@ module ClientModel =
         TerminalApprovalMode.requiresApproval (SyncedSessionState.modeOf entry.Terminal model.Synced) entry.Author
         && Option.isNone entry.ApprovedBy
 
+    /// Whether a queued command is held because a peer is typing in its terminal (Plan 13,
+    /// stage 2e) rather than because it needs an approval. Reported apart because they resolve
+    /// differently — one when a person makes a decision, the other when a person finishes a
+    /// task — and a queue that said only *pending* would leave both looking like a stall.
+    let awaitsTerminal (entry: TerminalQueued) (model: ClientModel) : bool =
+        TerminalProjection.tryFind entry.Terminal model.Terminals
+        |> Option.bind (fun view -> view.Lease)
+        |> Option.isSome
+
     /// Who is editing a terminal composer right now, by their live caret.
     let terminalEditorsOf (terminal: TerminalId) (author: PeerId) (model: ClientModel) : (PeerId * string) list =
         model.Presence
