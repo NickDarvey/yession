@@ -947,9 +947,51 @@ module View =
               {commandLines}
             </section>"""
 
+    /// A CLOSED terminal's recording (Plan 13, stage 3e) — the audit read.
+    ///
+    /// Its blocks still render above; this is the OTHER read. A list of commands says what
+    /// ran; the recording shows the terminal as it behaved, at the speed it behaved, which is
+    /// what someone auditing a session actually wants to watch. The player is attached by the
+    /// browser shell to the mount below; the `.cast` it replays is rebuilt from the records
+    /// this client already fetched (`TranscriptReplay.cast`), so the replay rides the same
+    /// immutable chunk cache the rest of the history does.
+    let private terminalReplay (model: ClientModel) (view: TerminalView) : TemplateResult =
+        let feed = ClientModel.terminalFeed view.TerminalId model
+        // Retention (stage 3d) deletes a closed terminal's transcript whole once it is old
+        // enough, and its chunks then 404. Saying so is the point: an empty player would be
+        // indistinguishable from a terminal that printed nothing, and the whole reason the
+        // drop is recorded is that a gap in an audit trail must be a stated fact.
+        let gone = Map.isEmpty feed.Records && view.DroppedBytes > 0
+        let closedFor =
+            match view.ClosedReason with
+            | Some reason -> sprintf "closed — %s" reason
+            | None -> "closed"
+        if gone then
+            html $"""
+                <section class="{Style.terminalComposer}" data-terminal-replay-gone="{TerminalId.value view.TerminalId}">
+                  <div class="{Style.terminalQueuedRow}">
+                    <span class="{Style.statusFaint}">{closedFor}</span>
+                    <span class="{Style.small}">This terminal's recording has passed its retention window and was deleted. The commands it ran are above; what they printed is no longer kept.</span>
+                  </div>
+                </section>"""
+        else
+            html $"""
+                <section class="{Style.terminalComposer}">
+                  <div class="{Style.terminalQueuedRow}">
+                    <span class="{Style.statusFaint}">{closedFor}</span>
+                    <span class="{Style.small}">A recording of everything this terminal printed.</span>
+                  </div>
+                  <div class="{Style.terminalBlocks}" role="region" aria-label="Terminal recording"
+                       data-terminal-replay="{TerminalId.value view.TerminalId}"></div>
+                </section>"""
+
     /// The terminals column: the conversation's mirror on the right.
     let private terminals (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         let openTerminals = TerminalProjection.openTerminals model.Terminals
+        // Closed terminals are reachable too (Plan 13, stage 3e). Without this the audit
+        // outlives the process in the DATA and not on the screen: a closed terminal's blocks
+        // are in the projection and nothing renders them.
+        let closedTerminals = model.Terminals.Terminals |> List.filter (fun t -> not t.IsOpen)
         let selected = ClientModel.selectedTerminal model
         let tab (view: TerminalView) =
             let isSelected = selected = Some view.TerminalId
@@ -966,6 +1008,17 @@ module View =
                 <button type="button" class="{if isSelected then Style.terminalTabActive else Style.terminalTab}"
                         data-terminal-tab="{TerminalId.value view.TerminalId}" aria-pressed="{if isSelected then "true" else "false"}"
                         @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+        // Rendered after the open ones and marked apart, because they behave differently:
+        // there is nothing to run in a closed terminal, only something to read.
+        let closedTabs =
+            closedTerminals
+            |> List.map (fun view ->
+                let isSelected = selected = Some view.TerminalId
+                html $"""
+                    <button type="button" class="{if isSelected then Style.terminalTabActive else Style.terminalTab}"
+                            data-terminal-closed-tab="{TerminalId.value view.TerminalId}"
+                            aria-pressed="{if isSelected then "true" else "false"}"
+                            @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.small}"> · closed</span></button>""")
         let body =
             match selected |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals) with
             | None ->
@@ -990,14 +1043,17 @@ module View =
                       {truncated}
                       {blocks}
                     </div>
-                    {terminalComposer actions dispatch model view.TerminalId}"""
+                    {if view.IsOpen then terminalComposer actions dispatch model view.TerminalId
+                     else terminalReplay model view}"""
+        // Offered only for a terminal that is actually open: a "close" on a closed one either
+        // does nothing or reports an error, and both are worse than not being there.
         let closeSelected =
-            match selected with
-            | Some id ->
+            match selected |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals) with
+            | Some view when view.IsOpen ->
                 html $"""
-                    <button type="button" class="{Style.cls [ Style.terminalTab; "ml-auto" ]}" data-terminal-close="{TerminalId.value id}"
-                            aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal id)}>close</button>"""
-            | None -> Lit.nothing
+                    <button type="button" class="{Style.cls [ Style.terminalTab; "ml-auto" ]}" data-terminal-close="{TerminalId.value view.TerminalId}"
+                            aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>close</button>"""
+            | _ -> Lit.nothing
         html $"""
             <aside class="{Style.terminalPanel}" data-terminal-panel>
               <div class="{Style.terminalPane}">
@@ -1008,6 +1064,7 @@ module View =
                 </div>
                 <div class="{Style.terminalTabs}">
                   {openTerminals |> List.map tab}
+                  {closedTabs}
                   <button type="button" class="{Style.terminalTabNew}" data-terminal-new
                           @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
                   {closeSelected}

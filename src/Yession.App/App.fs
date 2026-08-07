@@ -149,6 +149,12 @@ module App =
         /// whether the transcript continues past this chunk.
         type TranscriptPage =
             { Records : (int * TranscriptRecord) list
+              /// The transcript's own header, when this page carried it (line 0, so chunk 0
+              /// alone). Kept rather than discarded because the replay view (Plan 13, stage
+              /// 3e) rebuilds a `.cast` from these records, and a `.cast` without its header
+              /// is not one — the recorded width and height are what make a replay come out
+              /// the shape the terminal actually was.
+              Header : TranscriptHeader option
               /// One past the last line this chunk covered.
               NextSeq : int
               /// A full chunk means more may exist; a partial chunk IS the current tail.
@@ -177,21 +183,23 @@ module App =
                         // A line that will not decode fails the page: a partially decoded
                         // transcript is not history, it is a guess — the same rule the
                         // event feed applies to a corrupt chunk.
-                        let rec decode i acc =
-                            if i >= lines.Length then Ok (List.rev acc)
+                        let rec decode i acc header =
+                            if i >= lines.Length then Ok (List.rev acc, header)
                             else
                                 match Codec.fromString Codec.transcriptLine lines.[i] with
-                                | Ok (TranscriptRecordLine record) -> decode (i + 1) ((first + i, record) :: acc)
-                                // The header is line 0 and carries no output; it is skipped
-                                // rather than rejected.
-                                | Ok (TranscriptHeaderLine _) -> decode (i + 1) acc
+                                | Ok (TranscriptRecordLine record) ->
+                                    decode (i + 1) ((first + i, record) :: acc) header
+                                // The header is line 0 and carries no output, so it is no
+                                // record — but it is KEPT, because a replay needs it.
+                                | Ok (TranscriptHeaderLine h) -> decode (i + 1) acc (Some h)
                                 | Error e -> Error (FeedCorrupt e)
-                        match decode 0 [] with
+                        match decode 0 [] None with
                         | Error fault -> return Error fault
-                        | Ok records ->
+                        | Ok (records, header) ->
                             return
                                 Ok
                                     { Records = records |> List.filter (fun (seq, _) -> seq >= fromSeq)
+                                      Header = header
                                       NextSeq = first + lines.Length
                                       IsEnd = lines.Length < TranscriptChunk.size }
                 }
@@ -491,6 +499,7 @@ module App =
                             for (seq, record) in page.Records do
                                 dispatch (TerminalRecordMsg (terminal, seq, record))
                             transcriptRead.[TerminalId.value terminal] <- max (readPositionOf terminal) page.NextSeq
+                            page.Header |> Option.iter (fun h -> dispatch (TerminalHeaderMsg (terminal, h)))
                             dispatch (TerminalReadThroughMsg (terminal, page.NextSeq))
                             // `NextSeq > fromSeq` guards the one way this could spin: a
                             // chunk that yields nothing new would otherwise be re-read for

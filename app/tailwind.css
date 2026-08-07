@@ -5,6 +5,12 @@
 
 @import "tailwindcss";
 
+/* The asciinema player's own stylesheet (Plan 13, stage 3e), inlined here rather than
+   emitted as a second artefact. One stylesheet is what the shell serves and what the
+   package ships; a CSS import from the esbuild bundle would produce a second file that
+   every consumer then has to know about. */
+@import "../node_modules/asciinema-player/dist/bundle/asciinema-player.css";
+
 /* Theme — mirrors what the old tailwind.config.js `theme.extend` registered. Namespaced
    custom properties auto-generate utilities (`--color-blue` -> `bg-blue`/`text-blue`,
    `--font-mono` -> `font-mono`, `--animate-pulse2` -> `animate-pulse2`). */

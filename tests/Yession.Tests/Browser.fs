@@ -554,6 +554,43 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+
+        // The replay (Plan 13, stage 3e). Everything else about it is pinned DOM-free — the
+        // `.cast` rebuild against the real file, the closed tab, the retention gap — but not
+        // this: whether `asciinema-player`'s named export resolves through the bundle and
+        // actually plays what was recorded. An import that silently failed would leave every
+        // other test green and the feature dead in the browser.
+        testCaseAsync "a recorded terminal replays in a real player, and prints what it printed" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 3)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 3)))
+
+                // The player took the mount and built its own DOM there.
+                let! _ = await (page.WaitForSelectorAsync "#replay .ap-player")
+                // …with the transport controls that ARE the audit-read affordance: a replay
+                // you cannot pause or seek is a video of a terminal, not a record of one.
+                let! _ = await (page.WaitForSelectorAsync "#replay .ap-control-bar")
+
+                // Then play it, and wait for the recording's own output to appear on the
+                // screen. This is the assertion that spans the whole stage: bytes the Session
+                // Process wrote, encoded as asciicast, rebuilt by `TranscriptReplay.cast`,
+                // and rendered by the player.
+                let! _ = await (page.WaitForSelectorAsync "#replay .ap-overlay-start")
+                do! awaitU (page.ClickAsync "#replay .ap-overlay-start")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelector('#replay').textContent.includes('total 0')")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 // --- A path-mounted session in a real browser (docs/plans/10) ---------------------------

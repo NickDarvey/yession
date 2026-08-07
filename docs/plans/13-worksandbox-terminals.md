@@ -1,10 +1,11 @@
 # Plan 13 — Terminals on the WorkSandbox
 
-> **Status: stage 1 and stage 2 implemented; stage 3 implemented through 3d** — rejection,
-> the headless emulator, `SpawnPty`, blocks on the pty, live mode, `IntegrationLost`, the
-> agent's terminal digest, the merged `execute_command` with its retirements, and the
-> idle-lease timeout and transcript retention. 3e (the asciinema replay view) is all that
-> remains — see [Delivery](#delivery) for the split.
+> **Status: implemented** — every stage, 1 through 3e: rejection, the headless emulator,
+> `SpawnPty`, blocks on the pty, live mode, `IntegrationLost`, the agent's terminal digest,
+> the merged `execute_command` with its retirements, the idle-lease timeout, transcript
+> retention, and the asciinema replay view. What the plan deliberately leaves open is listed
+> under [What this plan leaves open](#what-this-plan-leaves-open); see
+> [Delivery](#delivery) for the split it shipped as.
 > Builds directly on the sandbox seam from
 > [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
@@ -986,6 +987,55 @@ section leaves open); **transcript compaction and retention**, which is a policy
 about the sidecar and the chunk route — settled below; and the **asciinema-player replay view** for closed
 terminals, the audit read, which needs only PR 1's transcript. Plus the GAPS entries (agent
 lease, per-user terminal gating, docker non-root unchanged).
+
+### What the replay turned out to be (3e)
+
+A closed terminal's blocks survive in the projection, but a list of commands is not the same
+artefact as the RECORDING: a replay shows the terminal as it behaved, at the speed it
+behaved, which is what someone auditing actually wants to watch. Four things were decided
+while building it, and none of them is what the one-line plan entry implied.
+
+- **The player is `asciinema-player`, not the client's own renderer.** PR 1's pure-F# SGR
+  parser renders a STREAM, not a SCREEN, so a recording of anything that moves the cursor —
+  `htop`, a progress bar, `vim` — would replay as garbage. That is the same argument that
+  made the Session Process need a real emulator rather than half of one, and it is why the
+  sidecar was written as asciicast v2 in the first place: so the standard player replays it.
+  Transport controls come with it, and seek/pause IS the audit-read affordance.
+- **It is rebuilt from the chunks the client already fetched, not from a new whole-file
+  route.** Concatenating chunks reproduces the file byte for byte, so a replay rides the
+  immutable chunk cache the rest of the history rides — which is what the design chose
+  immutable chunks for. `TranscriptReplay.cast` is that reassembly, and the cheap-tier test
+  pins it against the real file on disk rather than against itself.
+- **A closed terminal had to become SELECTABLE, which it was not.** `selectedTerminal`
+  resolved a choice against the OPEN terminals only, so a selection fell back to a live
+  terminal the moment its shell closed. That was sound while a closed terminal had nothing
+  to show; with a recording behind it, it put the audit out of reach exactly when it starts
+  to matter. A choice now names any terminal the client knows; the DEFAULT is still the
+  first open one, because opening the panel should land somewhere you can type.
+- **A retention-deleted recording renders as a STATED gap, not an empty replay.** After 3d
+  exactly those terminals have non-zero `DroppedBytes` and their chunks 404, and an empty
+  player is indistinguishable from a terminal that printed nothing. This is the one place
+  3d's behaviour reaches a person, and the whole reason the drop is recorded as an event is
+  that a hole in an audit trail must be a stated fact.
+
+The one thing no DOM-free test can reach is whether the player's import resolves through the
+bundle and renders at all, so that runs in the `Browser` tier against the host-free harness —
+a `.cast` the client's own rebuild produced, played in real Chromium, asserting the recorded
+output appears on screen.
+
+### What this plan leaves open
+
+Named here rather than left implied, because each is a decision rather than an oversight:
+
+- **The browser terminal viewport.** Live mode (2e) is complete on the Session Process side —
+  lease, flip, `TerminalInput`/`TerminalResize` frames, the idle timeout — and the client has
+  no producer for those frames: the panel renders blocks and the lease bar, not a live
+  screen. So a lease can be taken and observed, and typing into one is not yet drivable from
+  a browser. The frames and their handling are the part that needed the protocol; the
+  viewport is a client surface on top of it.
+- **The GAPS entries**, unchanged: the agent takes no lease (it queues, like everyone else),
+  terminals are not gated per user beyond the session's own membership, and the docker
+  backend still runs as whatever the image's user is.
 
 **A note on ordering.** PR 3 is numbered after PR 2 because the retirements need somewhere
 to land, not because it depends on it — and the loophole is open until 3b ships. If PR 2

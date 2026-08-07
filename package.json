@@ -17,6 +17,7 @@
     "@opentelemetry/sdk-logs": "^0.220.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
+    "asciinema-player": "^3.17.0",
     "dockerode": "^4.0.12",
     "jose": "^6.2.3",
     "lib0": "^0.2.99",

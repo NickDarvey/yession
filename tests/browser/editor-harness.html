@@ -10,6 +10,10 @@
          The bundle is the Fable-compiled app/browser/EditorHarness.fs, esbuilt by the
          `Browser`-cap test build (mise). No inline JS — the no-authored-JS invariant holds. -->
     <div id="host"></div>
+    <!-- The replay of a recorded terminal mounts here (Plan 13, stage 3e): the same
+         `asciinema-player` binding the client uses, driven by a `.cast` the client's own
+         rebuild produced. -->
+    <div id="replay"></div>
     <script type="module" src="./out/harness.js"></script>
   </body>
 </html>

@@ -107,11 +107,15 @@ type TerminalFeed =
       /// `LatestKnownOffset` drives the event feed.
       KnownLength : int
       /// How far a contiguous prefix has been read. Fetching resumes here.
-      ReadThrough : int }
+      ReadThrough : int
+      /// The transcript's own header, once chunk 0 has been fetched (Plan 13, stage 3e).
+      /// The replay rebuilds a `.cast` from these records, and the recorded width and height
+      /// are what make it come out the shape the terminal actually was.
+      Header : TranscriptHeader option }
 
 module TerminalFeed =
 
-    let empty : TerminalFeed = { Records = Map.empty; KnownLength = 0; ReadThrough = 0 }
+    let empty : TerminalFeed = { Records = Map.empty; KnownLength = 0; ReadThrough = 0; Header = None }
 
     /// Fold one record in. Out-of-order and duplicate records are both fine — the map key
     /// is the sequence number.
@@ -182,8 +186,7 @@ type ClientModel =
       /// stream from the transcript.
       TerminalFeeds : Map<TerminalId, TerminalFeed>
       /// Which terminal the panel is showing. `None` = the first open one, resolved by
-      /// `selectedTerminal` — a stored choice would go stale the moment that terminal
-      /// closed.
+      /// `selectedTerminal`.
       TerminalChoice : TerminalId option
       /// Whether the terminals panel is open. View state, never synced: two people in one
       /// session may reasonably want different columns on screen.
@@ -261,6 +264,8 @@ type ClientMsg =
     | TerminalAvailableMsg of TerminalId * length: int
     /// A contiguous prefix of a terminal's transcript has been read through this seq.
     | TerminalReadThroughMsg of TerminalId * seq: int
+    /// The transcript's header, from the chunk that carried line 0 (Plan 13, stage 3e).
+    | TerminalHeaderMsg of TerminalId * TranscriptHeader
     /// Show this terminal in the panel.
     | SelectTerminalMsg of TerminalId
     /// Open or close the terminals column.
@@ -385,11 +390,18 @@ module ClientModel =
     /// Which terminal the panel shows: the stored choice while it is still open, else the
     /// first open one. Resolved rather than stored, for the same reason `composerTarget`
     /// is: a choice that outlives what it pointed at is a blank pane nobody asked for.
+    /// Which terminal the panel shows. A CHOICE may name any terminal this client knows,
+    /// closed ones included (Plan 13, stage 3e): a closed terminal is where the recording is
+    /// read, so a selection that silently fell back to a live terminal the moment the shell
+    /// closed would put the audit out of reach exactly when it starts to matter. The DEFAULT
+    /// is still the first open one, because opening the panel should land somewhere you can
+    /// type. A choice naming a terminal that is not in the projection at all is stale and
+    /// falls back the same way.
     let selectedTerminal (model: ClientModel) : TerminalId option =
-        let openIds = TerminalProjection.openTerminals model.Terminals |> List.map (fun t -> t.TerminalId)
+        let known = model.Terminals.Terminals |> List.map (fun t -> t.TerminalId)
         match model.TerminalChoice with
-        | Some chosen when List.contains chosen openIds -> Some chosen
-        | _ -> List.tryHead openIds
+        | Some chosen when List.contains chosen known -> Some chosen
+        | _ -> TerminalProjection.openTerminals model.Terminals |> List.map (fun t -> t.TerminalId) |> List.tryHead
 
     /// A terminal's feed, empty when nothing has arrived for it yet.
     let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
@@ -657,6 +669,9 @@ module ClientModel =
             { model with
                 TerminalFeeds =
                     Map.add terminal { feed with KnownLength = max feed.KnownLength length } model.TerminalFeeds }
+        | TerminalHeaderMsg (terminal, header) ->
+            let feed = terminalFeed terminal model
+            { model with TerminalFeeds = Map.add terminal { feed with Header = Some header } model.TerminalFeeds }
         | TerminalReadThroughMsg (terminal, seq) ->
             let feed = terminalFeed terminal model
             { model with

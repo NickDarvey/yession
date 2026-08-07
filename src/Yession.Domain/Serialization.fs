@@ -1017,3 +1017,32 @@ module Codec =
     /// Deserialize a value from a JSON string.
     let fromString (codec: Codec<'a>) (json: string) : Result<'a, string> =
         Decode.fromString codec.Decode json
+
+/// Rebuilding a `.cast` file from what a client has fetched (Plan 13, stage 3e).
+///
+/// The audit read. A closed terminal's blocks survive in the projection, but a list of
+/// commands is not the same artefact as the RECORDING — a replay shows the terminal as it
+/// behaved, at the speed it behaved, which is what someone auditing actually wants to watch.
+///
+/// It is cheap because the transcript already IS asciicast v2 on disk and the chunk route
+/// already serves it: concatenating chunk 0, 1, 2 … reproduces the file byte for byte, so any
+/// prefix of chunks is a valid `.cast`. This reassembles that from the DECODED records a
+/// client holds, which is the same thing through a round trip the codec already pins — and it
+/// means the replay rides the browser's HTTP cache rather than a second whole-file route.
+module TranscriptReplay =
+
+    /// The `.cast` text for a header and the records under it, in sequence order.
+    ///
+    /// Gaps are simply absent rather than filled: a record the client never fetched, or one
+    /// retention deleted, is a line that is not there. asciicast has no notion of a hole, and
+    /// inventing a placeholder would put something in the recording that the terminal never
+    /// printed. Whether the recording is COMPLETE is a separate question, answered by the
+    /// terminal's `DroppedBytes` and said in the surface rather than smuggled into the file.
+    let cast (header: TranscriptHeader) (records: (int * TranscriptRecord) list) : string =
+        let lines =
+            (Codec.toString Codec.transcriptLine (TranscriptHeaderLine header))
+            :: (records
+                |> List.sortBy fst
+                |> List.map (fun (_, record) ->
+                    Codec.toString Codec.transcriptLine (TranscriptRecordLine record)))
+        String.concat "\n" lines + "\n"

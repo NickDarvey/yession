@@ -22,6 +22,13 @@ open Yession.App
 [<Emit("document.getElementById('host')")>]
 let private host : obj = jsNative
 
+/// The replay mount (Plan 13, stage 3e). It shares this page rather than getting one of its
+/// own because it is the same KIND of thing — a host-free surface that needs a real browser
+/// and nothing else — and a second harness would be a second bundle, a second page and a
+/// second static server for one `create` call.
+[<Emit("document.getElementById('replay')")>]
+let private replayHost : Browser.Types.Element = jsNative
+
 [<Emit("(function(f){ window.__md = f; })($0)")>]
 let private exposeMd (f: unit -> string) : unit = jsNative
 
@@ -64,3 +71,13 @@ do
                      Anchor = anchor
                      Head = head } : Editor.RemoteBodyCursor) ]
         | None -> ())
+
+    // The replay, mounted from a `.cast` rebuilt by the very function the client uses. This
+    // is the one part of stage 3e no DOM-free test can reach: whether `asciinema-player`'s
+    // named export actually resolves through the bundle and renders the recording.
+    let cast =
+        TranscriptReplay.cast
+            { Width = 80; Height = 24; Timestamp = 0L }
+            [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\r\n" }
+              1, { At = 0.1; Kind = TranscriptOutput; Data = "total 0\r\n" } ]
+    Replay.mount replayHost cast |> ignore
