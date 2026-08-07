@@ -224,11 +224,20 @@ dialect an image's own shell integration is most likely to already emit, and
 ### The marks, and why not a sentinel
 
 Block boundaries and exit codes come from **OSC 133 semantic marks** — `C` when the shell
-begins running a command, `D;<code>` when it finishes. The block's `FromSeq` is the
-transcript position of the `C` mark, so the shell's echo of the command line sits *before*
-the block's output range rather than inside it, and `ToSeq` and the exit code both come
-off `D`. `@xterm/headless` surfaces these directly: `registerOscHandler(133, …)` on the
-parser, so the Session Process reads marks as a callback instead of scanning bytes.
+begins running a command, `D;<code>` when it finishes. `ToSeq` and the exit code both come
+off `D`.
+
+`FromSeq` is taken **before the command is written**, and therefore includes the shell's
+echo of it. An earlier draft of this section put the range's start at the `C` mark so the
+echo would sit outside it, and that cannot be reconciled with the ordering the block events
+already have: `TerminalBlockStarted` is appended FIRST, because it is the exactly-once
+anchor that makes a crash leave a visible never-completed block rather than a command which
+silently runs twice — and `C` does not exist until after the write. The anchor is the
+stronger invariant, so the echo is inside the range.
+
+That is also the honest reading rather than a concession. On a pty the shell echoes the
+command itself, and the echo is part of what the block put on the screen; Warp separates the
+two only because it keeps a distinct header grid, where our transcript is one stream.
 
 We need less of the protocol than Warp does, because Warp must reconstruct what a human
 typed at a prompt it does not control — hence hooks carrying the command text and a

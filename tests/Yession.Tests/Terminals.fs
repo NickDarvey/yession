@@ -257,6 +257,103 @@ let private projectionTests =
             Expect.equal (TerminalProjection.tryFind terminalA proj |> Option.get).DroppedBytes 512 "the loss is counted"
     ]
 
+// --- OSC 133 marks and their integrity (Plan 13, stage 2d) -------------------------------
+
+let private nonce = "n0nce"
+
+/// A mark as our shell hooks emit it.
+let private mark (body: string) = "]133;" + body + ";y=" + nonce + ""
+
+/// A mark as anything ELSE emits it — a nested shell's own integration, or a file being
+/// printed. Same bytes, no nonce.
+let private foreign (body: string) = "]133;" + body + ""
+
+let private scan1 (data: string) = TerminalMarks.scan nonce "" data
+
+let private markTests =
+    testList "Terminal marks" [
+        testCase "our marks are recognised and taken out of the output" <| fun () ->
+            let marks, output, carry = scan1 (mark "C" + "hello" + mark "D;0")
+            Expect.equal marks [ MarkCommandStart; MarkCommandDone 0 ] "both marks are read"
+            Expect.equal output "hello" "and neither reaches the transcript"
+            Expect.equal carry "" "nothing is left over"
+
+        testCase "a mark WITHOUT our nonce is output, not a mark" <| fun () ->
+            // The forgery case, and the reason the nonce exists. These bytes arrive from a
+            // file someone printed, a build log, a filename — anything the terminal displays
+            // that we did not write. Treating them as marks would close the running block
+            // early with an exit code nobody produced.
+            let marks, output, _ = scan1 (foreign "D;0")
+            Expect.isEmpty marks "no mark is taken from it"
+            Expect.equal output (foreign "D;0") "the bytes pass through verbatim, as output"
+
+        testCase "a mark with the WRONG nonce is output too" <| fun () ->
+            let marks, output, _ = scan1 ("]133;D;0;y=guessed")
+            Expect.isEmpty marks "a guessed nonce is not our nonce"
+            Expect.equal output "]133;D;0;y=guessed" "so it is just bytes"
+
+        testCase "`cat` of a crafted file cannot forge a completion" <| fun () ->
+            // The end-to-end shape of the attack: real output around a plausible-looking
+            // mark. The block must not close, and the file's contents must survive intact
+            // for whoever reads the transcript afterwards.
+            let crafted = "build ok\n" + foreign "D;0" + "\nmore output"
+            let marks, output, _ = scan1 crafted
+            Expect.isEmpty marks "nothing is taken as a completion"
+            Expect.equal output crafted "and the file reads back exactly as it was printed"
+
+        testCase "a mark split across two chunks is still one mark" <| fun () ->
+            // A pty delivers whatever the kernel had, so a mark can and will arrive in two
+            // reads. Scanning each chunk alone would both miss the mark and leave half an
+            // escape sequence in the transcript.
+            let whole = mark "D;7"
+            let first = whole.Substring (0, 8)
+            let second = whole.Substring 8
+            let marks1, out1, carry1 = TerminalMarks.scan nonce "" ("x" + first)
+            Expect.isEmpty marks1 "the first half is not a mark yet"
+            Expect.equal out1 "x" "and the fragment is not emitted as output"
+            let marks2, out2, carry2 = TerminalMarks.scan nonce carry1 (second + "y")
+            Expect.equal marks2 [ MarkCommandDone 7 ] "the halves join into one mark"
+            Expect.equal out2 "y" "with only the real output around it"
+            Expect.equal carry2 "" "and nothing left hanging"
+
+        testCase "a bare prefix at the end of a chunk is carried, not printed" <| fun () ->
+            let marks, output, carry = scan1 "done]133"
+            Expect.isEmpty marks "not a mark yet"
+            Expect.equal output "done" "the fragment is held back"
+            Expect.equal carry "]133" "to be finished by the next chunk"
+
+        testCase "both terminators are accepted, because a shell may print either" <| fun () ->
+            let withSt = "]133;D;3;y=" + nonce + "\\"
+            let marks, output, _ = scan1 withSt
+            Expect.equal marks [ MarkCommandDone 3 ] "ST terminates a mark as well as BEL"
+            Expect.equal output "" "and is stripped with it"
+
+        testCase "an unreadable exit code still closes the block" <| fun () ->
+            // Better than leaving a block open for ever over an unparseable integer: the
+            // shell said the command ended and it held the nonce, so it ended.
+            let marks, _, _ = scan1 (mark "D;notanumber")
+            Expect.equal marks [ MarkCommandDone -1 ] "reported as 'the OS gave us none'"
+
+        testCase "the prompt mark is what the open-probe waits for" <| fun () ->
+            let marks, _, _ = scan1 (mark "A")
+            Expect.equal marks [ MarkPromptStart ] "A is the handshake that instrumentation took"
+
+        testCase "the rc payload carries the nonce and reads $? first" <| fun () ->
+            // Two properties of the emitted shell, both of which are silent when wrong.
+            for shell in [ "bash"; "zsh" ] do
+                let rc = TerminalMarks.rcFor shell nonce |> Option.get
+                Expect.isTrue (rc.Contains ("y=" + nonce)) (sprintf "%s marks carry the nonce" shell)
+                Expect.isTrue (rc.Contains "__y_code=$?") (sprintf "%s captures $? as the first statement" shell)
+                Expect.isTrue (rc.Contains "command -p") (sprintf "%s resolves binaries off a clobbered PATH" shell)
+                for line in rc.Split '\n' do
+                    Expect.isTrue (line.StartsWith " ") (sprintf "%s keeps its bootstrap out of history: %s" shell line)
+
+        testCase "a shell we cannot instrument says so rather than guessing" <| fun () ->
+            Expect.isNone (TerminalMarks.rcFor "fish" nonce) "fish is not one of the three yet"
+            Expect.isNone (TerminalMarks.rcFor "" nonce) "and neither is nothing"
+            Expect.isSome (TerminalMarks.rcFor "sh" nonce) "a POSIX sh rides its marks in PS1"
+    ]
+
 // --- The headless emulator (Plan 13, stage 2b) -------------------------------------------
 
 let private emulatorTests =
@@ -778,6 +875,7 @@ let private scriptedEnvironment (script: string -> (OutputStream * string) list 
                               Kill = ignore
                               Exited = async { return SandboxExited code } }
                 }
+          SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
           Stop = fun () -> async { return () }
           CurrentRef = fun () -> Some "scripted" }
     environment, spawned
@@ -830,6 +928,8 @@ let private makeTerminals (log: EventLog<SessionEvent>) environment openTranscri
             fixedClock
             (fun () -> TerminalId.create (mintTerminal ()) |> expect)
             (fun () -> BlockId.create (mintBlock ()) |> expect)
+            // Fixed, because a test that cannot predict the nonce cannot assert on a mark.
+            (fun () -> "test-nonce")
             (fun id seq record -> records.Add (id, seq, record))
             openAtBoot
     terminals, records
@@ -1110,6 +1210,7 @@ let tests =
         approvalTests
         drainTests
         projectionTests
+        markTests
         emulatorTests
         rejectionTests
         digestTests

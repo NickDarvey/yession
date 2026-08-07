@@ -198,6 +198,7 @@ let tests =
                                           Kill = ignore
                                           Exited = async { return SandboxExited 0 } }
                             }
+                      SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
                       CurrentRef = fun () -> Some "scripted" }
                 let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
@@ -275,6 +276,7 @@ let tests =
                                           Kill = ignore
                                           Exited = async { return SandboxExited 0 } }
                             }
+                      SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
                       CurrentRef = fun () -> Some "scripted" }
                 let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
