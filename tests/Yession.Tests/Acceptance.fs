@@ -118,7 +118,8 @@ let private representativeModel : ClientModel =
                       [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\n" }
                         1, { At = 0.1; Kind = TranscriptOutput; Data = "\u001b[32mtotal 0\u001b[0m\n" } ]
                 KnownLength = 2
-                ReadThrough = 2 } ]
+                ReadThrough = 2
+                Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
       TerminalChoice = None
       TerminalsOpen = true
       Claude =
@@ -166,6 +167,26 @@ let private lostIntegrationModel : ClientModel =
             { Terminals =
                 representativeModel.Terminals.Terminals
                 |> List.map (fun t -> { t with IntegrationLost = true }) } }
+
+/// The same session after the terminal has closed (Plan 13, stage 3e) — the audit read. The
+/// choice is explicit because that is the real flow: the panel LANDS on a live terminal, and
+/// a closed one is somewhere you go on purpose.
+let private closedTerminalModel : ClientModel =
+    { representativeModel with
+        Terminals =
+            { Terminals =
+                representativeModel.Terminals.Terminals
+                |> List.map (fun t -> { t with IsOpen = false; ClosedReason = Some "closed by a peer" }) }
+        TerminalChoice = Some terminalId }
+
+/// …and after retention has deleted its recording (stage 3d): the blocks survive in the
+/// projection, the transcript does not, and the byte count is the only trace of what it held.
+let private forgottenTerminalModel : ClientModel =
+    { closedTerminalModel with
+        Terminals =
+            { Terminals =
+                closedTerminalModel.Terminals.Terminals |> List.map (fun t -> { t with DroppedBytes = 4096 }) }
+        TerminalFeeds = Map.empty }
 
 let private uiChecklistTests =
     testList "UI checklist" [
@@ -280,6 +301,38 @@ let private uiChecklistTests =
                   "the held command names this hold",
                   Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingIntegration ] do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+
+        testCase "a closed terminal is reachable, and shows the recording rather than a composer" <| fun () ->
+            let html = Support.render closedTerminalModel
+            for label, marker in
+                [ "a closed terminal has a tab of its own",
+                  Dom.attr Dom.Hooks.terminalClosedTab (TerminalId.value terminalId)
+                  "and the mount the player attaches to",
+                  Dom.attr Dom.Hooks.terminalReplay (TerminalId.value terminalId)
+                  // The blocks are still the other half of the read: what ran, beside how it
+                  // behaved.
+                  "the commands it ran are still listed", Dom.attr Dom.Hooks.terminalBlock "block-ui" ] do
+                Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+            // Nothing can be run in a closed terminal, so nothing offers to: a command line
+            // that queues into a terminal with no shell behind it is the misleading half.
+            Expect.isFalse
+                (html.Contains (Dom.attr Dom.Hooks.terminalInput (BodyKey.terminalDraft terminalId ada)))
+                "no command line"
+            Expect.isFalse
+                (html.Contains (Dom.attr "data-terminal-close" (TerminalId.value terminalId)))
+                "and no offer to close what is already closed"
+
+        testCase "a recording retention deleted is a STATED gap, not an empty player" <| fun () ->
+            // The one place stage 3d's behaviour reaches the surface. An empty player is
+            // indistinguishable from a terminal that printed nothing, and the whole reason
+            // the drop is recorded is that a hole in an audit trail must be a stated fact.
+            let html = Support.render forgottenTerminalModel
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.terminalReplayGone (TerminalId.value terminalId)))
+                "the gap is named"
+            Expect.isFalse
+                (html.Contains (Dom.attr Dom.Hooks.terminalReplay (TerminalId.value terminalId)))
+                "and no player is mounted over nothing"
 
         testCase "the random peer display name is human-readable" <| fun () ->
             let rng = Random 1234

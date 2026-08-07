@@ -14,6 +14,13 @@ open Yession.App
 open Yession.SessionProcess
 open Yession.Tests.Support
 
+// Reading a transcript back as BYTES, for the one assertion that is about the file itself
+// rather than about what the store returns from it.
+let private nodeFs : obj = Fable.Core.JsInterop.importAll "node:fs"
+
+[<Fable.Core.Emit("$0.readFileSync($1, 'utf8')")>]
+let private readFileSync (fs: obj) (path: string) : string = Fable.Core.Util.jsNative
+
 let private expect =
     function
     | Ok v -> v
@@ -1257,6 +1264,53 @@ let private transcriptTests =
             for line in lines do
                 let encoded = Codec.toString Codec.transcriptLine line
                 Expect.equal (Codec.fromString Codec.transcriptLine encoded) (Ok line) ("round-trips: " + encoded)
+
+        // The replay (stage 3e) is built from what the client already fetched rather than
+        // from a new whole-file route, and that is only sound if the reassembly is the FILE.
+        // This drives the real route end to end — write through the store, read the chunks a
+        // client reads, decode them as a client decodes them, rebuild — and compares against
+        // the recording on disk byte for byte.
+        testCase "a replay rebuilt from fetched chunks IS the recording on disk" <| fun () ->
+            let dir = sprintf "tests/Yession.Tests/out/.data/replay-%s" (string (System.Guid.NewGuid ()))
+            let store = Yession.Host.TranscriptStore.openStore dir
+            let header = { Width = 120; Height = 40; Timestamp = 1754092800L }
+            let transcript = store.Open terminalA header
+            for record in
+                [ { At = 0.0; Kind = TranscriptInput; Data = "ls -la\n" }
+                  { At = 0.1; Kind = TranscriptOutput; Data = "[32mtotal 0[0m\n" }
+                  { At = 0.2; Kind = TranscriptStderr; Data = "warning\n" }
+                  { At = 0.3; Kind = TranscriptResize; Data = "100x30" } ] do
+                transcript.Append record |> ignore
+            // What a client holds after fetching: decoded lines, keyed by sequence number.
+            let lines, _ = store.ReadChunk terminalA 0 |> Option.defaultWith (fun () -> failwith "no chunk 0")
+            let decoded =
+                lines
+                |> List.mapi (fun i line -> i, Codec.fromString Codec.transcriptLine line)
+                |> List.choose (fun (seq, line) ->
+                    match line with
+                    | Ok (TranscriptRecordLine record) -> Some (seq, record)
+                    | _ -> None)
+            // Deliberately shuffled: chunks arrive in whatever order the fetches settle, and
+            // the map a client keeps them in has no order at all. Sequence order is the
+            // recording's order, and `cast` is what restores it.
+            let cast = TranscriptReplay.cast header (List.rev decoded)
+            Expect.equal
+                cast
+                (readFileSync nodeFs (sprintf "%s/%s.cast" dir (TerminalId.value terminalA)))
+                "the rebuilt cast is the file"
+
+        // Retention (stage 3d) deletes a closed terminal's recording, and the client's
+        // records go with it. A cast of nothing must still be a VALID asciicast — a header
+        // and no frames — rather than an empty file the player reports as broken, because
+        // "this terminal printed nothing that is still kept" is a thing the surface says.
+        testCase "a recording with no records left is still a valid cast" <| fun () ->
+            let cast = TranscriptReplay.cast { Width = 80; Height = 24; Timestamp = 0L } []
+            let lines = cast.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
+            Expect.equal lines.Length 1 "the header, and nothing else"
+            Expect.equal
+                (Codec.fromString Codec.transcriptLine lines.[0])
+                (Ok (TranscriptHeaderLine { Width = 80; Height = 24; Timestamp = 0L }))
+                "and it is the header"
     ]
 
 // --- Wire codecs --------------------------------------------------------------------------

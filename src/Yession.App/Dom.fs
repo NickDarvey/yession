@@ -151,6 +151,12 @@ module Dom =
         /// 2f), and the control that types the instrumentation in again.
         let terminalLost = "data-terminal-lost"
         let terminalRearm = "data-terminal-rearm"
+        /// The replay of a CLOSED terminal (Plan 13, stage 3e): the mount the player attaches
+        /// to, the tab that reaches a closed terminal at all, and the banner shown instead
+        /// when retention has deleted the recording.
+        let terminalReplay = "data-terminal-replay"
+        let terminalClosedTab = "data-terminal-closed-tab"
+        let terminalReplayGone = "data-terminal-replay-gone"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).

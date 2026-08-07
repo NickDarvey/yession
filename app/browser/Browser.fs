@@ -286,6 +286,20 @@ let private hostReadOnly (el: obj) : bool = jsNative
 [<Emit("Array.from(document.querySelectorAll('[data-terminal-input]'))")>]
 let private terminalInputs () : obj[] = jsNative
 
+// --- The replay of a closed terminal (Plan 13, stage 3e) -------------------------------
+// The view renders an empty `<div data-terminal-replay="<id>">`; the player is attached here,
+// because a `.cast` is a whole artefact rather than a value to bind and the player owns its
+// own DOM once mounted.
+
+[<Emit("Array.from(document.querySelectorAll('[data-terminal-replay]'))")>]
+let private replayMounts () : obj[] = jsNative
+
+[<Emit("$0.getAttribute('data-terminal-replay')")>]
+let private replayMountId (el: obj) : string = jsNative
+
+[<Emit("$0.childElementCount > 0")>]
+let private isMounted (el: obj) : bool = jsNative
+
 [<Emit("$0.getAttribute('data-terminal-input')")>]
 let private terminalInputKey (el: obj) : string = jsNative
 
@@ -636,6 +650,38 @@ let private start () =
                         |> ignore
                     setInputValue el (TerminalText.read texts key)
 
+        /// Attach a player to any replay mount that has not got one, and dispose the players
+        /// whose mount has gone.
+        ///
+        /// Keyed on the mount being EMPTY rather than on a model flag: the view re-renders for
+        /// reasons that have nothing to do with this terminal, and re-mounting a player on
+        /// every render would restart the recording under whoever was watching it.
+        let replays = System.Collections.Generic.Dictionary<string, Replay.Mounted> ()
+
+        let syncReplays () =
+            let live = System.Collections.Generic.HashSet<string> ()
+            for el in replayMounts () do
+                let id = replayMountId el
+                if not (isNull (box id)) && id <> "" then
+                    live.Add id |> ignore
+                    if not (isMounted el) then
+                        match TerminalId.create id with
+                        | Error _ -> ()
+                        | Ok terminalId ->
+                            let feed = ClientModel.terminalFeed terminalId latestModel
+                            match feed.Header with
+                            // No header means chunk 0 has not arrived, so there is nothing to
+                            // replay YET — the next fetch re-renders and this runs again.
+                            | None -> ()
+                            | Some header ->
+                                let cast =
+                                    TranscriptReplay.cast header (feed.Records |> Map.toList)
+                                replays.[id] <- Replay.mount (unbox el) cast
+            // A player whose mount is gone keeps a worker alive; take it down with the node.
+            for stale in replays.Keys |> Seq.filter (fun k -> not (live.Contains k)) |> Seq.toList do
+                replays.[stale].Dispose ()
+                replays.Remove stale |> ignore
+
         // The publication rule, one subscription per open terminal. Started when a terminal
         // appears and stopped when it goes, so a closed terminal's rule cannot republish a
         // slot into a terminal that no longer exists.
@@ -868,6 +914,7 @@ let private start () =
             // measured against the just-rendered input.
             syncRichBodies ()
             syncTerminalInputs ()
+            syncReplays ()
             // The terminals column's open state is a class on the shell root, like the
             // sidebar's — presentation, so a re-render never fights it — but driven FROM the
             // model, because unlike the sidebar this column's visibility is something the app
