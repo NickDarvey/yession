@@ -23,6 +23,8 @@ module SessionCommands =
         (requestInterrupt: PeerId -> AgentTurnId -> Result<unit, string>)
         (openTerminal: ActorRef -> string -> Async<Result<TerminalId, string>>)
         (closeTerminal: TerminalId -> string -> Async<Result<unit, string>>)
+        (takeLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
+        (releaseLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
         (actorFor: PeerId -> ActorRef)
         (peerId: PeerId)
         (command: SessionCommand)
@@ -40,6 +42,19 @@ module SessionCommands =
                 | Error reason -> return CommandRejected reason
             | CloseTerminal terminalId ->
                 match! closeTerminal terminalId "closed by a peer" with
+                | Ok () -> return CommandAccepted
+                | Error reason -> return CommandRejected reason
+            // Taking a lease succeeds even when someone else holds it: collaborators are
+            // trusted, so this is a steal rather than a request, and what it needs is to be on
+            // the record rather than to be permitted. Releasing is the asymmetric one — only
+            // the holder can, because releasing someone else's lease is a steal wearing a
+            // polite word, and a steal has its own verb.
+            | TakeTerminalLease terminalId ->
+                match! takeLease terminalId (actorFor peerId) with
+                | Ok () -> return CommandAccepted
+                | Error reason -> return CommandRejected reason
+            | ReleaseTerminalLease terminalId ->
+                match! releaseLease terminalId (actorFor peerId) with
                 | Ok () -> return CommandAccepted
                 | Error reason -> return CommandRejected reason
         }

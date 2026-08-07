@@ -417,6 +417,43 @@ module Codec =
                   TerminalBlockCompleted.Result = get.Required.Field "result" commandResult.Decode
                   TerminalBlockCompleted.ToSeq = get.Required.Field "toSeq" Decode.int }) }
 
+    let private leaseEnd : Codec<TerminalLeaseEnd> =
+        { Encode =
+            (fun e ->
+                match e with
+                | LeaseReleased -> Encode.object [ "kind", Encode.string "released" ]
+                | LeaseStolen by -> Encode.object [ "kind", Encode.string "stolen"; "by", actor.Encode by ]
+                | LeaseHolderGone -> Encode.object [ "kind", Encode.string "holderGone" ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "released" -> Decode.succeed LeaseReleased
+                | "stolen" -> Decode.field "by" actor.Decode |> Decode.map LeaseStolen
+                | "holderGone" -> Decode.succeed LeaseHolderGone
+                | other -> Decode.fail (sprintf "Unknown lease end: %s" other)) }
+
+    let private terminalLeaseTaken : Codec<TerminalLeaseTaken> =
+        { Encode =
+            fun (p: TerminalLeaseTaken) ->
+                Encode.object [ "terminalId", terminalId.Encode p.TerminalId; "by", actor.Encode p.By ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalLeaseTaken.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalLeaseTaken.By = get.Required.Field "by" actor.Decode }) }
+
+    let private terminalLeaseReleased : Codec<TerminalLeaseReleased> =
+        { Encode =
+            fun (p: TerminalLeaseReleased) ->
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "was", actor.Encode p.Was
+                      "reason", leaseEnd.Encode p.Reason ]
+          Decode =
+            Decode.object (fun get ->
+                { TerminalLeaseReleased.TerminalId = get.Required.Field "terminalId" terminalId.Decode
+                  TerminalLeaseReleased.Was = get.Required.Field "was" actor.Decode
+                  TerminalLeaseReleased.Reason = get.Required.Field "reason" leaseEnd.Decode }) }
+
     let private terminalCommandRejected : Codec<TerminalCommandRejected> =
         { Encode =
             fun (p: TerminalCommandRejected) ->
@@ -507,6 +544,10 @@ module Codec =
                     Encode.object [ "type", Encode.string "terminalBlockCompleted"; "payload", terminalBlockCompleted.Encode p ]
                 | TerminalCommandRejected p ->
                     Encode.object [ "type", Encode.string "terminalCommandRejected"; "payload", terminalCommandRejected.Encode p ]
+                | TerminalLeaseTaken p ->
+                    Encode.object [ "type", Encode.string "terminalLeaseTaken"; "payload", terminalLeaseTaken.Encode p ]
+                | TerminalLeaseReleased p ->
+                    Encode.object [ "type", Encode.string "terminalLeaseReleased"; "payload", terminalLeaseReleased.Encode p ]
                 | TerminalTranscriptTruncated p ->
                     Encode.object [ "type", Encode.string "terminalTranscriptTruncated"; "payload", terminalTranscriptTruncated.Encode p ])
           Decode =
@@ -539,6 +580,8 @@ module Codec =
                 | "terminalBlockStarted" -> Decode.field "payload" terminalBlockStarted.Decode |> Decode.map TerminalBlockStarted
                 | "terminalBlockCompleted" -> Decode.field "payload" terminalBlockCompleted.Decode |> Decode.map TerminalBlockCompleted
                 | "terminalCommandRejected" -> Decode.field "payload" terminalCommandRejected.Decode |> Decode.map TerminalCommandRejected
+                | "terminalLeaseTaken" -> Decode.field "payload" terminalLeaseTaken.Decode |> Decode.map TerminalLeaseTaken
+                | "terminalLeaseReleased" -> Decode.field "payload" terminalLeaseReleased.Decode |> Decode.map TerminalLeaseReleased
                 | "terminalTranscriptTruncated" ->
                     Decode.field "payload" terminalTranscriptTruncated.Decode |> Decode.map TerminalTranscriptTruncated
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
@@ -656,7 +699,18 @@ module Codec =
                         [ "kind", Encode.string "snapshot"
                           "terminalId", terminalId.Encode id
                           "seq", Encode.int seq
-                          "screen", Encode.string screen ])
+                          "screen", Encode.string screen ]
+                | TerminalInput (id, data) ->
+                    Encode.object
+                        [ "kind", Encode.string "input"
+                          "terminalId", terminalId.Encode id
+                          "data", Encode.string data ]
+                | TerminalResize (id, cols, rows) ->
+                    Encode.object
+                        [ "kind", Encode.string "resize"
+                          "terminalId", terminalId.Encode id
+                          "cols", Encode.int cols
+                          "rows", Encode.int rows ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
@@ -677,6 +731,17 @@ module Codec =
                         (Decode.field "terminalId" terminalId.Decode)
                         (Decode.field "seq" Decode.int)
                         (Decode.field "screen" Decode.string)
+                | "input" ->
+                    Decode.map2
+                        (fun id data -> TerminalInput (id, data))
+                        (Decode.field "terminalId" terminalId.Decode)
+                        (Decode.field "data" Decode.string)
+                | "resize" ->
+                    Decode.map3
+                        (fun id cols rows -> TerminalResize (id, cols, rows))
+                        (Decode.field "terminalId" terminalId.Decode)
+                        (Decode.field "cols" Decode.int)
+                        (Decode.field "rows" Decode.int)
                 | other -> Decode.fail (sprintf "Unknown terminal frame: %s" other)) }
 
     let private sessionCommand : Codec<SessionCommand> =
@@ -688,13 +753,21 @@ module Codec =
                 | OpenTerminal title ->
                     Encode.object [ "kind", Encode.string "openTerminal"; "title", Encode.string title ]
                 | CloseTerminal id ->
-                    Encode.object [ "kind", Encode.string "closeTerminal"; "terminalId", terminalId.Encode id ])
+                    Encode.object [ "kind", Encode.string "closeTerminal"; "terminalId", terminalId.Encode id ]
+                | TakeTerminalLease id ->
+                    Encode.object [ "kind", Encode.string "takeTerminalLease"; "terminalId", terminalId.Encode id ]
+                | ReleaseTerminalLease id ->
+                    Encode.object
+                        [ "kind", Encode.string "releaseTerminalLease"; "terminalId", terminalId.Encode id ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "interruptAgentTurn" -> Decode.field "agentTurnId" agentTurnId.Decode |> Decode.map InterruptAgentTurn
                 | "openTerminal" -> Decode.field "title" Decode.string |> Decode.map OpenTerminal
                 | "closeTerminal" -> Decode.field "terminalId" terminalId.Decode |> Decode.map CloseTerminal
+                | "takeTerminalLease" -> Decode.field "terminalId" terminalId.Decode |> Decode.map TakeTerminalLease
+                | "releaseTerminalLease" ->
+                    Decode.field "terminalId" terminalId.Decode |> Decode.map ReleaseTerminalLease
                 | other -> Decode.fail (sprintf "Unknown session command: %s" other)) }
 
     let private sessionCommandResult : Codec<SessionCommandResult> =

@@ -105,6 +105,10 @@ type TerminalView =
       IsOpen : bool
       /// Why it closed, when it has.
       ClosedReason : string option
+      /// Who holds the terminal's stdin, when anyone does (Plan 13, stage 2e). `Some` IS
+      /// live mode: there is no separate mode flag, because a mode nobody holds and a lease
+      /// nobody holds would be two names for one fact, free to disagree.
+      Lease : ActorRef option
       /// Blocks in the order they ran.
       Blocks : TerminalBlock list
       /// Output this terminal produced that the transcript did not keep. Non-zero means
@@ -141,10 +145,26 @@ module TerminalProjection =
                           OpenedBy = e.OpenedBy
                           IsOpen = true
                           ClosedReason = None
+                          Lease = None
                           Blocks = []
                           DroppedBytes = 0 } ] }
         | SessionEvent.TerminalClosed e ->
-            proj |> updateTerminal e.TerminalId (fun t -> { t with IsOpen = false; ClosedReason = Some e.Reason })
+            // The lease goes with the terminal. A closed terminal has no stdin to hold, and
+            // a holder left standing on one would render as "nick is typing" for ever.
+            proj
+            |> updateTerminal e.TerminalId (fun t ->
+                { t with IsOpen = false; ClosedReason = Some e.Reason; Lease = None })
+        | SessionEvent.TerminalLeaseTaken e ->
+            proj |> updateTerminal e.TerminalId (fun t -> { t with Lease = Some e.By })
+        | SessionEvent.TerminalLeaseReleased e ->
+            // Clear only if the holder is still the one this release names. A steal is two
+            // events — the old lease ending and the new one starting — and this guard is what
+            // makes the fold independent of which order they are appended in: a release
+            // naming someone who no longer holds it is stale, and acting on it would drop the
+            // lease the take beside it just granted.
+            proj
+            |> updateTerminal e.TerminalId (fun t ->
+                if t.Lease = Some e.Was then { t with Lease = None } else t)
         | SessionEvent.TerminalBlockStarted e ->
             proj
             |> updateTerminal e.TerminalId (fun t ->
@@ -200,6 +220,51 @@ module TerminalProjection =
     /// directory and environment mean anything from one command to the next.
     let runningBlock (view: TerminalView) : TerminalBlock option =
         view.Blocks |> List.tryFind (fun b -> b.Status = BlockRunning)
+
+/// What the emulator's alt-screen state proposes doing about the lease (Plan 13, stage 2e).
+///
+/// "The flip is detected, not configured": a TUI taking the screen is the universal signal
+/// that a program, not a prompt, owns the terminal, and the person whose command started it
+/// is the person who now needs to type into it. This is the whole policy, deliberately one
+/// pure function over the emulator's state so that shipping it, tuning it, or turning it off
+/// is a one-line change rather than an excavation.
+type TerminalFlip =
+    /// Give the lease to this actor — a block became a TUI and its author needs the keyboard.
+    | FlipToLive of ActorRef
+    /// The TUI exited and nobody claimed the terminal by hand: back to block mode.
+    | FlipToBlock
+    | FlipNothing
+
+module TerminalFlip =
+
+    /// `altScreen` is the emulator's current buffer; `holder` the lease as it stands;
+    /// `autoHeld` whether that holder got it from a previous `FlipToLive` rather than by
+    /// asking; `runningAuthor` the author of the block running now, if one is.
+    ///
+    /// Three rules, and the second two are what "detection PROPOSES the mode" means:
+    ///
+    ///   * A held lease is never overridden by detection. A peer who took the terminal owns
+    ///     it until they release it or someone steals it — a program exiting is not either.
+    ///   * Detection only ever RELEASES what detection took. Otherwise leaving `vim` would
+    ///     yank the keyboard from a peer who had taken the terminal explicitly and happened
+    ///     to run an editor in it.
+    ///   * An agent-authored block does not flip. Live mode is human-only for now, and an
+    ///     agent that entered a full-screen editor has a wedged block rather than a lease —
+    ///     which the alt-screen unwedge on block completion is what answers.
+    let propose
+        (altScreen: bool)
+        (holder: ActorRef option)
+        (autoHeld: bool)
+        (runningAuthor: ActorRef option)
+        : TerminalFlip =
+        match altScreen, holder with
+        | true, None ->
+            match runningAuthor with
+            | Some (PeerRef _ as author) | Some (UserRef _ as author) -> FlipToLive author
+            | Some Agent | Some SessionProcess | Some System | None -> FlipNothing
+        | true, Some _ -> FlipNothing
+        | false, Some _ when autoHeld -> FlipToBlock
+        | false, _ -> FlipNothing
 
 /// One block an agent turn is told the outcome of (Plan 13, stage 3a).
 ///

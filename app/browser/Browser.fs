@@ -825,6 +825,8 @@ let private start () =
                 fun scope -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Disconnect)) scope "" "" false
               OpenTerminal = fun title -> connectionRef |> Option.iter (fun c -> c.OpenTerminal title)
               CloseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.CloseTerminal id)
+              TakeTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.TakeTerminal id)
+              ReleaseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.ReleaseTerminal id)
               SendTerminalDraft =
                 fun terminal author -> connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
               ReopenSession =

@@ -30,6 +30,17 @@ type [<AllowNullLiteral>] private Term =
     abstract resize : int * int -> unit
     abstract dispose : unit -> unit
     abstract loadAddon : obj -> unit
+    /// The active buffer, whose `type` is `"normal"` or `"alternate"`.
+    abstract buffer : Buffers
+
+and [<AllowNullLiteral>] private Buffers =
+    abstract active : Buffer
+    /// Fires with the new active buffer whenever a program enters or leaves the alternate
+    /// screen — xterm's own API for the transition, so no DECSET 1049 parsing here.
+    abstract onBufferChange : (Buffer -> unit) -> unit
+
+and [<AllowNullLiteral>] private Buffer =
+    abstract ``type`` : string
 
 type [<AllowNullLiteral>] private SerializeAddon =
     abstract serialize : unit -> string
@@ -81,4 +92,9 @@ let openEmulator : OpenEmulator =
                 Async.FromContinuations (fun (cont, _, _) ->
                     term.write ("", fun () -> cont (serializer.serialize ())))
           Resize = fun c r -> term.resize (c, r)
+          // Reported on the TRANSITION only, which is what `onBufferChange` already is: the
+          // flip policy is a decision about a change of ownership, and firing it on every
+          // write would make "a TUI took the screen" a thing said continuously.
+          OnAltScreen =
+            fun handler -> term.buffer.onBufferChange (fun buffer -> handler (buffer.``type`` = "alternate"))
           Dispose = fun () -> term.dispose () }

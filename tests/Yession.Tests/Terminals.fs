@@ -114,7 +114,11 @@ let private queueOf entries =
 
 let private allOpen (_: TerminalId) = true
 let private planWith consumed busy isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed busy isOpen modeOf (queueOf entries)
+    TerminalQueueDrain.plan consumed busy Set.empty isOpen modeOf (queueOf entries)
+
+/// The same plan with a lease in play (Plan 13, stage 2e).
+let private planLeased consumed busy leased isOpen modeOf entries =
+    TerminalQueueDrain.plan consumed busy leased isOpen modeOf (queueOf entries)
 
 let private drainTests =
     testList "Terminal drain plan" [
@@ -560,6 +564,189 @@ let private rejectionTests =
 
 // --- The agent's terminal digest (Plan 13, stage 3a) -------------------------------------
 
+// --- Live mode: leases, the flip, and the drain gate (Plan 13, stage 2e) -----------------
+
+let private leaseTests =
+    testList "Terminal leases" [
+        testCase "taking an unheld terminal writes one event; re-taking it writes none" <| fun () ->
+            let events, leases = TerminalLeases.take terminalA (PeerRef ada) false TerminalLeases.empty
+            Expect.equal (List.length events) 1 "one take"
+            Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef ada)) "ada holds it"
+            // Not a steal from yourself. A client re-sending the frame must not fill the log.
+            let again, _ = TerminalLeases.take terminalA (PeerRef ada) false leases
+            Expect.isEmpty again "re-taking your own lease records nothing"
+
+        testCase "a steal ENDS the old lease before it starts the new one" <| fun () ->
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false TerminalLeases.empty
+            let events, leases = TerminalLeases.take terminalA (PeerRef bob) false held
+            Expect.equal
+                events
+                [ SessionEvent.TerminalLeaseReleased
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) }
+                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob } ]
+                "the release names who took it, and comes first"
+            Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef bob)) "bob holds it now"
+            // Folded in that order, a reader never sees two holders — and never none.
+            let proj = fold [ opened terminalA "build"; yield! events ]
+            Expect.equal
+                (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
+                (Some (PeerRef bob))
+                "the projection agrees"
+
+        testCase "only the holder can release; a non-holder's release is not an event" <| fun () ->
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false TerminalLeases.empty
+            let events, leases = TerminalLeases.release terminalA (PeerRef bob) held
+            Expect.isEmpty events "bob cannot release ada's lease"
+            Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef ada)) "and ada still holds it"
+            let events, leases = TerminalLeases.release terminalA (PeerRef ada) held
+            Expect.equal
+                events
+                [ SessionEvent.TerminalLeaseReleased
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased } ]
+                "the holder's release is recorded as one"
+            Expect.isEmpty (TerminalLeases.held leases) "and the terminal is free"
+
+        testCase "a dropped peer's leases end, and only that peer's" <| fun () ->
+            let _, leases = TerminalLeases.take terminalA (PeerRef ada) false TerminalLeases.empty
+            let _, leases = TerminalLeases.take terminalB (PeerRef bob) false leases
+            let events, leases = TerminalLeases.peerGone ada leases
+            Expect.equal
+                events
+                [ SessionEvent.TerminalLeaseReleased
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseHolderGone } ]
+                "the reason says nobody decided anything"
+            Expect.equal (TerminalLeases.held leases) (Set.singleton (TerminalId.value terminalB)) "bob's is untouched"
+
+        testCase "a stale release does not clear the lease it names someone else holding" <| fun () ->
+            // The guard that makes the fold independent of which order a steal's two events
+            // are appended in: acting on this would drop the lease the take beside it granted.
+            let proj =
+                fold
+                    [ opened terminalA "build"
+                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob }
+                      SessionEvent.TerminalLeaseReleased
+                        { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) } ]
+            Expect.equal
+                (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
+                (Some (PeerRef bob))
+                "bob still holds it"
+
+        testCase "closing a terminal clears its lease" <| fun () ->
+            let proj =
+                fold
+                    [ opened terminalA "build"
+                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada }
+                      SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" } ]
+            Expect.equal
+                (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
+                None
+                "a closed terminal has no stdin to hold"
+    ]
+
+let private flipTests =
+    testList "Alt-screen flip policy" [
+        testCase "a peer's block entering the alt screen hands them the terminal" <| fun () ->
+            Expect.equal
+                (TerminalFlip.propose true None false (Some (PeerRef ada)))
+                (FlipToLive (PeerRef ada))
+                "the author of the command is the person who now needs the keyboard"
+
+        testCase "an agent's block does not flip — live mode is human-only" <| fun () ->
+            Expect.equal (TerminalFlip.propose true None false (Some ActorRef.Agent)) FlipNothing "no agent lease"
+            Expect.equal (TerminalFlip.propose true None false None) FlipNothing "nor with no block at all"
+
+        testCase "detection never overrides a lease somebody is holding" <| fun () ->
+            Expect.equal
+                (TerminalFlip.propose true (Some (PeerRef bob)) false (Some (PeerRef ada)))
+                FlipNothing
+                "ada's command does not take the terminal out from under bob"
+
+        testCase "detection only gives back what detection took" <| fun () ->
+            // Leaving `vim` must not yank the keyboard from a peer who took the terminal by
+            // hand and happened to run an editor in it.
+            Expect.equal (TerminalFlip.propose false (Some (PeerRef ada)) true None) FlipToBlock "auto-held goes back"
+            Expect.equal (TerminalFlip.propose false (Some (PeerRef ada)) false None) FlipNothing "asked-for does not"
+            Expect.equal (TerminalFlip.propose false None false None) FlipNothing "and an unheld terminal is a no-op"
+    ]
+
+let private leaseGateTests =
+    testList "The lease as a drain gate" [
+        testCase "an approved entry in a leased terminal with NO block running is held" <| fun () ->
+            // The case `busy` does not cover: someone pressed "take terminal" and is typing at
+            // the shell. Nothing is running, the terminal is open, the entry is approved.
+            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
+            let leased = Set.singleton (TerminalId.value terminalA)
+            let plan = planLeased Set.empty Set.empty leased allOpen (fun _ -> AutoRun) entries
+            Expect.isEmpty plan.Ready "the queue waits for the terminal"
+            Expect.equal
+                (TerminalQueueDrain.holdOf Set.empty Set.empty leased allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (Some TerminalQueueDrain.AwaitingTerminal)
+                "and the hold names the terminal, not an approval"
+
+        testCase "releasing the lease yields the entry Ready, unchanged" <| fun () ->
+            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
+            let plan = planLeased Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) entries
+            Expect.equal (plan.Ready |> List.map (fun e -> QueueId.value e.QueueId)) [ "q-a1" ] "it runs on release"
+            Expect.equal
+                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                None
+                "nothing is holding it"
+
+        testCase "the three holds are told apart" <| fun () ->
+            let entries = [ entry "a1" terminalA ActorRef.Agent 1.0 None ]
+            let hold busy leased mode =
+                TerminalQueueDrain.holdOf Set.empty busy leased allOpen (fun _ -> mode) (queueOf entries) terminalA
+            let busyA = Set.singleton (TerminalId.value terminalA)
+            Expect.equal (hold busyA Set.empty AutoRun) (Some TerminalQueueDrain.AwaitingBlock) "a block is running"
+            Expect.equal (hold Set.empty busyA AutoRun) (Some TerminalQueueDrain.AwaitingTerminal) "a peer is typing"
+            Expect.equal
+                (hold Set.empty Set.empty ApproveAgent)
+                (Some TerminalQueueDrain.AwaitingApproval)
+                "the agent needs a yes"
+
+        testCase "a refusal is planned even while a peer holds the terminal" <| fun () ->
+            // Refusing touches no pty, so it outranks the lease exactly as it outranks the
+            // mode: someone can clear a bad queue while a colleague is inside vim.
+            let leased = Set.singleton (TerminalId.value terminalA)
+            let plan =
+                planLeased Set.empty Set.empty leased allOpen (fun _ -> AutoRun)
+                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None ]
+            Expect.equal (List.length plan.Rejections) 1 "the refusal is recorded"
+            Expect.isEmpty plan.Ready "and still nothing runs"
+    ]
+
+let private leaseCommandTests =
+    testList "Lease commands" [
+        testCaseAsync "take and release route to the lease, attributed to the peer who asked" <|
+            async {
+                let calls = ResizeArray<string> ()
+                let handle =
+                    SessionCommands.handle
+                        (fun _ _ -> Ok ())
+                        (fun _ _ -> async { return Error "not this test" })
+                        (fun _ _ -> async { return Error "not this test" })
+                        (fun id by -> async { calls.Add (sprintf "take:%s:%A" (TerminalId.value id) by); return Ok () })
+                        (fun id by ->
+                            async {
+                                calls.Add (sprintf "release:%s:%A" (TerminalId.value id) by)
+                                return Error "another peer holds this terminal"
+                            })
+                        PeerRef
+                let! taken = handle ada (TakeTerminalLease terminalA)
+                Expect.equal taken CommandAccepted "a take always succeeds — it steals rather than asks"
+                let! released = handle ada (ReleaseTerminalLease terminalA)
+                Expect.equal
+                    released
+                    (CommandRejected "another peer holds this terminal")
+                    "and a release you are not entitled to is refused, with the reason"
+                Expect.equal
+                    (List.ofSeq calls)
+                    [ sprintf "take:%s:%A" (TerminalId.value terminalA) (PeerRef ada)
+                      sprintf "release:%s:%A" (TerminalId.value terminalA) (PeerRef ada) ]
+                    "both carry the asking peer's actor, not the terminal's owner"
+            }
+    ]
+
 let private turnStarted (n: string) =
     SessionEvent.AgentTurnStarted
         { AgentTurnId = AgentTurnId.create ("t-" + n) |> expect
@@ -775,7 +962,16 @@ let private codecTests =
                         FromSeq = 3 }
                   completed terminalA "1" CommandTimedOut 9
                   SessionEvent.TerminalTranscriptTruncated
-                      { TerminalId = terminalA; BlockId = None; DroppedBytes = 17 } ]
+                      { TerminalId = terminalA; BlockId = None; DroppedBytes = 17 }
+                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada }
+                  // All three endings, because the reason is the whole value of the event: a
+                  // release, a steal and a dropped connection read differently in a log.
+                  SessionEvent.TerminalLeaseReleased
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased }
+                  SessionEvent.TerminalLeaseReleased
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) }
+                  SessionEvent.TerminalLeaseReleased
+                      { TerminalId = terminalA; Was = ActorRef.Agent; Reason = LeaseHolderGone } ]
             for event in events do
                 let encoded = Codec.toString Codec.sessionEvent event
                 Expect.equal (Codec.fromString Codec.sessionEvent encoded) (Ok event) ("round-trips: " + encoded)
@@ -786,7 +982,10 @@ let private codecTests =
                 [ Terminal (TerminalRecord (terminalA, 7, { At = 1.0; Kind = TranscriptOutput; Data = "hi" }))
                   Terminal (TerminalTranscriptAvailable (terminalA, 42))
                   // The screen a joining peer renders, and the seq it composes with.
-                  Terminal (TerminalSnapshot (terminalA, 42, "screen")) ]
+                  Terminal (TerminalSnapshot (terminalA, 42, "screen"))
+                  // Live mode's two peer-authored frames (stage 2e).
+                  Terminal (TerminalInput (terminalA, "\u001b[A"))
+                  Terminal (TerminalResize (terminalA, 120, 40)) ]
             for frame in frames do
                 let encoded = Codec.toString codec frame
                 Expect.equal (Codec.fromString codec encoded) (Ok frame) ("round-trips: " + encoded)
@@ -796,6 +995,8 @@ let private codecTests =
             let frames =
                 [ Command (Request (RequestId.fresh (), OpenTerminal "build"))
                   Command (Request (RequestId.fresh (), CloseTerminal terminalA))
+                  Command (Request (RequestId.fresh (), TakeTerminalLease terminalA))
+                  Command (Request (RequestId.fresh (), ReleaseTerminalLease terminalA))
                   Presence
                       { PeerId = ada
                         DisplayName = "Ada"
@@ -931,6 +1132,10 @@ let private makeTerminals (log: EventLog<SessionEvent>) environment openTranscri
             // Fixed, because a test that cannot predict the nonce cannot assert on a mark.
             (fun () -> "test-nonce")
             (fun id seq record -> records.Add (id, seq, record))
+            // No scheduler in these tests: the drain's re-arm is exercised where the drain is
+            // (`TerminalScheduler`), and wiring a real one here would test the scheduler twice
+            // while making every manager assertion depend on it.
+            ignore
             openAtBoot
     terminals, records
 
@@ -1213,6 +1418,10 @@ let tests =
         markTests
         emulatorTests
         rejectionTests
+        leaseTests
+        flipTests
+        leaseGateTests
+        leaseCommandTests
         digestTests
         ansiTests
         transcriptTests

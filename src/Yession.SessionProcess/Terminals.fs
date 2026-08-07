@@ -55,6 +55,14 @@ type Emulator =
       /// drawn yet, which is not a snapshot of anything.
       Serialize : unit -> Async<string>
       Resize : int -> int -> unit
+      /// Subscribe to alternate-screen transitions — `true` on entry, `false` on exit.
+      ///
+      /// This is what "the flip is detected, not configured" reads: a TUI taking the screen is
+      /// the universal signal that a program rather than a prompt owns the terminal. Read off
+      /// the emulator's buffer rather than parsed out of the byte stream, because the emulator
+      /// is already the thing that knows — a second DECSET 1049 parser would be a second
+      /// interpretation of ANSI, free to disagree with the screen every peer is looking at.
+      OnAltScreen : (bool -> unit) -> unit
       Dispose : unit -> unit }
 
 /// Open an emulator of a given size (cols, rows).
@@ -69,6 +77,10 @@ module Emulator =
         { Write = ignore
           Serialize = fun () -> async { return "" }
           Resize = fun _ _ -> ()
+          // No emulator, no alt-screen signal, and therefore no auto-flip: a terminal here
+          // still runs blocks and can still be taken by hand. Detection is the part that
+          // needs a screen, and it is the part that declares itself missing.
+          OnAltScreen = ignore
           Dispose = ignore }
 
 module Transcript =
@@ -101,6 +113,21 @@ module Transcript =
 ///     those two commands the other way round.
 module TerminalQueueDrain =
 
+    /// Why a terminal's head entry is not running (Plan 13, stage 2e). Distinguished because
+    /// they resolve differently and a queue that says only *pending* leaves both looking like
+    /// a stall: "waiting for approval" ends when a person makes a decision, "nick is using
+    /// this terminal" ends when a person finishes a task. The agent's tool reports them
+    /// apart, and so does the composer.
+    type TerminalHold =
+        /// The head needs an approval it has not got.
+        | AwaitingApproval
+        /// A peer holds the terminal's stdin. Resolves on release, and any peer may steal.
+        | AwaitingTerminal
+        /// A block is already running here. One at a time, per terminal.
+        | AwaitingBlock
+        /// The terminal is closed, or has nothing queued.
+        | NotWaiting
+
     type TerminalDrainPlan =
         { /// The entries to start now — at most one per terminal, in terminal order.
           Ready : TerminalQueued list
@@ -114,13 +141,73 @@ module TerminalQueueDrain =
           /// a second time.
           Removals : QueueId list }
 
+    /// The gate for ONE terminal, shared by `plan` and `holdOf` so what runs and what the
+    /// queue says about why it is not running cannot drift apart.
+    ///
+    /// The order is the design: a refusal outranks every policy (it touches no pty, so a busy
+    /// or leased terminal is irrelevant to it, and someone can clear a bad queue while a
+    /// colleague is inside vim); then one block at a time; then the lease; then approval.
+    let private gate
+        (alreadyConsumed: TerminalQueued -> bool)
+        (rejected: Set<string>)
+        (busy: Set<string>)
+        (leased: Set<string>)
+        (isOpen: TerminalId -> bool)
+        (modeOf: TerminalApprovalMode)
+        (queue: Map<QueueId, TerminalQueued>)
+        (terminal: TerminalId)
+        : Choice<TerminalQueued, TerminalHold> =
+        // The head is the first entry this drain has not already consumed. A refused entry is
+        // not skipped over: it is still the head and it stops the queue exactly as an
+        // unapproved one does, until the drain removes it. Running the entry behind it first
+        // would reorder execution because of a verdict, which is the thing the approval gate
+        // promises not to do.
+        match TerminalQueueOrder.sortedFor terminal queue |> List.filter (alreadyConsumed >> not) |> List.tryHead with
+        | None -> Choice2Of2 NotWaiting
+        | Some entry when Set.contains (QueueId.value entry.QueueId) rejected -> Choice2Of2 NotWaiting
+        | Some entry ->
+            if not (isOpen terminal) then Choice2Of2 NotWaiting
+            elif Set.contains (TerminalId.value terminal) busy then Choice2Of2 AwaitingBlock
+            // Narrower than "the terminal is in live mode", and the narrowing is the point. A
+            // block that BECAME live — the drain ran `vim`, alt-screen flipped the terminal —
+            // is already held by `busy`. The gap this closes is a terminal live with NO block
+            // running: someone pressed "take terminal" and is typing at the shell.
+            elif Set.contains (TerminalId.value terminal) leased then Choice2Of2 AwaitingTerminal
+            elif TerminalApprovalMode.requiresApproval modeOf entry.Author && Option.isNone entry.ApprovedBy then
+                Choice2Of2 AwaitingApproval
+            else Choice1Of2 entry
+
+    /// Why a terminal's head is not running — `None` when it IS about to run. Pure, and asked
+    /// by the agent's tool and the composer alike so neither invents its own answer.
+    let holdOf
+        (consumed: Set<string>)
+        (busy: Set<string>)
+        (leased: Set<string>)
+        (isOpen: TerminalId -> bool)
+        (modeOf: TerminalId -> TerminalApprovalMode)
+        (queue: Map<QueueId, TerminalQueued>)
+        (terminal: TerminalId)
+        : TerminalHold option =
+        let alreadyConsumed (entry: TerminalQueued) = Set.contains (QueueId.value entry.QueueId) consumed
+        let rejected =
+            queue
+            |> Map.toList
+            |> List.map snd
+            |> List.filter (fun entry -> Option.isSome entry.RejectedBy && not (alreadyConsumed entry))
+            |> List.map (fun entry -> QueueId.value entry.QueueId)
+            |> Set.ofList
+        match gate alreadyConsumed rejected busy leased isOpen (modeOf terminal) queue terminal with
+        | Choice1Of2 _ -> None
+        | Choice2Of2 hold -> Some hold
+
     /// `consumed` is the log-anchored exactly-once set; `busy` names terminals with a
-    /// block already running; `isOpen` and `modeOf` answer for the terminal an entry
-    /// names. Nothing here reads the clock or the doc — it is given a snapshot and returns
-    /// a decision.
+    /// block already running; `leased` those a peer is typing into; `isOpen` and `modeOf`
+    /// answer for the terminal an entry names. Nothing here reads the clock or the doc — it
+    /// is given a snapshot and returns a decision.
     let plan
         (consumed: Set<string>)
         (busy: Set<string>)
+        (leased: Set<string>)
         (isOpen: TerminalId -> bool)
         (modeOf: TerminalId -> TerminalApprovalMode)
         (queue: Map<QueueId, TerminalQueued>)
@@ -152,20 +239,9 @@ module TerminalQueueDrain =
         let ready =
             terminals
             |> List.choose (fun terminal ->
-                if not (isOpen terminal) || Set.contains (TerminalId.value terminal) busy then None
-                else
-                    // The head is the first entry this drain has not already consumed. A
-                    // refused entry is not skipped over: it is still the head, and it stops
-                    // the queue exactly as an unapproved one does until the drain removes
-                    // it. Running the entry behind it first would reorder execution because
-                    // of a verdict, which is the thing the approval gate promises not to do.
-                    TerminalQueueOrder.sortedFor terminal queue
-                    |> List.filter (alreadyConsumed >> not)
-                    |> List.tryHead
-                    |> Option.filter (fun entry ->
-                        not (Set.contains (QueueId.value entry.QueueId) rejected)
-                        && (not (TerminalApprovalMode.requiresApproval (modeOf terminal) entry.Author)
-                            || Option.isSome entry.ApprovedBy)))
+                match gate alreadyConsumed rejected busy leased isOpen (modeOf terminal) queue terminal with
+                | Choice1Of2 entry -> Some entry
+                | Choice2Of2 _ -> None)
 
         { Ready = ready
           Rejections = rejections
@@ -186,6 +262,90 @@ module TerminalQueueDrain =
         | SessionEvent.TerminalBlockStarted b -> b.QueueId |> Option.map QueueId.value
         | SessionEvent.TerminalCommandRejected r -> Some (QueueId.value r.QueueId)
         | _ -> None
+
+/// Who holds each terminal's stdin (Plan 13, stage 2e), as a pure transition over a map.
+///
+/// Pure rather than a mutable corner of the terminal manager because every interesting
+/// question about leases is about which EVENTS a transition writes — a steal is two of them,
+/// a release of a lease you do not hold is none — and those are exactly what an audit is
+/// read from. The manager holds the map and calls these.
+module TerminalLeases =
+
+    /// Terminal id -> its holder, and whether detection gave it to them rather than them
+    /// asking. The flag never leaves the process: it decides only whether the alt-screen flip
+    /// may take the lease back, and "the program exited" is not a durable fact about a person.
+    type Leases = Map<string, ActorRef * bool>
+
+    let empty : Leases = Map.empty
+
+    let holderOf (id: TerminalId) (leases: Leases) : ActorRef option =
+        leases |> Map.tryFind (TerminalId.value id) |> Option.map fst
+
+    /// Terminals someone is typing into — the drain's `leased` set, the exact counterpart of
+    /// its `busy` one.
+    let held (leases: Leases) : Set<string> = leases |> Map.toList |> List.map fst |> Set.ofList
+
+    /// Claim the terminal, stealing it if someone else has it. Always succeeds: collaborators
+    /// are trusted, so a steal needs no permission — what it needs is to be on the record,
+    /// which is the pair of events this returns. The old lease ENDS BEFORE the new one starts,
+    /// so a reader folding them in order never sees two holders.
+    ///
+    /// Re-taking a lease you already hold writes nothing. It is not a steal from yourself, and
+    /// a log that said so would be noise the second time a client sent the frame.
+    let take (id: TerminalId) (by: ActorRef) (auto: bool) (leases: Leases) : SessionEvent list * Leases =
+        let key = TerminalId.value id
+        match Map.tryFind key leases with
+        | Some (holder, _) when holder = by -> [], leases
+        | previous ->
+            let ending =
+                match previous with
+                | Some (holder, _) ->
+                    [ SessionEvent.TerminalLeaseReleased
+                        { TerminalId = id; Was = holder; Reason = LeaseStolen by } ]
+                | None -> []
+            ending @ [ SessionEvent.TerminalLeaseTaken { TerminalId = id; By = by } ],
+            Map.add key (by, auto) leases
+
+    /// Hand the terminal back. Only the holder can: releasing someone else's lease is a steal
+    /// wearing a polite word, and a steal is `take`, which says so on the record.
+    let release (id: TerminalId) (by: ActorRef) (leases: Leases) : SessionEvent list * Leases =
+        let key = TerminalId.value id
+        match Map.tryFind key leases with
+        | Some (holder, _) when holder = by ->
+            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = holder; Reason = LeaseReleased } ],
+            Map.remove key leases
+        | _ -> [], leases
+
+    /// Detection's release: the TUI exited and the lease was detection's to give back. Recorded
+    /// as an ordinary release, because from outside the process that is what it is — the holder
+    /// is done with the terminal — and a fourth reason for "the program they were in exited"
+    /// would distinguish something no reader of the log is asking.
+    let autoRelease (id: TerminalId) (leases: Leases) : SessionEvent list * Leases =
+        match Map.tryFind (TerminalId.value id) leases with
+        | Some (holder, true) ->
+            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = holder; Reason = LeaseReleased } ],
+            Map.remove (TerminalId.value id) leases
+        | _ -> [], leases
+
+    /// A peer's connection dropped: every lease it held ends. Without this a crashed tab
+    /// leaves the composer reading "nick is using this terminal" for ever, with the queue held
+    /// behind a peer who cannot release it — a deadlock wearing a status message's face.
+    let peerGone (peer: PeerId) (leases: Leases) : SessionEvent list * Leases =
+        let mine =
+            leases
+            |> Map.toList
+            |> List.filter (fun (_, (holder, _)) -> holder = PeerRef peer)
+            |> List.sortBy fst
+        let events =
+            mine
+            |> List.choose (fun (key, (holder, _)) ->
+                match TerminalId.create key with
+                | Ok id ->
+                    Some (
+                        SessionEvent.TerminalLeaseReleased
+                            { TerminalId = id; Was = holder; Reason = LeaseHolderGone })
+                | Error _ -> None)
+        events, mine |> List.fold (fun acc (key, _) -> Map.remove key acc) leases
 
 /// The session's terminals: opening and closing them, and running one queued command at a
 /// time in each. Owns no queue and no policy — the drain decides what runs, this runs it
@@ -285,8 +445,36 @@ module SessionTerminals =
           /// terminal that is busy, leased (stage 2e) or closed. Someone can clear a bad
           /// queue while a colleague is inside vim.
           Reject : TerminalQueued -> string -> (unit -> unit) -> Async<unit>
+          /// Take the terminal's stdin (Plan 13, stage 2e), stealing it from whoever holds it.
+          /// Refused only when there is nothing to hold: a terminal that is not open, or a
+          /// degraded one with no persistent shell to type into.
+          Take : TerminalId -> ActorRef -> Async<Result<unit, string>>
+          /// Hand it back. Refused when this actor is not the holder.
+          Release : TerminalId -> ActorRef -> Async<Result<unit, string>>
+          /// A peer's connection dropped: every lease it held ends, and the queues behind
+          /// them are re-armed.
+          PeerGone : PeerId -> Async<unit>
+          /// Relay keystrokes to the pty. `false` when they were DROPPED — this actor does not
+          /// hold the lease, or the terminal has no shell. Returned rather than logged here so
+          /// the frame router logs it once, where it knows which peer sent it.
+          ///
+          /// Keystrokes are never written to the transcript. The shell echoes what is typed at
+          /// it, so ordinary typing is already captured as output; what recording these would
+          /// add is exactly what the terminal deliberately did not display — a password at an
+          /// `ssh` prompt. See "Durable capture" in the plan.
+          Input : TerminalId -> ActorRef -> string -> bool
+          /// The lease holder's viewport size, applied to the pty and the emulator. `false`
+          /// when dropped, on the same terms as `Input`.
+          Resize : TerminalId -> ActorRef -> int -> int -> bool
+          /// The synced size register, applied in BLOCK mode. Ignored while the terminal is
+          /// leased: there, the holder's own viewport is what their foreground program has to
+          /// agree with, and a bystander resizing the register must not redraw under them.
+          /// Idempotent, so the doc watcher can call it on every update.
+          ApplySize : TerminalId -> TerminalSize -> unit
           /// Terminals with a block running — the drain's `busy` set.
           Busy : unit -> Set<string>
+          /// Terminals a peer is typing into — the drain's `leased` set, `busy`'s counterpart.
+          Leased : unit -> Set<string>
           IsOpen : TerminalId -> bool
           /// Every open terminal's id and current transcript length, for a joining peer's
           /// catch-up hints.
@@ -310,7 +498,14 @@ module SessionTerminals =
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ -> async { return () }
           Reject = fun _ _ _ -> async { return () }
+          Take = fun _ _ -> async { return Error "this session has no terminals" }
+          Release = fun _ _ -> async { return Error "this session has no terminals" }
+          PeerGone = fun _ -> async { return () }
+          Input = fun _ _ _ -> false
+          Resize = fun _ _ _ _ -> false
+          ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
+          Leased = fun () -> Set.empty
           IsOpen = fun _ -> false
           Lengths = fun () -> []
           Snapshot = fun _ -> async { return None }
@@ -337,6 +532,11 @@ module SessionTerminals =
         // trusted cannot forge a block's outcome.
         (mintNonce: unit -> string)
         (onRecord: TerminalId -> int -> TranscriptRecord -> unit)
+        // Re-arm the terminal drain (Plan 13, stage 2e). A lease ending frees a terminal
+        // exactly as a block finishing does, so whatever queued behind it must start now —
+        // and unlike block completion, a lease can end from inside here (the alt-screen flip,
+        // a dropped peer) where the scheduler has nothing to observe.
+        (reDrain: unit -> unit)
         (openAtBoot: TerminalId list)
         : SessionTerminals =
 
@@ -347,7 +547,15 @@ module SessionTerminals =
         /// because a terminal runs one block at a time — which is the same invariant `busy`
         /// already states.
         let pending = Collections.Generic.Dictionary<string, (int -> unit) * (unit -> int) * (int -> unit)> ()
+        /// Who wrote the block currently running in each terminal — the input the flip policy
+        /// needs, since "a TUI took the screen" only says whose keyboard it should be if we
+        /// know whose command started it.
+        let runningAuthor = Collections.Generic.Dictionary<string, ActorRef> ()
+        /// The size last applied to each pty, so the block-mode register watcher can run on
+        /// every doc update without resizing a terminal that has not changed size.
+        let appliedSize = Collections.Generic.Dictionary<string, TerminalSize> ()
         let mutable busy : Set<string> = Set.empty
+        let mutable leases = TerminalLeases.empty
         let mutable leftOpen : Set<string> = openAtBoot |> List.map TerminalId.value |> Set.ofList
 
         let append event =
@@ -386,6 +594,52 @@ module SessionTerminals =
             | TranscriptOutput | TranscriptStderr -> emulator.Write data
             | TranscriptInput | TranscriptResize -> ()
             onRecord id seq record
+
+        /// Who a lease event is attributed to. A take and a steal are the acts of whoever took
+        /// it; a voluntary release is the holder's; a lease ended because its holder vanished
+        /// is nobody's but the Process's, which is the honest reading of `LeaseHolderGone`.
+        let leaseActor (event: SessionEvent) =
+            match event with
+            | SessionEvent.TerminalLeaseTaken t -> t.By
+            | SessionEvent.TerminalLeaseReleased r ->
+                match r.Reason with
+                | LeaseReleased -> r.Was
+                | LeaseStolen by -> by
+                | LeaseHolderGone -> ActorRef.SessionProcess
+            | _ -> ActorRef.SessionProcess
+
+        /// Commit a lease transition: the map first, then its events, then the re-arm.
+        ///
+        /// The map moves before the appends so that a drain woken by them already sees the new
+        /// holder — the whole point of the gate is that a terminal handed back is available to
+        /// the queue, and one just taken is not.
+        let applyLease (events: SessionEvent list, next: TerminalLeases.Leases) : Async<unit> =
+            async {
+                if List.isEmpty events then return ()
+                else
+                    leases <- next
+                    for event in events do
+                        do! appendAs (leaseActor event) event
+                    reDrain ()
+            }
+
+        /// What the alternate screen proposes, applied. Detection never overrides a lease
+        /// somebody asked for, and only ever gives back what detection itself took —
+        /// `TerminalFlip.propose` is where both rules live.
+        let flip (id: TerminalId) (altScreen: bool) : Async<unit> =
+            async {
+                let key = TerminalId.value id
+                let holder = TerminalLeases.holderOf id leases
+                let autoHeld = leases |> Map.tryFind key |> Option.map snd |> Option.defaultValue false
+                let author =
+                    match runningAuthor.TryGetValue key with
+                    | true, actor -> Some actor
+                    | _ -> None
+                match TerminalFlip.propose altScreen holder autoHeld author with
+                | FlipToLive by -> do! applyLease (TerminalLeases.take id by true leases)
+                | FlipToBlock -> do! applyLease (TerminalLeases.autoRelease id leases)
+                | FlipNothing -> return ()
+            }
 
         /// Open the terminal's ONE instrumented shell, and report whether it took.
         ///
@@ -508,6 +762,8 @@ module SessionTerminals =
                     // In the live map BEFORE the shell starts: the pty's output callback finds
                     // the terminal by id, and bytes can arrive the instant it spawns.
                     live.[TerminalId.value id] <- terminal
+                    appliedSize.[TerminalId.value id] <- TerminalSize.default'
+                    terminal.Emulator.OnAltScreen (fun alt -> Async.StartImmediate (flip id alt))
                     do! openShell id terminal
                     do! appendAs openedBy (SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = openedBy; Title = title })
                     return Ok id
@@ -525,9 +781,16 @@ module SessionTerminals =
                         terminal.Shell |> Option.iter (fun pty -> pty.Kill ())
                     | _ -> ()
                     pending.Remove (TerminalId.value id) |> ignore
+                    runningAuthor.Remove (TerminalId.value id) |> ignore
+                    appliedSize.Remove (TerminalId.value id) |> ignore
                     live.Remove (TerminalId.value id) |> ignore
                     leftOpen <- Set.remove (TerminalId.value id) leftOpen
                     busy <- Set.remove (TerminalId.value id) busy
+                    // The lease goes with the terminal, and WITHOUT an event: `TerminalClosed`
+                    // already clears the holder in the projection, so appending a release
+                    // beside it would be two mechanisms for one fact — free to disagree the
+                    // moment one of them is missed.
+                    leases <- Map.remove (TerminalId.value id) leases
                     do! append (SessionEvent.TerminalClosed { TerminalId = id; Reason = reason })
                     return Ok ()
             }
@@ -544,6 +807,9 @@ module SessionTerminals =
                 | true, terminal ->
                     let transcript = terminal.Transcript
                     busy <- Set.add key busy
+                    // The flip policy's input: if this command takes the alternate screen, its
+                    // author is the person who now needs the keyboard.
+                    runningAuthor.[key] <- entry.Author
                     let blockId = mintBlockId ()
                     // Taken BEFORE the command is written, which is forced by the anchor
                     // ordering below and is the honest reading anyway: on a pty the shell
@@ -637,8 +903,89 @@ module SessionTerminals =
                                   BlockId = blockId
                                   Result = result
                                   ToSeq = transcript.NextSeq () })
+                    runningAuthor.Remove key |> ignore
                     busy <- Set.remove key busy
             }
+
+        let take (id: TerminalId) (by: ActorRef) : Async<Result<unit, string>> =
+            async {
+                match live.TryGetValue (TerminalId.value id) with
+                | false, _ -> return Error "terminal is not open"
+                // A degraded terminal has no persistent shell, so there is no stdin to hold:
+                // its blocks are separate processes that end with themselves. Refusing here is
+                // the same declare-and-skip honesty the fallback is built on — better than a
+                // lease that is granted and then does nothing.
+                | true, terminal when Option.isNone terminal.Shell ->
+                    return Error "this terminal has no interactive shell"
+                | true, _ ->
+                    do! applyLease (TerminalLeases.take id by false leases)
+                    return Ok ()
+            }
+
+        let release (id: TerminalId) (by: ActorRef) : Async<Result<unit, string>> =
+            async {
+                match TerminalLeases.holderOf id leases with
+                | Some holder when holder = by ->
+                    do! applyLease (TerminalLeases.release id by leases)
+                    return Ok ()
+                | Some _ -> return Error "another peer holds this terminal"
+                | None -> return Error "this terminal is not held"
+            }
+
+        let peerGone (peer: PeerId) : Async<unit> = applyLease (TerminalLeases.peerGone peer leases)
+
+        /// The pty of a terminal this actor is entitled to type into, if any.
+        let heldPty (id: TerminalId) (by: ActorRef) : PtyHandle option =
+            match TerminalLeases.holderOf id leases with
+            | Some holder when holder = by ->
+                match live.TryGetValue (TerminalId.value id) with
+                | true, terminal -> terminal.Shell
+                | _ -> None
+            | _ -> None
+
+        let input (id: TerminalId) (by: ActorRef) (data: string) : bool =
+            match heldPty id by with
+            | Some pty ->
+                pty.Write data
+                true
+            | None -> false
+
+        let resize (id: TerminalId) (by: ActorRef) (cols: int) (rows: int) : bool =
+            if not (TerminalSize.isValid { Cols = cols; Rows = rows }) then false
+            else
+                match heldPty id by with
+                | Some pty ->
+                    let key = TerminalId.value id
+                    pty.Resize cols rows
+                    match live.TryGetValue key with
+                    | true, terminal ->
+                        terminal.Emulator.Resize cols rows
+                        // A resize IS output-side history, not a keystroke: asciicast records
+                        // it (`[t, "r", "COLSxROWS"]`) because a replay that does not know the
+                        // screen changed shape redraws everything after it wrongly.
+                        emit id terminal TranscriptResize (sprintf "%dx%d" cols rows)
+                    | _ -> ()
+                    appliedSize.[key] <- { Cols = cols; Rows = rows }
+                    true
+                | None -> false
+
+        let applySize (id: TerminalId) (size: TerminalSize) : unit =
+            let key = TerminalId.value id
+            let unchanged =
+                match appliedSize.TryGetValue key with
+                | true, current -> current = size
+                | _ -> false
+            // Leased terminals are the holder's to size, and an invalid size reaches us from a
+            // doc any peer can write — neither is a resize.
+            if unchanged || not (TerminalSize.isValid size) || Map.containsKey key leases then ()
+            else
+                match live.TryGetValue key with
+                | true, terminal ->
+                    terminal.Shell |> Option.iter (fun pty -> pty.Resize size.Cols size.Rows)
+                    terminal.Emulator.Resize size.Cols size.Rows
+                    emit id terminal TranscriptResize (sprintf "%dx%d" size.Cols size.Rows)
+                    appliedSize.[key] <- size
+                | _ -> ()
 
         let reject (entry: TerminalQueued) (command: string) (onRecorded: unit -> unit) : Async<unit> =
             async {
@@ -678,7 +1025,14 @@ module SessionTerminals =
           Close = closeTerminal
           RunBlock = runBlock
           Reject = reject
+          Take = take
+          Release = release
+          PeerGone = peerGone
+          Input = input
+          Resize = resize
+          ApplySize = applySize
           Busy = fun () -> busy
+          Leased = fun () -> TerminalLeases.held leases
           IsOpen = isOpen
           Lengths =
             fun () ->
@@ -736,12 +1090,23 @@ module TerminalScheduler =
         let rec drain () =
             match SyncedStateSync.ofDoc doc with
             | Error _ -> ()
-            | Ok synced when Map.isEmpty synced.TerminalQueue -> ()
             | Ok synced ->
+
+            // The size register's block-mode path (Plan 13, stage 2e). `TerminalResize` is
+            // live-mode only, so in block mode the Process is what tells the pty its size —
+            // a shell that never learns its size is the one that redraws wrongly. Run before
+            // the queue check rather than after it, because a terminal with nothing queued is
+            // exactly the one whose size a peer is likely to be adjusting.
+            for terminal, size in Map.toList synced.TerminalSizes do
+                terminals.ApplySize terminal size
+
+            if Map.isEmpty synced.TerminalQueue then () else
+
                 let plan =
                     TerminalQueueDrain.plan
                         consumed
                         (terminals.Busy ())
+                        (terminals.Leased ())
                         terminals.IsOpen
                         (fun terminal -> SyncedSessionState.modeOf terminal synced)
                         synced.TerminalQueue

@@ -215,6 +215,9 @@ let startFull
         // running in a terminal must not stop the agent answering, and a long agent turn
         // must not stop someone running `git status`.
         let transcripts = transcriptStore |> Option.defaultWith TranscriptStore.inMemory
+        // Assigned once the terminal scheduler exists, below. The terminal manager is built
+        // first (the scheduler consumes it), and it needs to wake the drain when a lease ends.
+        let mutable reDrainTerminals : unit -> unit = ignore
         let mintBlockId () =
             match BlockId.create (string (Guid.NewGuid ())) with
             | Ok id -> id
@@ -243,6 +246,11 @@ let startFull
                 // block's outcome.
                 Interop.randomSecret
                 broadcastTerminalRecord
+                // Re-arm the terminal drain when a lease ends (Plan 13, stage 2e). The
+                // scheduler is built from `terminals`, so this is the one indirection the
+                // cycle needs: a lease that ends inside the manager — the alt-screen flip, a
+                // dropped peer — has nothing the scheduler could have observed.
+                (fun () -> reDrainTerminals ())
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 
         // The agent's terminal capability (Plan 13): it QUEUES a command where people can
@@ -320,6 +328,7 @@ let startFull
 
         let terminalScheduler = TerminalScheduler.create doc terminals initialTerminalConsumed
         let drainTerminals () = terminalScheduler.Drain ()
+        reDrainTerminals <- drainTerminals
 
         // Process-originated doc writes (the drain's queue removals) broadcast to every
         // peer; peer payloads are relayed by the receiving connection.
@@ -451,8 +460,38 @@ let startFull
                     fun payload ->
                         DocSync.applyRemote doc payload
                         broadcastExcept connectionId payload
-                  OnCommand = SessionCommands.handle requestInterrupt terminals.Open terminals.Close actorFor
+                  OnCommand =
+                    SessionCommands.handle
+                        requestInterrupt
+                        terminals.Open
+                        terminals.Close
+                        terminals.Take
+                        terminals.Release
+                        actorFor
                   OnPresence = fun payload -> broadcastPresenceExcept connectionId payload
+                  // Live-mode traffic (Plan 13, stage 2e). Only the two peer-authored frames
+                  // are acted on; a peer replaying a `TerminalRecord` or a `TerminalSnapshot`
+                  // at us is asserting a fact about the transcript, which is the Process's
+                  // alone to state, and is dropped exactly as a spoofed event page is.
+                  OnTerminal =
+                    fun peerId frame ->
+                        let actor = actorFor peerId
+                        match frame with
+                        | TerminalInput (terminal, data) ->
+                            // Dropped LOUDLY. A peer typing into a terminal it no longer holds
+                            // sees nothing happen, and the only place that can be explained is
+                            // here — most often a steal the sender has not learned about yet.
+                            if not (terminals.Input terminal actor data) then
+                                eprintfn
+                                    "[session %s] terminal input dropped: %s does not hold %s"
+                                    (SessionId.value sessionId)
+                                    (PeerId.value peerId)
+                                    (TerminalId.value terminal)
+                        | TerminalResize (terminal, cols, rows) ->
+                            terminals.Resize terminal actor cols rows |> ignore
+                        | TerminalRecord _
+                        | TerminalTranscriptAvailable _
+                        | TerminalSnapshot _ -> ()
                   OnAccepted =
                     fun peerId ch ->
                         async {
@@ -473,6 +512,13 @@ let startFull
                                     // Clear this peer's cursor on every remaining peer.
                                     broadcastPresenceExcept connectionId
                                         { PeerId = peerId; DisplayName = ""; Focus = None }
+                                    // ...and release every terminal it was holding. A lease
+                                    // held by someone who is gone is the one hold nobody
+                                    // should have to clear by hand: without this a crashed
+                                    // tab leaves the composer reading "nick is using this
+                                    // terminal" for ever, with the queue held behind a peer
+                                    // who cannot release it.
+                                    Async.StartImmediate (terminals.PeerGone peerId)
                                     // ...and the last one leaving starts it, which is the
                                     // whole point: a closed tab should not cost a full beat
                                     // of idle time before it counts.

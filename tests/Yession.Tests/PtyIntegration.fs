@@ -57,6 +57,240 @@ let private runOnPty (executable: string) (arguments: string list) : Async<Resul
                     return Ok (string output, ended)
     }
 
+/// A real terminal manager over a real host sandbox: the production pty path with no
+/// container and no Manager, which is a few lines because `SessionEnvironment` is a record
+/// of functions. The emulator is the REAL headless one, so alt-screen detection is the
+/// production mechanism rather than a stub agreeing with itself.
+///
+/// `body` receives the manager, the terminal it opened, the transcript records it wrote, the
+/// event log, and a count of how many times the drain was re-armed.
+let private withLiveTerminal
+    (name: string)
+    (body: SessionTerminals.SessionTerminals
+             -> TerminalId
+             -> ResizeArray<TranscriptRecord>
+             -> EventLog<SessionEvent>
+             -> (unit -> int)
+             -> Async<unit>)
+    : Async<unit> =
+    async {
+        let policy =
+            { ReadPaths = []
+              WritePaths = []
+              AllowedDomains = None
+              Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
+              WorkingDirectory = None }
+        match! Sandboxes.HostSandbox.create () policy with
+        | Error e -> failwith e
+        | Ok sandbox ->
+            let environment : SessionEnvironment.SessionEnvironment =
+                { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+                  Execute = fun _ _ -> async { return CommandExecutionFailed "unused" }
+                  Spawn = fun exec onChunk -> sandbox.Spawn exec onChunk
+                  SpawnPty =
+                    fun exec cols rows onOutput ->
+                        async {
+                            match sandbox.SpawnPty with
+                            | None -> return Error "no pty"
+                            | Some spawn -> return! spawn exec cols rows onOutput
+                        }
+                  Stop = fun () -> async { return () }
+                  CurrentRef = fun () -> Some "host" }
+            let at () = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Zero)
+            let log = InMemoryEventLog.create (SessionId.create name |> expect) at
+            let records = ResizeArray<TranscriptRecord> ()
+            let transcript : Transcript =
+                { Append = fun record -> records.Add record; records.Count - 1
+                  NextSeq = fun () -> records.Count }
+            let mutable reDrains = 0
+            let terminals =
+                SessionTerminals.create
+                    log
+                    environment
+                    (fun _ _ -> transcript)
+                    Yession.Host.Emulator.openEmulator
+                    SessionTerminals.TerminalShell.bash
+                    at
+                    (fun () -> TerminalId.create ("term-" + name) |> expect)
+                    (let mutable n = 0 in fun () -> n <- n + 1; BlockId.create (sprintf "b-%d" n) |> expect)
+                    (fun () -> name + "-nonce")
+                    (fun _ _ _ -> ())
+                    (fun () -> reDrains <- reDrains + 1)
+                    []
+            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) name with
+            | Error e -> failwith e
+            | Ok id ->
+                do! body terminals id records log (fun () -> reDrains)
+                do! sandbox.Dispose ()
+    }
+
+/// A queue entry for a terminal, as the drain would hand one over.
+let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : TerminalQueued =
+    { QueueId = QueueId.create n |> expect
+      Terminal = terminal
+      Author = author
+      Order = 1.0
+      ApprovedBy = None
+      RejectedBy = None
+      RejectedReason = None }
+
+/// Poll until `condition` holds or the budget runs out. Bounded rather than a fixed sleep:
+/// a shell's timing is not ours to predict, and a test that sleeps long enough to be safe is
+/// a test that is slow every run.
+let private until (budgetMs: int) (condition: unit -> bool) : Async<bool> =
+    let rec go remaining =
+        async {
+            if condition () then return true
+            elif remaining <= 0 then return false
+            else
+                do! Async.Sleep 50
+                return! go (remaining - 50)
+        }
+    go budgetMs
+
+let private liveModeTests =
+    testList "Live mode over a real pty (Plan 13, stage 2e)" [
+        testCaseAsync "only the lease holder's keystrokes reach the shell, and none are recorded as input" <|
+            withLiveTerminal "lease" (fun terminals id records _ _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    let bob = PeerRef (PeerId.create "bob" |> expect)
+                    // Nobody holds it yet: even the peer who opened it is not typing into it.
+                    Expect.isFalse (terminals.Input id ada "echo nope\r") "no lease, no input"
+                    match! terminals.Take id ada with
+                    | Error e -> failwith e
+                    | Ok () ->
+                        Expect.isFalse (terminals.Input id bob "echo stolen\r") "a non-holder is dropped"
+                        Expect.isTrue (terminals.Input id ada "echo held\r") "the holder's keystrokes land"
+                        let printed () =
+                            records
+                            |> Seq.filter (fun r -> r.Kind = TranscriptOutput)
+                            |> Seq.map (fun r -> r.Data)
+                            |> String.concat ""
+                        let! landed = until 5000 (fun () -> (printed ()).Contains "held")
+                        Expect.isTrue landed (sprintf "the shell ran it; transcript was: %s" (printed ()))
+                        Expect.isFalse ((printed ()).Contains "stolen") "and bob's keystrokes never reached it"
+                        // The narrowing: live-mode keystrokes are relayed and NEVER written as
+                        // `"i"` records. Typing a password at an `ssh` prompt must not land in
+                        // a durable file that replays.
+                        Expect.isEmpty
+                            (records |> Seq.filter (fun r -> r.Kind = TranscriptInput) |> List.ofSeq)
+                            "no input record exists for anything typed in live mode"
+                        // ...while the DRAIN's command line still is one, because the Process
+                        // composed that and knows exactly what it wrote.
+                        match! terminals.Release id ada with
+                        | Error e -> failwith e
+                        | Ok () ->
+                            do! terminals.RunBlock (queueEntry id ada "1") "echo drained" ignore
+                            Expect.equal
+                                (records
+                                 |> Seq.filter (fun r -> r.Kind = TranscriptInput)
+                                 |> Seq.map (fun r -> r.Data)
+                                 |> List.ofSeq)
+                                [ "echo drained\n" ]
+                                "the drain's command line is recorded as input, and it alone"
+                })
+
+        testCaseAsync "a lease gates the drain and its release re-arms it" <|
+            withLiveTerminal "gate" (fun terminals id _ _ reDrains ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    Expect.isEmpty (terminals.Leased ()) "nothing is held to begin with"
+                    let before = reDrains ()
+                    match! terminals.Take id ada with
+                    | Error e -> failwith e
+                    | Ok () ->
+                        Expect.equal
+                            (terminals.Leased ())
+                            (Set.singleton (TerminalId.value id))
+                            "the drain's `leased` set names it"
+                        match! terminals.Release id ada with
+                        | Error e -> failwith e
+                        | Ok () ->
+                            Expect.isEmpty (terminals.Leased ()) "and gives it back"
+                            // Handing the terminal back must START whatever was waiting for
+                            // it, exactly as block completion does — otherwise the queue sits
+                            // there until some unrelated doc update happens to wake it.
+                            Expect.isTrue (reDrains () > before) "the release re-armed the drain"
+                })
+
+        testCaseAsync "a block that takes the alternate screen hands its author the terminal, and gives it back" <|
+            withLiveTerminal "altscreen" (fun terminals id _ log _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    // A real TUI's entry and exit, without depending on `vim` being installed:
+                    // DECSET 1049 is exactly what one writes, and the emulator does not care
+                    // who wrote it.
+                    do!
+                        terminals.RunBlock
+                            (queueEntry id ada "1")
+                            "printf '\\033[?1049h'; sleep 0.4; printf '\\033[?1049l'"
+                            ignore
+                    let leaseEvents () =
+                        async {
+                            let! page = log.Read None 1000
+                            return
+                                page.Events
+                                |> List.choose (fun e ->
+                                    match e.Event with
+                                    | SessionEvent.TerminalLeaseTaken t -> Some ("taken", t.By)
+                                    | SessionEvent.TerminalLeaseReleased r -> Some ("released", r.Was)
+                                    | _ -> None)
+                        }
+                    // The exit is what closes the round trip, and the emulator applies writes
+                    // asynchronously — so poll for it rather than assume it has landed.
+                    let rec settle remaining =
+                        async {
+                            let! seen = leaseEvents ()
+                            if List.length seen >= 2 || remaining <= 0 then return seen
+                            else
+                                do! Async.Sleep 50
+                                return! settle (remaining - 50)
+                        }
+                    let! seen = settle 5000
+                    Expect.equal
+                        seen
+                        [ "taken", ada; "released", ada ]
+                        "entry gave ada the terminal; exit gave it back, because detection took it"
+                })
+
+        testCaseAsync "a dropped holder's lease is released, and the drain re-armed" <|
+            withLiveTerminal "gone" (fun terminals id _ log reDrains ->
+                async {
+                    // What the Host runs from a peer's connection cleanup. Without it a
+                    // crashed tab leaves the composer reading "bob is using this terminal" for
+                    // ever, with the queue held behind a peer who cannot release it.
+                    let bob = PeerId.create "bob" |> expect
+                    match! terminals.Take id (PeerRef bob) with
+                    | Error e -> failwith e
+                    | Ok () ->
+                        let before = reDrains ()
+                        do! terminals.PeerGone bob
+                        Expect.isEmpty (terminals.Leased ()) "the lease is gone with its holder"
+                        Expect.isTrue (reDrains () > before) "and the queue behind it is re-armed"
+                        let! page = log.Read None 1000
+                        Expect.isTrue
+                            (page.Events
+                             |> List.exists (fun e ->
+                                 match e.Event with
+                                 | SessionEvent.TerminalLeaseReleased r ->
+                                     r.Was = PeerRef bob && r.Reason = LeaseHolderGone
+                                 | _ -> false))
+                            "the record says nobody decided anything — the connection dropped"
+                })
+
+        testCaseAsync "a terminal with no shell refuses the lease rather than granting a dead one" <|
+            async {
+                // The degraded terminal: blocks still run as separate processes, and there is
+                // no persistent stdin for anyone to hold. Refusing says so; granting would be
+                // a lease that silently does nothing.
+                let terminals = SessionTerminals.unavailable
+                match! terminals.Take (TerminalId.create "term-x" |> expect) (PeerRef (PeerId.create "ada" |> expect)) with
+                | Ok () -> failwith "a session with no terminals granted a lease"
+                | Error _ -> Expect.isTrue true "refused"
+            }
+    ]
+
 let tests =
     testList "Pty (Plan 13)" [
         testCaseAsync "the host backend offers a pty at all" <|
@@ -225,73 +459,19 @@ let tests =
             }
 
         testCaseAsync "cd in one block moves the next one — the whole point of stage 2d" <|
-            async {
-                // THE property a per-block spawn structurally cannot have, and therefore the
-                // test that proves blocks really moved onto one shared shell. Under stage 1
-                // each block was its own process, so `cd` died with it; here the second block
-                // is typed into the same shell the first one changed.
-                let policy =
-                    { ReadPaths = []
-                      WritePaths = []
-                      AllowedDomains = None
-                      Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
-                match! Sandboxes.HostSandbox.create () policy with
-                | Error e -> failwith e
-                | Ok sandbox ->
-                    // A `SessionEnvironment` is a record of functions, so a real one over a
-                    // real sandbox is a few lines — no container, no Manager, and the pty path
-                    // under test is the production one.
-                    let environment : SessionEnvironment.SessionEnvironment =
-                        { Ensure = fun _ _ -> async { return EnvironmentAvailable }
-                          Execute = fun _ _ -> async { return CommandExecutionFailed "unused" }
-                          Spawn = fun exec onChunk -> sandbox.Spawn exec onChunk
-                          SpawnPty =
-                            fun exec cols rows onOutput ->
-                                async {
-                                    match sandbox.SpawnPty with
-                                    | None -> return Error "no pty"
-                                    | Some spawn -> return! spawn exec cols rows onOutput
-                                }
-                          Stop = fun () -> async { return () }
-                          CurrentRef = fun () -> Some "host" }
-                    let at () = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Zero)
-                    let log = InMemoryEventLog.create (SessionId.create "pty-cd" |> expect) at
-                    let lines = ResizeArray<string> ()
-                    let transcript : Transcript =
-                        { Append = fun record -> lines.Add record.Data; lines.Count - 1
-                          NextSeq = fun () -> lines.Count }
-                    let terminals =
-                        SessionTerminals.create
-                            log
-                            environment
-                            (fun _ _ -> transcript)
-                            (fun _ _ -> Emulator.none)
-                            SessionTerminals.TerminalShell.bash
-                            at
-                            (fun () -> TerminalId.create "term-cd" |> expect)
-                            (let mutable n = 0 in fun () -> n <- n + 1; BlockId.create (sprintf "b-%d" n) |> expect)
-                            (fun () -> "cd-nonce")
-                            (fun _ _ _ -> ())
-                            []
-                    match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) "cd" with
-                    | Error e -> failwith e
-                    | Ok id ->
-                        let entryFor n =
-                            { QueueId = QueueId.create n |> expect
-                              Terminal = id
-                              Author = PeerRef (PeerId.create "ada" |> expect)
-                              Order = 1.0
-                              ApprovedBy = None
-                              RejectedBy = None
-                              RejectedReason = None }
-                        do! terminals.RunBlock (entryFor "1") "cd /tmp" ignore
-                        do! terminals.RunBlock (entryFor "2") "pwd" ignore
-                        do! sandbox.Dispose ()
-                        let printed = String.concat "" lines
-                        Expect.isTrue (printed.Contains "/tmp")
-                            (sprintf "the second block saw the first block's directory, got: %s" printed)
-            }
+            // THE property a per-block spawn structurally cannot have, and therefore the test
+            // that proves blocks really moved onto one shared shell. Under stage 1 each block
+            // was its own process, so `cd` died with it; here the second block is typed into
+            // the same shell the first one changed.
+            withLiveTerminal "cd" (fun terminals id records _ _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    do! terminals.RunBlock (queueEntry id ada "1") "cd /tmp" ignore
+                    do! terminals.RunBlock (queueEntry id ada "2") "pwd" ignore
+                    let printed = records |> Seq.map (fun r -> r.Data) |> String.concat ""
+                    Expect.isTrue (printed.Contains "/tmp")
+                        (sprintf "the second block saw the first block's directory, got: %s" printed)
+                })
 
         testCaseAsync "killing the pty settles Exited rather than hanging" <|
             async {
@@ -318,4 +498,6 @@ let tests =
                         do! sandbox.Dispose ()
                         Expect.isTrue true "Exited resolved after Kill"
             }
+
+        liveModeTests
     ]

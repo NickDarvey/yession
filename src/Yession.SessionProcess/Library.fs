@@ -33,6 +33,8 @@ module Bootstrap =
         | CommandCompleted _ -> "command-completed"
         | SessionEvent.TerminalOpened _ -> "terminal-opened"
         | SessionEvent.TerminalClosed _ -> "terminal-closed"
+        | SessionEvent.TerminalLeaseTaken _ -> "terminal-lease-taken"
+        | SessionEvent.TerminalLeaseReleased _ -> "terminal-lease-released"
         | SessionEvent.TerminalBlockStarted _ -> "terminal-block-started"
         | SessionEvent.TerminalBlockCompleted _ -> "terminal-block-completed"
         | SessionEvent.TerminalCommandRejected _ -> "terminal-command-rejected"

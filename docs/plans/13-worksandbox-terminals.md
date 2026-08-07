@@ -1,8 +1,9 @@
 # Plan 13 — Terminals on the WorkSandbox
 
-> **Status: stage 1 of 3 implemented** (blocks, no pty). Stage 2 (pty + live mode, as
-> parts 2a–2f) and stage 3 (one `execute_command`, as parts 3a–3e) remain — see
-> [Delivery](#delivery) for the split and what each part depends on.
+> **Status: stage 1 implemented; stage 2 implemented through 2e** (rejection, the headless
+> emulator, `SpawnPty`, blocks on the pty, live mode). 2f (`IntegrationLost`) and stage 3
+> (one `execute_command`, as parts 3a–3e) remain — see [Delivery](#delivery) for the split
+> and what each part depends on.
 > Builds directly on the sandbox seam from
 > [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
@@ -857,6 +858,20 @@ not cover), the hold names the terminal rather than approval, and release yields
 does not strand the queue. Transcript capture: a live-mode keystroke never appears as an
 `"i"` record while the drain's command line does. `Browser`: the lease bar names the holder
 and the steal control works.
+
+Two deviations, both narrowings rather than substitutions. The dropped-holder case landed
+`Pty`-tagged rather than `Ports`-tagged, because what it needs is a shell to hold — a lease
+is refused on a terminal that has no pty, so a port buys nothing and a pty is the actual
+requirement. And the lease bar is asserted over the SERVER-RENDERED view rather than in a
+browser, which is where the composer's other states are already pinned; nothing in the bar
+is behaviour a real browser would render differently.
+
+What 2e deliberately does NOT ship is the client's own terminal viewport. `TerminalInput`
+and `TerminalResize` have no producer in the browser yet, because producing them means an
+`@xterm/xterm` viewport, and that is a surface — a dependency, a Fable binding, theme
+tokens under the contrast test — rather than a part of live mode. Live mode is complete on
+the Process side and driven end-to-end there; the viewport is its own change, and saying so
+is better than half-landing it inside this one.
 
 **2f (optional). `IntegrationLost`.** The missing-`C` detector, the queue hold, and the
 re-arm control. Hardening on top of 2d rather than part of it, because losing marks
