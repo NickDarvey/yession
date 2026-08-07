@@ -33,6 +33,44 @@ type OpenTranscript = TerminalId -> TranscriptHeader -> Transcript
 /// not use would make every writer carry a reader it must implement.
 type ReadTranscript = TerminalId -> int -> int option -> TranscriptRecord list
 
+/// One terminal's screen, as the Session Process keeps it (Plan 13, stage 2b).
+///
+/// The transcript is the audit trail and the screen is not: ANSI moves the cursor and
+/// overwrites what was printed a moment ago, so what a terminal DISPLAYS is a projection
+/// with lossy history while what it EMITTED is the record. Both are wanted, for different
+/// questions — "what happened here" is the transcript, "what does it look like right now"
+/// is this.
+///
+/// A capability rather than a concrete type because it is a real terminal emulator
+/// (`@xterm/headless`) at the composition boundary, and because that keeps the Process's
+/// own logic free of a JS dependency it would otherwise have to be tested around.
+type Emulator =
+    { /// Feed output bytes, exactly as they were written to the transcript.
+      Write : string -> unit
+      /// The screen and its scrollback, serialized — what a joining peer is sent so it can
+      /// render the terminal without replaying every byte that ever reached it.
+      ///
+      /// Async because the emulator parses writes asynchronously: reading the screen without
+      /// waiting for what has been fed to be applied returns a screen that has not been
+      /// drawn yet, which is not a snapshot of anything.
+      Serialize : unit -> Async<string>
+      Resize : int -> int -> unit
+      Dispose : unit -> unit }
+
+/// Open an emulator of a given size (cols, rows).
+type OpenEmulator = int -> int -> Emulator
+
+module Emulator =
+
+    /// An emulator that keeps nothing. For a host with no emulator available: terminals
+    /// still run, and the only thing missing is the join snapshot — the same declare-and-skip
+    /// honesty a backend without a pty gets.
+    let none : Emulator =
+        { Write = ignore
+          Serialize = fun () -> async { return "" }
+          Resize = fun _ _ -> ()
+          Dispose = ignore }
+
 module Transcript =
 
     /// What a range of records PRINTED. Input records are skipped — the command is already
@@ -201,6 +239,14 @@ module SessionTerminals =
           /// Close every terminal left open by a previous process, at boot. A terminal is
           /// a live process in a sandbox that died with its session, so an event log that
           /// still says "open" is describing something that no longer exists.
+          /// The current screen of an open terminal, with the transcript position it
+          /// represents — what a joining peer is sent instead of replaying every byte
+          /// (Plan 13, stage 2b). `None` for a terminal that is not open here.
+          ///
+          /// The seq is what makes the snapshot composable with the live feed: a client
+          /// renders this, then folds records ABOVE that seq, exactly as it does with an
+          /// event-offset catch-up.
+          Snapshot : TerminalId -> Async<(int * string) option>
           ReconcileAtBoot : unit -> Async<unit> }
 
     /// A session with no terminals: every operation refuses, nothing is ever open.
@@ -212,6 +258,7 @@ module SessionTerminals =
           Busy = fun () -> Set.empty
           IsOpen = fun _ -> false
           Lengths = fun () -> []
+          Snapshot = fun _ -> async { return None }
           ReconcileAtBoot = fun () -> async { return () } }
 
     /// Create the terminal manager for one session.
@@ -224,6 +271,7 @@ module SessionTerminals =
         (log: EventLog<SessionEvent>)
         (environment: SessionEnvironment.SessionEnvironment)
         (openTranscript: OpenTranscript)
+        (openEmulator: OpenEmulator)
         (shell: TerminalShell)
         (clock: unit -> DateTimeOffset)
         (mintTerminalId: unit -> TerminalId)
@@ -233,8 +281,8 @@ module SessionTerminals =
         : SessionTerminals =
 
         /// What the manager holds per live terminal: its transcript, the instant every
-        /// record's `At` is relative to, and whether a block is running in it.
-        let live = Collections.Generic.Dictionary<string, Transcript * DateTimeOffset> ()
+        /// record's `At` is relative to, and the emulator keeping its screen.
+        let live = Collections.Generic.Dictionary<string, Transcript * DateTimeOffset * Emulator> ()
         let mutable busy : Set<string> = Set.empty
         let mutable leftOpen : Set<string> = openAtBoot |> List.map TerminalId.value |> Set.ofList
 
@@ -254,12 +302,30 @@ module SessionTerminals =
             live.ContainsKey (TerminalId.value id) || Set.contains (TerminalId.value id) leftOpen
 
         /// Write a record and tell the peers. Durable first, visible second.
-        let emit (id: TerminalId) (transcript: Transcript) (openedAt: DateTimeOffset) (kind: TranscriptKind) (data: string) =
+        ///
+        /// The emulator is fed here and only here, which is what makes the screen a pure
+        /// function of the transcript: every byte that reaches one reaches the other, in the
+        /// same order, so folding the transcript through a fresh emulator reproduces this
+        /// one. That property is what the join snapshot rests on, and it is pinned by a test.
+        let emit
+            (id: TerminalId)
+            (transcript: Transcript)
+            (openedAt: DateTimeOffset)
+            (emulator: Emulator)
+            (kind: TranscriptKind)
+            (data: string)
+            =
             let record =
                 { At = (clock () - openedAt).TotalSeconds
                   Kind = kind
                   Data = data }
             let seq = transcript.Append record
+            // Only what the terminal PRINTED shapes the screen. An input record is what we
+            // wrote to the process, not what came back; feeding it here would draw the
+            // command twice on a pty, which echoes it itself.
+            match kind with
+            | TranscriptOutput | TranscriptStderr -> emulator.Write data
+            | TranscriptInput | TranscriptResize -> ()
             onRecord id seq record
 
         let openTerminal (openedBy: ActorRef) (title: string) : Async<Result<TerminalId, string>> =
@@ -278,7 +344,7 @@ module SessionTerminals =
                             { Width = 80
                               Height = 24
                               Timestamp = openedAt.ToUnixTimeSeconds () }
-                    live.[TerminalId.value id] <- (transcript, openedAt)
+                    live.[TerminalId.value id] <- (transcript, openedAt, openEmulator 80 24)
                     do! appendAs openedBy (SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = openedBy; Title = title })
                     return Ok id
             }
@@ -287,6 +353,11 @@ module SessionTerminals =
             async {
                 if not (isOpen id) then return Error "terminal is not open"
                 else
+                    // The emulator is a live JS object; a closed terminal keeps its blocks
+                    // (the audit outlives the process) but not its screen.
+                    match live.TryGetValue (TerminalId.value id) with
+                    | true, (_, _, emulator) -> emulator.Dispose ()
+                    | _ -> ()
                     live.Remove (TerminalId.value id) |> ignore
                     leftOpen <- Set.remove (TerminalId.value id) leftOpen
                     busy <- Set.remove (TerminalId.value id) busy
@@ -303,7 +374,7 @@ module SessionTerminals =
                     // the doc (nothing consumed it), and the next drain will find the
                     // terminal shut and leave it alone.
                     return ()
-                | true, (transcript, openedAt) ->
+                | true, (transcript, openedAt, emulator) ->
                     busy <- Set.add key busy
                     let blockId = mintBlockId ()
                     let fromSeq = transcript.NextSeq ()
@@ -330,7 +401,7 @@ module SessionTerminals =
                     // The command line is echoed into the transcript as INPUT, so a replay
                     // shows what was typed as well as what came back — the same reason
                     // asciinema records `"i"` events at all.
-                    emit entry.Terminal transcript openedAt TranscriptInput (command + "\n")
+                    emit entry.Terminal transcript openedAt emulator TranscriptInput (command + "\n")
 
                     let mutable written = 0
                     let mutable dropped = 0
@@ -342,7 +413,7 @@ module SessionTerminals =
                             dropped <- dropped + (text.Length - kept.Length)
                             written <- written + kept.Length
                             let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
-                            emit entry.Terminal transcript openedAt kind kept
+                            emit entry.Terminal transcript openedAt emulator kind kept
 
                     let! spawned =
                         environment.Spawn
@@ -421,9 +492,29 @@ module SessionTerminals =
                 live
                 |> Seq.choose (fun kv ->
                     match TerminalId.create kv.Key with
-                    | Ok id -> Some (id, (fst kv.Value).NextSeq ())
+                    | Ok id -> let (transcript, _, _) = kv.Value in Some (id, transcript.NextSeq ())
                     | Error _ -> None)
                 |> List.ofSeq
+          Snapshot =
+            fun id ->
+                async {
+                match live.TryGetValue (TerminalId.value id) with
+                | false, _ -> return None
+                // Read the length FIRST, then serialize. The two are taken under no lock —
+                // there is none to take — so the only ordering that cannot lie is the one
+                // that reports a screen at least as new as the seq it claims: a client that
+                // re-folds a record already drawn here is idempotent, while one that misses
+                // a record drawn after the seq would never draw it at all.
+                | true, (transcript, _, emulator) ->
+                    // Seq FIRST, then the screen. Records written while the barrier drains
+                    // land on the screen but not in the seq, so the snapshot is at worst
+                    // NEWER than it claims — a client re-folds what it already drew, which
+                    // is idempotent. The other order would report a seq for a record the
+                    // screen has not drawn, and the client would skip it for ever.
+                    let seq = transcript.NextSeq ()
+                    let! screen = emulator.Serialize ()
+                    return Some (seq, screen)
+                }
           ReconcileAtBoot = reconcileAtBoot }
 
 /// The terminal queue's consumer loop — the message scheduler's sibling, and deliberately

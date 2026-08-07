@@ -233,6 +233,7 @@ let startFull
                 log
                 environment
                 transcripts.Open
+                Emulator.openEmulator
                 SessionTerminals.TerminalShell.posix
                 (fun () -> DateTimeOffset.UtcNow)
                 TerminalId.mint

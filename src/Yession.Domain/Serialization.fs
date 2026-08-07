@@ -650,7 +650,13 @@ module Codec =
                     Encode.object
                         [ "kind", Encode.string "available"
                           "terminalId", terminalId.Encode id
-                          "nextSeq", Encode.int nextSeq ])
+                          "nextSeq", Encode.int nextSeq ]
+                | TerminalSnapshot (id, seq, screen) ->
+                    Encode.object
+                        [ "kind", Encode.string "snapshot"
+                          "terminalId", terminalId.Encode id
+                          "seq", Encode.int seq
+                          "screen", Encode.string screen ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
@@ -665,6 +671,12 @@ module Codec =
                         (fun id nextSeq -> TerminalTranscriptAvailable (id, nextSeq))
                         (Decode.field "terminalId" terminalId.Decode)
                         (Decode.field "nextSeq" Decode.int)
+                | "snapshot" ->
+                    Decode.map3
+                        (fun id seq screen -> TerminalSnapshot (id, seq, screen))
+                        (Decode.field "terminalId" terminalId.Decode)
+                        (Decode.field "seq" Decode.int)
+                        (Decode.field "screen" Decode.string)
                 | other -> Decode.fail (sprintf "Unknown terminal frame: %s" other)) }
 
     let private sessionCommand : Codec<SessionCommand> =

@@ -257,6 +257,92 @@ let private projectionTests =
             Expect.equal (TerminalProjection.tryFind terminalA proj |> Option.get).DroppedBytes 512 "the loss is counted"
     ]
 
+// --- The headless emulator (Plan 13, stage 2b) -------------------------------------------
+
+let private emulatorTests =
+    testList "Terminal emulator" [
+        testCaseAsync "folding a transcript through a fresh emulator reproduces the screen" <|
+            async {
+                // THE property stage 2d rests on. A joining peer is sent a snapshot instead
+                // of every byte the terminal ever printed, and that is only sound if the
+                // screen is a pure function of the output records — same bytes, same order,
+                // same screen. If this ever fails, a snapshot and a replay show two
+                // different terminals and the transcript stops being the authority.
+                let output = [ "hello\r\n"; "[31mred[0m "; "and\tmore\r\n"; "[1mbold[0m" ]
+                let live = Yession.Host.Emulator.openEmulator 80 24
+                for chunk in output do live.Write chunk
+                let fresh = Yession.Host.Emulator.openEmulator 80 24
+                for chunk in output do fresh.Write chunk
+                let! liveScreen = live.Serialize ()
+                let! freshScreen = fresh.Serialize ()
+                // Asserted non-empty first, because the interesting way for this test to
+                // fail is to pass: `write` is asynchronous, so serializing without waiting
+                // compares one blank screen to another and proves nothing at all.
+                Expect.isTrue (liveScreen.Contains "bold") "the screen was actually drawn before it was read"
+                Expect.equal freshScreen liveScreen "same bytes, same screen"
+                live.Dispose ()
+                fresh.Dispose ()
+            }
+
+        testCaseAsync "the screen is a projection, and the transcript is not" <|
+            async {
+                // Why both records exist. A carriage return overwrites what was printed, so
+                // the SCREEN loses it while the transcript still has every byte — which is
+                // exactly why the audit trail is the stream and never the rendered buffer.
+                let emulator = Yession.Host.Emulator.openEmulator 80 24
+                emulator.Write "secret\rpublic"
+                let! screen = emulator.Serialize ()
+                Expect.isFalse (screen.Contains "secret") "the overwritten text is gone from the screen"
+                Expect.isTrue (screen.Contains "public") "what remains is what was drawn last"
+                emulator.Dispose ()
+            }
+
+        testCaseAsync "cursor movement is applied, not recorded literally" <|
+            async {
+                let emulator = Yession.Host.Emulator.openEmulator 80 24
+                emulator.Write "abc[2DX"
+                let! screen = emulator.Serialize ()
+                Expect.isTrue (screen.Contains "aXc") "the cursor moved back two and overwrote"
+                emulator.Dispose ()
+            }
+
+        testCaseAsync "a resize keeps the screen usable" <|
+            async {
+                let emulator = Yession.Host.Emulator.openEmulator 80 24
+                emulator.Write "hello"
+                emulator.Resize 120 40
+                let! screen = emulator.Serialize ()
+                Expect.isTrue (screen.Contains "hello") "content survives a resize"
+                emulator.Dispose ()
+            }
+
+        testCase "a terminal with no size register is 80x24" <| fun () ->
+            // The default IS the absence: a terminal nobody has resized carries no register
+            // restating what every terminal has defaulted to since the VT100.
+            let size = SyncedSessionState.sizeOf terminalA SyncedSessionState.empty
+            Expect.equal size TerminalSize.default' "absent means default"
+            Expect.equal (size.Cols, size.Rows) (80, 24) "and the default is 80x24"
+
+        testCase "an unusable size reads back as the default, never as a broken terminal" <| fun () ->
+            // The doc is shared with peers we do not control, and a zero-column terminal is
+            // not a small terminal — it is one nothing can render. Same direction the
+            // approval mode fails in: absent means the default, and the default always works.
+            Expect.isFalse (TerminalSize.isValid { Cols = 0; Rows = 24 }) "no columns is not a size"
+            Expect.isFalse (TerminalSize.isValid { Cols = 80; Rows = -1 }) "nor are negative rows"
+            Expect.isTrue (TerminalSize.isValid TerminalSize.default') "the default is always valid"
+
+        testCaseAsync "the no-op emulator answers everything without keeping a screen" <|
+            async {
+                // A host with no emulator still runs terminals; only the join snapshot is
+                // missing. Same declare-and-skip honesty a backend without a pty gets.
+                Emulator.none.Write "anything"
+                Emulator.none.Resize 10 10
+                let! screen = Emulator.none.Serialize ()
+                Expect.equal screen "" "it keeps nothing, and says so"
+                Emulator.none.Dispose ()
+            }
+    ]
+
 // --- Rejection as an answer (Plan 13, stage 2a) ------------------------------------------
 
 let private rejectedEvent (id: TerminalId) (q: string) (b: string) (by: PeerId) (reason: string option) =
@@ -601,7 +687,9 @@ let private codecTests =
             let codec = Codec.sessionFrame Codec.string
             let frames =
                 [ Terminal (TerminalRecord (terminalA, 7, { At = 1.0; Kind = TranscriptOutput; Data = "hi" }))
-                  Terminal (TerminalTranscriptAvailable (terminalA, 42)) ]
+                  Terminal (TerminalTranscriptAvailable (terminalA, 42))
+                  // The screen a joining peer renders, and the seq it composes with.
+                  Terminal (TerminalSnapshot (terminalA, 42, "screen")) ]
             for frame in frames do
                 let encoded = Codec.toString codec frame
                 Expect.equal (Codec.fromString codec encoded) (Ok frame) ("round-trips: " + encoded)
@@ -733,6 +821,11 @@ let private makeTerminals (log: EventLog<SessionEvent>) environment openTranscri
             log
             environment
             openTranscript
+            // The REAL emulator, not a stub: the whole point of the manager tests is that
+            // what the Process thinks the screen is comes from the same emulator a browser
+            // renders with, and a stub here would test the wiring while proving nothing
+            // about the screen.
+            Yession.Host.Emulator.openEmulator
             SessionTerminals.TerminalShell.posix
             fixedClock
             (fun () -> TerminalId.create (mintTerminal ()) |> expect)
@@ -1017,6 +1110,7 @@ let tests =
         approvalTests
         drainTests
         projectionTests
+        emulatorTests
         rejectionTests
         digestTests
         ansiTests
