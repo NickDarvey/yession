@@ -503,6 +503,7 @@ let startFull
                         terminals.Close
                         terminals.Take
                         terminals.Release
+                        terminals.Rearm
                         actorFor
                   OnPresence = fun payload -> broadcastPresenceExcept connectionId payload
                   // Live-mode traffic (Plan 13, stage 2e). Only the two peer-authored frames

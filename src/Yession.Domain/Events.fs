@@ -79,6 +79,8 @@ type SessionEvent =
     | TerminalBlockStarted of TerminalBlockStarted
     | TerminalBlockCompleted of TerminalBlockCompleted
     | TerminalCommandRejected of TerminalCommandRejected
+    | TerminalIntegrationLost of TerminalIntegrationLost
+    | TerminalIntegrationRestored of TerminalIntegrationRestored
     | TerminalTranscriptTruncated of TerminalTranscriptTruncated
 
 and SessionCreated =
@@ -259,6 +261,26 @@ and TerminalCommandRejected =
       /// A record saying *something* was rejected is not a record.
       Command : string
       Reason : string option }
+
+/// The shell stopped emitting marks (Plan 13, stage 2f). `exec sh`, or an image whose shell
+/// drops into another, replaces the process we instrumented while the pty stays open — so
+/// `Exited` never fires and the marks simply stop.
+///
+/// Durable rather than runtime-only state, for the same reason `TerminalTranscriptTruncated`
+/// is: this is a GAP in what the record can say. From here the Process cannot tell when a
+/// command started or finished, so "we no longer know when this finished" is a fact about the
+/// audit trail and belongs in it — not merely on a screen somebody may not be looking at.
+and TerminalIntegrationLost =
+    { TerminalId : TerminalId
+      /// The block that was open when it happened, if one was. It stays open — its `ToSeq`
+      /// and exit code are exactly what was lost — and naming it here is what lets a reader
+      /// tell an unbounded block from a running one.
+      BlockId : BlockId option }
+
+/// Marking is back (Plan 13, stage 2f): a peer used the re-arm control and the shell that is
+/// actually there now answered our instrumentation.
+and TerminalIntegrationRestored =
+    { TerminalId : TerminalId }
 
 and TerminalBlockCompleted =
     { TerminalId : TerminalId

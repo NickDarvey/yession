@@ -827,6 +827,7 @@ let private start () =
               CloseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.CloseTerminal id)
               TakeTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.TakeTerminal id)
               ReleaseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.ReleaseTerminal id)
+              RearmTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.RearmTerminal id)
               SendTerminalDraft =
                 fun terminal author -> connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
               ReopenSession =

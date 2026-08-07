@@ -147,6 +147,10 @@ module Dom =
         /// Enter live mode, or steal it. One control, because it is one act.
         let terminalTake = "data-terminal-take"
         let terminalRelease = "data-terminal-release"
+        /// The banner shown when a terminal's shell stopped emitting marks (Plan 13, stage
+        /// 2f), and the control that types the instrumentation in again.
+        let terminalLost = "data-terminal-lost"
+        let terminalRearm = "data-terminal-rearm"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
@@ -224,6 +228,10 @@ module Dom =
         /// makes a decision, the other when a person finishes a task, and a queue that said
         /// only *pending* would leave both looking like a stall.
         let queuedAwaitingTerminal = "awaiting-terminal"
+        /// A queued command held because its terminal's shell stopped marking (Plan 13, stage
+        /// 2f). Apart from `queuedAwaitingTerminal` because it resolves differently: one ends
+        /// when a person finishes a task, this one when somebody repairs the terminal.
+        let queuedAwaitingIntegration = "awaiting-integration"
         let system = "system"
         // Conversation item status.
         let complete = "complete"

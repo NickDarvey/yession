@@ -1,10 +1,10 @@
 # Plan 13 — Terminals on the WorkSandbox
 
-> **Status: stage 1 implemented; stage 2 implemented through 2e; stage 3 implemented
-> through 3b** (rejection, the headless emulator, `SpawnPty`, blocks on the pty, live mode,
-> the agent's terminal digest, and the merged `execute_command` with its retirements).
-> plus 3c's idle-lease timeout. 2f (`IntegrationLost`), 3d and 3e remain — see
-> [Delivery](#delivery) for the split and what each part depends on.
+> **Status: stage 1 and stage 2 implemented; stage 3 implemented through 3c** — rejection,
+> the headless emulator, `SpawnPty`, blocks on the pty, live mode, `IntegrationLost`, the
+> agent's terminal digest, the merged `execute_command` with its retirements, and the
+> idle-lease timeout. 3d (transcript compaction and retention) and 3e (the asciinema replay
+> view) remain — see [Delivery](#delivery) for the split.
 > Builds directly on the sandbox seam from
 > [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
@@ -895,6 +895,22 @@ mid-session is visible and non-corrupting on its own — the block simply never 
 *Verify:* a `Pty` suite where the shell is replaced mid-session (`exec`) — the detector
 fires within its window while a genuinely long-running command does NOT trip it, the queue
 is held rather than drained into an unmarked shell, and the re-arm control restores marking.
+
+As shipped, one decision the section above left open and one narrowing the `Pty` suite forced:
+
+- **A client learns through EVENTS** (`TerminalIntegrationLost` / `TerminalIntegrationRestored`),
+  not synced state. It is how every other terminal fact reaches clients here; the doc is
+  peer-writable and this is the Process's alone to assert; and it makes a gap in the audit
+  trail a STATED fact, exactly as `TerminalTranscriptTruncated` does — from that point the
+  record cannot say when a command started or finished, which is worth recording rather than
+  only displaying. `TerminalIntegrationLost` names the block that was open, so a reader can
+  tell an unbounded block from a running one.
+- **A `C` counts only while a block is open.** A mark from something a peer typed in live
+  mode, or from the previous command arriving late, says nothing about whether THIS block was
+  marked — the same reasoning the `D` handler already used for a mark with no block. Found by
+  the `Pty` suite, where typing into live mode and draining immediately is the one ordering
+  with no barrier between the two; the drain itself always has one, because it awaits a
+  block's `D` before starting the next.
 
 **3. One `execute_command`, and the seams.** Splits along the same principle. Note that
 **none of it depends on PR 2** — the merged tool runs on PR 1's block model — so 3a and 3b

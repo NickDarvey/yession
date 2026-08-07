@@ -425,6 +425,15 @@ module ClientModel =
         |> Option.bind (fun view -> view.Lease)
         |> Option.isSome
 
+    /// Whether a queued command is held because its terminal's shell stopped emitting marks
+    /// (Plan 13, stage 2f) rather than because a peer is typing there. Apart again for the
+    /// same reason: they resolve differently — one when a person finishes, this one when
+    /// somebody repairs the terminal.
+    let awaitsIntegration (entry: TerminalQueued) (model: ClientModel) : bool =
+        TerminalProjection.tryFind entry.Terminal model.Terminals
+        |> Option.map (fun view -> view.IntegrationLost)
+        |> Option.defaultValue false
+
     /// Who is editing a terminal composer right now, by their live caret.
     let terminalEditorsOf (terminal: TerminalId) (author: PeerId) (model: ClientModel) : (PeerId * string) list =
         model.Presence

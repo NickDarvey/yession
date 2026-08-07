@@ -25,6 +25,7 @@ module SessionCommands =
         (closeTerminal: TerminalId -> string -> Async<Result<unit, string>>)
         (takeLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
         (releaseLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
+        (rearmTerminal: TerminalId -> Async<Result<unit, string>>)
         (actorFor: PeerId -> ActorRef)
         (peerId: PeerId)
         (command: SessionCommand)
@@ -55,6 +56,13 @@ module SessionCommands =
                 | Error reason -> return CommandRejected reason
             | ReleaseTerminalLease terminalId ->
                 match! releaseLease terminalId (actorFor peerId) with
+                | Ok () -> return CommandAccepted
+                | Error reason -> return CommandRejected reason
+            // Unattributed, and deliberately: re-arming repairs a terminal rather than taking
+            // anything from anyone, so who pressed it decides nothing. The event it produces
+            // says the terminal is marking again, which is the fact worth having.
+            | RearmTerminal terminalId ->
+                match! rearmTerminal terminalId with
                 | Ok () -> return CommandAccepted
                 | Error reason -> return CommandRejected reason
         }

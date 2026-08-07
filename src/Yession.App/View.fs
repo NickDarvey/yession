@@ -69,7 +69,10 @@ type ViewActions =
       /// there is one control because there is one act, and any peer may perform it.
       TakeTerminal : TerminalId -> unit
       /// Hand it back to block mode.
-      ReleaseTerminal : TerminalId -> unit }
+      ReleaseTerminal : TerminalId -> unit
+      /// Type the shell instrumentation in again after the terminal stopped marking (Plan 13,
+      /// stage 2f). Any peer may — it repairs rather than takes.
+      RearmTerminal : TerminalId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -90,7 +93,8 @@ module ViewActions =
           CloseTerminal = ignore
           SendTerminalDraft = fun _ _ -> ()
           TakeTerminal = ignore
-          ReleaseTerminal = ignore }
+          ReleaseTerminal = ignore
+          RearmTerminal = ignore }
 
 module View =
 
@@ -783,6 +787,7 @@ module View =
             // resolve first rather than the one that is actually blocking.
             let statusToken =
                 if awaiting then Dom.Text.queuedAwaitingApproval
+                elif ClientModel.awaitsIntegration entry model then Dom.Text.queuedAwaitingIntegration
                 elif ClientModel.awaitsTerminal entry model then Dom.Text.queuedAwaitingTerminal
                 else Dom.Text.queuedReady
             let approval =
@@ -813,7 +818,7 @@ module View =
                            data-terminal-input="{BodyKey.terminalQueued id}">
                   </div>
                   <div class="{Style.terminalQueuedRow}">
-                    <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if statusToken = Dom.Text.queuedAwaitingApproval then "waiting for approval" elif statusToken = Dom.Text.queuedAwaitingTerminal then "waiting for the terminal" else "queued"}</span>
+                    <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if statusToken = Dom.Text.queuedAwaitingApproval then "waiting for approval" elif statusToken = Dom.Text.queuedAwaitingIntegration then "waiting for the terminal to be re-armed" elif statusToken = Dom.Text.queuedAwaitingTerminal then "waiting for the terminal" else "queued"}</span>
                     <span class="{Style.small}">{authorLabel entry.Author}</span>
                     <div class="ml-auto flex items-center gap-2">
                       {reject}
@@ -857,6 +862,10 @@ module View =
         let mode = SyncedSessionState.modeOf terminal model.Synced
         let lease =
             TerminalProjection.tryFind terminal model.Terminals |> Option.bind (fun view -> view.Lease)
+        let integrationLost =
+            TerminalProjection.tryFind terminal model.Terminals
+            |> Option.map (fun view -> view.IntegrationLost)
+            |> Option.defaultValue false
         let editors (author: PeerId) =
             ClientModel.terminalEditorsOf terminal author model
             |> List.map (fun (editor, name) ->
@@ -906,8 +915,24 @@ module View =
                                 @click={Ev(fun _ -> actions.SendTerminalDraft terminal mine)}>Run</button>
                       </div>
                     </div>"""
+        // Named, not shown as a stall. The queue is held because a command written here could
+        // not be bounded — we would not know when it started or finished — and saying that is
+        // the difference between a terminal that looks broken and one that says what to do.
+        let lostBanner =
+            if not integrationLost then Lit.nothing
+            else
+                html $"""
+                    <div class="{Style.terminalQueuedRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
+                      <span class="{Style.statusErr}">not marking</span>
+                      <span class="{Style.small}">This terminal's shell stopped reporting when commands start and finish, so queued commands are held.</span>
+                      <div class="ml-auto flex items-center gap-2">
+                        <button type="button" class="{Style.btnPrimary}" data-terminal-rearm="{TerminalId.value terminal}"
+                                @click={Ev(fun _ -> actions.RearmTerminal terminal)}>Re-arm it</button>
+                      </div>
+                    </div>"""
         html $"""
             <section class="{Style.terminalComposer}">
+              {lostBanner}
               <div class="{Style.sideRow}">
                 <label class="{Style.label}" for="terminal-mode">approval</label>
                 <select id="terminal-mode" class="{Style.field} w-auto" data-terminal-mode="{TerminalApprovalMode.describe mode}"
