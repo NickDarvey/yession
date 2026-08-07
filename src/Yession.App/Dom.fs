@@ -58,13 +58,6 @@ module Dom =
         let peerPresence = "data-peer-presence"
         let peerAt = "data-peer-at"
         let environment = "data-environment"
-        let commandLog = "data-command-log"
-        let commandId = "data-command-id"
-        let commandStatus = "data-command-status"
-        let stream = "data-stream"
-        // Deliberately never emitted — the command log is read-only. Named so the
-        // "no input surface" invariant is asserted against a constant, not a literal.
-        let commandInput = "data-command-input"
         // Conversation timeline.
         let conversation = "data-conversation"
         let messageId = "data-message-id"
@@ -243,13 +236,6 @@ module Dom =
         let envRunning = "running"
         let envFailed = "failed"
         let envStopped = "stopped"
-        // Command result status tokens.
-        let cmdPending = "pending"
-        let cmdRunning = "running"
-        let cmdTimedOut = "timed-out"
-        let cmdExecutionFailed = "execution-failed"
-        let cmdSucceeded (code: int) : string = "succeeded:" + string code
-        let cmdFailed (code: int) : string = "failed:" + string code
         // Command output streams.
         let stdout = "stdout"
         let stderr = "stderr"

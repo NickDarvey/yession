@@ -46,10 +46,65 @@ type EnsureEnvironmentResult =
 /// never calls it, so a one-shot never starts a container.
 type EnsureEnvironment = string -> Async<EnsureEnvironmentResult>
 
-/// Run a command in the session's environment (Step 13). Typed and pre-scoped — the
-/// agent never sees container handles or engines. Output streams through the chunk
-/// callback (it is also recorded as events by the Session Process).
-type ExecuteCommand = CommandRequest -> (CommandOutputChunk -> unit) -> Async<CommandResult>
+/// Where a command the agent asked for has got to (Plan 13, stage 3b).
+///
+/// Every case NAMES its own state, and that is the point rather than a nicety. Telling a
+/// model "queued" when it is actually blocked on a person has it conclude, after a silent
+/// pause, that its command failed and try something else — which is how a review gate turns
+/// into the agent routing around the review.
+type TerminalCommandStatus =
+    /// It ran to an outcome. The ordinary answer.
+    | TerminalCommandRan of CommandResult
+    /// Still going when the deadline fell. A yield, not a cancellation: the block runs on and
+    /// the handle resumes it.
+    | TerminalCommandRunning
+    /// A human has to approve it. Unbounded in principle — they may be asleep — so the tool
+    /// returns rather than waits, and the turn says what it queued and why.
+    | TerminalCommandAwaitingApproval
+    /// The terminal is not free: a peer is typing in it, or another block is running there.
+    /// Distinct from awaiting approval because it resolves differently — one ends when a
+    /// person makes a decision, the other when a person or a process finishes a task.
+    | TerminalCommandAwaitingTerminal
+    /// Somebody said no. The other half of the approval gate, and the more interesting half.
+    | TerminalCommandRefused of by: ActorRef * reason: string option
+
+/// What one `execute_command` answered with (Plan 13, stage 3b).
+type TerminalCommandOutcome =
+    { Terminal : TerminalId
+      /// The handle that resumes this command, and it is the QUEUE entry's id rather than the
+      /// block's — deliberately, because a block does not exist until the command runs, so a
+      /// block-id handle could not be returned by the two cases that most need one
+      /// (`AwaitingApproval`, `AwaitingTerminal`). The queue id names the REQUEST, which
+      /// exists from the moment it is visible to everyone.
+      Handle : QueueId
+      /// The block, once there is one. `None` while the command is still only a request.
+      Block : BlockId option
+      Status : TerminalCommandStatus
+      /// The tail of what it printed, capped. The transcript keeps all of it, and the block's
+      /// range travels with the handle, so nothing here is the only copy.
+      OutputTail : string
+      /// Characters the tail leaves out. Stated rather than silently elided: a model that
+      /// cannot tell a short output from a truncated one will confidently describe the wrong
+      /// thing.
+      Elided : int }
+
+/// Run a command for the agent (Plan 13, stage 3b). ONE door: the agent has no private
+/// execution path, so a terminal set to require approval actually holds it.
+///
+/// `command` is a shell command LINE, not an executable plus argv. A terminal block is a line
+/// a human reads in a queue and may edit before approving, and an argv array is not that; the
+/// quoting burden moves to the side that knows what it meant.
+///
+/// `TerminalId option`: `None` means the session's agent terminal, opened on first use.
+///
+/// It waits, bounded twice over — a short grace for an approval, then the command timeout for
+/// the process — and yields a handle rather than blocking a turn on a human. See
+/// `TerminalCommandWait` for the policy.
+type ExecuteCommand = TerminalId option -> string -> Async<Result<TerminalCommandOutcome, string>>
+
+/// Resume a handle `ExecuteCommand` yielded (Plan 13, stage 3b): an approval that arrived
+/// late, a long build. Returns the same shape, so the agent learns one thing rather than two.
+type ReadTerminalBlock = QueueId -> Async<Result<TerminalCommandOutcome, string>>
 
 /// Persist a secret under the session's own scope (Plan 06). WRITE-ONLY from the
 /// agent's side: there is no capability that returns a value — a stored secret is used
@@ -65,49 +120,33 @@ type ListSessionSecrets = unit -> Async<Result<SecretMetadata list, string>>
 /// Delete one of the session's secrets; false = it did not exist.
 type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 
-/// What queueing a terminal command did (Plan 13).
-type QueuedTerminalCommand =
-    { Terminal : TerminalId
-      /// Whether the terminal's approval mode is holding it for a human. The agent is
-      /// TOLD this rather than left to infer it from silence: "your command is waiting for
-      /// someone to approve it" is the difference between a useful answer and a model
-      /// deciding its command failed and trying something else.
-      AwaitingApproval : bool }
-
-/// Put a command in a terminal's queue (Plan 13). Named for what it does: the agent does
-/// NOT get to run a command in a terminal — it queues one, exactly as a person does, and
-/// the terminal's approval mode decides what happens next.
-///
-/// It returns as soon as the command is queued, and deliberately does not wait for the
-/// command to run. Waiting would make an agent turn block on a human pressing Approve,
-/// which turns a review gate into a deadlock whenever nobody is looking.
-///
-/// `TerminalId option`: `None` means "whichever terminal is open", opening one if none is.
-type QueueTerminalCommand = TerminalId option -> string -> Async<Result<QueuedTerminalCommand, string>>
-
 /// The typed capabilities an agent turn may use. No raw Docker, no handles, no session
 /// ids — everything is already scoped by the Session Process and, beneath it, the
 /// Session Manager.
+///
+/// `EnsureEnvironment` retired with stage 3b: it existed to start the environment lazily
+/// before a command, and opening a terminal already does that — so it had nothing left to do.
+/// Its `reason` argument survives as the agent terminal's TITLE, which is a better answer to
+/// "what is that terminal for" than the tool ever gave.
 type AgentCapabilities =
-    { EnsureEnvironment : EnsureEnvironment
+    { /// Run a command where the people in this session can see it (Plan 13, stage 3b).
+      /// The agent's ONLY execution path — that is what makes the approval gate real.
       ExecuteCommand : ExecuteCommand
+      /// Resume a handle `ExecuteCommand` yielded.
+      ReadTerminalBlock : ReadTerminalBlock
       SetSecret : SetSessionSecret
       ListSecrets : ListSessionSecrets
-      DeleteSecret : DeleteSessionSecret
-      /// Queue a command in a terminal (Plan 13), where people can see it, edit it, and —
-      /// depending on the terminal's mode — approve it before it runs.
-      QueueTerminalCommand : QueueTerminalCommand }
+      DeleteSecret : DeleteSessionSecret }
 
 module AgentCapabilities =
 
     /// A turn with no environment authority at all (Phase 1 behaviour).
     let none : AgentCapabilities =
-        { EnsureEnvironment = fun _ -> async { return EnvironmentUnavailable "no environment capability" }
-          ExecuteCommand = fun _ _ -> async { return CommandExecutionFailed "no environment capability" }
+        { ExecuteCommand = fun _ _ -> async { return Error "no terminal capability" }
+          ReadTerminalBlock = fun _ -> async { return Error "no terminal capability" }
           SetSecret = fun _ _ -> async { return Error "no secrets capability" }
           ListSecrets = fun () -> async { return Error "no secrets capability" }
-          DeleteSecret = fun _ -> async { return Error "no secrets capability" }
-          QueueTerminalCommand = fun _ _ -> async { return Error "no terminal capability" } }
+          DeleteSecret = fun _ -> async { return Error "no secrets capability" } }
 
 /// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
 /// Session Process owns the signal; the runner observes it — poll `IsAborted` at

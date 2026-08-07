@@ -586,6 +586,21 @@ module SyncedStateSync =
                 entry.set ("approvedBy", box "") |> ignore),
             processOrigin)
 
+    /// Set a terminal's approval mode from the Process (Plan 13, stage 3b).
+    ///
+    /// Peers set the mode through the Ylmish binding, from the model; the Process has no
+    /// model, and it needs to write exactly one mode — the agent terminal's `AutoRun`, at the
+    /// moment it opens one. Under the process origin, like its other structural writes, so
+    /// the Process's own change is not mistaken for a peer's.
+    let setTerminalMode (doc: Yjs.Y.Doc) (terminal: TerminalId) (mode: TerminalApprovalMode) : unit =
+        doc.transact (
+            (fun _ ->
+                let modes : Yjs.Y.Map<obj> = doc.getMap "terminalModes"
+                let entry : Yjs.Y.Map<obj> = Yjs.Y.Map.Create ()
+                modes.set (TerminalId.value terminal, box entry) |> ignore
+                entry.set ("mode", box (TerminalApprovalMode.describe mode)) |> ignore),
+            processOrigin)
+
     /// Remove consumed terminal-queue entries in one transaction under the process origin —
     /// the terminal drain's counterpart of `removeQueued`, and the Process's only other
     /// structural doc write.

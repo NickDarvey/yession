@@ -263,6 +263,87 @@ module TerminalQueueDrain =
         | SessionEvent.TerminalCommandRejected r -> Some (QueueId.value r.QueueId)
         | _ -> None
 
+/// How long `execute_command` waits, and for what (Plan 13, stage 3b).
+///
+/// The reason "queue and return" looked forced is that it answered one question — how do we
+/// avoid blocking a turn on a human? — by giving up a different thing: waiting for a PROCESS,
+/// which was never the problem. They are separate waits with separate bounds, and separating
+/// them is the whole design:
+///
+///   * **Waiting for a person is unbounded in principle.** They may be asleep. So an approval
+///     gets a short grace — enough that a supervised session, where approvals come in seconds,
+///     still chains normally — and then the tool returns a handle. The turn continues.
+///   * **Waiting for a process is already bounded**, by the same command timeout the old
+///     `execute_command` used. Keeping it is not a new risk, it is the existing one.
+///
+/// Under `AutoRun` the first wait does not exist: the drain subscribes to the doc, the agent's
+/// write is local to the Session Process, and the entry drains on the update. `AutoRun` is
+/// therefore synchronous — met by having no network hop in the path rather than by hiding one.
+module TerminalCommandWait =
+
+    /// What the Process can see about one queued command right now.
+    type Observation =
+        { /// The block this request started, once it has. Joined to the request by the
+          /// `QueueId` the block events carry.
+          Block : TerminalBlock option
+          /// Whether the request is still sitting in the doc's queue.
+          InQueue : bool
+          /// Whether it is the terminal's HEAD — the only entry a drain can start. An entry
+          /// behind another is waiting for the queue, whatever the head happens to be waiting
+          /// for, and reporting the head's reason as ours would tell the agent its own command
+          /// needs an approval when somebody else's does.
+          IsHead : bool
+          /// Why the terminal's head is held, from `TerminalQueueDrain.holdOf`. `None` = it is
+          /// about to run.
+          Hold : TerminalQueueDrain.TerminalHold option }
+
+    type Step =
+        | Return of TerminalCommandStatus
+        | KeepWaiting
+        /// The request is in neither the queue nor the log: a peer deleted it before it ran.
+        /// Deleting a queued entry is WITHDRAWAL, which has no event — so this is an absence,
+        /// and reporting it as any outcome would be inventing one.
+        | Gone
+
+    /// The decision, given what has been observed and which deadlines have passed.
+    ///
+    /// `graceElapsed` bounds waiting on a PERSON; `deadlineElapsed` bounds waiting on a
+    /// PROCESS. Which one applies is decided by what is actually being waited for, and that is
+    /// the only interesting thing here.
+    let step (graceElapsed: bool) (deadlineElapsed: bool) (observation: Observation) : Step =
+        match observation.Block with
+        | Some block ->
+            match block.Status with
+            | BlockRejected (by, reason) -> Return (TerminalCommandRefused (by, reason))
+            | BlockFinished result -> Return (TerminalCommandRan result)
+            // Still running. A deadline here is a YIELD, not a cancellation — the block runs
+            // on, its output lands in the transcript, and the handle resumes it.
+            | BlockRunning -> if deadlineElapsed then Return TerminalCommandRunning else KeepWaiting
+        | None when not observation.InQueue -> Gone
+        // Behind another entry: a wait on the QUEUE, bounded by the process deadline, because
+        // what has to happen first is that the entries ahead run.
+        | None when not observation.IsHead ->
+            if deadlineElapsed then Return TerminalCommandAwaitingTerminal else KeepWaiting
+        | None ->
+            match observation.Hold with
+            // A peer holding the terminal is mid-task and will not be done in five seconds, so
+            // the grace does not apply — burning it on a wait that was never going to resolve
+            // only makes the turn slower. Return at once.
+            | Some TerminalQueueDrain.AwaitingTerminal -> Return TerminalCommandAwaitingTerminal
+            | Some TerminalQueueDrain.AwaitingApproval ->
+                if graceElapsed then Return TerminalCommandAwaitingApproval else KeepWaiting
+            // Another block is running here: a wait on a PROCESS, so it gets the process
+            // deadline rather than the approval grace — a quick command ahead of ours still
+            // chains. Reported as `AwaitingTerminal` because from the caller's side both holds
+            // say the same thing: the terminal is not free.
+            | Some TerminalQueueDrain.AwaitingBlock ->
+                if deadlineElapsed then Return TerminalCommandAwaitingTerminal else KeepWaiting
+            // Nothing is holding it — it is about to run, or has just been consumed and the
+            // block event has not landed yet. Bounded by the process deadline, because what is
+            // being waited for is the run.
+            | Some TerminalQueueDrain.NotWaiting
+            | None -> if deadlineElapsed then Return TerminalCommandRunning else KeepWaiting
+
 /// Who holds each terminal's stdin (Plan 13, stage 2e), as a pure transition over a map.
 ///
 /// Pure rather than a mutable corner of the terminal manager because every interesting
@@ -1149,3 +1230,209 @@ module TerminalScheduler =
                         })
 
         { Drain = drain }
+
+/// The agent's ONE execution path (Plan 13, stage 3b): queue a command where everyone can see
+/// it, wait as long as it is worth waiting, and answer with what happened.
+///
+/// PR 1 shipped the terminal tool BESIDE `execute_command` rather than instead of it, and that
+/// split was worse than either end of it: the gated path returned before anything happened
+/// while the ungated one returned an answer, so a model that needed an answer took the path
+/// that gave one. The consequence was not a nudge being ignored — it was that `ApproveAgent`
+/// was UNENFORCEABLE, because the agent had a second door with no gate on it. The gate only
+/// becomes real when there is one door, which is this.
+module TerminalCommands =
+
+    /// How long an approval is waited for. Short, because the point is only that a SUPERVISED
+    /// session — where someone is watching and approvals come in seconds — still chains
+    /// normally. Beyond it the tool yields a handle rather than holding the turn.
+    let approvalGrace = TimeSpan.FromSeconds 5.0
+
+    /// How long a RUNNING command is waited for: the same bound the retired `execute_command`
+    /// used. Keeping it is not a new risk, it is the existing one.
+    let commandTimeout = TimeSpan.FromSeconds 120.0
+
+    /// Register a listener for "something that could change an outcome happened" — a log
+    /// append, a doc update. Returns the unsubscribe.
+    type OnChanged = (unit -> unit) -> (unit -> unit)
+
+    type TerminalCommands =
+        { Execute : ExecuteCommand
+          Read : ReadTerminalBlock }
+
+    let unavailable : TerminalCommands =
+        { Execute = fun _ _ -> async { return Error "this session has no terminals" }
+          Read = fun _ -> async { return Error "this session has no terminals" } }
+
+    /// Wake on the next change, or on a short tick.
+    ///
+    /// The tick is a floor, not the mechanism: a change wakes the wait immediately, which is
+    /// what makes `AutoRun` synchronous, and the tick only guarantees that a deadline can
+    /// still fire in a quiet session where nothing else is happening.
+    let private nextWake (onChanged: OnChanged) : Async<unit> =
+        Async.FromContinuations (fun (cont, _, _) ->
+            let mutable fired = false
+            let mutable unsubscribe : unit -> unit = ignore
+            let go () =
+                if not fired then
+                    fired <- true
+                    unsubscribe ()
+                    cont ()
+            unsubscribe <- onChanged go
+            Async.StartImmediate (
+                async {
+                    do! Async.Sleep 100
+                    go ()
+                }))
+
+    /// `projection` and `syncedOf` are read fresh on every observation — the whole loop is a
+    /// fold over what the Process already knows, holding no state of its own, so a restart
+    /// mid-wait loses a wait and never an outcome.
+    let create
+        (doc: Yjs.Y.Doc)
+        (terminals: SessionTerminals.SessionTerminals)
+        (projection: unit -> TerminalProjection)
+        (syncedOf: unit -> Result<SyncedSessionState, Ylmish.Codec.Error list>)
+        (readOutput: TerminalId -> int -> int option -> string)
+        /// The session's agent terminal, opened on first use with `reason` as its TITLE — so
+        /// the strip says "running the test suite" rather than "agent", which is what the
+        /// retired `ensure_environment`'s one genuinely useful argument becomes.
+        (agentTerminal: string -> Async<Result<TerminalId, string>>)
+        (mintQueueId: unit -> QueueId)
+        (now: unit -> DateTimeOffset)
+        (onChanged: OnChanged)
+        : TerminalCommands =
+
+        /// Every block in the session, keyed by the request it came from. The join between a
+        /// handle and its outcome, and the reason `TerminalBlock` carries its `QueueId`.
+        let blockFor (handle: QueueId) : (TerminalId * TerminalBlock) option =
+            (projection ()).Terminals
+            |> List.tryPick (fun terminal ->
+                terminal.Blocks
+                |> List.tryFind (fun block -> block.QueueId = Some handle)
+                |> Option.map (fun block -> terminal.TerminalId, block))
+
+        /// The exactly-once set, derived from the projection rather than borrowed from the
+        /// scheduler: a block or a refusal that names a `QueueId` IS that entry having been
+        /// consumed, and the projection already holds both.
+        let consumed () =
+            (projection ()).Terminals
+            |> List.collect (fun t -> t.Blocks)
+            |> List.choose (fun b -> b.QueueId |> Option.map QueueId.value)
+            |> Set.ofList
+
+        let observe (terminal: TerminalId) (handle: QueueId) : TerminalCommandWait.Observation =
+            let block = blockFor handle |> Option.map snd
+            match syncedOf () with
+            | Error _ ->
+                // A doc that will not decode says nothing about this request. Keep waiting on
+                // whatever the log shows rather than declaring the entry gone.
+                { Block = block; InQueue = true; IsHead = false; Hold = None }
+            | Ok synced ->
+                let consumed = consumed ()
+                let head =
+                    TerminalQueueOrder.sortedFor terminal synced.TerminalQueue
+                    |> List.filter (fun e -> not (Set.contains (QueueId.value e.QueueId) consumed))
+                    |> List.tryHead
+                { Block = block
+                  InQueue = Map.containsKey handle synced.TerminalQueue
+                  IsHead = (head |> Option.map (fun e -> e.QueueId)) = Some handle
+                  Hold =
+                    TerminalQueueDrain.holdOf
+                        consumed
+                        (terminals.Busy ())
+                        (terminals.Leased ())
+                        terminals.IsOpen
+                        (fun t -> SyncedSessionState.modeOf t synced)
+                        synced.TerminalQueue
+                        terminal }
+
+        let outcomeOf (terminal: TerminalId) (handle: QueueId) (status: TerminalCommandStatus) =
+            let block = blockFor handle |> Option.map snd
+            let output =
+                match block with
+                | Some b -> readOutput terminal b.FromSeq b.ToSeq
+                | None -> ""
+            let elided = max 0 (output.Length - TerminalDigest.tailCap)
+            { Terminal = terminal
+              Handle = handle
+              Block = block |> Option.map (fun b -> b.BlockId)
+              Status = status
+              OutputTail = (if elided > 0 then output.Substring elided else output)
+              Elided = elided }
+
+        /// Wait out both phases, then answer. Both deadlines are measured from `startedAt`
+        /// rather than from entry into a phase, so a command that spends its grace waiting for
+        /// an approval and then runs still gets the full command timeout it would have had.
+        let rec awaitOutcome (terminal: TerminalId) (handle: QueueId) (startedAt: DateTimeOffset) (runningSince: DateTimeOffset option) =
+            async {
+                let elapsedSince (from: DateTimeOffset) = now () - from
+                let observation = observe terminal handle
+                // The process deadline runs from the moment the block STARTED, when one has;
+                // before that there is no process to time.
+                let deadlineFrom = runningSince |> Option.defaultValue startedAt
+                let graceElapsed = elapsedSince startedAt >= approvalGrace
+                let deadlineElapsed = elapsedSince deadlineFrom >= commandTimeout
+                match TerminalCommandWait.step graceElapsed deadlineElapsed observation with
+                | TerminalCommandWait.Return status -> return Ok (outcomeOf terminal handle status)
+                | TerminalCommandWait.Gone ->
+                    return Error "that command was removed from the queue before it ran"
+                | TerminalCommandWait.KeepWaiting ->
+                    let runningSince =
+                        match runningSince, observation.Block with
+                        | None, Some block when block.Status = BlockRunning -> Some (now ())
+                        | existing, _ -> existing
+                    do! nextWake onChanged
+                    return! awaitOutcome terminal handle startedAt runningSince
+            }
+
+        let execute (requested: TerminalId option) (command: string) : Async<Result<TerminalCommandOutcome, string>> =
+            async {
+                let command = command.Trim ()
+                if command = "" then return Error "a command cannot be empty"
+                else
+                    let! terminal =
+                        async {
+                            match requested with
+                            | Some id when terminals.IsOpen id -> return Ok id
+                            | Some _ -> return Error "that terminal is not open"
+                            // The agent's own terminal, titled with what it is for.
+                            | None -> return! agentTerminal command
+                        }
+                    match terminal, syncedOf () with
+                    | Error reason, _ -> return Error reason
+                    | Ok _, Error _ -> return Error "the session's collaborative state could not be read"
+                    | Ok terminal, Ok synced ->
+                        let handle = mintQueueId ()
+                        // Visible to every peer the instant this lands — before any waiting —
+                        // because the point of the one door is that what the agent is about to
+                        // run is something people can read, edit and refuse.
+                        SyncedStateSync.enqueueTerminalCommand
+                            doc
+                            handle
+                            terminal
+                            ActorRef.Agent
+                            (TerminalQueueOrder.nextFor terminal synced.TerminalQueue)
+                            command
+                        return! awaitOutcome terminal handle (now ()) None
+            }
+
+        let read (handle: QueueId) : Async<Result<TerminalCommandOutcome, string>> =
+            async {
+                // The handle names a request, so it is resolvable from either side: the block
+                // it became, or the entry it still is.
+                let terminal =
+                    match blockFor handle with
+                    | Some (terminal, _) -> Some terminal
+                    | None ->
+                        match syncedOf () with
+                        | Ok synced -> synced.TerminalQueue |> Map.tryFind handle |> Option.map (fun e -> e.Terminal)
+                        | Error _ -> None
+                match terminal with
+                | None -> return Error "no such command"
+                // Resumed under the same two-phase policy, which is what makes a late approval
+                // chainable: the caller waits again rather than being told "still waiting" for
+                // ever in a loop of its own.
+                | Some terminal -> return! awaitOutcome terminal handle (now ()) None
+            }
+
+        { Execute = execute; Read = read }

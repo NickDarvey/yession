@@ -180,28 +180,25 @@ let private subscribeMcp =
     | url, secret -> Some (fun handler -> ControlClient.subscribeMcp url secret handler)
 
 /// A built-in diagnostic runner (`YESSION_AGENT=diagnostic`): exercises the session's
-/// environment capability end to end — ensure, execute, stream — without model
-/// credentials. The verify suite drives it across real process boundaries; it doubles
+/// command capability end to end — open a terminal, queue, drain, run, read the output back —
+/// without model credentials. The verify suite drives it across real process boundaries; it doubles
 /// as a field smoke test.
 let private diagnosticAgent : RunAgent =
     fun _ capabilities _signal onChunk ->
         async {
-            match! capabilities.EnsureEnvironment "diagnostic run" with
-            | EnvironmentUnavailable reason -> return AgentFailed (sprintf "environment unavailable: %s" reason)
-            | EnvironmentAvailable ->
-                let request =
-                    { CommandId = CommandId.create (string (System.Guid.NewGuid ())) |> expect
-                      Executable = "node"
-                      Arguments = [ "-e"; "console.log('diagnostic-ok')" ]
-                      WorkingDirectory = None
-                      Environment = Map.empty
-                      Timeout = Some (System.TimeSpan.FromSeconds 30.0) }
-                let mutable output = ""
-                let! result = capabilities.ExecuteCommand request (fun chunk -> output <- output + chunk.Text)
-                match result with
-                | CommandSucceeded 0 ->
-                    onChunk { Text = output.Trim () }
-                    return AgentCompleted (sprintf "diagnostic: %s" (output.Trim ()), None)
+            // One call, because after stage 3b there is one door: `execute_command` opens the
+            // agent terminal (which starts the environment), queues the command where every
+            // peer can see it, drains it and waits for the exit code. That the whole path
+            // collapses to this is the point of the merge, and driving the real one across
+            // process boundaries is what makes this a smoke test rather than a mock.
+            match! capabilities.ExecuteCommand None "node -e \"console.log('diagnostic-ok')\"" with
+            | Error reason -> return AgentFailed (sprintf "diagnostic command failed: %s" reason)
+            | Ok outcome ->
+                match outcome.Status with
+                | TerminalCommandRan (CommandSucceeded 0) ->
+                    let output = outcome.OutputTail.Trim ()
+                    onChunk { Text = output }
+                    return AgentCompleted (sprintf "diagnostic: %s" output, None)
                 | other -> return AgentFailed (sprintf "diagnostic command failed: %A" other)
         }
 

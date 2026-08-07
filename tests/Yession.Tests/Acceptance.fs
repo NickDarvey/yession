@@ -89,7 +89,6 @@ let private representativeModel : ClientModel =
       Peers = Map.ofList [ ada, "swift-heron"; bob, "brave-owl" ]
       Composer = Unchosen
       Environment = EnvironmentNotStarted
-      Commands = CommandLog.empty
       Terminals =
         { Terminals =
             [ { TerminalId = terminalId
@@ -100,6 +99,7 @@ let private representativeModel : ClientModel =
                 Lease = None
                 Blocks =
                   [ { BlockId = blockId
+                      QueueId = None
                       Author = PeerRef ada
                       ApprovedBy = None
                       Command = "ls -la"
@@ -178,7 +178,6 @@ let private uiChecklistTests =
                   "latest known event offset", Dom.hookText Dom.Hooks.latestKnownOffset "7"
                   "catch-up status", Dom.hookText Dom.Hooks.catchUp Dom.Text.catchingUp
                   "environment status (Phase 2)", Dom.Hooks.environment
-                  "read-only command log (Phase 2)", Dom.Hooks.commandLog
                   "message queue (Phase 3)", Dom.Hooks.messageQueue
                   "queued message editor", Dom.attr Dom.Hooks.queueInput "queue-ui"
                   "queue reorder up", Dom.attr Dom.Hooks.queueUp "queue-ui"
