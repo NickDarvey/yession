@@ -27,6 +27,7 @@
     <!-- Before SessionState: the synced terminal state carries the approval mode this
          declares, so the policy type precedes the collaborative state that holds it. -->
     <Compile Include="Terminals.fs" />
+    <Compile Include="TerminalMarks.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="SessionState.fs" />
     <Compile Include="RichText.fs" />
