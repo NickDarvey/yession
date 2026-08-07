@@ -928,6 +928,8 @@ let private makeTerminals (log: EventLog<SessionEvent>) environment openTranscri
             fixedClock
             (fun () -> TerminalId.create (mintTerminal ()) |> expect)
             (fun () -> BlockId.create (mintBlock ()) |> expect)
+            // Fixed, because a test that cannot predict the nonce cannot assert on a mark.
+            (fun () -> "test-nonce")
             (fun id seq record -> records.Add (id, seq, record))
             openAtBoot
     terminals, records

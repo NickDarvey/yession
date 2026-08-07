@@ -238,6 +238,10 @@ let startFull
                 (fun () -> DateTimeOffset.UtcNow)
                 TerminalId.mint
                 mintBlockId
+                // Cryptographically random, and not a counter: a guessable nonce is no nonce
+                // at all, since the whole point is that output nobody trusted cannot forge a
+                // block's outcome.
+                Interop.randomSecret
                 broadcastTerminalRecord
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 

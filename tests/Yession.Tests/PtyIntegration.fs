@@ -17,6 +17,7 @@ open Fable.Core.JsInterop
 open Fable.Pyxpecto
 open Yession.Domain
 open Yession.Host
+open Yession.SessionProcess
 open Yession.Tests.Support
 
 // Host-side fixtures the pty is then pointed at (same shape as SrtIntegration's).
@@ -221,6 +222,75 @@ let tests =
                         // transcript that is fetchable over HTTP.
                         Expect.isFalse (clean.Contains nonce) "no mark, and so no nonce, reaches the transcript"
                         Expect.isTrue (clean.Contains "hello") "while the command's real output is kept"
+            }
+
+        testCaseAsync "cd in one block moves the next one — the whole point of stage 2d" <|
+            async {
+                // THE property a per-block spawn structurally cannot have, and therefore the
+                // test that proves blocks really moved onto one shared shell. Under stage 1
+                // each block was its own process, so `cd` died with it; here the second block
+                // is typed into the same shell the first one changed.
+                let policy =
+                    { ReadPaths = []
+                      WritePaths = []
+                      AllowedDomains = None
+                      Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
+                      WorkingDirectory = None }
+                match! Sandboxes.HostSandbox.create () policy with
+                | Error e -> failwith e
+                | Ok sandbox ->
+                    // A `SessionEnvironment` is a record of functions, so a real one over a
+                    // real sandbox is a few lines — no container, no Manager, and the pty path
+                    // under test is the production one.
+                    let environment : SessionEnvironment.SessionEnvironment =
+                        { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+                          Execute = fun _ _ -> async { return CommandExecutionFailed "unused" }
+                          Spawn = fun exec onChunk -> sandbox.Spawn exec onChunk
+                          SpawnPty =
+                            fun exec cols rows onOutput ->
+                                async {
+                                    match sandbox.SpawnPty with
+                                    | None -> return Error "no pty"
+                                    | Some spawn -> return! spawn exec cols rows onOutput
+                                }
+                          Stop = fun () -> async { return () }
+                          CurrentRef = fun () -> Some "host" }
+                    let at () = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Zero)
+                    let log = InMemoryEventLog.create (SessionId.create "pty-cd" |> expect) at
+                    let lines = ResizeArray<string> ()
+                    let transcript : Transcript =
+                        { Append = fun record -> lines.Add record.Data; lines.Count - 1
+                          NextSeq = fun () -> lines.Count }
+                    let terminals =
+                        SessionTerminals.create
+                            log
+                            environment
+                            (fun _ _ -> transcript)
+                            (fun _ _ -> Emulator.none)
+                            SessionTerminals.TerminalShell.bash
+                            at
+                            (fun () -> TerminalId.create "term-cd" |> expect)
+                            (let mutable n = 0 in fun () -> n <- n + 1; BlockId.create (sprintf "b-%d" n) |> expect)
+                            (fun () -> "cd-nonce")
+                            (fun _ _ _ -> ())
+                            []
+                    match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) "cd" with
+                    | Error e -> failwith e
+                    | Ok id ->
+                        let entryFor n =
+                            { QueueId = QueueId.create n |> expect
+                              Terminal = id
+                              Author = PeerRef (PeerId.create "ada" |> expect)
+                              Order = 1.0
+                              ApprovedBy = None
+                              RejectedBy = None
+                              RejectedReason = None }
+                        do! terminals.RunBlock (entryFor "1") "cd /tmp" ignore
+                        do! terminals.RunBlock (entryFor "2") "pwd" ignore
+                        do! sandbox.Dispose ()
+                        let printed = String.concat "" lines
+                        Expect.isTrue (printed.Contains "/tmp")
+                            (sprintf "the second block saw the first block's directory, got: %s" printed)
             }
 
         testCaseAsync "killing the pty settles Exited rather than hanging" <|

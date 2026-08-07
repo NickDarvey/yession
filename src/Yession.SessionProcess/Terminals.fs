@@ -198,16 +198,71 @@ module SessionTerminals =
     type TerminalShell =
         { Executable : string
           /// Arguments before the command line itself.
-          Arguments : string list }
+          Arguments : string list
+          /// Which instrumentation dialect this shell speaks — the key `TerminalMarks.rcFor`
+          /// is asked for. A name we do not know means no instrumentation, and therefore a
+          /// terminal that keeps the per-block path.
+          Name : string
+          /// How to launch this shell INTERACTIVELY, with its own startup files suppressed
+          /// so ours is the only instrumentation in play.
+          InteractiveArguments : string list }
 
     module TerminalShell =
-        let posix : TerminalShell = { Executable = "/bin/sh"; Arguments = [ "-c" ] }
+        let posix : TerminalShell =
+            { Executable = "/bin/sh"
+              Arguments = [ "-c" ]
+              Name = "sh"
+              InteractiveArguments = [ "-i" ] }
+
+        let bash : TerminalShell =
+            { Executable = "/bin/bash"
+              Arguments = [ "-c" ]
+              Name = "bash"
+              InteractiveArguments = [ "--noprofile"; "--norc"; "-i" ] }
+
+    /// What the manager holds per live terminal (Plan 13, stage 2d).
+    ///
+    /// `Shell = None` is the DEGRADED terminal, and it is a complete answer rather than a
+    /// broken one: blocks run as stage 1 ran them, one piped `Spawn` each. What it gives up
+    /// is exactly what needs a shared shell — state carried between blocks, and a tty for a
+    /// foreground program — so both are stateable at open rather than discovered later.
+    ///
+    /// Mutable, because the pty is spawned AFTER the terminal is in the live map: its output
+    /// callback looks the terminal up by id, so the terminal has to exist before the first
+    /// byte can arrive.
+    type LiveTerminal =
+        { Transcript : Transcript
+          OpenedAt : DateTimeOffset
+          Emulator : Emulator
+          mutable Shell : PtyHandle option }
 
     /// Bytes of output one block may write to the transcript. Beyond it, output is dropped
     /// and the drop is RECORDED (`TerminalTranscriptTruncated`) — a runaway `yes` must not
     /// fill a disk, and an audit trail with a hole in it must say so rather than read as a
     /// complete record of a command that printed less than it did.
     let private blockOutputCap = 4 * 1024 * 1024
+
+    /// A command line, as bytes to type into a shell's line editor. Three things, and none of
+    /// them is cosmetic.
+    ///
+    /// Kill-line FIRST (`^U`), because the editor may already hold a half-typed line — a peer
+    /// mid-keystroke in live mode, or a previous write that was never submitted.
+    ///
+    /// Control characters are STRIPPED, newline excepted. A terminal composer is
+    /// collaborative and the agent writes into one, so command text is attacker-reachable in
+    /// a way a locally typed line is not: an `ESC` in it could emit a forged mark from the
+    /// INPUT side, where no nonce check can help because we are the one writing.
+    ///
+    /// Newline survives and becomes `\r`, because a heredoc IS a multi-line command and the
+    /// shell reads its body from the lines that follow.
+    let internal writeFor (command: string) : string =
+        let kept =
+            command
+            |> Seq.filter (fun c -> c = '\n' || not (System.Char.IsControl c))
+            |> Seq.map (fun c -> if c = '\n' then '\r' else c)
+            |> Seq.toArray
+            |> System.String
+        "\u0015" + kept + "\r" 
 
     type SessionTerminals =
         { /// Open a terminal, ensuring the WorkSandbox exists first — opening one IS a
@@ -276,13 +331,22 @@ module SessionTerminals =
         (clock: unit -> DateTimeOffset)
         (mintTerminalId: unit -> TerminalId)
         (mintBlockId: unit -> BlockId)
+        // The per-terminal mark nonce (Plan 13, stage 2d). Injected like every other mint so
+        // tests are deterministic; the Host supplies a cryptographically random one, because
+        // a guessable nonce is no nonce at all — the whole point is that output nobody
+        // trusted cannot forge a block's outcome.
+        (mintNonce: unit -> string)
         (onRecord: TerminalId -> int -> TranscriptRecord -> unit)
         (openAtBoot: TerminalId list)
         : SessionTerminals =
 
-        /// What the manager holds per live terminal: its transcript, the instant every
-        /// record's `At` is relative to, and the emulator keeping its screen.
-        let live = Collections.Generic.Dictionary<string, Transcript * DateTimeOffset * Emulator> ()
+        let live = Collections.Generic.Dictionary<string, LiveTerminal> ()
+
+        /// The block a pty terminal is waiting on: what to call when its `D` mark lands, and
+        /// the per-block output accounting the piped path keeps in locals. Keyed by terminal,
+        /// because a terminal runs one block at a time — which is the same invariant `busy`
+        /// already states.
+        let pending = Collections.Generic.Dictionary<string, (int -> unit) * (unit -> int) * (int -> unit)> ()
         let mutable busy : Set<string> = Set.empty
         let mutable leftOpen : Set<string> = openAtBoot |> List.map TerminalId.value |> Set.ofList
 
@@ -307,16 +371,11 @@ module SessionTerminals =
         /// function of the transcript: every byte that reaches one reaches the other, in the
         /// same order, so folding the transcript through a fresh emulator reproduces this
         /// one. That property is what the join snapshot rests on, and it is pinned by a test.
-        let emit
-            (id: TerminalId)
-            (transcript: Transcript)
-            (openedAt: DateTimeOffset)
-            (emulator: Emulator)
-            (kind: TranscriptKind)
-            (data: string)
-            =
+        let emit (id: TerminalId) (terminal: LiveTerminal) (kind: TranscriptKind) (data: string) =
+            let transcript = terminal.Transcript
+            let emulator = terminal.Emulator
             let record =
-                { At = (clock () - openedAt).TotalSeconds
+                { At = (clock () - terminal.OpenedAt).TotalSeconds
                   Kind = kind
                   Data = data }
             let seq = transcript.Append record
@@ -327,6 +386,103 @@ module SessionTerminals =
             | TranscriptOutput | TranscriptStderr -> emulator.Write data
             | TranscriptInput | TranscriptResize -> ()
             onRecord id seq record
+
+        /// Open the terminal's ONE instrumented shell, and report whether it took.
+        ///
+        /// Probed by RUNNING it: the shell is launched with our rc file and we wait, bounded,
+        /// for its first prompt mark. Arrived, the terminal is instrumented. Absent — an image
+        /// whose shell we cannot instrument, or which ignores the mechanism — the pty is torn
+        /// down and the terminal keeps the per-block path. Deciding by observation rather than
+        /// by shell name is the point: a POSIX `sh` has no prompt hook at all and rides its
+        /// marks in PS1, which is the shakiest of the three and cannot be trusted on a name.
+        let openShell (id: TerminalId) (terminal: LiveTerminal) : Async<unit> =
+            async {
+                let key = TerminalId.value id
+                let nonce = mintNonce ()
+                match TerminalMarks.rcFor shell.Name nonce with
+                | None -> return ()
+                | Some rc ->
+                    let carry = ref ""
+                    let ready = ref false
+                    let onOutput (data: string) =
+                        match live.TryGetValue key with
+                        | false, _ -> ()
+                        | true, current ->
+                            let marks, clean, rest = TerminalMarks.scan nonce carry.Value data
+                            carry.Value <- rest
+                            for m in marks do
+                                match m with
+                                | MarkPromptStart -> ready.Value <- true
+                                // A second `C` inside an open block is dropped rather than
+                                // repaired: the Process knows what it wrote, so a surprise is
+                                // evidence about the shell, never something to act on.
+                                | MarkCommandStart -> ()
+                                | MarkCommandDone code ->
+                                    match pending.TryGetValue key with
+                                    | true, (complete, _, _) ->
+                                        pending.Remove key |> ignore
+                                        complete code
+                                    // A `D` with no block open is the shell's own prompt
+                                    // cycle — at startup, or after a peer typed something in
+                                    // live mode. Not ours to act on.
+                                    | _ -> ()
+                            // Nothing before the first prompt mark reaches the transcript.
+                            // What arrives then is the shell's own startup and the echo of
+                            // the bootstrap we just typed — it belongs to no block, and
+                            // recording it would put our instrumentation in the audit trail.
+                            if clean <> "" && ready.Value then
+                                // Per-block output accounting lives with the pending block,
+                                // because on a pty the stream belongs to the TERMINAL and the
+                                // cap is a property of the block.
+                                match pending.TryGetValue key with
+                                | true, (_, written, note) ->
+                                    let room = blockOutputCap - written ()
+                                    if room <= 0 then note clean.Length
+                                    else
+                                        let kept = if clean.Length <= room then clean else clean.Substring (0, room)
+                                        note (clean.Length - kept.Length)
+                                        emit id current TranscriptOutput kept
+                                | _ -> emit id current TranscriptOutput clean
+                    let! spawned =
+                        environment.SpawnPty
+                            { Executable = shell.Executable
+                              Arguments = shell.InteractiveArguments
+                              Env = Map.empty
+                              WorkingDirectory = None }
+                            80
+                            24
+                            onOutput
+                    match spawned with
+                    | Error _ -> return ()
+                    | Ok pty ->
+                        terminal.Shell <- Some pty
+                        // TYPED into the shell rather than written to a file it is launched
+                        // with. No temp file to place inside a sandbox this Process cannot
+                        // reach, no second spawn to set one up, and it works for any shell
+                        // that has a prompt — which is Warp's approach for the same reasons.
+                        // Every line starts with a space, so the shell's own
+                        // ignore-duplicates-and-space history setting keeps our bootstrap out
+                        // of the user's history.
+                        for line in rc.Split '\n' do
+                            pty.Write (line + "\r")
+                        // Poll rather than race: this is the open path, not a hot one, and a
+                        // 50ms granularity beats carrying cancellation machinery Fable would
+                        // have to reproduce.
+                        let rec await (remaining: int) =
+                            async {
+                                if ready.Value then return true
+                                elif remaining <= 0 then return false
+                                else
+                                    do! Async.Sleep 50
+                                    return! await (remaining - 50)
+                            }
+                        let! instrumented = await 3000
+                        if not instrumented then
+                            // Uninstrumented. Tear the shell down and keep the per-block
+                            // path, which answers a smaller question completely.
+                            pty.Kill ()
+                            terminal.Shell <- None
+            }
 
         let openTerminal (openedBy: ActorRef) (title: string) : Async<Result<TerminalId, string>> =
             async {
@@ -344,7 +500,15 @@ module SessionTerminals =
                             { Width = 80
                               Height = 24
                               Timestamp = openedAt.ToUnixTimeSeconds () }
-                    live.[TerminalId.value id] <- (transcript, openedAt, openEmulator 80 24)
+                    let terminal =
+                        { Transcript = transcript
+                          OpenedAt = openedAt
+                          Emulator = openEmulator 80 24
+                          Shell = None }
+                    // In the live map BEFORE the shell starts: the pty's output callback finds
+                    // the terminal by id, and bytes can arrive the instant it spawns.
+                    live.[TerminalId.value id] <- terminal
+                    do! openShell id terminal
                     do! appendAs openedBy (SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = openedBy; Title = title })
                     return Ok id
             }
@@ -356,8 +520,11 @@ module SessionTerminals =
                     // The emulator is a live JS object; a closed terminal keeps its blocks
                     // (the audit outlives the process) but not its screen.
                     match live.TryGetValue (TerminalId.value id) with
-                    | true, (_, _, emulator) -> emulator.Dispose ()
+                    | true, terminal ->
+                        terminal.Emulator.Dispose ()
+                        terminal.Shell |> Option.iter (fun pty -> pty.Kill ())
                     | _ -> ()
+                    pending.Remove (TerminalId.value id) |> ignore
                     live.Remove (TerminalId.value id) |> ignore
                     leftOpen <- Set.remove (TerminalId.value id) leftOpen
                     busy <- Set.remove (TerminalId.value id) busy
@@ -374,9 +541,16 @@ module SessionTerminals =
                     // the doc (nothing consumed it), and the next drain will find the
                     // terminal shut and leave it alone.
                     return ()
-                | true, (transcript, openedAt, emulator) ->
+                | true, terminal ->
+                    let transcript = terminal.Transcript
                     busy <- Set.add key busy
                     let blockId = mintBlockId ()
+                    // Taken BEFORE the command is written, which is forced by the anchor
+                    // ordering below and is the honest reading anyway: on a pty the shell
+                    // echoes the command itself, and that echo is part of what this block put
+                    // on the screen. The alternative — starting the range at the `C` mark —
+                    // cannot be reconciled with appending the anchor first, because `C` does
+                    // not exist until after the write.
                     let fromSeq = transcript.NextSeq ()
                     // Durable BEFORE the process starts: the block event is the
                     // exactly-once anchor, so a crash between here and the spawn leaves a
@@ -401,37 +575,56 @@ module SessionTerminals =
                     // The command line is echoed into the transcript as INPUT, so a replay
                     // shows what was typed as well as what came back — the same reason
                     // asciinema records `"i"` events at all.
-                    emit entry.Terminal transcript openedAt emulator TranscriptInput (command + "\n")
+                    emit entry.Terminal terminal TranscriptInput (command + "\n")
 
                     let mutable written = 0
                     let mutable dropped = 0
-                    let onChunk (stream: OutputStream, text: string) =
-                        if written >= blockOutputCap then dropped <- dropped + text.Length
-                        else
-                            let room = blockOutputCap - written
-                            let kept = if text.Length <= room then text else text.Substring (0, room)
-                            dropped <- dropped + (text.Length - kept.Length)
-                            written <- written + kept.Length
-                            let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
-                            emit entry.Terminal transcript openedAt emulator kind kept
 
-                    let! spawned =
-                        environment.Spawn
-                            { Executable = shell.Executable
-                              Arguments = shell.Arguments @ [ command ]
-                              Env = Map.empty
-                              WorkingDirectory = None }
-                            onChunk
                     let! result =
-                        async {
-                            match spawned with
-                            | Error reason -> return CommandExecutionFailed reason
-                            | Ok handle ->
-                                match! handle.Exited with
-                                | SandboxExited 0 -> return CommandSucceeded 0
-                                | SandboxExited code -> return CommandFailed code
-                                | SandboxRunFailed reason -> return CommandExecutionFailed reason
-                        }
+                        match terminal.Shell with
+                        | Some pty ->
+                            // TYPED into the terminal's one shell, which is what makes `cd`
+                            // in this block move the next one — the property a per-block
+                            // spawn structurally cannot have.
+                            async {
+                                let complete = Async.FromContinuations (fun (cont, _, _) ->
+                                    pending.[key] <-
+                                        ((fun code -> cont code),
+                                         (fun () -> written),
+                                         (fun extra ->
+                                             dropped <- dropped + extra
+                                             written <- written + extra)))
+                                pty.Write (writeFor command)
+                                let! code = complete
+                                return (if code = 0 then CommandSucceeded 0 else CommandFailed code)
+                            }
+                        | None ->
+                            // The degraded terminal: stage 1's path, unchanged.
+                            async {
+                                let onChunk (stream: OutputStream, text: string) =
+                                    if written >= blockOutputCap then dropped <- dropped + text.Length
+                                    else
+                                        let room = blockOutputCap - written
+                                        let kept = if text.Length <= room then text else text.Substring (0, room)
+                                        dropped <- dropped + (text.Length - kept.Length)
+                                        written <- written + kept.Length
+                                        let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
+                                        emit entry.Terminal terminal kind kept
+                                let! spawned =
+                                    environment.Spawn
+                                        { Executable = shell.Executable
+                                          Arguments = shell.Arguments @ [ command ]
+                                          Env = Map.empty
+                                          WorkingDirectory = None }
+                                        onChunk
+                                match spawned with
+                                | Error reason -> return CommandExecutionFailed reason
+                                | Ok handle ->
+                                    match! handle.Exited with
+                                    | SandboxExited 0 -> return CommandSucceeded 0
+                                    | SandboxExited code -> return CommandFailed code
+                                    | SandboxRunFailed reason -> return CommandExecutionFailed reason
+                            }
                     if dropped > 0 then
                         do!
                             append
@@ -492,7 +685,7 @@ module SessionTerminals =
                 live
                 |> Seq.choose (fun kv ->
                     match TerminalId.create kv.Key with
-                    | Ok id -> let (transcript, _, _) = kv.Value in Some (id, transcript.NextSeq ())
+                    | Ok id -> Some (id, kv.Value.Transcript.NextSeq ())
                     | Error _ -> None)
                 |> List.ofSeq
           Snapshot =
@@ -505,14 +698,14 @@ module SessionTerminals =
                 // that reports a screen at least as new as the seq it claims: a client that
                 // re-folds a record already drawn here is idempotent, while one that misses
                 // a record drawn after the seq would never draw it at all.
-                | true, (transcript, _, emulator) ->
+                | true, terminal ->
                     // Seq FIRST, then the screen. Records written while the barrier drains
                     // land on the screen but not in the seq, so the snapshot is at worst
                     // NEWER than it claims — a client re-folds what it already drew, which
                     // is idempotent. The other order would report a seq for a record the
                     // screen has not drawn, and the client would skip it for ever.
-                    let seq = transcript.NextSeq ()
-                    let! screen = emulator.Serialize ()
+                    let seq = terminal.Transcript.NextSeq ()
+                    let! screen = terminal.Emulator.Serialize ()
                     return Some (seq, screen)
                 }
           ReconcileAtBoot = reconcileAtBoot }
