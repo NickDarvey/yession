@@ -26,6 +26,11 @@ let private activityBeatMs = 30000
 /// Well under `TerminalLeaseIdle.window`, so the overshoot is bounded by the beat.
 let private idleLeaseBeatMs = 30000
 
+/// How often the transcript-retention sweep runs (Plan 13, stage 3d). Hourly: it deletes
+/// files that have been eligible for a week, so the beat's precision is irrelevant and its
+/// cost should be too.
+let private retentionBeatMs = 3600000
+
 type SessionHost =
     { SessionId : SessionId
       /// Mint an unattributed peer token valid for this process — what tests/headless
@@ -179,6 +184,11 @@ let startFull
         // Anything that could change a waiting command's outcome: an appended event, a doc
         // update. One signal for both, because a waiter does not care which happened — it
         // re-reads and decides.
+        /// When each terminal closed, from the log's envelope timestamps — the input the
+        /// retention sweep needs and the one the projection cannot give it, since
+        /// `applyEvent` takes an event rather than an envelope. Seeded from the boot replay so
+        /// a restart does not make already-closed terminals immortal.
+        let closedAt = Collections.Generic.Dictionary<string, DateTimeOffset> ()
         let mutable changeListeners : Map<int, unit -> unit> = Map.empty
         let mutable nextChangeListener = 0
         let subscribeToChanges (listener: unit -> unit) : unit -> unit =
@@ -202,6 +212,13 @@ let startFull
                             recordAttribution event
                             let! appended = inner.Append actor event
                             terminalProjection <- TerminalProjection.applyEvent terminalProjection event
+                            match event with
+                            | SessionEvent.TerminalClosed c ->
+                                // The Host's own clock, not the append result's — that carries
+                                // only an offset. Same instant either way; the retention age is
+                                // a week.
+                                closedAt.[TerminalId.value c.TerminalId] <- DateTimeOffset.UtcNow
+                            | _ -> ()
                             broadcastEventsAvailable appended.Offset
                             notifyChanged ()
                             return appended
@@ -221,6 +238,10 @@ let startFull
             replayed.Events
             |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) TerminalProjection.empty
         terminalProjection <- replayedTerminals
+        for e in replayed.Events do
+            match e.Event with
+            | SessionEvent.TerminalClosed c -> closedAt.[TerminalId.value c.TerminalId] <- e.Timestamp
+            | _ -> ()
 
         // The session's environment: the session-owned WorkSandbox, lazily created on
         // first need; absent a composition, needs are recorded as unavailable.
@@ -362,6 +383,38 @@ let startFull
         // session, so a timer left armed past the end of a session is a timer reading a doc
         // and a log that nothing owns any more.
         let idleLeaseBeat = setInterval idleLeaseBeatMs terminalScheduler.ReclaimIdleLeases
+
+        /// Delete the transcripts of terminals that closed longer ago than the retention age
+        /// (Plan 13, stage 3d). Whole files only — a line index is a sequence number, so
+        /// removing lines would renumber every block range and every cached chunk.
+        let sweepTranscripts () =
+            let now = DateTimeOffset.UtcNow
+            let expired =
+                terminalProjection.Terminals
+                |> List.filter (fun t -> not t.IsOpen)
+                |> List.choose (fun t ->
+                    match closedAt.TryGetValue (TerminalId.value t.TerminalId) with
+                    | true, at when now - at >= TranscriptRetention.closedFor -> Some t.TerminalId
+                    | _ -> None)
+            for id in expired do
+                match transcripts.Forget id with
+                | None -> ()
+                | Some dropped ->
+                    // Forgotten once: the file is gone, so the next sweep finds nothing and
+                    // says nothing. The record of the gap is the event, and it is written
+                    // exactly as the live cap writes one — one mechanism for "the transcript
+                    // did not keep this", not two.
+                    closedAt.Remove (TerminalId.value id) |> ignore
+                    Async.StartImmediate (
+                        async {
+                            let! _ =
+                                log.Append
+                                    ActorRef.SessionProcess
+                                    (SessionEvent.TerminalTranscriptTruncated
+                                        { TerminalId = id; BlockId = None; DroppedBytes = dropped })
+                            return ()
+                        })
+        let retentionBeat = setInterval retentionBeatMs sweepTranscripts
 
         // Process-originated doc writes (the drain's queue removals) broadcast to every
         // peer; peer payloads are relayed by the receiving connection.
@@ -639,6 +692,7 @@ let startFull
                 fun () ->
                     async {
                         clearInterval idleLeaseBeat
+                        clearInterval retentionBeat
                         notifications |> Option.iter (fun s -> s.Stop ())
                         mcpTools |> Option.iter (fun s -> s.Stop ())
                         // Sandbox lifetime = session lifetime: take the WorkSandbox (and

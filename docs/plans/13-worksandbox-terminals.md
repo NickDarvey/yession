@@ -1,10 +1,10 @@
 # Plan 13 — Terminals on the WorkSandbox
 
-> **Status: stage 1 and stage 2 implemented; stage 3 implemented through 3c** — rejection,
+> **Status: stage 1 and stage 2 implemented; stage 3 implemented through 3d** — rejection,
 > the headless emulator, `SpawnPty`, blocks on the pty, live mode, `IntegrationLost`, the
 > agent's terminal digest, the merged `execute_command` with its retirements, and the
-> idle-lease timeout. 3d (transcript compaction and retention) and 3e (the asciinema replay
-> view) remain — see [Delivery](#delivery) for the split.
+> idle-lease timeout and transcript retention. 3e (the asciinema replay view) is all that
+> remains — see [Delivery](#delivery) for the split.
 > Builds directly on the sandbox seam from
 > [PR #73](https://github.com/NickDarvey/yession/pull/73) (`CreateSandbox`,
 > session-owned WorkSandbox, `SandboxProcessHandle` with piped stdin).
@@ -945,10 +945,45 @@ after a human approves; a test that an interrupted turn leaves the block running
 outcome in the next turn's digest; and a `LiveAgent` turn proving a real model uses the one
 tool it now has.
 
+### What retention turned out to be (3c–3e's middle tail)
+
+The shape is forced by one fact: **a line index IS a sequence number**. It is what
+`TerminalBlockStarted.FromSeq` and `TerminalBlockCompleted.ToSeq` point at, what
+`TranscriptChunk.firstSeq` slices on, and what every chunk URL is keyed by. Compaction that
+removed lines from the front or the middle would renumber everything after it, invalidating
+every block range in the event log and every cached chunk at once. **A rolling window over a
+live transcript is therefore not available**, however natural it sounds — which is why this
+part needed deciding rather than merely doing.
+
+Two things are available, and neither renumbers anything:
+
+- **A ceiling while the terminal is live** (`TranscriptRetention.outputCap`, 64MB of output
+  per terminal). Past it, output stops being kept. What is given up is the NEWEST output
+  rather than the oldest — the opposite of a window, and the only direction that preserves
+  numbering. The per-block cap already does this for one runaway command; this bounds a
+  terminal that runs a thousand well-behaved ones. Only OUTPUT is capped: input and resize
+  records are the audit's spine, and they are bounded by the number of commands rather than by
+  what any of them printed, so dropping them would give up the part that answers questions
+  while saving nothing worth saving. Past the cap the EMULATOR stops advancing too, because
+  folding a transcript through a fresh emulator must reproduce the live one — the property the
+  join snapshot rests on — and that holds only if the two see the same bytes.
+- **Deleting a closed terminal's transcript whole**, once it is older than
+  `TranscriptRetention.closedFor` (a week). Numbering cannot shift because the file is gone
+  rather than edited. Only closed terminals are eligible; a live one is still being written.
+
+Both record what was lost as `TerminalTranscriptTruncated` — one mechanism for "the transcript
+did not keep this", not two, so a client that could already render a truncated terminal renders
+a forgotten one with no new case.
+
+**This keeps the chunk route's promise rather than bending it.** `immutable` says a chunk's
+BYTES never change, not that a chunk exists for ever: a cache can never serve wrong bytes, and
+a request for a deleted transcript is a 404 — which `ReadChunk` already distinguishes from an
+empty chunk. Rewriting a chunk in place would break the promise; deleting one does not.
+
 **3c–3e, three independent tails**, sharing nothing with each other and each shippable
 whenever: the **idle-lease timeout** (the only one gated on 2e, bounding the starvation that
 section leaves open); **transcript compaction and retention**, which is a policy decision
-about the sidecar and the chunk route; and the **asciinema-player replay view** for closed
+about the sidecar and the chunk route — settled below; and the **asciinema-player replay view** for closed
 terminals, the audit read, which needs only PR 1's transcript. Plus the GAPS entries (agent
 lease, per-user terminal gating, docker non-root unchanged).
 

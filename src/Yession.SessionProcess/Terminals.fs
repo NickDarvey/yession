@@ -740,6 +740,10 @@ module SessionTerminals =
         /// needs, since "a TUI took the screen" only says whose keyboard it should be if we
         /// know whose command started it.
         let runningAuthor = Collections.Generic.Dictionary<string, ActorRef> ()
+        /// Output bytes each terminal's transcript has KEPT, for the lifetime ceiling (Plan
+        /// 13, stage 3d). Separate from the per-block cap, which bounds one runaway command;
+        /// this bounds a terminal that runs a thousand well-behaved ones.
+        let keptOutput = Collections.Generic.Dictionary<string, int> ()
         /// The size last applied to each pty, so the block-mode register watcher can run on
         /// every doc update without resizing a terminal that has not changed size.
         let appliedSize = Collections.Generic.Dictionary<string, TerminalSize> ()
@@ -779,6 +783,30 @@ module SessionTerminals =
         let emit (id: TerminalId) (terminal: LiveTerminal) (kind: TranscriptKind) (data: string) =
             let transcript = terminal.Transcript
             let emulator = terminal.Emulator
+            let key = TerminalId.value id
+            // The transcript's lifetime ceiling (Plan 13, stage 3d). Output only: input and
+            // resize records are the audit's spine and are bounded by the number of commands
+            // rather than by what any of them printed.
+            let data, dropped =
+                match kind with
+                | TranscriptOutput | TranscriptStderr ->
+                    let kept = match keptOutput.TryGetValue key with | true, n -> n | _ -> 0
+                    let admission = TranscriptRetention.admit kept data
+                    keptOutput.[key] <- kept + admission.Keep.Length
+                    admission.Keep, admission.Dropped
+                | TranscriptInput | TranscriptResize -> data, 0
+            if dropped > 0 then
+                Async.StartImmediate (
+                    append
+                        (SessionEvent.TerminalTranscriptTruncated
+                            { TerminalId = id; BlockId = None; DroppedBytes = dropped }))
+            // Nothing kept, nothing to record — and nothing fed to the emulator either. Past
+            // the cap the screen stops advancing with the transcript, which is deliberate:
+            // folding a transcript through a fresh emulator must reproduce this one (the
+            // property the join snapshot rests on, pinned by a test), and that can only hold
+            // if the two see exactly the same bytes. A terminal that has printed its whole
+            // allowance says so through `TerminalTranscriptTruncated`.
+            if data = "" then () else
             let record =
                 { At = (clock () - terminal.OpenedAt).TotalSeconds
                   Kind = kind
