@@ -272,8 +272,30 @@ discovers it in production. Items are roughly ordered by how much they matter.
   option), and the queued-message UI has no "locked" visual during the drain broadcast
   window (a peer can briefly type into an entry that is about to vanish — the edit is
   safely discarded, but the UX flickers).
-- **No repository integration** (`.yession.yml`, clone, commit/push) — explicitly later
-  phases per the delivery plan.
+- **Repo integration is the read-only bootstrap slice** ([Plan 14](plans/14-git-repos.md)):
+  typed clone-and-orient verbs beside the agent, one repos dir shared into the
+  WorkSandbox, GitHub sign-in per user over the device flow. Remaining, deliberate:
+  - **A session's repos are session-readable, and bytes outlive revocation.** One
+    user's private repo, once added, is readable by every peer and everything in the
+    WorkSandbox — the same shared-trust boundary as "terminal access equals session
+    access". The `RepoAdded` event names who brought it in; GitHub-side revocation
+    does not claw back what is already on disk.
+  - **A pasted PAT bypasses the App-installation scope rule.** The device-flow token
+    is a GitHub App user-to-server token, so it can only reach repos where the App is
+    installed; a pasted `github_pat_`/`ghp_` answers to no such bound.
+  - **The stored token does not rotate.** Device flow + static storage (the broker is
+    a PKCE public client; GitHub's code exchange wants the App secret) means the App
+    must have user-token expiration disabled and revocation happens at GitHub.
+  - **`git push` in a WorkSandbox terminal has no forwarded credential yet** — v1
+    terminals do local git only; forwarding becomes `.yession.yml` configuration in a
+    later plan. Commit/push attribution machinery (author = requesting user,
+    `Co-Authored-By`) lands with it.
+  - **Under `YESSION_AGENT_SANDBOX=host` the git verbs run unconfined** — the
+    operator's explicitly lax choice, as everywhere `host` is chosen. The per-invocation
+    hardening (hooks/fsmonitor/ext off, no global config, protocol pinned) still
+    applies; the filesystem and egress boundaries do not.
+  - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
+    and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **Per-user agent credentials landed** ([Plan 08](plans/08-connections-and-claude-auth.md)):
   a human signs into their Claude account from the session's Connections panel — "this
   session only" (`SessionScope`) or "all my sessions" (their user/peer scope) — the
