@@ -83,7 +83,11 @@ type ReposConfig =
     { Backend : SandboxBackend
       ReposDir : string
       /// Paths beyond `ReposDir` the git sandbox may READ. Empty in production; the
-      /// test harness names its local bare-repo fixtures here.
+      /// test harness names its local bare-repo fixtures here. None of them may be an
+      /// ANCESTOR of `ReposDir`: when both sit under a read-denied region (a HOME, which
+      /// is where a session's data dir usually lives) srt re-binds each read path after
+      /// the write binds, so an ancestor lands on top of the repos dir read-only and
+      /// every clone fails. A sibling cannot cover it.
       ExtraReadPaths : string list
       /// Egress for the git sandbox. Production: github.com.
       AllowedDomains : string list

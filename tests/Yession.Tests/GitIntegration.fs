@@ -94,29 +94,40 @@ let private makeExecutable (fs: obj) (path: string) : unit = jsNative
 [<Emit("$0.execFileSync('git', $1, { cwd: $2, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'f@x', GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'f@x' }, stdio: 'pipe' })")>]
 let private hostGit (cp: obj) (args: string array) (cwd: string) : unit = jsNative
 
+/// The fixtures live in a SIBLING of the repos dir, never an ancestor of it. srt re-binds
+/// an allowRead path over the write binds when both sit under a denyRead region (HOME —
+/// which is where a CI runner's temp dir lives), so an allowRead ANCESTOR of the repos dir
+/// lands on top of it read-only and every clone dies with "Read-only file system". A
+/// sibling cannot cover it. Production never hits this: it passes no extra read paths, and
+/// srt skips the re-bind of a path that is itself the write path.
+let private fixturesIn (root: string) : string = sprintf "%s/fixtures" root
+
 /// A local bare repo with one commit on `main` — what the service clones from, over the
 /// `file` protocol the test config allows.
 let private makeBareFixture (root: string) (name: string) : string =
-    let work = sprintf "%s/work-%s" root name
+    let fixtures = fixturesIn root
+    let work = sprintf "%s/work-%s" fixtures name
     mkdir nodeFs work
     hostGit childProcess [| "init"; "-b"; "main" |] work
     writeFile nodeFs (sprintf "%s/README.md" work) "fixture\n"
     hostGit childProcess [| "add"; "." |] work
     hostGit childProcess [| "commit"; "-m"; "seed" |] work
-    let bare = sprintf "%s/%s.git" root name
-    hostGit childProcess [| "clone"; "--bare"; work; bare |] root
+    let bare = sprintf "%s/%s.git" fixtures name
+    hostGit childProcess [| "clone"; "--bare"; work; bare |] fixtures
     bare
 
 let private serviceIn (root: string) (log: EventLog<SessionEvent>) : Repos.ReposService =
     let reposDir = sprintf "%s/repos" root
+    let fixtures = fixturesIn root
     mkdir nodeFs reposDir
+    mkdir nodeFs fixtures
     Repos.create
         { Backend = SrtBackend
           ReposDir = reposDir
-          ExtraReadPaths = [ root ]
+          ExtraReadPaths = [ fixtures ]
           AllowedDomains = []
           AllowProtocol = "file"
-          CloneUrl = fun ref -> sprintf "file://%s/%s.git" root (RepoRef.repo ref)
+          CloneUrl = fun ref -> sprintf "file://%s/%s.git" fixtures (RepoRef.repo ref)
           ResolveToken = fun _ -> async { return None }
           Log = log }
     |> expect
