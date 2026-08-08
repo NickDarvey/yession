@@ -212,7 +212,10 @@ let private frameSerializationTests =
                   CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandSucceeded 0 }
                   CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandFailed 3 }
                   CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandTimedOut }
-                  CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandExecutionFailed "denied" } ]
+                  CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandExecutionFailed "denied" }
+                  RepoAdded { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "main"; Actor = PeerRef peerId }
+                  RepoRemoved { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Actor = ActorRef.Agent }
+                  RepoBranchSwitched { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "feature/x"; Created = true; Actor = UserRef (UserId.create "alice" |> expect) } ]
             for event in everyCase do
                 let env = { sampleEnvelope with Event = event }
                 let roundTripped =
@@ -237,10 +240,70 @@ let private frameSerializationTests =
                 "a line without queueId decodes with QueueId = None"
     ]
 
+let private repoTests =
+    testList "Repos (Plan 14)" [
+        testCase "RepoRef parses owner/repo, trims, and strips a pasted .git" <| fun () ->
+            let r = RepoRef.create "  NickDarvey/yession.git  " |> expect
+            Expect.equal (RepoRef.owner r) "NickDarvey" "owner"
+            Expect.equal (RepoRef.repo r) "yession" ".git stripped"
+            Expect.equal (RepoRef.value r) "NickDarvey/yession" "canonical form"
+            Expect.equal (RepoRef.cloneUrl r) "https://github.com/NickDarvey/yession.git" "constructed clone url"
+            Expect.equal (RepoRef.relativePath r) "NickDarvey/yession" "checkout path"
+
+        testCase "RepoRef refuses everything that is not owner/repo" <| fun () ->
+            Expect.isError (RepoRef.create "no-slash") "no slash"
+            Expect.isError (RepoRef.create "a/b/c") "two slashes"
+            Expect.isError (RepoRef.create "/repo") "empty owner"
+            Expect.isError (RepoRef.create "owner/") "empty repo"
+            Expect.isError (RepoRef.create "owner/re po") "whitespace inside"
+            Expect.isError (RepoRef.create "https://github.com/o/r") "a URL is not a name — the url is constructed, never accepted"
+            Expect.isError (RepoRef.create "owner/..") "dot-dot cannot traverse"
+            Expect.isError (RepoRef.create (String.replicate 40 "a" + "/repo")) "owner over GitHub's cap"
+
+        testCase "the repos projection folds add, re-add, switch, and remove" <| fun () ->
+            let msg n = MessageId.create n |> expect
+            let repo = RepoRef.create "octo/hello" |> expect
+            let ada = PeerId.create "ada" |> expect
+            let folded =
+                [ RepoAdded { MessageId = msg "r1"; Repo = repo; Branch = "main"; Actor = PeerRef ada }
+                  RepoBranchSwitched { MessageId = msg "r2"; Repo = repo; Branch = "feature/x"; Created = true; Actor = ActorRef.Agent }
+                  MessageSent { MessageId = msg "m"; QueueId = None; Author = PeerRef ada; Body = "hi" } ]
+                |> List.fold ReposProjection.applyEvent ReposProjection.empty
+            Expect.equal folded.Repos [ { Repo = repo; Branch = "feature/x"; AddedBy = PeerRef ada } ] "one repo, on the switched branch"
+            let readded = ReposProjection.applyEvent folded (RepoAdded { MessageId = msg "r3"; Repo = repo; Branch = "main"; Actor = ActorRef.Agent })
+            Expect.equal readded.Repos [ { Repo = repo; Branch = "main"; AddedBy = ActorRef.Agent } ] "re-add replaces in place"
+            let removed = ReposProjection.applyEvent readded (RepoRemoved { MessageId = msg "r4"; Repo = repo; Actor = PeerRef ada })
+            Expect.equal removed.Repos [] "removed"
+
+        testCase "repo events fold into the timeline as attributed notes" <| fun () ->
+            let msg n = MessageId.create n |> expect
+            let repo = RepoRef.create "octo/hello" |> expect
+            let sessionId = SessionId.create "repo-session" |> expect
+            let ada = PeerId.create "ada" |> expect
+            let envelopes =
+                [ RepoAdded { MessageId = msg "r1"; Repo = repo; Branch = "main"; Actor = PeerRef ada }
+                  RepoBranchSwitched { MessageId = msg "r2"; Repo = repo; Branch = "fix/y"; Created = false; Actor = ActorRef.Agent }
+                  RepoRemoved { MessageId = msg "r3"; Repo = repo; Actor = PeerRef ada } ]
+                |> List.mapi (fun i event ->
+                    { EventId = EventId.fresh ()
+                      SessionId = sessionId
+                      Offset = EventOffset.create (int64 (i + 1)) |> expect
+                      Actor = ActorRef.SessionProcess
+                      Timestamp = DateTimeOffset(2026, 8, 8, 10, 0, 0, TimeSpan.Zero)
+                      Event = event })
+            let proj, _ = ConversationProjection.applyEvents None envelopes ConversationProjection.empty
+            Expect.equal (proj.Items |> List.map (fun i -> i.Kind)) [ ConversationItemKind.RepoNote; ConversationItemKind.RepoNote; ConversationItemKind.RepoNote ] "all notes"
+            Expect.equal (proj.Items |> List.map (fun i -> i.Body))
+                [ "added repo octo/hello (branch main)"; "switched octo/hello to branch fix/y"; "removed repo octo/hello" ]
+                "the notes read as sentences"
+            Expect.equal (proj.Items |> List.map (fun i -> i.Author)) [ PeerRef ada; ActorRef.Agent; PeerRef ada ] "attributed to the acting party"
+    ]
+
 let tests =
     testList "Domain" [
         identityTests
         envelopeSerializationTests
         conversationProjectionTests
+        repoTests
         frameSerializationTests
     ]

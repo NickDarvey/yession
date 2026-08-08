@@ -99,9 +99,25 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 // The WorkSandbox composition: an unavailable backend (or one this build does not
 // implement) refuses the boot with its reason. The environment itself stays lazy —
 // nothing is created until the first signalled need.
+// The session's repos directory (Plan 14): one host path both sandboxes see — the git
+// verbs clone into it, the WorkSandbox reads and builds it. Created at boot so its
+// existence is never a per-operation question, and living in the data dir so a checkout
+// survives idle reaping and relaunch with the session.
+let private reposDir = sprintf "%s/repos" dataDir
+do Fs.ensureDir reposDir
+
 let private makeEnvironment : Yession.SessionProcess.EventLog<SessionEvent> -> SessionEnvironment.SessionEnvironment =
     let name = SessionId.value sessionId
-    let workSpec = EnvironmentSpec.defaults
+    let workSpec =
+        // The docker backend cannot share a host path by policy, so the repos dir rides
+        // the spec as a bind mount at /repos — beside the named workspace volume, not
+        // replacing it. Host-family backends share it by write path below.
+        match workBackend with
+        | DockerBackend ->
+            { EnvironmentSpec.defaults with
+                Mounts = [ { Source = HostPath reposDir; Target = "/repos"; Mode = ReadWrite } ] }
+        | HostBackend
+        | SrtBackend -> EnvironmentSpec.defaults
     match Sandboxes.forBackend workBackend name workSpec with
     | Error e -> failwithf "work sandbox: %s" e
     | Ok createSandbox ->
@@ -112,11 +128,16 @@ let private makeEnvironment : Yession.SessionProcess.EventLog<SessionEvent> -> S
             | HostBackend
             | SrtBackend -> Some (sprintf "%s/workspace" dataDir)
             | DockerBackend -> workSpec.WorkingDirectory
+        let sharedRepos =
+            match workBackend with
+            | HostBackend
+            | SrtBackend -> Some reposDir
+            | DockerBackend -> None
         fun log ->
             SessionEnvironment.create
                 log
                 createSandbox
-                (Sandboxes.preparePolicy workBackend resolveSecretRef workspace workSpec)
+                (Sandboxes.preparePolicy workBackend resolveSecretRef workspace sharedRepos workSpec)
                 (Sandboxes.summaryFor workBackend workSpec)
                 (sprintf "env-%s" name)
 

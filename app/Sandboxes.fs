@@ -81,6 +81,11 @@ let policyFor
     (ambient: Map<string, string>)
     (resolved: Map<string, string>)
     (workspace: string option)
+    // The session's repos directory (Plan 14), shared into the WorkSandbox so a
+    // bootstrap clone is visible the moment it lands. For the host-family backends it
+    // is a write path beside the workspace; the docker backend carries it as a bind
+    // mount on the spec instead (`SessionMain`), so it is None there.
+    (reposDir: string option)
     : SandboxPolicy =
     let env =
         match backend with
@@ -88,7 +93,7 @@ let policyFor
         | SrtBackend -> mergeEnv (hostBaseline ambient) resolved
         | DockerBackend -> resolved
     { ReadPaths = []
-      WritePaths = workspace |> Option.toList
+      WritePaths = (workspace |> Option.toList) @ (reposDir |> Option.toList)
       AllowedDomains = egressFor backend ambient
       Env = env
       WorkingDirectory = workspace }
@@ -112,13 +117,14 @@ let preparePolicy
     (backend: SandboxBackend)
     (resolveSecret: SecretName -> Async<Result<string, string>>)
     (workspace: string option)
+    (reposDir: string option)
     (spec: EnvironmentSpec)
     : unit -> Async<Result<SandboxPolicy, string>> =
     fun () ->
         async {
             match! resolveVariables resolveSecret spec.EnvironmentVariables with
             | Error e -> return Error e
-            | Ok resolved -> return Ok (policyFor backend (ambientEnv ()) resolved workspace)
+            | Ok resolved -> return Ok (policyFor backend (ambientEnv ()) resolved workspace reposDir)
         }
 
 // --- A buffered one-shot: settle once, deliver to every (even late) awaiter --------------

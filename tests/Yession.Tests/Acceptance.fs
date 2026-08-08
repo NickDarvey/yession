@@ -69,11 +69,13 @@ let private representativeModel : ClientModel =
             [ { MessageId = MessageId.create "msg-1" |> expect
                 Author = PeerRef ada
                 Body = "ship it"
-                Status = Complete }
+                Status = Complete
+                Kind = ConversationItemKind.Message }
               { MessageId = MessageId.create "msg-agent" |> expect
                 Author = ActorRef.Agent
                 Body = "Sounds go"
-                Status = Streaming } ]
+                Status = Streaming
+                Kind = ConversationItemKind.Message } ]
           ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ] }
       EventConsumer =
         { LastProcessedOffset = Some (EventOffset.create 5L |> expect)
@@ -394,7 +396,8 @@ let private uiChecklistTests =
                 { MessageId = MessageId.create "msg-rich" |> expect
                   Author = PeerRef ada
                   Body = "# Heading one\n\nText with **bold** and `code`.\n\n- item one\n- item two"
-                  Status = Complete }
+                  Status = Complete
+                  Kind = ConversationItemKind.Message }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ richItem ] } }

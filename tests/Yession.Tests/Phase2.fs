@@ -280,11 +280,12 @@ let private sandboxPolicyTests =
         testCase "policy assembly: spec variables win over the baseline; docker takes no baseline" <| fun () ->
             let ambient = Map.ofList [ "PATH", "/usr/bin"; "HOME", "/home/u" ]
             let resolved = Map.ofList [ "HOME", "/workspace-home"; "TOKEN", "t" ]
-            let host = Sandboxes.policyFor HostBackend ambient resolved (Some "/ws")
+            let host = Sandboxes.policyFor HostBackend ambient resolved (Some "/ws") (Some "/repos")
             Expect.equal (Map.tryFind "HOME" host.Env) (Some "/workspace-home") "the spec's variable wins"
             Expect.equal (Map.tryFind "PATH" host.Env) (Some "/usr/bin") "the baseline fills the rest"
             Expect.equal host.WorkingDirectory (Some "/ws") "the workspace is the default cwd"
-            let docker = Sandboxes.policyFor DockerBackend ambient resolved None
+            Expect.equal host.WritePaths [ "/ws"; "/repos" ] "the repos dir is writable beside the workspace (Plan 14)"
+            let docker = Sandboxes.policyFor DockerBackend ambient resolved None None
             Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
             Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
     ]
@@ -471,7 +472,7 @@ let private hostEnvironment (log: Yession.SessionProcess.EventLog<SessionEvent>)
     Yession.SessionProcess.SessionEnvironment.create
         log
         createSandbox
-        (Sandboxes.preparePolicy HostBackend noSecrets None EnvironmentSpec.defaults)
+        (Sandboxes.preparePolicy HostBackend noSecrets None None EnvironmentSpec.defaults)
         (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
         (sprintf "env-%s" name)
 
@@ -707,7 +708,7 @@ let private acceptanceE2eTests =
                 let name = SessionId.value (SessionId.mint ())
                 let spec = { EnvironmentSpec.defaults with Image = Some { Name = "alpine"; Tag = Some "3" } }
                 let createSandbox = Sandboxes.forBackend DockerBackend name spec |> expect
-                match! createSandbox (Sandboxes.policyFor DockerBackend Map.empty Map.empty None) with
+                match! createSandbox (Sandboxes.policyFor DockerBackend Map.empty Map.empty None None) with
                 | Error reason -> failwithf "docker sandbox failed: %s" reason
                 | Ok sandbox ->
                     let! run, out, _ = runInSandbox sandbox "echo" [ "hello-from-docker" ] Map.empty None
