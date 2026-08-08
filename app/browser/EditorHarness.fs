@@ -108,6 +108,12 @@ do
 [<Emit("document.getElementById('shell')")>]
 let private shellHost : obj = jsNative
 
+/// The shell's own container class, taken from `Style.app` rather than written into the
+/// harness page — the served document sets exactly this on `<main id="app">`, and a second
+/// copy in HTML would be a layout free to drift from the one people get.
+[<Emit("document.getElementById('shell').className = $0")>]
+let private dressShell (className: string) : unit = jsNative
+
 /// A session that has run one command: one open terminal, one finished block, and the two
 /// transcript records it produced. Enough for a chip to render in the chat and for its tab
 /// to have something to show.
@@ -159,10 +165,13 @@ let private shellModel : ClientModel =
                     KnownLength = 2
                     ReadThrough = 2
                     Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
-        TerminalsOpen = true }
+        // SHUT to begin with, like a fresh client: the phone case is about what happens when
+        // a chip brings the pane on screen, which is nothing to watch if it is already there.
+        TerminalsOpen = false }
 
 do
-    let actions = { ViewActions.ssr with FocusPane = PaneFocus.toPane; FocusChat = PaneFocus.toChatItem }
+    dressShell Style.app
+    let actions = { ViewActions.ssr with FocusPane = PaneShell.toPane; FocusChat = PaneShell.toChatItem }
     // The app's own player sync, so a block tab in the harness really plays its recording —
     // which is the point of driving this in a browser rather than asserting a string.
     let replays = PaneReplays.create ()
@@ -173,4 +182,5 @@ do
     and render () =
         Lit.render (unbox shellHost) (View.view actions model dispatch)
         replays.Sync model
+        PaneShell.setOpen model.TerminalsOpen
     render ()

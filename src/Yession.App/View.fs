@@ -1306,8 +1306,14 @@ module View =
               <div class="{Style.terminalPane}">
                 <div class="{Style.terminalHead}">
                   <span class="{Style.settingsTitle}">terminals</span>
-                  <button type="button" class="{Style.navChevronForward}" aria-label="Hide terminals"
-                          data-terminal-toggle="hide" @click={Ev(fun _ -> dispatch ToggleTerminalsMsg)}>{Icon.right}</button>
+                  <button type="button" class="{Style.navChevronForward}" aria-label="Back to the chat"
+                          data-terminal-toggle="hide"
+                          @click={Ev(fun _ ->
+                                        dispatch ToggleTerminalsMsg
+                                        // On a phone this control IS the way back, and it is
+                                        // about to leave the screen — so focus goes where the
+                                        // reader came from, exactly as closing a tab does.
+                                        selected |> Option.iter (PaneTab.key >> actions.FocusChat))}>{Icon.right}</button>
                 </div>
                 <div class="{Style.terminalTabs}" role="tablist" aria-label="Terminals and recordings"
                      @keydown={Ev(fun e -> moveTabFocus e)}>

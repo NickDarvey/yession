@@ -4,6 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Yession rich-editor harness</title>
+    <!-- The real stylesheet, built beside the bundle by the `Browser`-cap test build. The
+         shell below is the real `View.view`, and an unstyled one would make every layout
+         this page is used to measure a fiction. -->
+    <link rel="stylesheet" href="./out/app.css" />
   </head>
   <body>
     <!-- The editor mounts here; window.__md() returns the fragment's serialized Markdown.
@@ -18,7 +22,7 @@
          no Session Process behind it. Here to answer the two questions only a browser can —
          where focus goes when a chat chip opens a pane tab, and whether the tab strip is a
          tablist the arrow keys walk. -->
-    <div id="shell"></div>
+    <main id="shell"></main>
     <script type="module" src="./out/harness.js"></script>
   </body>
 </html>

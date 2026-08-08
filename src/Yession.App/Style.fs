@@ -655,18 +655,24 @@ module Style =
     // timeline: reading something and then having it slide out from under you is the thing
     // this shell does not do.
 
-    /// The terminals column. Mirrors `sidebar`'s geometry (a fixed column on desktop that
-    /// animates shut, an off-canvas drawer on mobile) reflected to the right edge.
+    /// The pane. Mirrors `sidebar`'s geometry (a fixed column on desktop that animates shut,
+    /// an off-canvas column on mobile) reflected to the right edge.
+    ///
+    /// On a phone it takes the WHOLE width (Plan 14, stage 5). The columns collapse to one
+    /// and opening a tab switches that column to the pane, keeping the tab strip — so the
+    /// chat is a back-swipe away rather than an overlay to dismiss, and desktop and phone
+    /// stay the same mental model. The old 92vw left a sliver of chat showing beside it,
+    /// which reads as a dialog: something you get rid of rather than somewhere you are.
     let terminalPanel =
         "relative w-term shrink-0 bg-panel h-full overflow-hidden z-40 flex flex-col " + Stroke.dividerLeft + " "
         + "md:transition-[width] md:duration-200 md:ease-out "
         + "md:[.term-closed_&]:w-0 md:[.term-closed_&]:border-l-0 "
-        + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-[min(var(--spacing-term),92vw)] "
+        + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-full max-md:border-l-0 "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out "
         + "max-md:[.term-closed_&]:translate-x-[101%] motion-reduce:transition-none"
 
     /// Held at the column's full width so nothing reflows while the column animates shut.
-    let terminalPane = "absolute inset-0 w-term max-md:w-[min(var(--spacing-term),92vw)] flex flex-col"
+    let terminalPane = "absolute inset-0 w-term max-md:w-full flex flex-col"
 
     /// The column's head, on the same 88px band as the sidebar and the main header.
     let terminalHead = "h-band shrink-0 flex items-end justify-between gap-2 px-5 pb-5 " + Stroke.dividerBottom

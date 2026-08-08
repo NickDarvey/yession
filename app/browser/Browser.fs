@@ -210,15 +210,6 @@ let private catchUpQuietMs = 500
 })()""")>]
 let private toggleNav () : unit = jsNative
 
-/// The terminals column's open state (Plan 13), as a class on the shell root — the same
-/// mechanism the sidebar uses, so a Lit re-render never fights the CSS transition.
-///
-/// It differs from the nav in one way that matters: it is driven FROM the model, because
-/// the app opens this column itself (selecting a terminal opens it). So this is a `set`,
-/// not a `toggle` — the model holds the bit, and this reflects it.
-[<Emit("document.documentElement.classList.toggle('term-closed', !$0)")>]
-let private setTerminalsOpen (isOpen: bool) : unit = jsNative
-
 // Settings is the sidebar column's other FACE (Style.settingsPane), not a drawer over the
 // conversation — so opening it has to bring that column on screen, and `nav-alt` means the
 // opposite thing on each side of the breakpoint: uncollapse on desktop, slide the drawer in on
@@ -880,8 +871,8 @@ let private start () =
                     | Some origin, Some sessionId ->
                         navigateTo (sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId))
                     | _ -> ()
-              FocusPane = PaneFocus.toPane
-              FocusChat = PaneFocus.toChatItem }
+              FocusPane = PaneShell.toPane
+              FocusChat = PaneShell.toChatItem }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
@@ -908,7 +899,7 @@ let private start () =
             // sidebar's — presentation, so a re-render never fights it — but driven FROM the
             // model, because unlike the sidebar this column's visibility is something the app
             // itself changes (selecting a terminal opens it).
-            setTerminalsOpen model.TerminalsOpen
+            PaneShell.setOpen model.TerminalsOpen
             // Keep a slot rule running for every open terminal: a person may be mid-command
             // in more than one, and each slot follows its own command line.
             syncTerminalSlots model

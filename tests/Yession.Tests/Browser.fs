@@ -409,6 +409,10 @@ let private serveStatic (root: string) (port: int) : HttpListener =
                     ctx.Response.ContentType <-
                         if path.EndsWith ".js" then "text/javascript"
                         elif path.EndsWith ".html" then "text/html"
+                        // A stylesheet served as `application/octet-stream` is ignored by
+                        // the browser, silently — which makes every layout measured on this
+                        // page a fiction, and looks exactly like CSS that does not work.
+                        elif path.EndsWith ".css" then "text/css"
                         else "application/octet-stream"
                     ctx.Response.OutputStream.Write (bytes, 0, bytes.Length)
                 else ctx.Response.StatusCode <- 404
@@ -658,6 +662,68 @@ let editorTests =
                 // stranding it on a control that has just left the document.
                 do! awaitU (page.ClickAsync "#shell [data-pane-tab-close]")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-pane-block]')""")
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+        // The phone (Plan 14, stage 5). Headless Chromium clamps its WINDOW to ~500px, which
+        // is why a naive narrow screenshot lies; Playwright's viewport is a real CDP device
+        // metrics override, so 390 here is 390. The two things this asserts are the two the
+        // plan is about: the pane takes the whole column rather than sitting over the chat
+        // as a dismissible overlay, and nothing overflows sideways — an overflow a phone
+        // user cannot scroll away is a reachability bug, not a cosmetic one.
+        testCaseAsync "on a phone the pane IS the column, the strip stays, and the chat is one control away" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 5)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                // ViewportSize alone. `IsMobile` additionally asks Chromium to fit the
+                // layout to a device window, and measured here that lands at 648px rather
+                // than 390 — the very lie the ui-exploration skill warns about, arriving
+                // through a different door.
+                let! ctx =
+                    await (br.NewContextAsync (
+                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 390, Height = 844))))
+                let! page = await (ctx.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 5)))
+
+                // Ground truth first: the viewport really is the width we asked for.
+                let! width = await (page.EvaluateAsync<int> "() => window.innerWidth")
+                Expect.equal width 390 "a true phone viewport, not a clamped window"
+
+                // The pane starts off screen, as it does for a fresh client.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().left >= window.innerWidth - 1")
+
+                // A chip brings it on, and it takes the WHOLE column.
+                do! awaitU (page.ClickAsync "#shell [data-chat-block]")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """(() => {
+                             const r = document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect()
+                             return r.left <= 1 && Math.round(r.width) === window.innerWidth
+                           })()""")
+                // …with the tab strip retained, which is what keeps phone and desktop one
+                // mental model rather than two surfaces that happen to share a codebase.
+                let! _ = await (page.WaitForSelectorAsync "#shell [role='tablist'] [data-pane-tab]")
+
+                // Nothing overflows sideways.
+                let! overflows =
+                    await (page.EvaluateAsync<bool> "() => document.documentElement.scrollWidth > window.innerWidth + 1")
+                Expect.isFalse overflows "no horizontal overflow a phone user cannot scroll away"
+
+                // And the way back to the chat is a control, not a dismissal: it returns
+                // focus to the chip that opened the pane.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='hide']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().left >= window.innerWidth - 1")
                 let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
 
                 do! awaitU (br.CloseAsync ())

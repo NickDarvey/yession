@@ -10,9 +10,10 @@
 
   <ItemGroup>
     <Compile Include="Replay.fs" />
-    <!-- Focus moves the model cannot make: shared by the app entry and the host-free
+    <!-- Presentation the model drives but a Lit render cannot do — focus moves, and the
+         column's open state as a root class. Shared by the app entry and the host-free
          shell harness, so there is one implementation rather than two. -->
-    <Compile Include="PaneFocus.fs" />
+    <Compile Include="PaneShell.fs" />
     <!-- Keeping the mounted players in step with the model: shared by the app entry and
          the host-free shell harness, so there is one mount path rather than two. -->
     <Compile Include="PaneReplays.fs" />
