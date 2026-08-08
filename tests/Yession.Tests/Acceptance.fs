@@ -179,8 +179,9 @@ let private closedTerminalModel : ClientModel =
                 |> List.map (fun t -> { t with IsOpen = false; ClosedReason = Some "closed by a peer" }) }
         TerminalChoice = Some terminalId }
 
-/// …and after retention has deleted its recording (stage 3d): the blocks survive in the
-/// projection, the transcript does not, and the byte count is the only trace of what it held.
+/// …and after the per-terminal output cap ate its recording (stage 3d): the blocks survive
+/// in the projection, the transcript does not, and the byte count is the only trace of what
+/// it held.
 let private forgottenTerminalModel : ClientModel =
     { closedTerminalModel with
         Terminals =
@@ -322,7 +323,7 @@ let private uiChecklistTests =
                 (html.Contains (Dom.attr "data-terminal-close" (TerminalId.value terminalId)))
                 "and no offer to close what is already closed"
 
-        testCase "a recording retention deleted is a STATED gap, not an empty player" <| fun () ->
+        testCase "a recording the cap ate is a STATED gap, not an empty player" <| fun () ->
             // The one place stage 3d's behaviour reaches the surface. An empty player is
             // indistinguishable from a terminal that printed nothing, and the whole reason
             // the drop is recorded is that a hole in an audit trail must be a stated fact.

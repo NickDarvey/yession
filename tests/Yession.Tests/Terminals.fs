@@ -659,7 +659,7 @@ let private leaseTests =
     ]
 
 let private retentionTests =
-    testList "Transcript retention (Plan 13, stage 3d)" [
+    testList "Transcript retention (Plan 13, stage 3d; Plan 14, stage 0)" [
         testCase "output is kept up to the cap, then dropped — never renumbered away" <| fun () ->
             // A line index IS a sequence number, so nothing may ever be removed from the front
             // or the middle: that would renumber every block range in the log and every cached
@@ -680,34 +680,29 @@ let private retentionTests =
             let admission = TranscriptRetention.admit (TranscriptRetention.outputCap - 3) "abcde"
             Expect.equal admission { Keep = "abc"; Dropped = 2 } "three kept, two dropped"
 
-        testCase "a closed terminal's transcript is forgotten WHOLE, and the gap is stated" <| fun () ->
-            let store = Yession.Host.TranscriptStore.inMemory ()
-            let id = terminalA
-            let transcript = store.Open id { Width = 80; Height = 24; Timestamp = 0L }
-            transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "hello" } |> ignore
-            transcript.Append { At = 0.1; Kind = TranscriptOutput; Data = "world" } |> ignore
-            Expect.equal (store.Forget id) (Some 10) "it reports what the record lost"
-            // A request for it is now a 404, which `ReadChunk` already distinguishes from an
-            // empty chunk — and that is consistent with `immutable`, which promises a chunk's
-            // BYTES never change, not that a chunk exists for ever.
-            Expect.equal (store.ReadChunk id 0) None "the chunk route reports it gone, not empty"
-            Expect.isEmpty (store.ReadRange id 0 None) "and there is nothing left to read"
-            Expect.equal (store.Forget id) None "forgetting it twice says nothing twice"
-
-        testCase "the FILE-backed store forgets a transcript by deleting it" <| fun () ->
-            // The in-memory store above shares the contract but not the `unlinkSync`, and it
-            // is the file that retention is actually about.
+        testCase "closing a terminal takes nothing away from its recording" <| fun () ->
+            // Plan 14, stage 0: a recording lives as long as its session does. There is no
+            // age at which a closed terminal's transcript is deleted, because the chat now
+            // carries a permanent, tappable item for every block — and a chip whose recording
+            // a timer deleted underneath it is a dead end rather than an audit trail.
             let dir = sprintf "tests/Yession.Tests/out/.data/retention-%s" (string (System.Guid.NewGuid ()))
             let store = Yession.Host.TranscriptStore.openStore dir
             let transcript = store.Open terminalA { Width = 80; Height = 24; Timestamp = 0L }
-            transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "kept-then-gone" } |> ignore
-            Expect.isSome (store.ReadChunk terminalA 0) "it is there to begin with"
-            Expect.equal (store.Forget terminalA) (Some 14) "and reports what the record lost"
-            Expect.equal (store.ReadChunk terminalA 0) None "the file is gone, so the chunk 404s"
-            // Reopening after a forget starts a clean transcript rather than resurrecting the
-            // old handle — the file descriptor went with the file.
-            let reopened = store.Open terminalA { Width = 80; Height = 24; Timestamp = 0L }
-            Expect.equal (reopened.NextSeq ()) 1 "a fresh transcript, with its header at line 0"
+            transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "still here" } |> ignore
+            let proj = fold [ opened terminalA "build"; SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" } ]
+            Expect.equal
+                (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.IsOpen))
+                (Some false)
+                "the terminal is closed"
+            Expect.isSome (store.ReadChunk terminalA 0) "and its recording is still served"
+            Expect.equal
+                (store.ReadRange terminalA 0 None |> List.map (fun r -> r.Data))
+                [ "still here" ]
+                "with every record it held"
+            Expect.equal
+                (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.DroppedBytes))
+                (Some 0)
+                "and nothing counted as lost"
 
         testCase "the stated gap is the SAME event the live cap writes" <| fun () ->
             // One mechanism for "the transcript did not keep this", not two. The projection
@@ -1299,10 +1294,11 @@ let private transcriptTests =
                 (readFileSync nodeFs (sprintf "%s/%s.cast" dir (TerminalId.value terminalA)))
                 "the rebuilt cast is the file"
 
-        // Retention (stage 3d) deletes a closed terminal's recording, and the client's
-        // records go with it. A cast of nothing must still be a VALID asciicast — a header
-        // and no frames — rather than an empty file the player reports as broken, because
-        // "this terminal printed nothing that is still kept" is a thing the surface says.
+        // A terminal can hold no records the client has: one that printed nothing, or one
+        // whose output the cap (stage 3d) refused before a single chunk arrived. A cast of
+        // nothing must still be a VALID asciicast — a header and no frames — rather than an
+        // empty file the player reports as broken, because "this terminal printed nothing
+        // that is still kept" is a thing the surface says.
         testCase "a recording with no records left is still a valid cast" <| fun () ->
             let cast = TranscriptReplay.cast { Width = 80; Height = 24; Timestamp = 0L } []
             let lines = cast.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
