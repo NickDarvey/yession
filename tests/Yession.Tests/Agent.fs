@@ -372,7 +372,7 @@ let private liveTests =
 
         testCaseAsync "the built-in tools are gone: the live agent cannot read a host file" <|
             async {
-                // The turn's tool surface is exactly the five `yession` MCP tools
+                // The turn's tool surface is exactly the `yession` MCP tools
                 // (`tools: []` in the adapter drops every built-in), and these
                 // capabilities are `none`, so `execute_command` cannot run either.
                 // A nonce no model can guess is therefore unreachable — a body that

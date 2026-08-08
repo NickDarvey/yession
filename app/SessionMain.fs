@@ -421,11 +421,18 @@ Async.StartImmediate (
                             (fun target -> Map.tryFind target connectionStatus)
                             sessionMount)
                 | _ -> None
-            match claudeRoutes, githubRoutes with
-            | Some claude, Some github -> Some (fun req res -> claude req res || github req res)
-            | Some one, None
-            | None, Some one -> Some one
-            | None, None -> None
+            // The Repos panel (Plan 14): the human interface over the same service the
+            // agent's verbs drive. Needs only a login surface — the service itself is
+            // always there.
+            let repoRoutes =
+                match auth, reposService with
+                | Some a, Some service -> Some (Repos.routes a service sessionMount)
+                | _ -> None
+            [ claudeRoutes; githubRoutes; repoRoutes ]
+            |> List.choose id
+            |> function
+               | [] -> None
+               | handlers -> Some (fun req res -> handlers |> List.exists (fun handler -> handler req res))
         // Transcripts live beside the event log and the doc sidecar, one `.cast` file per
         // terminal — a durable, replayable record of everything its commands printed.
         let transcriptStore = TranscriptStore.openStore (sprintf "%s/terminals" dataDir)

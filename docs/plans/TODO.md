@@ -179,6 +179,21 @@ Infrastructure delivered after Phase 4 acceptance, outside the numbered phase ta
   agent turn running on the TURN ACTOR's credential (session ▸ actor ▸ ambient env),
   resolved fresh per turn. Follow-ups recorded in the plan doc + GAPS.
 
+- **Git repos (Plan 14)** — [14-git-repos.md](14-git-repos.md) (Status: implemented).
+  The AgentSandbox becomes a read-only bootstrap airlock: typed clone-and-orient MCP verbs
+  (`add_repo`/`list_repos`/`switch_branch`/`fetch_repo`/`repo_status`/`repo_log`/`repo_diff`),
+  git spawned per operation through the sandbox seam under the agent backend with
+  repo-controlled execution forced off per invocation — NO commit and NO push, so everything
+  irreversible stays behind `execute_command` and Plan 13's approval gate. One repos dir
+  (`<dataDir>/repos`) is visible in the WorkSandbox from boot (write path on host/srt, bind
+  mount at `/repos` on docker). GitHub sign-in per user rides the Plan 08 broker via the
+  DEVICE FLOW stored static (the broker is a PKCE public client; GitHub's code exchange wants
+  the App secret), so the Manager is untouched; the turn human's token reaches exactly the one
+  git invocation that needs it. Repo changes are events that fold into the conversation
+  timeline as attributed act-lines, and the settings panel is the human interface over the
+  same service. Stated risks + deferrals (credential forwarding to terminals, `.yession.yml`
+  consumption, installation-token swap, rotation) in the plan doc + GAPS.
+
 - **Terminals on the WorkSandbox (Plan 13)** — [13-worksandbox-terminals.md](13-worksandbox-terminals.md)
   (Status: PR 1 of 3 delivered). Zero-to-many terminals against the session's WorkSandbox, on a
   right panel built out of the message composer's parts: a command line is a collaborative

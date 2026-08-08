@@ -35,6 +35,14 @@ type GitHubAction =
     | Token
     | Disconnect
 
+/// The Repos panel's write actions (Plan 14) — the human interface over the same repo
+/// manager the agent's verbs drive; every action lands as the same event.
+[<RequireQualifiedAccess>]
+type RepoPanelAction =
+    | Add
+    | Remove
+    | Switch
+
 type SessionRoute =
     /// The client shell itself — the served page IS the app.
     | Shell
@@ -68,6 +76,10 @@ type SessionRoute =
     | GitHubStatus
     /// One of the GitHub panel's write actions.
     | GitHub of action: GitHubAction
+    /// The session's repos, as the filesystem reports them (Plan 14).
+    | RepoList
+    /// One of the Repos panel's write actions.
+    | Repo of action: RepoPanelAction
 
 module SessionRoute =
 
@@ -110,6 +122,12 @@ module SessionRoute =
         | GitHubAction.Token -> "token"
         | GitHubAction.Disconnect -> "disconnect"
 
+    let private repoSegment (action: RepoPanelAction) =
+        match action with
+        | RepoPanelAction.Add -> "add"
+        | RepoPanelAction.Remove -> "remove"
+        | RepoPanelAction.Switch -> "switch"
+
     /// A route as a URL relative to whatever the session is mounted at. Never begins with
     /// `/` — that is the whole point (see the type's remarks). `Shell` is the empty
     /// string, which resolves to the mount point itself.
@@ -128,6 +146,8 @@ module SessionRoute =
         | Claude action -> "claude/" + claudeSegment action
         | GitHubStatus -> "github"
         | GitHub action -> "github/" + githubSegment action
+        | RepoList -> "repos"
+        | Repo action -> "repos/" + repoSegment action
 
     /// A route as an absolute URL under a session's address — what a client outside a
     /// browser needs, having no document base to resolve against. The single `/` between
@@ -166,6 +186,10 @@ module SessionRoute =
         | "POST", [ "github"; "poll" ] -> Some (GitHub GitHubAction.Poll)
         | "POST", [ "github"; "token" ] -> Some (GitHub GitHubAction.Token)
         | "POST", [ "github"; "disconnect" ] -> Some (GitHub GitHubAction.Disconnect)
+        | "GET", [ "repos" ] -> Some RepoList
+        | "POST", [ "repos"; "add" ] -> Some (Repo RepoPanelAction.Add)
+        | "POST", [ "repos"; "remove" ] -> Some (Repo RepoPanelAction.Remove)
+        | "POST", [ "repos"; "switch" ] -> Some (Repo RepoPanelAction.Switch)
         // Last among the single-segment GETs, because a fingerprinted name is matched by
         // shape rather than by literal and would otherwise shadow the fixed paths above.
         | "GET", [ segment ] ->

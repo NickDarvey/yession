@@ -1,6 +1,9 @@
 # Plan 14 — Git repos: bootstrap clones beside the agent, shared into the WorkSandbox
 
-> **Status: in progress.**
+> **Status: implemented** — all four stages: the GitHub connection (device flow + paste),
+> the repos vocabulary and both-sandbox visibility, the repo manager with the agent's
+> verbs, and the panel + timeline rendering. Deviations taken while implementing are in
+> [What shipped](#what-shipped) at the foot of this document.
 
 The agent needs repos to work on, and the WorkSandbox will eventually be configured *from*
 a repo (`.yession.yml`, a devcontainer, a CLAUDE.md) — a chicken-and-egg the runtime could
@@ -117,3 +120,31 @@ never the WorkSandbox, never the transcript.
    against local fixtures.
 4. **The panel and the record** — the Repos settings section, timeline rendering,
    GAPS entries, this document's status flip.
+
+## What shipped
+
+Deviations and concretions against the sections above:
+
+- **The timeline carries repo notes as first-class items.** `ConversationItem` gained a
+  `Kind` (`Message | RepoNote`); repo events carry a Process-minted `MessageId` and fold
+  into `ConversationProjection` as attributed act-lines ("ada added repo octo/hello
+  (branch main)") — which also puts them in the agent's context pack for free, since the
+  pack is built from the same projection.
+- **`RepoCaller` splits the acting party from the credential owner.** For an agent verb
+  the event's actor is the AGENT (it acted) while the token is the TURN HUMAN's (Plan 08:
+  no borrowing, and the agent has no scope of its own); at the panel both are the same
+  person. SessionMain's dispatcher rebinds the verbs per turn.
+- **The git sandbox is a sibling `SrtSandbox.create` under the agent backend** — srt
+  confinement is per-spawn argv rewriting, so one service-lifetime sandbox spawns each
+  verb in milliseconds. The hardened env rides `GIT_CONFIG_COUNT` per invocation; the
+  token is one base64-wrapped `http.https://github.com/.extraheader` config on the single
+  invocation that needs it, with ambient `GITHUB_TOKEN` as the documented last resort.
+- **The `[Srt]` suite proves the interesting property**: a hook and an fsmonitor planted
+  in the checkout (exactly what the WorkSandbox could write) do not fire through the
+  verbs — driven against local bare fixtures over the `file` protocol the test config
+  allows, deterministic and network-free. The pure tier pins the hardened env's shape,
+  branch-name validation (option-injection and traversal refused), and stated-elision
+  output capping.
+- **The panel is `/repos*` beside the connection panels** (cookie-gated, extra-routes),
+  its listing the FILESYSTEM's answer (branch + dirty per checkout) so it can never
+  disagree with `git status`; every action re-probes rather than patching client state.

@@ -103,6 +103,14 @@ type GitHubViewState =
     { Status : GitHubStatus
       Flow : GitHubFlowState }
 
+/// The Repos panel's state (Plan 14), fed by the /repos probe — the filesystem's
+/// answer, not the event projection's, so the panel can never disagree with `git
+/// status`. `None` until the first probe answers.
+type ReposViewState =
+    { Listings : RepoListing list option
+      Busy : bool
+      Error : string option }
+
 /// Which draft the composer has open. `Unchosen` is the state a fresh client is in, and the only
 /// one where the DEFAULT applies (join the draft already in flight rather than start a rival) —
 /// once someone picks, the pick stands, so "new message" is not undone by a peer starting to type.
@@ -216,7 +224,9 @@ type ClientModel =
       /// The Claude connection panel's state (Plan 08), driven by the /claude routes.
       Claude        : ClaudeViewState
       /// The GitHub connection panel's state (Plan 14), driven by the /github routes.
-      GitHub        : GitHubViewState }
+      GitHub        : GitHubViewState
+      /// The Repos panel's state (Plan 14), driven by the /repos routes.
+      Repos         : ReposViewState }
 
 /// Messages that drive the client model. Connection-lifecycle messages are produced by
 /// the connection driver (Connection.fs); the suffix avoids clashing with the
@@ -284,6 +294,10 @@ type ClientMsg =
     | GitHubStatusMsg of GitHubStatus
     /// The GitHub sign-in flow moved (begin/awaiting/busy/error/reset).
     | GitHubFlowMsg of GitHubFlowState
+    /// A fresh /repos probe result (Plan 14).
+    | ReposListMsg of RepoListing list
+    /// A repos-panel action moved (busy/error/reset). `None` error = idle.
+    | ReposFlowMsg of busy: bool * error: string option
     // --- Terminals (Plan 13) ---------------------------------------------------------
     /// One transcript record arrived — live over the data channel, or from a fetched
     /// history chunk. Both routes carry the sequence number, so both fold the same way.
@@ -364,7 +378,8 @@ module ClientModel =
               Flow = ClaudeIdle }
           GitHub =
             { Status = { SessionCredential = None; MineCredential = None }
-              Flow = GitHubIdle } }
+              Flow = GitHubIdle }
+          Repos = { Listings = None; Busy = false; Error = None } }
 
     /// Advance the latest-known offset and recompute the catch-up indicator. "Slow" is a
     /// property of a catch-up that is STILL RUNNING, so it dies with the catch-up it
@@ -703,6 +718,11 @@ module ClientModel =
             { model with GitHub = { Status = status; Flow = flow } }
         | GitHubFlowMsg flow ->
             { model with GitHub = { model.GitHub with Flow = flow } }
+        | ReposListMsg listings ->
+            // A fresh listing settles any in-flight action: the probe IS the outcome.
+            { model with Repos = { Listings = Some listings; Busy = false; Error = None } }
+        | ReposFlowMsg (busy, error) ->
+            { model with Repos = { model.Repos with Busy = busy; Error = error } }
         | TerminalRecordMsg (terminal, seq, record) ->
             let feed = terminalFeed terminal model |> TerminalFeed.withRecord seq record
             { model with TerminalFeeds = Map.add terminal feed model.TerminalFeeds }

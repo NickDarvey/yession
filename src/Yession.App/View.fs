@@ -62,6 +62,14 @@ type ViewActions =
       GitHubPasteToken : unit -> unit
       /// Disconnect the credential stored for a scope choice ("session" | "mine").
       GitHubDisconnect : string -> unit
+      /// Repos panel (Plan 14). Imperative like the connection sets: they read panel
+      /// inputs and drive the /repos round-trips; the reducer folds the results.
+      /// Add the owner/repo in the panel's add input.
+      RepoAdd : unit -> unit
+      /// Remove a repo's checkout (the argument is its owner/repo rendering).
+      RepoRemove : string -> unit
+      /// Switch a repo to the branch typed in its row's input.
+      RepoSwitchBranch : string -> unit
       /// Ask the Manager to bring this session back and take the browser to it (Plan 11).
       /// Imperative because it is a navigation, and a navigation is not a state change this
       /// document survives to fold.
@@ -100,6 +108,9 @@ module ViewActions =
           GitHubConnect = ignore
           GitHubPasteToken = ignore
           GitHubDisconnect = ignore
+          RepoAdd = ignore
+          RepoRemove = ignore
+          RepoSwitchBranch = ignore
           ReopenSession = ignore
           OpenTerminal = ignore
           CloseTerminal = ignore
@@ -439,6 +450,52 @@ module View =
               {controls}
             </section>"""
 
+    /// The Repos panel (Plan 14): the session's checkouts, each with its branch and
+    /// dirty state (the filesystem's answer), a per-row branch switch, remove, and the
+    /// add input — with the shared-trust disclosure stated where the act happens.
+    let private reposSection (actions: ViewActions) (repos: ReposViewState) : TemplateResult =
+        let rows =
+            match repos.Listings with
+            | None -> [ html $"""<span class="{Style.small}" data-repos-loading>…</span>""" ]
+            | Some [] -> [ html $"""<span class="{Style.small}" data-repos-empty>no repos yet</span>""" ]
+            | Some listings ->
+                listings
+                |> List.map (fun listing ->
+                    let name = RepoRef.value listing.Repo
+                    let dirty =
+                        if listing.Dirty then html $"""<span class="{Style.statusFaint}">uncommitted changes</span>"""
+                        else Lit.nothing
+                    html $"""
+                        <div class="{Style.sideRow}" data-repo-row="{name}">
+                          <div class="flex flex-col gap-1 min-w-0">
+                            <span class="{Style.small}">{name} · {listing.Branch}</span>
+                            {dirty}
+                            <div class="flex gap-2">
+                              <input type="text" class="{Style.field}" data-repo-branch-input="{name}" aria-label="Branch for {name}" placeholder="branch" />
+                              <button type="button" class="{Style.btn}" data-repo-switch="{name}" @click={Ev(fun _ -> actions.RepoSwitchBranch name)}>Switch</button>
+                            </div>
+                          </div>
+                          <button type="button" class="{Style.btnIconDanger}" aria-label="Remove {name}" data-repo-remove="{name}" @click={Ev(fun _ -> actions.RepoRemove name)}>{Icon.close}</button>
+                        </div>""")
+        let busy =
+            if repos.Busy then html $"""<span class="{Style.statusRun}" data-repos-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
+            else Lit.nothing
+        let error =
+            match repos.Error with
+            | Some reason -> html $"""<span class="{Style.statusErr}" data-repos-error>{reason}</span>"""
+            | None -> Lit.nothing
+        html $"""
+            <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-repos-panel>
+              <span class="{Style.label}">repos</span>
+              <span class="{Style.small}">a repo added here is readable by everyone in this session, and inside the work environment</span>
+              {rows}
+              {busy}
+              {error}
+              <label class="{Style.label}" for="repo-add">add a repo</label>
+              <input id="repo-add" type="text" class="{Style.field}" data-repo-add-input placeholder="owner/repo" />
+              <button type="button" class="{Style.btnPrimary}" data-repo-add @click={Ev(fun _ -> actions.RepoAdd ())}>Add repo</button>
+            </section>"""
+
     /// Settings, as the sidebar column's OTHER FACE. Not a drawer over the conversation: you
     /// go there and come back, the timeline never moves under a scrim, and configuration keeps
     /// the section rhythm it already had. Open state is the root element's `settings-open`
@@ -457,6 +514,7 @@ module View =
               </div>
               {claudeSection actions dispatch model.Claude}
               {githubSection actions dispatch model.GitHub}
+              {reposSection actions model.Repos}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
             </div>"""
@@ -633,28 +691,41 @@ module View =
               </div>
             </header>"""
 
+    /// A repo note is something someone DID, not said — one quiet line, actor-attributed,
+    /// no avatar and no rich body (Plan 14).
+    let private repoNoteItem (item: ConversationItem) : TemplateResult =
+        html $"""
+            <article class="{Style.repoNote}" data-message-id="{MessageId.value item.MessageId}" data-repo-note data-message-author="{authorLabel item.Author}">
+              <span class="{Style.repoNoteText}">{authorLabel item.Author} {item.Body}</span>
+            </article>"""
+
+    let private messageItem (item: ConversationItem) : TemplateResult =
+        let isAgent = (item.Author = ActorRef.Agent)
+        let whoClass = if isAgent then Style.whoAgent else Style.who
+        let statusInner =
+            match item.Status with
+            | Complete -> Lit.nothing
+            | Streaming -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>streaming</span>"""
+            | ConversationItemStatus.Failed -> html $"""<span class="{Style.statusErr}">failed</span>"""
+            | ConversationItemStatus.Interrupted -> html $"""<span class="{Style.statusFaint}">interrupted</span>"""
+        let bodyClass, caret =
+            match item.Status with
+            | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
+            | _ -> Style.messageBody, Lit.nothing
+        html $"""
+            <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
+              <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
+              <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
+              <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
+            </article>"""
+
     let private conversation (projection: ConversationProjection) : TemplateResult =
         let items =
             projection.Items
             |> List.map (fun item ->
-                let isAgent = (item.Author = ActorRef.Agent)
-                let whoClass = if isAgent then Style.whoAgent else Style.who
-                let statusInner =
-                    match item.Status with
-                    | Complete -> Lit.nothing
-                    | Streaming -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>streaming</span>"""
-                    | ConversationItemStatus.Failed -> html $"""<span class="{Style.statusErr}">failed</span>"""
-                    | ConversationItemStatus.Interrupted -> html $"""<span class="{Style.statusFaint}">interrupted</span>"""
-                let bodyClass, caret =
-                    match item.Status with
-                    | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
-                    | _ -> Style.messageBody, Lit.nothing
-                html $"""
-                    <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
-                      <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
-                      <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
-                      <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
-                    </article>""")
+                match item.Kind with
+                | ConversationItemKind.RepoNote -> repoNoteItem item
+                | ConversationItemKind.Message -> messageItem item)
         html $"""<section class="{Style.timeline}" data-conversation>{items}</section>"""
 
     let private agentStrip (actions: ViewActions) (agent: AgentViewState) : TemplateResult =
