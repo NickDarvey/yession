@@ -91,7 +91,11 @@ type ViewActions =
       /// tab's key, which is the only thing the chip and the tab share — the browser turns it
       /// back into a selector. Without this, closing a tab strands focus on a control that
       /// has just been removed from the document.
-      FocusChat : string -> unit }
+      FocusChat : string -> unit
+      /// Hand focus to whichever DVR control replaced the one just pressed (Plan 14,
+      /// stage 7): Rewind and Jump-to-live each remove the other from the document, so the
+      /// press that swaps them would otherwise strand focus on a control that has gone.
+      FocusDvr : TerminalId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -117,7 +121,8 @@ module ViewActions =
           TypeIntoTerminal = fun _ _ -> ()
           ResizeTerminal = fun _ _ _ -> ()
           FocusPane = ignore
-          FocusChat = ignore }
+          FocusChat = ignore
+          FocusDvr = ignore }
 
 module View =
 
@@ -1347,25 +1352,35 @@ module View =
             // The DVR (Plan 14, stage 7): step back through what this terminal has recorded
             // so far while it keeps running, and catch back up. Offered on any LIVE terminal
             // — the mechanism does not care which mode it is in, and both are one growing
-            // byte stream.
+            // byte stream — but only once something IS recorded: a DVR with nothing behind
+            // it is a control with nothing to do. Each press hands focus to the control
+            // that replaces the pressed one, which leaves the document.
             let rewound = ClientModel.isRewound view.TerminalId model
             let dvr =
                 if not view.IsOpen then Lit.nothing
                 elif rewound then
+                    // Say HOW FAR behind, in the recording's clock, as it grows — a reader
+                    // parked behind live deserves to know the edge is moving away.
+                    let behind =
+                        match ClientModel.behindLive view.TerminalId model with
+                        | Some seconds when seconds >= 1.0 ->
+                            sprintf "behind live — %s" (durationText (System.TimeSpan.FromSeconds seconds))
+                        | _ -> "behind live"
                     html $"""
                         <div class="{Style.terminalQueuedRow}">
-                          <span class="{Style.statusFaint}">behind live</span>
+                          <span class="{Style.statusFaint}" data-terminal-behind="{TerminalId.value view.TerminalId}">{behind}</span>
                           <button type="button" class="{Style.cls [ Style.btnPrimary; "ml-auto" ]}"
                                   data-terminal-live="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (JumpToLiveMsg view.TerminalId))}>Jump to live</button>
+                                  @click={Ev(fun _ -> dispatch (JumpToLiveMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Jump to live</button>
                         </div>"""
-                else
+                elif feed.KnownLength > 0 then
                     html $"""
                         <div class="{Style.terminalQueuedRow}">
                           <button type="button" class="{Style.cls [ Style.btn; "ml-auto" ]}"
                                   data-terminal-rewind="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId))}>Rewind</button>
+                                  @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Rewind</button>
                         </div>"""
+                else Lit.nothing
             // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
             // program is running here and what it displays is not a list of commands and
             // their output — the blocks are block mode's view of a terminal, and they come

@@ -90,7 +90,9 @@ do
         { Cast = cast
           Markers = [ 0.0, "ls -la" ]
           StartAt = None
-          Poster = None }
+          Poster = None
+          BehindLive = None }
+        None
     |> ignore
 
 // --- The shell, host-free (Plan 14, stage 2) --------------------------------------------
@@ -207,10 +209,15 @@ do
         { ViewActions.ssr with
             FocusPane = PaneShell.toPane
             FocusChat = PaneShell.toChatItem
+            FocusDvr = fun id -> PaneShell.toDvrControl (TerminalId.value id)
             TypeIntoTerminal = recordTyped }
     // The app's own player sync, so a block tab in the harness really plays its recording —
-    // which is the point of driving this in a browser rather than asserting a string.
-    let replays = PaneReplays.create ()
+    // which is the point of driving this in a browser rather than asserting a string. The
+    // forward reference is the same shape `Browser.fs` uses: the syncer needs dispatch (a
+    // rewound cast that plays off its end jumps back to live) and dispatch's render needs
+    // the syncer.
+    let mutable dispatchRef : ClientMsg -> unit = ignore
+    let replays = PaneReplays.create (fun msg -> dispatchRef msg)
     let mutable model = shellModel
     let rec dispatch (msg: ClientMsg) : unit =
         model <- ClientModel.update msg model
@@ -219,4 +226,5 @@ do
         Lit.render (unbox shellHost) (View.view actions model dispatch)
         replays.Sync model
         PaneShell.setOpen model.TerminalsOpen
+    dispatchRef <- dispatch
     render ()

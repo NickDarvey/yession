@@ -28,6 +28,12 @@ open Yession.App
 type [<AllowNullLiteral>] private Player =
     abstract dispose : unit -> unit
 
+/// The player's own `ended` event — playback ran off the end of the cast. The DVR's catch-up
+/// signal (Plan 14, stage 7): a rewound cast ends at the pin, so ending it means the reader
+/// caught up.
+[<Emit("$0.addEventListener('ended', $1)")>]
+let private onEnded (player: Player) (handler: unit -> unit) : unit = jsNative
+
 /// `asciinema-player` 3.x ships proper ESM with an `exports` map, so a named import resolves —
 /// unlike `@xterm/headless`, whose CommonJS `main` forced `ImportDefault`.
 [<ImportMember("asciinema-player")>]
@@ -60,7 +66,12 @@ type Mounted =
 /// position expresses everything a slice can, and its chapters come from the blocks that ran.
 /// `poster: "npt:<t>"` costs nothing extra — the player builds the still by replaying to that
 /// point internally.
-let mount (element: Browser.Types.Element) (replay: PaneReplay) : Mounted =
+///
+/// `caughtUp` is the DVR's half (Plan 14, stage 7): a rewound live terminal's cast ends at
+/// the pin, so playing off its end means the reader has caught up — the handler jumps back
+/// to live rather than leaving them on a stale final frame. `None` for every recording
+/// whose end really is the end.
+let mount (element: Browser.Types.Element) (replay: PaneReplay) (caughtUp: (unit -> unit) option) : Mounted =
     let url = blobUrl replay.Cast
     let options =
         [ "fit" ==> "width"
@@ -71,6 +82,7 @@ let mount (element: Browser.Types.Element) (replay: PaneReplay) : Mounted =
         @ (match replay.StartAt with Some at -> [ "startAt" ==> at ] | None -> [])
         @ (match replay.Poster with Some at -> [ "poster" ==> sprintf "npt:%f" at ] | None -> [])
     let player = create (box url) element (createObj options)
+    caughtUp |> Option.iter (onEnded player)
     { Dispose =
         fun () ->
             player.dispose ()

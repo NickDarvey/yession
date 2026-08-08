@@ -194,7 +194,12 @@ type PaneReplay =
       /// in full context, without slicing anything.
       StartAt : float option
       /// The time whose frame becomes the still shown before anyone presses play.
-      Poster : float option }
+      Poster : float option
+      /// Set when this cast is a LIVE terminal watched from behind its edge (Plan 14,
+      /// stage 7): it ends where the rewind pinned it, not where the terminal is, so
+      /// playing past its end means the reader has caught up — the mount answers by
+      /// jumping back to live rather than stopping on a stale frame.
+      BehindLive : TerminalId option }
 
 type ClientModel =
     { Peer          : PeerState
@@ -539,6 +544,20 @@ module ClientModel =
     let selectedTerminal (model: ClientModel) : TerminalId option =
         selectedPane model |> Option.map PaneTab.terminal
 
+    /// The transcript length this client's rewind pinned, while the terminal is still LIVE
+    /// (Plan 14, stage 7). Resolved rather than read raw, for the same reason `selectedPane`
+    /// is: a pin that outlives its live edge — the terminal closed while somebody sat behind
+    /// it — is not a rewind any more, it is simply the recording, and the closed-terminal
+    /// replay already shows that in full.
+    let rewoundTo (terminal: TerminalId) (model: ClientModel) : int option =
+        model.PaneRewound
+        |> Option.filter (fun (id, _) -> id = terminal)
+        |> Option.filter (fun _ ->
+            TerminalProjection.tryFind terminal model.Terminals
+            |> Option.map (fun view -> view.IsOpen)
+            |> Option.defaultValue false)
+        |> Option.map snd
+
     /// The `.cast` for one range of a terminal's recording — a block's output, or a stretch
     /// of live mode — from the records and the keyframe this client has (Plan 14, stage 3).
     ///
@@ -599,7 +618,8 @@ module ClientModel =
                       // One command is one chapter; there is nothing to mark.
                       Markers = []
                       StartAt = None
-                      Poster = None })
+                      Poster = None
+                      BehindLive = None })
             | StretchTab stretch ->
                 match stretch.Range with
                 // Nothing to replay, and the surface says so rather than mounting a player
@@ -614,14 +634,14 @@ module ClientModel =
                           // A still of the FINAL screen, so the item has a face before anyone
                           // presses play. It costs nothing extra: the player builds it by
                           // replaying internally to that time.
-                          Poster = timeOf (toSeq - 1) |> Option.map (fun at -> at - origin) }
+                          Poster = timeOf (toSeq - 1) |> Option.map (fun at -> at - origin)
+                          BehindLive = None }
             | TerminalTab terminal ->
                 // A REWOUND live terminal plays what it has recorded so far, up to the
                 // length pinned when the rewind began. Everything else about it is the
                 // whole-terminal recording, which is the point: rewinding live TV and
                 // replaying a finished session are the same mechanism with a moving end.
-                let rewoundTo =
-                    model.PaneRewound |> Option.filter (fun (id, _) -> id = terminal) |> Option.map snd
+                let pin = rewoundTo terminal model
                 let markers =
                     TerminalProjection.tryFind terminal model.Terminals
                     |> Option.map (fun view ->
@@ -633,17 +653,27 @@ module ClientModel =
                             timeOf block.FromSeq |> Option.map (fun at -> at, block.Command)))
                     |> Option.defaultValue []
                 let records =
-                    match rewoundTo with
+                    match pin with
                     | Some length -> feed.Records |> Map.toList |> List.filter (fun (seq, _) -> seq < length)
                     | None -> feed.Records |> Map.toList
+                // A rewind lands AT the pinned edge, not at the recording's start: "rewind"
+                // on an hour-old terminal must not mean "restart from the beginning". The
+                // still is the screen as it stood at the pin — visually the live screen the
+                // reader just left — and the scrub bar is how they go back from there.
+                let pinnedEdge =
+                    pin |> Option.bind (fun _ -> records |> List.tryLast |> Option.map (fun (_, r) -> r.At))
                 Some
                     { Cast = TranscriptReplay.cast header records
                       Markers = markers
                       StartAt =
-                        model.PaneStartAt
-                        |> Option.filter (fun (id, _) -> id = terminal)
-                        |> Option.bind (fun (_, seq) -> timeOf seq)
-                      Poster = None }
+                        match pinnedEdge with
+                        | Some at -> Some at
+                        | None ->
+                            model.PaneStartAt
+                            |> Option.filter (fun (id, _) -> id = terminal)
+                            |> Option.bind (fun (_, seq) -> timeOf seq)
+                      Poster = pinnedEdge
+                      BehindLive = pin |> Option.map (fun _ -> terminal) }
 
     /// The keyframe a tab's replay needs and this client does not have (Plan 14, stage 4).
     ///
@@ -667,7 +697,18 @@ module ClientModel =
 
     /// Whether this client is watching a terminal behind its live edge (Plan 14, stage 7).
     let isRewound (terminal: TerminalId) (model: ClientModel) : bool =
-        model.PaneRewound |> Option.exists (fun (id, _) -> id = terminal)
+        rewoundTo terminal model |> Option.isSome
+
+    /// How much recording has accrued past this client's pin, in the recording's own clock
+    /// (seconds). `None` when not rewound; `Some 0.0` while nothing new has arrived. What
+    /// lets the surface say HOW FAR behind the reader is, which a bare "behind live" cannot.
+    let behindLive (terminal: TerminalId) (model: ClientModel) : float option =
+        rewoundTo terminal model
+        |> Option.map (fun pin ->
+            let feed = model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
+            let latestBefore limit =
+                feed.Records |> Map.fold (fun acc seq r -> if seq < limit then max acc r.At else acc) 0.0
+            max 0.0 (latestBefore System.Int32.MaxValue - latestBefore pin))
 
     /// The live screen of a terminal, when this client has composed one.
     let terminalScreen (terminal: TerminalId) (model: ClientModel) : string option =

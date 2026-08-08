@@ -38,6 +38,23 @@ let toPane () : unit = jsNative
 })""")>]
 let toChatItem (tabKey: string) : unit = jsNative
 
+/// Hand focus to whichever DVR control is on screen for this terminal (Plan 14, stage 7).
+/// Rewind and Jump-to-live swap each other out of the document, so the press that swaps them
+/// — or the catch-up that fires when a rewound cast plays off its end — would otherwise
+/// strand focus on a control that has gone. One selector for both: only one of the pair is
+/// ever rendered. Guarded on focus actually being stranded (on `body`, or inside the player
+/// that is being unmounted): the automatic catch-up must never yank focus out of a composer
+/// somebody is typing in.
+[<Emit("""requestAnimationFrame(() => {
+  const active = document.activeElement
+  const stranded = !active || active === document.body || active.closest('[data-pane-replay]')
+  if (!stranded) return
+  const next = document.querySelector(
+    '[data-terminal-live="' + $0 + '"], [data-terminal-rewind="' + $0 + '"]')
+  if (next) next.focus()
+})""")>]
+let toDvrControl (terminalId: string) : unit = jsNative
+
 /// The pane's open state, as a class on the shell root — the same mechanism the sidebar uses,
 /// so a Lit re-render never fights the CSS transition. A `set` rather than a toggle, because
 /// the model holds the bit and this only reflects it: the app opens this column itself

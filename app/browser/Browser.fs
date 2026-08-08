@@ -657,7 +657,7 @@ let private start () =
                                     | Error _ -> ()
                             })
 
-        let replays = PaneReplays.create ()
+        let replays = PaneReplays.create (fun msg -> dispatchRef msg)
 
         /// The live screens (Plan 14, stage 6): one emulator per terminal this client has a
         /// snapshot for, folded forward from the records the model already holds.
@@ -901,7 +901,8 @@ let private start () =
                         navigateTo (sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId))
                     | _ -> ()
               FocusPane = PaneShell.toPane
-              FocusChat = PaneShell.toChatItem }
+              FocusChat = PaneShell.toChatItem
+              FocusDvr = fun id -> PaneShell.toDvrControl (TerminalId.value id) }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.

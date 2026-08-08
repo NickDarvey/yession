@@ -765,6 +765,68 @@ let private dvrTests =
                     model
             Expect.equal (castAt stillGrowing) (castAt model) "the recording under the reader is unchanged"
 
+        testCase "rewinding lands AT the pinned edge, not at the recording's start" <| fun () ->
+            // "Rewind" on an hour-old terminal must not mean "restart from the beginning".
+            // Like live TV it lands on the moment the reader left — the still of the pinned
+            // screen, visually the live screen they were just watching — and the scrub bar
+            // is how they go back from there.
+            let before = withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef bob) 1) ])
+            (match ClientModel.paneReplay (TerminalTab terminalA) before with
+             | Some replay -> Expect.isNone replay.BehindLive "an un-rewound cast's end really is the end"
+             | None -> failwith "the header is known, so there is a recording")
+            match ClientModel.paneReplay (TerminalTab terminalA) (ClientModel.update (RewindTerminalMsg terminalA) before) with
+            | Some replay ->
+                Expect.equal replay.StartAt (Some 43.5) "starts at the last pinned record's time"
+                Expect.equal replay.Poster (Some 43.5) "whose frame is the still shown before play"
+                Expect.equal replay.BehindLive (Some terminalA) "and playing off this end means the reader caught up"
+            | None -> failwith "the header is known, so there is a recording"
+
+        testCase "the surface says how far behind the reader is, and it grows" <| fun () ->
+            let model =
+                withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef bob) 1) ])
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+            Expect.equal (ClientModel.behindLive terminalA model) (Some 0.0) "nothing has accrued yet"
+            let grown =
+                ClientModel.update
+                    (TerminalRecordMsg (terminalA, 5, { At = 103.5; Kind = TranscriptOutput; Data = "after\r\n" }))
+                    model
+            Expect.equal (ClientModel.behindLive terminalA grown) (Some 60.0) "a minute of recording arrived behind the pin"
+            Expect.isTrue ((Support.render grown).Contains "behind live — 1m 0s") "and the pane says so"
+
+        testCase "a live terminal with NOTHING recorded offers no rewind" <| fun () ->
+            // A DVR with nothing behind it is a control with nothing to do.
+            let bare = clientOf [ at 1L 0.0 (opened terminalA "shell") ]
+            Expect.isFalse ((Support.render bare).Contains Dom.Hooks.terminalRewind) "no recording, no control"
+
+        testCase "a terminal that CLOSES under a rewound reader is simply its recording again" <| fun () ->
+            // The pin outlived its live edge, so it is no rewind any more. Left unresolved
+            // this rendered TWO players over one recording — the rewound region and the
+            // closed-terminal replay — with the final output missing from both and no
+            // "jump to live" to escape by.
+            let model =
+                withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef bob) 1) ])
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+                |> ClientModel.update
+                    (TerminalRecordMsg (terminalA, 5, { At = 60.0; Kind = TranscriptOutput; Data = "after\r\n" }))
+                |> ClientModel.update
+                    (EventsPageMsg
+                        { Events = [ at 3L 61.0 (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "done" }) ]
+                          LastOffset = Some (EventOffset.create 3L |> expect)
+                          IsEnd = true })
+            Expect.isFalse (ClientModel.isRewound terminalA model) "no live edge, no rewind"
+            (match ClientModel.paneReplay (TerminalTab terminalA) model with
+             | Some replay ->
+                 Expect.isTrue ((outputsOf replay.Cast) |> List.contains "after\r\n") "the recording is whole again, pin ignored"
+                 Expect.isNone replay.BehindLive "and its end really is the end"
+             | None -> failwith "the header is known, so there is a recording")
+            let html = Support.render model
+            let mountAttr = Dom.attr Dom.Hooks.paneReplay "terminal:term-a"
+            Expect.equal
+                ((html.Length - html.Replace(mountAttr, "").Length) / mountAttr.Length)
+                1
+                "ONE player over the recording, not two"
+            Expect.isFalse (html.Contains Dom.Hooks.terminalLive) "and no way-back-to-live for a terminal with no live"
+
         testCase "jumping to live drops the rewind, and the newest bytes are back" <| fun () ->
             let live = [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef bob) 1) ]
             let model =

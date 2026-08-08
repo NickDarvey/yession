@@ -201,6 +201,9 @@ module Dom =
         /// explain rather than a feature.
         let terminalRewind = "data-terminal-rewind"
         let terminalLive = "data-terminal-live"
+        /// How far behind live the rewound reader is, growing as the terminal keeps
+        /// printing under them.
+        let terminalBehind = "data-terminal-behind"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).

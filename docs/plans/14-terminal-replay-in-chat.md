@@ -166,6 +166,19 @@ move it out from under them, which is the one thing rewinding is for avoiding �
 the custom source is not needed to satisfy "rewound like live TV through the same mechanism". If
 following-while-behind is ever wanted, the custom source is where it goes.
 
+**The live-TV mechanics that make the pinned cast behave like a DVR** rather than a replay
+that happens to be of a live terminal. A rewind lands AT the pinned edge — the still of the
+screen as it stood, the scrub bar the way back — not at the recording's start, because
+"rewind" on an hour-old terminal must not mean "restart from the beginning". Playing off the
+pinned end IS catching up, so the player's `ended` drops the pin by itself instead of parking
+the reader on a stale final frame. While behind, the pane says how far behind, in the
+recording's clock, growing as records arrive. The rewind is offered only once something is
+recorded, and a pin does not survive its terminal closing — a closed terminal is simply its
+recording again, shown whole by the replay surface a closed terminal already has. Rewind and
+jump-to-live swap each other out of the document, so each press hands focus to its
+replacement (and the automatic catch-up does the same only when focus was actually in the
+player it unmounted).
+
 **This is offered on any live terminal, not only interactive ones.** The mechanism does not care
 which mode the terminal is in; both are one growing byte stream. Scrubbing back through a running
 build's output is the same act as scrubbing back through a `vim` session, and a rule that

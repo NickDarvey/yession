@@ -785,9 +785,10 @@ let editorTests =
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
         // and the same cast a finished terminal's replay uses, which is what "rewound like
-        // live TV, through the same mechanism" has to mean — and that jumping back to the
-        // edge returns the live screen.
-        testCaseAsync "a live terminal rewinds to its recording, plays it, and jumps back to live" <|
+        // live TV, through the same mechanism" has to mean — that it lands ON the pinned
+        // edge rather than at the recording's start, that focus survives the control swap,
+        // and that playing off the pinned end catches the reader back up to live by itself.
+        testCaseAsync "a live terminal rewinds to its pinned edge, and playing off it catches back up" <|
             async {
                 let server = serveStatic harnessRoot (EDITOR_PORT + 7)
                 let! pw = await (Playwright.CreateAsync ())
@@ -807,13 +808,31 @@ let editorTests =
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-terminal-screen='term-live']")""")
 
-                // …and it plays what the terminal printed BEFORE the moment it was rewound.
-                do! awaitU (page.ClickAsync "#shell [data-pane-replay='terminal:term-live'] .ap-overlay-start")
+                // The swap removed the pressed Rewind button from the document; focus must
+                // land on the control that replaced it, never on `body`.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-live') === 'term-live'""")
+
+                // It lands AT the pinned edge: the poster is the screen as it stood at the
+                // pin, shown before anyone presses play — not a blank player parked at 0:00.
                 let! _ =
                     await (page.WaitForFunctionAsync
                         """document.querySelector("#shell [data-pane-replay='terminal:term-live']")?.textContent.includes('earlier output') === true""")
 
-                // Jumping to live puts the screen back, and takes the player down with it.
+                // Playing off the pinned end IS catching up: the player's `ended` drops the
+                // rewind by itself — live screen back, player down, focus handed to the
+                // Rewind control that replaced the pane's face.
+                do! awaitU (page.ClickAsync "#shell [data-pane-replay='terminal:term-live'] .ap-overlay-start")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-rewind') === 'term-live'""")
+
+                // And the way back works by hand too: rewind again, jump to live again.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-rewind='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
                 do! awaitU (page.ClickAsync "#shell [data-terminal-live='term-live']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")

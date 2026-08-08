@@ -31,7 +31,10 @@ let private clearChildren (el: obj) : unit = jsNative
 /// Drive this from the render loop, after every render.
 type Syncer = { Sync : ClientModel -> unit }
 
-let create () : Syncer =
+/// `dispatch` feeds the one message a mounted player raises on its own: a rewound cast that
+/// played off its end has caught the reader up (Plan 14, stage 7), and the answer is a jump
+/// back to live rather than a stale final frame.
+let create (dispatch: ClientMsg -> unit) : Syncer =
     /// Mounted players by tab key, each with the cast text it was mounted over — so a
     /// recording that arrived in pieces can be told apart from one that has not changed.
     let players = System.Collections.Generic.Dictionary<string, Replay.Mounted * string> ()
@@ -44,7 +47,13 @@ let create () : Syncer =
             // the range has no end yet. The next render runs this again.
             match ClientModel.paneReplay tab model with
             | None -> ()
-            | Some replay -> players.[key] <- (Replay.mount (unbox el) replay, replay.Cast)
+            | Some replay ->
+                let caughtUp =
+                    replay.BehindLive
+                    |> Option.map (fun terminal () ->
+                        dispatch (JumpToLiveMsg terminal)
+                        PaneShell.toDvrControl (TerminalId.value terminal))
+                players.[key] <- (Replay.mount (unbox el) replay caughtUp, replay.Cast)
 
     { Sync =
         fun model ->
