@@ -475,6 +475,27 @@ module Style =
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 
+    /// Terminal work in the chat (Plan 14, stage 1): one line, subtler than a message, and a
+    /// real `<button>` — so it is keyboard-operable and focus-ringed by construction rather
+    /// than by a handler bolted onto a div.
+    ///
+    /// It sits on the message grid's CONTENT column (`20px` avatar + `12px` gutter) so a run
+    /// of chips between two messages lines up with the prose rather than drifting under the
+    /// avatars. The palette stays `text-ink-dim`/`text-ink-faint` — chips are the busiest
+    /// thing the chat will carry, and they must read as texture next to what people said.
+    let chatChip =
+        cls [ "w-full max-w-[46rem] bg-transparent cursor-pointer text-left"
+              "flex items-baseline gap-2 pl-[32px] py-0.5"
+              "text-ink-dim hover:text-ink transition-colors duration-150 ease-out"
+              focusRing ]
+    /// Who ran it — the same caps voice a message's author line wears, one step fainter.
+    let chatChipWho = caps + " text-ink-faint shrink-0"
+    /// The command itself: mono, truncated to one line. A chip that wrapped to three would
+    /// stop being a chip.
+    let chatChipCommand = "font-mono text-code-sm text-ink-dim truncate min-w-0 flex-1"
+    /// A stretch item's sentence — prose, not mono: nothing was typed that we recorded.
+    let chatChipText = "font-light text-small text-ink-dim truncate min-w-0 flex-1"
+
     /// Read-only rendered Markdown in the timeline (the mirror of the composer's live
     /// formatting). Preflight strips heading/list defaults, so each rendered element carries
     /// its own utilities — the same "F# composes utilities, no hand CSS" rule as everything

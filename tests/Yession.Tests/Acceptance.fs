@@ -69,12 +69,20 @@ let private representativeModel : ClientModel =
             [ { MessageId = MessageId.create "msg-1" |> expect
                 Author = PeerRef ada
                 Body = "ship it"
-                Status = Complete }
+                Status = Complete
+                Offset = EventOffset.create 1L |> expect }
               { MessageId = MessageId.create "msg-agent" |> expect
                 Author = ActorRef.Agent
                 Body = "Sounds go"
-                Status = Streaming } ]
+                Status = Streaming
+                Offset = EventOffset.create 4L |> expect } ]
           ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ] }
+      // The terminal half of the chat (Plan 14): the fixture's one block, anchored between
+      // the two messages — so the checklist renders a chip in the middle of the conversation
+      // rather than only at the end, which is the ordering the merge exists for.
+      Timeline =
+        { TimelineProjection.empty with
+            TerminalItems = [ TimelineBlock (EventOffset.create 2L |> expect, terminalId, blockId) ] }
       EventConsumer =
         { LastProcessedOffset = Some (EventOffset.create 5L |> expect)
           LatestKnownOffset = Some (EventOffset.create 7L |> expect)
@@ -241,6 +249,11 @@ let private uiChecklistTests =
                   "approve button", Dom.attr Dom.Hooks.terminalApprove "queue-ui-term"
                   "terminal composer input", Dom.attr Dom.Hooks.terminalInput "term-draft:term-ui:ada"
                   "terminal approval mode", Dom.attr Dom.Hooks.terminalMode "approve-agent"
+                  // Terminal work in the CHAT (Plan 14): the block that ran has a chip where
+                  // it ran, carrying who ran it and how it went — and no output, which is the
+                  // whole reason it is a chip.
+                  "block chip in the chat", Dom.attr Dom.Hooks.chatBlock "block-ui"
+                  "chip carries the block's status", Dom.attr Dom.Hooks.chatBlockStatus Dom.Text.blockOk
                   // Settings + agent presence (Plan 08 pass): the model has no agent, so
                   // the sidebar row says absent, the prompt strip renders with its
                   // connect call-to-action, and the drawer holds the Claude panel.
@@ -323,6 +336,60 @@ let private uiChecklistTests =
                 (html.Contains (Dom.attr "data-terminal-close" (TerminalId.value terminalId)))
                 "and no offer to close what is already closed"
 
+        testCase "terminal work sits in the chat WHERE it happened, not at the end" <| fun () ->
+            // Plan 14, stage 1. The fixture's block is anchored at offset 2, between the two
+            // messages at 1 and 4 — so the merge has to put it there. Appending it after
+            // everything said would be the thing the offset exists to prevent.
+            let html = Support.render representativeModel
+            let indexOf (needle: string) = html.IndexOf needle
+            let said = indexOf (Dom.attr Dom.Hooks.messageId "msg-1")
+            let ran = indexOf (Dom.attr Dom.Hooks.chatBlock "block-ui")
+            let answered = indexOf (Dom.attr Dom.Hooks.messageId "msg-agent")
+            Expect.isTrue (said >= 0 && ran >= 0 && answered >= 0) "all three render"
+            Expect.isTrue (said < ran && ran < answered) "said, ran, answered — in log order"
+
+        testCase "a chip is one line: who ran what, and how it went — never the output" <| fun () ->
+            // Output inline would make the chat noisiest exactly when it is busiest, and
+            // would put everything a command printed one glance from everyone in the session
+            // rather than one tap. The panel is where output lives.
+            let html = Support.render representativeModel
+            let chat =
+                let start = html.IndexOf Dom.Hooks.conversation
+                html.Substring (start, html.IndexOf ("</section>", start) - start)
+            Expect.isTrue (chat.Contains (Dom.attr Dom.Hooks.chatBlock "block-ui")) "the chip is there"
+            Expect.isTrue (chat.Contains "ls -la") "with the command it ran"
+            Expect.isFalse (chat.Contains Dom.Hooks.terminalOutput) "and nothing it printed"
+            // The panel is where output lives, and it still does.
+            Expect.isTrue (html.Contains Dom.Hooks.terminalOutput) "the terminal panel is unchanged"
+
+        testCase "a concluded lease stretch is its own item, and says how it ended" <| fun () ->
+            let stretchModel =
+                { representativeModel with
+                    Timeline =
+                        { representativeModel.Timeline with
+                            TerminalItems =
+                                representativeModel.Timeline.TerminalItems
+                                @ [ TimelineStretch
+                                        { Offset = EventOffset.create 3L |> expect
+                                          TerminalId = terminalId
+                                          Title = "build"
+                                          Holder = PeerRef bob
+                                          End = LeaseStolen (PeerRef ada)
+                                          Range = Some (2, 40)
+                                          StartedAt = DateTimeOffset (2026, 8, 8, 0, 0, 0, TimeSpan.Zero)
+                                          EndedAt = DateTimeOffset (2026, 8, 8, 0, 2, 0, TimeSpan.Zero) } ] } }
+            let html = Support.render stretchModel
+            let required =
+                [ "the stretch item", Dom.attr Dom.Hooks.chatStretch "term-ui@3"
+                  // Four endings, four answers: "did they finish, get taken over, drop out,
+                  // or wander off?" is not one question.
+                  "how it ended", Dom.attr Dom.Hooks.chatStretchEnd Dom.Text.stretchStolen
+                  "who held it", "bob"
+                  "where", "build"
+                  "for how long", "2m 0s" ]
+            for label, marker in required do
+                Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+
         testCase "a recording the cap ate is a STATED gap, not an empty player" <| fun () ->
             // The one place stage 3d's behaviour reaches the surface. An empty player is
             // indistinguishable from a terminal that printed nothing, and the whole reason
@@ -392,7 +459,8 @@ let private uiChecklistTests =
                 { MessageId = MessageId.create "msg-rich" |> expect
                   Author = PeerRef ada
                   Body = "# Heading one\n\nText with **bold** and `code`.\n\n- item one\n- item two"
-                  Status = Complete }
+                  Status = Complete
+                  Offset = EventOffset.create 1L |> expect }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ richItem ] } }

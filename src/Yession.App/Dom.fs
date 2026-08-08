@@ -157,6 +157,18 @@ module Dom =
         let terminalReplay = "data-terminal-replay"
         let terminalClosedTab = "data-terminal-closed-tab"
         let terminalReplayGone = "data-terminal-replay-gone"
+        /// Terminal work in the CHAT (Plan 14, stage 1). A chip per block, anchored where the
+        /// command started; an item per lease stretch, anchored where it concluded. Both are
+        /// buttons — tapping one opens the terminal read-only — so both are keyboard-operable
+        /// by construction rather than by a handler bolted onto a div.
+        ///
+        /// The block chip's VALUE is the block id and the stretch item's is its terminal plus
+        /// the transcript line it began at, which is the only handle a stretch has: leases are
+        /// not minted with ids, and one terminal can have many stretches.
+        let chatBlock = "data-chat-block"
+        let chatBlockStatus = "data-chat-block-status"
+        let chatStretch = "data-chat-stretch"
+        let chatStretchEnd = "data-chat-stretch-end"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
@@ -225,6 +237,13 @@ module Dom =
         let blockOk = "ok"
         let blockFailed = "failed"
         let blockRejected = "rejected"
+        /// How a lease stretch ended, on its chat item (Plan 14, stage 1). Four tokens rather
+        /// than one, because the question a reader asks afterwards — "did nick finish, get
+        /// taken over, drop out, or just wander off?" — has four different answers.
+        let stretchReleased = "released"
+        let stretchStolen = "stolen"
+        let stretchGone = "holder-gone"
+        let stretchIdle = "idle"
         /// A queued command whose terminal's mode demands an approval it has not got.
         let queuedAwaitingApproval = "awaiting-approval"
         /// A queued command that will run as soon as the terminal is free.

@@ -584,22 +584,22 @@ let private at0 = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Ze
 let private leaseTests =
     testList "Terminal leases" [
         testCase "taking an unheld terminal writes one event; re-taking it writes none" <| fun () ->
-            let events, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
+            let events, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
             Expect.equal (List.length events) 1 "one take"
             Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef ada)) "ada holds it"
             // Not a steal from yourself. A client re-sending the frame must not fill the log.
-            let again, _ = TerminalLeases.take terminalA (PeerRef ada) false at0 leases
+            let again, _ = TerminalLeases.take terminalA (PeerRef ada) false at0 0 leases
             Expect.isEmpty again "re-taking your own lease records nothing"
 
         testCase "a steal ENDS the old lease before it starts the new one" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
-            let events, leases = TerminalLeases.take terminalA (PeerRef bob) false at0 held
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
+            let events, leases = TerminalLeases.take terminalA (PeerRef bob) false at0 7 held
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
-                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) }
-                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob } ]
-                "the release names who took it, and comes first"
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob); ToSeq = 7 }
+                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob; FromSeq = 7 } ]
+                "the release names who took it, and comes first; the two stretches abut at one seq"
             Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef bob)) "bob holds it now"
             // Folded in that order, a reader never sees two holders — and never none.
             let proj = fold [ opened terminalA "build"; yield! events ]
@@ -609,26 +609,26 @@ let private leaseTests =
                 "the projection agrees"
 
         testCase "only the holder can release; a non-holder's release is not an event" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
-            let events, leases = TerminalLeases.release terminalA (PeerRef bob) held
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
+            let events, leases = TerminalLeases.release terminalA (PeerRef bob) 9 held
             Expect.isEmpty events "bob cannot release ada's lease"
             Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef ada)) "and ada still holds it"
-            let events, leases = TerminalLeases.release terminalA (PeerRef ada) held
+            let events, leases = TerminalLeases.release terminalA (PeerRef ada) 9 held
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
-                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased } ]
-                "the holder's release is recorded as one"
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased; ToSeq = 9 } ]
+                "the holder's release is recorded as one, and bounds the stretch it ends"
             Expect.isEmpty (TerminalLeases.held leases) "and the terminal is free"
 
         testCase "a dropped peer's leases end, and only that peer's" <| fun () ->
-            let _, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
-            let _, leases = TerminalLeases.take terminalB (PeerRef bob) false at0 leases
-            let events, leases = TerminalLeases.peerGone ada leases
+            let _, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
+            let _, leases = TerminalLeases.take terminalB (PeerRef bob) false at0 0 leases
+            let events, leases = TerminalLeases.peerGone ada (fun _ -> 4) leases
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
-                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseHolderGone } ]
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseHolderGone; ToSeq = 4 } ]
                 "the reason says nobody decided anything"
             Expect.equal (TerminalLeases.held leases) (Set.singleton (TerminalId.value terminalB)) "bob's is untouched"
 
@@ -638,9 +638,9 @@ let private leaseTests =
             let proj =
                 fold
                     [ opened terminalA "build"
-                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob }
+                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob; FromSeq = 0 }
                       SessionEvent.TerminalLeaseReleased
-                        { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) } ]
+                        { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob); ToSeq = 0 } ]
             Expect.equal
                 (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
                 (Some (PeerRef bob))
@@ -650,7 +650,7 @@ let private leaseTests =
             let proj =
                 fold
                     [ opened terminalA "build"
-                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada }
+                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada; FromSeq = 0 }
                       SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" } ]
             Expect.equal
                 (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
@@ -818,17 +818,17 @@ let private idleLeaseTests =
                 "typing stops while you watch a build; that is not abandoning the terminal"
 
         testCase "a reclaim ends the lease under its own reason" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
-            let events, leases = TerminalLeases.reclaimIdle terminalA held
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
+            let events, leases = TerminalLeases.reclaimIdle terminalA 5 held
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
-                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle } ]
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle; ToSeq = 5 } ]
                 "not `LeaseReleased` — the holder decided nothing, they stopped"
             Expect.isEmpty (TerminalLeases.held leases) "and the terminal is free"
 
         testCase "typing resets the clock; a non-holder's keystroke does not" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
             let later = at0.AddMinutes 4.0
             let touched = TerminalLeases.touch terminalA (PeerRef ada) later held
             Expect.equal
@@ -1328,17 +1328,17 @@ let private codecTests =
                   completed terminalA "1" CommandTimedOut 9
                   SessionEvent.TerminalTranscriptTruncated
                       { TerminalId = terminalA; BlockId = None; DroppedBytes = 17 }
-                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada }
+                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada; FromSeq = 0 }
                   // All three endings, because the reason is the whole value of the event: a
                   // release, a steal and a dropped connection read differently in a log.
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased }
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased; ToSeq = 0 }
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) }
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob); ToSeq = 0 }
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = ActorRef.Agent; Reason = LeaseHolderGone }
+                      { TerminalId = terminalA; Was = ActorRef.Agent; Reason = LeaseHolderGone; ToSeq = 0 }
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle }
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle; ToSeq = 0 }
                   SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = Some (block "1") }
                   SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = None }
                   SessionEvent.TerminalIntegrationRestored { TerminalId = terminalA } ]

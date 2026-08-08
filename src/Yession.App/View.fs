@@ -574,30 +574,6 @@ module View =
               </div>
             </header>"""
 
-    let private conversation (projection: ConversationProjection) : TemplateResult =
-        let items =
-            projection.Items
-            |> List.map (fun item ->
-                let isAgent = (item.Author = ActorRef.Agent)
-                let whoClass = if isAgent then Style.whoAgent else Style.who
-                let statusInner =
-                    match item.Status with
-                    | Complete -> Lit.nothing
-                    | Streaming -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>streaming</span>"""
-                    | ConversationItemStatus.Failed -> html $"""<span class="{Style.statusErr}">failed</span>"""
-                    | ConversationItemStatus.Interrupted -> html $"""<span class="{Style.statusFaint}">interrupted</span>"""
-                let bodyClass, caret =
-                    match item.Status with
-                    | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
-                    | _ -> Style.messageBody, Lit.nothing
-                html $"""
-                    <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
-                      <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
-                      <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
-                      <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
-                    </article>""")
-        html $"""<section class="{Style.timeline}" data-conversation>{items}</section>"""
-
     let private agentStrip (actions: ViewActions) (agent: AgentViewState) : TemplateResult =
         match agent.ActiveTurn with
         | Some turn ->
@@ -741,6 +717,97 @@ module View =
         // Named, not merely absent. "rejected by nick" in line with the commands that ran
         // is the whole reason a refusal mints a block at all.
         | BlockRejected (by, _) -> html $"""<span class="{Style.statusErr}">rejected by {authorLabel by}</span>"""
+
+    let private stretchEndLabel =
+        function
+        | LeaseReleased -> Dom.Text.stretchReleased
+        | LeaseStolen _ -> Dom.Text.stretchStolen
+        | LeaseHolderGone -> Dom.Text.stretchGone
+        | LeaseIdle -> Dom.Text.stretchIdle
+
+    /// How a stretch ended, said the way a reader asks it.
+    let private stretchEnding =
+        function
+        | LeaseReleased -> html $"""<span class="{Style.statusFaint}">handed back</span>"""
+        | LeaseStolen by -> html $"""<span class="{Style.statusFaint}">taken over by {authorLabel by}</span>"""
+        | LeaseHolderGone -> html $"""<span class="{Style.statusFaint}">holder left</span>"""
+        | LeaseIdle -> html $"""<span class="{Style.statusFaint}">went idle</span>"""
+
+    /// A stretch's length, in the coarsest unit that still says something. Sub-second is not
+    /// a session someone had; it is a lease that bounced.
+    let private durationText (span: System.TimeSpan) : string =
+        let seconds = int (round span.TotalSeconds)
+        if seconds >= 3600 then sprintf "%dh %dm" (seconds / 3600) ((seconds % 3600) / 60)
+        elif seconds >= 60 then sprintf "%dm %ds" (seconds / 60) (seconds % 60)
+        else sprintf "%ds" seconds
+
+    /// The chat: what was said and what was run, in the order it happened (Plan 14, stage 1).
+    ///
+    /// Terminal items are resolved against `TerminalProjection` at render time rather than
+    /// copied into the timeline, which is what makes a running chip mutate in place as its
+    /// block finishes — the timeline holds where it goes, the projection holds what it says.
+    let private chat (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        let message (item: ConversationItem) =
+            let isAgent = (item.Author = ActorRef.Agent)
+            let whoClass = if isAgent then Style.whoAgent else Style.who
+            let statusInner =
+                match item.Status with
+                | Complete -> Lit.nothing
+                | Streaming -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>streaming</span>"""
+                | ConversationItemStatus.Failed -> html $"""<span class="{Style.statusErr}">failed</span>"""
+                | ConversationItemStatus.Interrupted -> html $"""<span class="{Style.statusFaint}">interrupted</span>"""
+            let bodyClass, caret =
+                match item.Status with
+                | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
+                | _ -> Style.messageBody, Lit.nothing
+            html $"""
+                <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
+                  <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
+                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
+                  <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
+                </article>"""
+        // One line: who ran what, and how it went. No output — a tail inline would make the
+        // chat noisiest exactly when it is busiest, and would put everything a command
+        // printed one glance from anyone in the session rather than one tap.
+        let blockChip (terminalId: TerminalId) (blockId: BlockId) =
+            let found =
+                TerminalProjection.tryFind terminalId model.Terminals
+                |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+            match found with
+            // Both folds read the same page, so a chip without its block is a page boundary,
+            // not a bug: the next page brings it. Rendering nothing beats rendering a stub.
+            | None -> Lit.nothing
+            | Some block ->
+                html $"""
+                    <button type="button" class="{Style.chatChip}"
+                            data-chat-block="{BlockId.value blockId}"
+                            data-chat-block-status="{terminalBlockStatusLabel block.Status}"
+                            data-terminal-id="{TerminalId.value terminalId}"
+                            @click={Ev(fun _ -> dispatch (SelectTerminalMsg terminalId))}>
+                      <span class="{Style.chatChipWho}">{authorLabel block.Author}</span>
+                      <span class="{Style.terminalPrompt}">$</span>
+                      <code class="{Style.chatChipCommand}">{block.Command}</code>
+                      <span class="shrink-0">{terminalBlockStatus block.Status}</span>
+                    </button>"""
+        let stretchItem (stretch: TerminalStretch) =
+            let length = durationText (TerminalStretch.duration stretch)
+            html $"""
+                <button type="button" class="{Style.chatChip}"
+                        data-chat-stretch="{TerminalStretch.key stretch}"
+                        data-chat-stretch-end="{stretchEndLabel stretch.End}"
+                        data-terminal-id="{TerminalId.value stretch.TerminalId}"
+                        @click={Ev(fun _ -> dispatch (SelectTerminalMsg stretch.TerminalId))}>
+                  <span class="{Style.chatChipWho}">{authorLabel stretch.Holder}</span>
+                  <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
+                  <span class="shrink-0">{stretchEnding stretch.End}</span>
+                </button>"""
+        let items =
+            TimelineProjection.items model.Conversation model.Timeline
+            |> List.map (function
+                | TimelineMessage item -> message item
+                | TimelineBlock (_, terminalId, blockId) -> blockChip terminalId blockId
+                | TimelineStretch stretch -> stretchItem stretch)
+        html $"""<section class="{Style.timeline}" data-conversation>{items}</section>"""
 
     /// One block: the command that ran, then everything it printed.
     let private terminalBlockView (feed: TerminalFeed) (block: TerminalBlock) : TemplateResult =
@@ -1080,7 +1147,7 @@ module View =
             <div class="{Style.mainColumn}">
               {header actions dispatch model}
               {degradedBanner model}
-              {conversation model.Conversation}
+              {chat dispatch model}
               {agentStrip actions model.Agent}
               {queue dispatch model.Synced}
               {drafts actions dispatch model}

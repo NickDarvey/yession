@@ -165,6 +165,11 @@ type ClientModel =
       EphemeralStorage : bool
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
+      /// The terminal half of the chat (Plan 14, stage 1): block chips and lease-stretch
+      /// items, with the offset each is anchored at. Merged with `Conversation` at render
+      /// time by `TimelineProjection.items` — a view-level fold, so the projection that
+      /// builds the agent's context is untouched.
+      Timeline      : TimelineProjection
       EventConsumer : EventConsumerState
       Agent         : AgentViewState
       /// Other peers' live carets+selections, keyed by peer. Cleared when a peer moves its
@@ -315,6 +320,7 @@ module ClientModel =
           EphemeralStorage = false
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
+          Timeline = TimelineProjection.empty
           EventConsumer =
             { LastProcessedOffset = None
               LatestKnownOffset = None
@@ -562,9 +568,17 @@ module ClientModel =
                             Map.add joined.PeerId joined.DisplayName roster
                         | _ -> roster)
                     model.Peers
+            // The terminal half of the chat, gated on the same offset as the conversation —
+            // one page, two folds, merged only at render.
+            let timeline, _ =
+                TimelineProjection.applyEvents
+                    model.EventConsumer.LastProcessedOffset
+                    page.Events
+                    model.Timeline
             let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
             { model with
                 Conversation = conversation
+                Timeline = timeline
                 Agent = agent
                 Environment = environment
                 Terminals = terminals

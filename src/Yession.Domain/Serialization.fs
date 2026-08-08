@@ -451,14 +451,29 @@ module Codec =
             Decode.object (fun get ->
                 { TerminalIntegrationRestored.TerminalId = get.Required.Field "terminalId" terminalId.Decode }) }
 
+    /// The transcript bound a lease event carries (Plan 14, stage 1).
+    ///
+    /// OPTIONAL on the way in, alone among the terminal payloads' value fields, because a log
+    /// written before this existed is a log a running session still has to replay — and the
+    /// store fails loudly on anything it cannot decode. Absent reads as 0, so a stretch from
+    /// before the range was recorded has `ToSeq <= FromSeq`: an EMPTY range, which every reader
+    /// already treats as "nothing to replay" (it is what a rejected block carries). A default
+    /// that guessed a real range instead would replay the wrong bytes and look right.
+    let private leaseSeq (get: Decode.IGetters) (field: string) : int =
+        get.Optional.Field field Decode.int |> Option.defaultValue 0
+
     let private terminalLeaseTaken : Codec<TerminalLeaseTaken> =
         { Encode =
             fun (p: TerminalLeaseTaken) ->
-                Encode.object [ "terminalId", terminalId.Encode p.TerminalId; "by", actor.Encode p.By ]
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "by", actor.Encode p.By
+                      "fromSeq", Encode.int p.FromSeq ]
           Decode =
             Decode.object (fun get ->
                 { TerminalLeaseTaken.TerminalId = get.Required.Field "terminalId" terminalId.Decode
-                  TerminalLeaseTaken.By = get.Required.Field "by" actor.Decode }) }
+                  TerminalLeaseTaken.By = get.Required.Field "by" actor.Decode
+                  TerminalLeaseTaken.FromSeq = leaseSeq get "fromSeq" }) }
 
     let private terminalLeaseReleased : Codec<TerminalLeaseReleased> =
         { Encode =
@@ -466,12 +481,14 @@ module Codec =
                 Encode.object
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "was", actor.Encode p.Was
-                      "reason", leaseEnd.Encode p.Reason ]
+                      "reason", leaseEnd.Encode p.Reason
+                      "toSeq", Encode.int p.ToSeq ]
           Decode =
             Decode.object (fun get ->
                 { TerminalLeaseReleased.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalLeaseReleased.Was = get.Required.Field "was" actor.Decode
-                  TerminalLeaseReleased.Reason = get.Required.Field "reason" leaseEnd.Decode }) }
+                  TerminalLeaseReleased.Reason = get.Required.Field "reason" leaseEnd.Decode
+                  TerminalLeaseReleased.ToSeq = leaseSeq get "toSeq" }) }
 
     let private terminalCommandRejected : Codec<TerminalCommandRejected> =
         { Encode =
