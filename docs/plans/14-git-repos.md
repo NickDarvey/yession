@@ -148,3 +148,10 @@ Deviations and concretions against the sections above:
 - **The panel is `/repos*` beside the connection panels** (cookie-gated, extra-routes),
   its listing the FILESYSTEM's answer (branch + dirty per checkout) so it can never
   disagree with `git status`; every action re-probes rather than patching client state.
+- **The Ports-tier suite is an authorization test, not only an exchange.** Driving
+  `/github*` against a stub github.com pins what no pure test can see, because it is about
+  what crosses the wire: an unauthenticated caller cannot make the session a device-flow
+  proxy, a request body can choose between two scopes but cannot ADDRESS one, the device
+  code stays in the session while only the user code reaches the browser, and a pending
+  flow is keyed by target — so one signed-in human polling cannot redeem another's code
+  and land their token under his own scope.

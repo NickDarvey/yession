@@ -853,6 +853,300 @@ let private e2eTests =
             }
     ]
 
+// --- [Ports]: the /github sign-in routes against a stub github.com ---------------------------
+// The pure tier above pins the device flow's DECISIONS (what a body decodes to, what an
+// outcome folds to). This tier pins the SURFACE those decisions sit behind: who the routes
+// let in, whose scope a granted token lands in, and whether one signed-in human can finish
+// another's flow. The device flow is an authorization ceremony whose whole security rests on
+// the device code never leaving the session — a property no pure test can observe, because it
+// is about what crosses the wire.
+
+/// A scripted github.com: `/device/code` always hands back the same code pair, `/token`
+/// answers whatever the test currently wants and records what it was asked. Real GitHub
+/// answers 200 for every device-flow outcome, so the stub does too — the status code is
+/// never the signal (RFC 8628).
+type private StubGitHub =
+    { DeviceUrl : string
+      TokenUrl : string
+      SetTokenReply : string -> unit
+      TokenRequests : ResizeArray<string> }
+
+let private deviceCode = "dev-secret-do-not-leak"
+
+let private startStubGitHub () : Async<StubGitHub> =
+    async {
+        let mutable tokenReply = """{"error":"authorization_pending"}"""
+        let tokenRequests = ResizeArray<string> ()
+        let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            let mutable acc = ""
+            req.on ("data", fun chunk -> acc <- acc + Interop.bufferToString chunk) |> ignore
+            req.on ("end", fun _ ->
+                let reply =
+                    if (req.url.Split('?').[0]) = "/device/code" then
+                        sprintf """{"device_code":%s,"user_code":"WDJB-MJHT","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"""
+                            (Encode.toString 0 (Encode.string deviceCode))
+                    else
+                        tokenRequests.Add acc
+                        tokenReply
+                res.writeHead (200, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
+                res.``end`` reply) |> ignore
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        let origin = sprintf "http://127.0.0.1:%d" (Interop.serverPort listening)
+        return
+            { DeviceUrl = origin + "/device/code"
+              TokenUrl = origin + "/token"
+              SetTokenReply = (fun r -> tokenReply <- r)
+              TokenRequests = tokenRequests }
+    }
+
+/// The identity a request's cookie stands for, in this harness: `who=<name>` names a
+/// user, `who=anon` is unattributed (trust-localhost) access, anything else is nobody.
+/// Stands in for the OIDC round trip, which Oidc.fs already covers — what is under test
+/// here is what the routes DO with an identity, not how one is established.
+let private stubAuth () : SessionAuth.Auth =
+    { Configure = fun _ _ _ _ -> async { return Ok () }
+      IsAuthenticated = fun req -> (Interop.headerOf req "cookie").IsSome
+      IdentityOf =
+        fun req ->
+            match Interop.headerOf req "cookie" with
+            | Some cookie when cookie.StartsWith "who=" ->
+                let who = cookie.Substring 4
+                let attribution : Yession.SessionProcess.PeerAttribution =
+                    if who = "anon" then Yession.SessionProcess.UnattributedAccess
+                    else Yession.SessionProcess.AttributedUser (UserId.create who |> expect)
+                Some ({ Subject = who; DisplayName = None; Attribution = attribution } : Yession.SessionProcess.CookieIdentity)
+            | _ -> None
+      BeginLogin = fun _ -> async { return None }
+      HandleCallback = fun _ -> async { return Error (500, "not under test") }
+      CookieName = "who" }
+
+/// Every credential the routes stored, in order — the assertion surface for "whose scope
+/// did that token land in". Stands in for the Manager's control connection; the broker
+/// itself is proven above, so this records rather than stores.
+type private RecordingConnections =
+    { Client : ControlClient.SessionConnections
+      Puts : ResizeArray<SecretId * string>
+      Disconnects : ResizeArray<SecretId> }
+
+let private recordingConnections () : RecordingConnections =
+    let puts = ResizeArray<SecretId * string> ()
+    let disconnects = ResizeArray<SecretId> ()
+    { Client =
+        { Begin = fun _ -> async { return Error "not under test" }
+          Complete = fun _ _ -> async { return Error "not under test" }
+          Put = fun target value -> async { puts.Add (target, value); return Ok () }
+          Disconnect = fun target -> async { disconnects.Add target; return Ok true }
+          Resolve = fun _ -> async { return Error "not under test" } }
+      Puts = puts
+      Disconnects = disconnects }
+
+/// A bare server carrying only the /github handler, mounted at the origin root.
+let private startGitHubRoutes (connections: ControlClient.SessionConnections) (statusOf: SecretId -> ConnectionKind option) =
+    async {
+        let route = GitHubConnection.routes sessionA (stubAuth ()) connections statusOf ""
+        let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            if not (route req res) then
+                res.writeHead (404, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                res.``end`` "not found"
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        return sprintf "http://127.0.0.1:%d" (Interop.serverPort listening)
+    }
+
+/// Point the module at the stub for the duration of one test, and put the environment back
+/// afterwards — these are process-wide and the suite runs beside others.
+let private withStubGitHub (stub: StubGitHub) (clientId: string option) (body: unit -> Async<unit>) : Async<unit> =
+    async {
+        let names = [ "YESSION_GITHUB_DEVICE_URL"; "YESSION_GITHUB_TOKEN_URL"; "YESSION_GITHUB_CLIENT_ID" ]
+        let saved = names |> List.map (fun n -> n, getEnvRaw n)
+        setEnv "YESSION_GITHUB_DEVICE_URL" stub.DeviceUrl
+        setEnv "YESSION_GITHUB_TOKEN_URL" stub.TokenUrl
+        match clientId with
+        | Some id -> setEnv "YESSION_GITHUB_CLIENT_ID" id
+        | None -> unsetEnv "YESSION_GITHUB_CLIENT_ID"
+        try
+            do! body ()
+        finally
+            saved
+            |> List.iter (fun (n, v) ->
+                match v with
+                | Some original -> setEnv n original
+                | None -> unsetEnv n)
+    }
+
+let private githubRouteTests =
+    testList "github sign-in routes" [
+        testCaseAsync "the door: no cookie reaches nothing, and only the two scope words name a target" <|
+            async {
+                let! stub = startStubGitHub ()
+                let recorder = recordingConnections ()
+                let! url = startGitHubRoutes recorder.Client (fun _ -> None)
+                do! withStubGitHub stub (Some "Iv1.test") (fun () ->
+                    async {
+                        // No cookie: every route is 401 before it looks at anything else. The
+                        // begin route reaches github.com, so an unauthenticated caller getting
+                        // past this door would make the session an open device-flow proxy.
+                        let! status = getWithCookie (url + "/github") "" |> Async.AwaitPromise
+                        Expect.equal status.status 401 "status is gated"
+                        let! began = postJsonWithCookie (url + "/github/begin") "" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal began.status 401 "begin is gated"
+                        Expect.equal stub.TokenRequests.Count 0 "nothing reached github.com"
+
+                        // A cookie the process did not mint is no better than none.
+                        let! forged = postJsonWithCookie (url + "/github/begin") "sid=forged" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal forged.status 401 "an unrecognised cookie is not an identity"
+
+                        // Signed in, but naming a scope that is not one of the two words: the
+                        // body cannot address a scope, only choose between the caller's own and
+                        // this session's.
+                        let! bogus = postJsonWithCookie (url + "/github/begin") "who=alice" """{"scope":"user:bob"}""" |> Async.AwaitPromise
+                        Expect.equal bogus.status 400 "a scope string is not a scope"
+                        Expect.isTrue (bogus.body.Contains "unknown scope choice") "and says so"
+
+                        // Unattributed access owns nothing until it names the peer it is.
+                        let! anon = postJsonWithCookie (url + "/github/begin") "who=anon" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal anon.status 400 "no owner, no target"
+                        Expect.isTrue (anon.body.Contains "peer id required") "and says so"
+                        Expect.equal recorder.Puts.Count 0 "nothing was stored by any of it"
+                    })
+            }
+
+        testCaseAsync "begin hands the browser the user code and keeps the device code; poll paces, then connects" <|
+            async {
+                let! stub = startStubGitHub ()
+                let recorder = recordingConnections ()
+                let! url = startGitHubRoutes recorder.Client (fun _ -> None)
+                do! withStubGitHub stub (Some "Iv1.test") (fun () ->
+                    async {
+                        let! began = postJsonWithCookie (url + "/github/begin") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal began.status 200 "the flow began"
+                        Expect.isTrue (began.body.Contains "WDJB-MJHT") "the human is told what to type"
+                        Expect.isTrue (began.body.Contains "https://github.com/login/device") "and where to type it"
+                        // The device code is the half of the grant that redeems the token. It
+                        // stays in the session: a browser that held it could finish the flow
+                        // outside the session and keep the token for itself.
+                        Expect.isFalse (began.body.Contains deviceCode) "the device code never reaches the browser"
+
+                        // Pending: the panel is told to keep waiting, at the pace GitHub set.
+                        let! pending = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal pending.status 200 "still waiting"
+                        Expect.isTrue (pending.body.Contains "\"status\":\"pending\"") "pending"
+                        Expect.isTrue (pending.body.Contains "\"interval\":5") "at github's pace"
+                        let request = stub.TokenRequests.[0]
+                        Expect.isTrue (request.Contains "\"client_id\":\"Iv1.test\"") "the app identified itself"
+                        Expect.isTrue (request.Contains deviceCode) "the session redeemed the device code it kept"
+                        Expect.isTrue (request.Contains "urn:ietf:params:oauth:grant-type:device_code") "the RFC 8628 grant"
+
+                        // slow_down widens the pace, and the wider pace STICKS: a flow that
+                        // forgot it would be told to slow down forever.
+                        stub.SetTokenReply """{"error":"slow_down"}"""
+                        let! slowed = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.isTrue (slowed.body.Contains "\"interval\":10") "widened by the spec's 5s"
+                        stub.SetTokenReply """{"error":"authorization_pending"}"""
+                        let! again = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.isTrue (again.body.Contains "\"interval\":10") "the widened pace survives the next poll"
+
+                        // The grant lands under the SIGNED-IN HUMAN's scope, never a scope the
+                        // request named.
+                        stub.SetTokenReply """{"access_token":"ghu_granted","token_type":"bearer"}"""
+                        let! connected = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal connected.status 200 "granted"
+                        Expect.isTrue (connected.body.Contains "\"status\":\"connected\"") "and says so"
+                        Expect.equal (List.ofSeq recorder.Puts) [ githubTarget (UserScope alice), "ghu_granted" ] "stored under alice, verbatim"
+
+                        // The flow is spent. A replayed poll finds nothing to finish.
+                        let! replay = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal replay.status 400 "single-use"
+                        Expect.equal recorder.Puts.Count 1 "and stored nothing twice"
+                    })
+            }
+
+        testCaseAsync "a pending flow belongs to the target that began it — nobody else can finish it" <|
+            async {
+                let! stub = startStubGitHub ()
+                let recorder = recordingConnections ()
+                let! url = startGitHubRoutes recorder.Client (fun _ -> None)
+                do! withStubGitHub stub (Some "Iv1.test") (fun () ->
+                    async {
+                        // Alice begins for herself. Bob is signed in too, and github.com is
+                        // holding a grant that is about to be approved.
+                        let! _ = postJsonWithCookie (url + "/github/begin") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        stub.SetTokenReply """{"access_token":"ghu_alices","token_type":"bearer"}"""
+
+                        // Bob polls his own scope: there is no flow of his, so nothing happens.
+                        // If pending flows were not keyed by target, Bob's poll would redeem
+                        // Alice's device code and store HER token under HIS scope.
+                        let! bob = postJsonWithCookie (url + "/github/poll") "who=bob" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal bob.status 400 "no flow of bob's to finish"
+                        Expect.equal stub.TokenRequests.Count 0 "and bob's poll never redeemed a code"
+
+                        // The same human's OTHER scope is a different target, so it is a
+                        // different flow — the session-wide credential is not a side effect of
+                        // signing in for yourself.
+                        let! otherScope = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"session"}""" |> Async.AwaitPromise
+                        Expect.equal otherScope.status 400 "session scope has no flow of its own"
+
+                        // Alice finishes hers, and it lands where it began.
+                        let! alice' = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal alice'.status 200 "alice's flow completes"
+                        Expect.equal (List.ofSeq recorder.Puts) [ githubTarget (UserScope alice), "ghu_alices" ] "under alice, and only alice"
+                    })
+            }
+
+        testCaseAsync "without a configured app there is no flow to begin, and a paste is checked before it is stored" <|
+            async {
+                let! stub = startStubGitHub ()
+                let recorder = recordingConnections ()
+                let! url = startGitHubRoutes recorder.Client (fun _ -> None)
+                do! withStubGitHub stub None (fun () ->
+                    async {
+                        // No client id: the operator has registered no App. The route says so
+                        // instead of posting a half-formed grant at github.com.
+                        let! began = postJsonWithCookie (url + "/github/begin") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
+                        Expect.equal began.status 400 "nothing to begin"
+                        Expect.isTrue (began.body.Contains "YESSION_GITHUB_CLIENT_ID") "names what is missing"
+
+                        // The paste path is the day-one route, and it works with no App at all
+                        // — but only for something that is actually a GitHub credential.
+                        let! wrong = postJsonWithCookie (url + "/github/token") "who=alice" """{"scope":"mine","token":"sk-ant-api03-x"}""" |> Async.AwaitPromise
+                        Expect.equal wrong.status 400 "a claude key is not a github one"
+                        Expect.equal recorder.Puts.Count 0 "and was not stored"
+                        let! pasted = postJsonWithCookie (url + "/github/token") "who=alice" """{"scope":"session","token":"ghp_pasted"}""" |> Async.AwaitPromise
+                        Expect.equal pasted.status 200 "stored"
+                        Expect.equal (List.ofSeq recorder.Puts) [ githubTarget (SessionScope sessionA), "ghp_pasted" ] "under the scope the human chose"
+
+                        let! gone = postJsonWithCookie (url + "/github/disconnect") "who=alice" """{"scope":"session"}""" |> Async.AwaitPromise
+                        Expect.equal gone.status 200 "disconnected"
+                        Expect.equal (List.ofSeq recorder.Disconnects) [ githubTarget (SessionScope sessionA) ] "the scope the human chose"
+                    })
+            }
+
+        testCaseAsync "status reports both scopes, and reports them per caller" <|
+            async {
+                let! stub = startStubGitHub ()
+                let recorder = recordingConnections ()
+                let connected = Map.ofList [ githubTarget (UserScope alice), StaticConnection ]
+                let! url = startGitHubRoutes recorder.Client (fun target -> Map.tryFind target connected)
+                do! withStubGitHub stub (Some "Iv1.test") (fun () ->
+                    async {
+                        let! forAlice = getWithCookie (url + "/github") "who=alice" |> Async.AwaitPromise
+                        Expect.equal forAlice.status 200 "alice sees her own"
+                        Expect.isTrue (forAlice.body.Contains "\"mine\":\"static\"") "alice is connected"
+                        Expect.isTrue (forAlice.body.Contains "\"session\":null") "the session is not"
+                        Expect.isTrue (forAlice.body.Contains "\"owner\":\"user\"") "as a user"
+
+                        // The same session, a different human: status is computed from the
+                        // caller's identity, so bob does not learn he is signed in because
+                        // alice is.
+                        let! forBob = getWithCookie (url + "/github") "who=bob" |> Async.AwaitPromise
+                        Expect.isTrue (forBob.body.Contains "\"mine\":null") "bob is not connected"
+                    })
+            }
+    ]
+
 let tests =
     testList "Connections" [
         codecTests
@@ -862,5 +1156,6 @@ let tests =
         githubTests
         Tag.needs "Broker service" [ Tag.Ports ] (fun () -> brokerTests)
         Tag.needs "Connection control routes" [ Tag.Ports ] (fun () -> routeTests)
+        Tag.needs "GitHub sign-in routes" [ Tag.Ports ] (fun () -> githubRouteTests)
         Tag.needs "Per-actor credentials E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
     ]
