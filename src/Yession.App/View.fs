@@ -1344,28 +1344,64 @@ module View =
                 if List.isEmpty view.Blocks then
                     [ html $"""<div class="{Style.terminalOutputEmpty}">Nothing has run here yet.</div>""" ]
                 else view.Blocks |> List.map (terminalBlockView feed)
+            // The DVR (Plan 14, stage 7): step back through what this terminal has recorded
+            // so far while it keeps running, and catch back up. Offered on any LIVE terminal
+            // — the mechanism does not care which mode it is in, and both are one growing
+            // byte stream.
+            let rewound = ClientModel.isRewound view.TerminalId model
+            let dvr =
+                if not view.IsOpen then Lit.nothing
+                elif rewound then
+                    html $"""
+                        <div class="{Style.terminalQueuedRow}">
+                          <span class="{Style.statusFaint}">behind live</span>
+                          <button type="button" class="{Style.cls [ Style.btnPrimary; "ml-auto" ]}"
+                                  data-terminal-live="{TerminalId.value view.TerminalId}"
+                                  @click={Ev(fun _ -> dispatch (JumpToLiveMsg view.TerminalId))}>Jump to live</button>
+                        </div>"""
+                else
+                    html $"""
+                        <div class="{Style.terminalQueuedRow}">
+                          <button type="button" class="{Style.cls [ Style.btn; "ml-auto" ]}"
+                                  data-terminal-rewind="{TerminalId.value view.TerminalId}"
+                                  @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId))}>Rewind</button>
+                        </div>"""
             // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
             // program is running here and what it displays is not a list of commands and
             // their output — the blocks are block mode's view of a terminal, and they come
             // back the moment the lease does. The transcript keeps both either way.
             let above =
-                match view.Lease with
-                | Some holder ->
+                if rewound then
+                    // Behind the live edge: the recording, played. The same mount and the
+                    // same cast a finished terminal's replay uses, which is exactly what
+                    // "rewound like live TV, through the same mechanism" has to mean.
                     html $"""
-                        <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
-                          {truncated}
-                        </div>
-                        {terminalScreenView actions model view.TerminalId holder}"""
-                | None ->
-                    html $"""
-                        <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
-                          {truncated}
-                          {blocks}
-                        </div>"""
+                        {dvr}
+                        <div class="{Style.paneReadonly}" role="region" aria-label="Terminal recording, behind live"
+                             data-pane-replay="{PaneTab.key (TerminalTab view.TerminalId)}"></div>"""
+                else
+                    match view.Lease with
+                    | Some holder ->
+                        html $"""
+                            <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
+                              {truncated}
+                            </div>
+                            {dvr}
+                            {terminalScreenView actions model view.TerminalId holder}"""
+                    | None ->
+                        html $"""
+                            <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
+                              {truncated}
+                              {blocks}
+                            </div>
+                            {dvr}"""
             html $"""
                 {above}
-                {if view.IsOpen then terminalComposer actions dispatch model view.TerminalId
-                 else terminalReplay model view}"""
+                {if not view.IsOpen then terminalReplay model view
+                 // Behind the live edge there is nothing to type into and nothing to queue
+                 // against what you are watching: the way back is "jump to live", above.
+                 elif rewound then Lit.nothing
+                 else terminalComposer actions dispatch model view.TerminalId}"""
         let body =
             match selected with
             | None ->

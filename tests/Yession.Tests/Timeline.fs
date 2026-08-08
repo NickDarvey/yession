@@ -736,6 +736,92 @@ let private videoTests =
                 "a whole recording starts at the start; its header is its keyframe"
     ]
 
+// --- The DVR (stage 7) -------------------------------------------------------------------------
+
+let private dvrTests =
+    testList "Rewinding a live terminal (Plan 14, stage 7)" [
+        testCase "rewinding plays what has been recorded SO FAR, and pins that length" <| fun () ->
+            // A recording that grew under a reader would move the scrub bar out from under
+            // them, which is the one thing rewinding exists to avoid. The terminal keeps
+            // running and its records keep arriving — that is what makes this a DVR rather
+            // than a replay of something finished.
+            let live =
+                [ at 1L 0.0 (opened terminalA "shell")
+                  at 2L 1.0 (took terminalA (PeerRef bob) 1) ]
+            let model = withRecords (clientOf live) |> ClientModel.update (RewindTerminalMsg terminalA)
+            Expect.isTrue (ClientModel.isRewound terminalA model) "the pane is behind live"
+            let castAt (m: ClientModel) =
+                match ClientModel.paneReplay (TerminalTab terminalA) m with
+                | Some replay -> outputsOf replay.Cast
+                | None -> failwith "the header is known, so there is a recording"
+            Expect.equal
+                (castAt model)
+                [ "building\r\n"; "done\r\n"; "testing\r\n"; "FAILED\r\n" ]
+                "everything recorded when the rewind began"
+            // The terminal keeps printing. What is being watched does not move.
+            let stillGrowing =
+                ClientModel.update
+                    (TerminalRecordMsg (terminalA, 5, { At = 60.0; Kind = TranscriptOutput; Data = "after\r\n" }))
+                    model
+            Expect.equal (castAt stillGrowing) (castAt model) "the recording under the reader is unchanged"
+
+        testCase "jumping to live drops the rewind, and the newest bytes are back" <| fun () ->
+            let live = [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef bob) 1) ]
+            let model =
+                withRecords (clientOf live)
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+                |> ClientModel.update
+                    (TerminalRecordMsg (terminalA, 5, { At = 60.0; Kind = TranscriptOutput; Data = "after\r\n" }))
+                |> ClientModel.update (JumpToLiveMsg terminalA)
+            Expect.isFalse (ClientModel.isRewound terminalA model) "caught back up"
+            match ClientModel.paneReplay (TerminalTab terminalA) model with
+            | Some replay -> Expect.isTrue ((outputsOf replay.Cast) |> List.contains "after\r\n") "including what arrived while behind"
+            | None -> failwith "the header is known, so there is a recording"
+
+        testCase "choosing anything else in the pane ends the rewind" <| fun () ->
+            // A pane that was still behind live because of a rewind somebody started ten
+            // minutes ago would be a surprise with no cause on screen.
+            let live = [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef bob) 1) ]
+            let model =
+                withRecords (clientOf live)
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+                |> ClientModel.update (SelectTerminalMsg terminalA)
+            Expect.isFalse (ClientModel.isRewound terminalA model) "the rewind went with the choice"
+
+        testCase "rewind is offered on ANY live terminal, and the screen gives way to it" <| fun () ->
+            // The mechanism does not care which MODE the terminal is in: a running build and
+            // a `vim` session are one growing byte stream, and a rule that offered this for
+            // one and not the other would be a special case to explain rather than a feature.
+            let inBlockMode = withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell") ])
+            Expect.isTrue
+                ((Support.render inBlockMode).Contains (Dom.attr Dom.Hooks.terminalRewind "term-a"))
+                "a terminal in block mode is rewindable"
+            let inLiveMode =
+                withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef ada) 1) ])
+            Expect.isTrue
+                ((Support.render inLiveMode).Contains (Dom.attr Dom.Hooks.terminalRewind "term-a"))
+                "and so is one in live mode"
+            let rewound = ClientModel.update (RewindTerminalMsg terminalA) inLiveMode
+            let html = Support.render rewound
+            Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.terminalLive "term-a")) "the way back to the edge"
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.paneReplay "terminal:term-a"))
+                "the recording mounts through the same player a finished terminal uses"
+            Expect.isFalse
+                (html.Contains (Dom.attr Dom.Hooks.terminalScreen "term-a"))
+                "and the live screen gives way to it while you are behind"
+
+        testCase "a CLOSED terminal is not rewindable — it is simply a recording" <| fun () ->
+            let closed =
+                withRecords
+                    (clientOf
+                        [ at 1L 0.0 (opened terminalA "shell")
+                          at 2L 1.0 (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "done" }) ])
+            Expect.isFalse
+                ((Support.render closed).Contains Dom.Hooks.terminalRewind)
+                "there is no live edge to be behind"
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
         orderTests
@@ -745,4 +831,5 @@ let tests =
         paneTests
         keyframeTests
         videoTests
+        dvrTests
     ]

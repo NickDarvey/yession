@@ -276,6 +276,11 @@ type ClientModel =
       /// client has — a "play whole terminal" from a block chip lands on that block, in the
       /// context around it, which is the question the sliced view cannot answer.
       PaneStartAt   : (TerminalId * int) option
+      /// A live terminal this client has REWOUND, and the transcript length it was rewound
+      /// at (Plan 14, stage 7). While set, the pane plays what has been recorded so far
+      /// instead of showing the live screen — the terminal keeps running and its records
+      /// keep arriving, exactly as a broadcast keeps going while you watch it behind.
+      PaneRewound   : (TerminalId * int) option
       /// Whether the terminals panel is open. View state, never synced: two people in one
       /// session may reasonably want different columns on screen.
       TerminalsOpen : bool
@@ -376,6 +381,11 @@ type ClientMsg =
     /// that block (Plan 14, stage 4). Two paths on purpose: the slice answers "what did this
     /// command print", the whole answers "what was going on around it".
     | PlayWholeTerminalMsg of TerminalId * fromSeq: int
+    /// Rewind a LIVE terminal (Plan 14, stage 7): play what it has recorded so far, from a
+    /// transcript length pinned now, while the terminal keeps running.
+    | RewindTerminalMsg of TerminalId
+    /// Catch back up: drop the rewind and show the live screen again.
+    | JumpToLiveMsg of TerminalId
     /// Open or close the terminals column.
     | ToggleTerminalsMsg
     /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
@@ -443,6 +453,7 @@ module ClientModel =
           PaneTabs = []
           PaneChoice = None
           PaneStartAt = None
+          PaneRewound = None
           TerminalsOpen = false
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
@@ -605,6 +616,12 @@ module ClientModel =
                           // replaying internally to that time.
                           Poster = timeOf (toSeq - 1) |> Option.map (fun at -> at - origin) }
             | TerminalTab terminal ->
+                // A REWOUND live terminal plays what it has recorded so far, up to the
+                // length pinned when the rewind began. Everything else about it is the
+                // whole-terminal recording, which is the point: rewinding live TV and
+                // replaying a finished session are the same mechanism with a moving end.
+                let rewoundTo =
+                    model.PaneRewound |> Option.filter (fun (id, _) -> id = terminal) |> Option.map snd
                 let markers =
                     TerminalProjection.tryFind terminal model.Terminals
                     |> Option.map (fun view ->
@@ -615,8 +632,12 @@ module ClientModel =
                             // wrong command.
                             timeOf block.FromSeq |> Option.map (fun at -> at, block.Command)))
                     |> Option.defaultValue []
+                let records =
+                    match rewoundTo with
+                    | Some length -> feed.Records |> Map.toList |> List.filter (fun (seq, _) -> seq < length)
+                    | None -> feed.Records |> Map.toList
                 Some
-                    { Cast = TranscriptReplay.cast header (feed.Records |> Map.toList)
+                    { Cast = TranscriptReplay.cast header records
                       Markers = markers
                       StartAt =
                         model.PaneStartAt
@@ -643,6 +664,10 @@ module ClientModel =
             // A whole recording starts at the start; the header is its keyframe.
             | TerminalTab _ -> None
         wanted |> Option.filter (fun key -> not (Map.containsKey key model.TerminalKeyframes))
+
+    /// Whether this client is watching a terminal behind its live edge (Plan 14, stage 7).
+    let isRewound (terminal: TerminalId) (model: ClientModel) : bool =
+        model.PaneRewound |> Option.exists (fun (id, _) -> id = terminal)
 
     /// The live screen of a terminal, when this client has composed one.
     let terminalScreen (terminal: TerminalId) (model: ClientModel) : string option =
@@ -938,12 +963,24 @@ module ClientModel =
         | TerminalScreenMsg (terminal, screen) ->
             { model with TerminalScreens = Map.add terminal screen model.TerminalScreens }
         | SelectTerminalMsg terminal ->
-            { model with PaneChoice = Some (TerminalTab terminal); PaneStartAt = None; TerminalsOpen = true }
+            { model with PaneChoice = Some (TerminalTab terminal); PaneStartAt = None; PaneRewound = None; TerminalsOpen = true }
         | SelectPaneTabMsg tab ->
             // The start hint belongs to the step-out that set it, so choosing anything else
             // drops it — a recording that opened halfway through because of a chip somebody
             // tapped ten minutes ago would be a surprise with no cause on screen.
-            { model with PaneChoice = Some tab; PaneStartAt = None; TerminalsOpen = true }
+            { model with PaneChoice = Some tab; PaneStartAt = None; PaneRewound = None; TerminalsOpen = true }
+        | RewindTerminalMsg terminal ->
+            // The length is pinned NOW rather than followed. A recording that grew under a
+            // reader would move the scrub bar out from under them, which is the one thing
+            // rewinding exists to avoid.
+            let length = (model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty).KnownLength
+            { model with
+                PaneChoice = Some (TerminalTab terminal)
+                PaneRewound = Some (terminal, length)
+                PaneStartAt = None
+                TerminalsOpen = true }
+        | JumpToLiveMsg terminal ->
+            { model with PaneRewound = None; PaneChoice = Some (TerminalTab terminal); TerminalsOpen = true }
         | PlayWholeTerminalMsg (terminal, fromSeq) ->
             { model with
                 PaneChoice = Some (TerminalTab terminal)
@@ -957,6 +994,7 @@ module ClientModel =
                 PaneTabs = if already then model.PaneTabs else model.PaneTabs @ [ tab ]
                 PaneChoice = Some tab
                 PaneStartAt = None
+                PaneRewound = None
                 TerminalsOpen = true }
         | ClosePaneTabMsg tab ->
             // The selection falls back through `selectedPane` — a choice naming a tab that

@@ -782,6 +782,46 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+        // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
+        // terminal really mounts a player over what it has recorded so far — the same player
+        // and the same cast a finished terminal's replay uses, which is what "rewound like
+        // live TV, through the same mechanism" has to mean — and that jumping back to the
+        // edge returns the live screen.
+        testCaseAsync "a live terminal rewinds to its recording, plays it, and jumps back to live" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 7)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 7)))
+
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
+
+                // Rewinding replaces the live screen with the recording, in a real player.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-rewind='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-terminal-screen='term-live']")""")
+
+                // …and it plays what the terminal printed BEFORE the moment it was rewound.
+                do! awaitU (page.ClickAsync "#shell [data-pane-replay='terminal:term-live'] .ap-overlay-start")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-pane-replay='terminal:term-live']")?.textContent.includes('earlier output') === true""")
+
+                // Jumping to live puts the screen back, and takes the player down with it.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-live='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 // --- A path-mounted session in a real browser (docs/plans/10) ---------------------------

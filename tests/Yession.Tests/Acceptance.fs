@@ -133,6 +133,7 @@ let private representativeModel : ClientModel =
       PaneTabs = []
       PaneChoice = None
       PaneStartAt = None
+      PaneRewound = None
       TerminalsOpen = true
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }

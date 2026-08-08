@@ -168,6 +168,9 @@ let private shellModel : ClientModel =
                     IntegrationLost = false
                     Blocks = []
                     DroppedBytes = 0 } ] }
+        // The live terminal has a recording behind it too — that is what makes it
+        // rewindable (Plan 14, stage 7), and a DVR with nothing recorded is a control with
+        // nothing to do.
         TerminalFeeds =
             Map.ofList
                 [ terminalId,
@@ -175,6 +178,14 @@ let private shellModel : ClientModel =
                       Map.ofList
                           [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\n" }
                             1, { At = 0.1; Kind = TranscriptOutput; Data = "total 0\n" } ]
+                    KnownLength = 2
+                    ReadThrough = 2
+                    Header = Some { Width = 80; Height = 24; Timestamp = 0L } }
+                  liveId,
+                  { Records =
+                      Map.ofList
+                          [ 0, { At = 0.0; Kind = TranscriptOutput; Data = "earlier output\r\n" }
+                            1, { At = 0.2; Kind = TranscriptOutput; Data = "vim ~/notes\r\n" } ]
                     KnownLength = 2
                     ReadThrough = 2
                     Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]

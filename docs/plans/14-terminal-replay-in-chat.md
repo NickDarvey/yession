@@ -1,6 +1,9 @@
 # Plan 14 — Terminal work in the chat, and replay as a first-class surface
 
-> **Status: proposed.** Builds directly on [Plan 13](13-worksandbox-terminals.md), which shipped
+> **Status: shipped**, stages 0-7. Two things landed differently from the sketch below and
+> are called out where they happen: keyframes are written at range STARTS only (stage 3), and
+> the DVR is built out of the whole-terminal cast rather than a custom player source (stage 7).
+> Builds directly on [Plan 13](13-worksandbox-terminals.md), which shipped
 > terminals, blocks, the pty, live mode, the transcript sidecar, the chunk route and the
 > asciinema replay of a closed terminal. This plan takes the two things Plan 13 deliberately
 > left open — the browser terminal viewport, and the fact that terminal work is invisible from
@@ -111,8 +114,8 @@ a block starts at a fresh prompt line, so a fresh VT is close. "Close" is not a 
 an audit trail on, and it is not close at all for a lease stretch, which by definition begins
 with a program already owning the screen.
 
-So: **keyframes**. At each block boundary and each lease-stretch boundary the Session Process
-serializes the emulator's screen — the same serializer `TerminalSnapshot` already uses to bring
+So: **keyframes**. At each range START — every block's `FromSeq`, every lease stretch's — the
+Session Process serializes the emulator's screen — the same serializer `TerminalSnapshot` already uses to bring
 a joining peer up to date — and writes it to a sidecar keyed by transcript seq. A ranged replay
 is then *header + one synthesized output record that paints the keyframe + the rebased range*,
 which is a valid asciicast the stock player renders with no modification.
@@ -126,6 +129,12 @@ while output is capped.
 
 They stay in a **sidecar**, not in the `.cast`. Plan 13 bought a standard, replayable format
 on purpose; putting a private record type in the file spends that.
+
+**Shipped at range starts only.** A keyframe at every range END too would be a keyframe nothing
+reads: a range `[from, to)` asks for the one at `from`, and the next range's `from` gets its own.
+Capturing it reads the transcript position first and starts the serialize in the same tick, which
+is what makes the pairing exact — the emulator's write barrier resolves over everything queued
+before it and nothing that arrived after.
 
 **Whole-terminal replay needs none of this.** The full cast starts at the start, so it mounts as
 it does today, with two additions the player already supports: `markers` at each block boundary
@@ -143,6 +152,19 @@ beginning. The union of the two transports the design already has is precisely a
 The stock player cannot express this: its file source is static, and its live sources
 (websocket, eventsource) do not seek backwards. So the client owns the timeline and drives the
 player through a custom source — history, tail, seek, and a "jump to live" that reattaches.
+
+**Shipped without the custom source, and the difference is worth stating.** The client already
+holds every record — history fetched over the chunk route, tail arriving on the data channel —
+so rewinding PINS the transcript length at that moment and mounts the ordinary whole-terminal
+cast over `[0, length)`, through the same player a finished terminal replays in. Seeking is then
+the player's own, and it needs no keyframes because the cast starts at the start. "Jump to live"
+drops the pin and the live screen comes back.
+
+What that gives up is watching the tail arrive while behind it: the recording under the reader
+is fixed until they catch up. That is deliberate — a recording that grew under a scrub bar would
+move it out from under them, which is the one thing rewinding is for avoiding — and it is why
+the custom source is not needed to satisfy "rewound like live TV through the same mechanism". If
+following-while-behind is ever wanted, the custom source is where it goes.
 
 **This is offered on any live terminal, not only interactive ones.** The mechanism does not care
 which mode the terminal is in; both are one growing byte stream. Scrubbing back through a running
@@ -242,16 +264,22 @@ Plan 13's open item: the client renders a live screen from `TerminalOutput` and
 `TerminalSnapshot`, produces `TerminalInput`/`TerminalResize`, and wires take/release/steal to
 the lease bar that already exists.
 
-*Tests:* `Ports Native` — a real two-peer session where one takes the lease, types, and the other
-sees it read-only; the idle timeout returning the terminal to block mode.
+The client composes the screen with the SAME emulator the Session Process uses, linked rather
+than copied — fed the same bytes in the same order, the two screens cannot disagree, which is
+the property `TerminalSnapshot` already rests on.
+
+*Tests:* `Browser`, host-free — the keystroke translation is the part only a real browser can
+answer, because a `KeyboardEvent` is not something a rendered string has. The two-peer pty flow
+is NOT covered: it needs `Pty` and a sandbox that can spawn. The Process half of it is already
+pinned in the pty suite.
 
 ### Stage 7 — the DVR
 
-The custom player source: chunk history, live tail, keyframe-targeted seek, jump-to-live. Offered
-on any live terminal.
+Rewind and jump-to-live on any live terminal, over the whole-terminal cast pinned at the moment
+of rewind (see "Live TV" above for why the custom source turned out to be unnecessary).
 
-*Tests:* `Ports Native` for seek-then-catch-up against a real growing transcript; `Browser` for
-the control surface.
+*Tests:* cheap tier for the pinning and for what ends a rewind; `Browser` for the control
+surface and for the recording really playing in a real player.
 
 ## Protocol and versioning
 

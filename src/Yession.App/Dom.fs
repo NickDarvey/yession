@@ -194,6 +194,13 @@ module Dom =
         /// terminal's id; the holder's copy is the one that takes keystrokes, and every other
         /// peer's is the same screen read-only.
         let terminalScreen = "data-terminal-screen"
+        /// The DVR (Plan 14, stage 7): step back through what a LIVE terminal has recorded
+        /// so far, and catch back up to its edge. Offered on any live terminal, whichever
+        /// mode it is in — both are one growing byte stream, and a rule that offered it for
+        /// an interactive session and not for a running build would be a special case to
+        /// explain rather than a feature.
+        let terminalRewind = "data-terminal-rewind"
+        let terminalLive = "data-terminal-live"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
