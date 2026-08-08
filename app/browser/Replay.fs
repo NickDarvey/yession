@@ -20,6 +20,7 @@ module Yession.Browser.Replay
 
 open Fable.Core
 open Fable.Core.JsInterop
+open Yession.App
 
 /// What `create` hands back. Only `dispose` is used: a replay is mounted when a closed
 /// terminal is shown and torn down when it is not, and a player left attached to a detached
@@ -47,19 +48,29 @@ let private revoke (url: string) : unit = jsNative
 type Mounted =
     { Dispose : unit -> unit }
 
-/// Mount a replay of `cast` into `element`.
+/// Mount a replay into `element`, with whatever the model computed for this tab.
 ///
 /// `idleTimeLimit` compresses the long gaps a terminal spends waiting for a person — an audit
 /// read of a session someone left open for an hour should not be an hour long. `fit: "width"`
 /// keeps the recorded geometry (the header's width and height are what make a replay come out
 /// the shape the terminal actually was) while scaling to the panel.
-let mount (element: Browser.Types.Element) (cast: string) : Mounted =
-    let url = blobUrl cast
-    let player =
-        create
-            (box url)
-            element
-            (createObj [ "fit" ==> "width"; "idleTimeLimit" ==> 2; "terminalFontFamily" ==> "ui-monospace, monospace" ])
+///
+/// `markers`, `startAt` and `poster` are the player's own options (Plan 14, stage 4), which is
+/// why the step-out from a chip needs no second recording: a whole-terminal cast with a start
+/// position expresses everything a slice can, and its chapters come from the blocks that ran.
+/// `poster: "npt:<t>"` costs nothing extra — the player builds the still by replaying to that
+/// point internally.
+let mount (element: Browser.Types.Element) (replay: PaneReplay) : Mounted =
+    let url = blobUrl replay.Cast
+    let options =
+        [ "fit" ==> "width"
+          "idleTimeLimit" ==> 2
+          "terminalFontFamily" ==> "ui-monospace, monospace" ]
+        @ (if List.isEmpty replay.Markers then []
+           else [ "markers" ==> (replay.Markers |> List.map (fun (at, label) -> box [| box at; box label |]) |> Array.ofList) ])
+        @ (match replay.StartAt with Some at -> [ "startAt" ==> at ] | None -> [])
+        @ (match replay.Poster with Some at -> [ "poster" ==> sprintf "npt:%f" at ] | None -> [])
+    let player = create (box url) element (createObj options)
     { Dispose =
         fun () ->
             player.dispose ()

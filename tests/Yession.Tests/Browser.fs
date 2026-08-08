@@ -576,6 +576,10 @@ let editorTests =
                 // …with the transport controls that ARE the audit-read affordance: a replay
                 // you cannot pause or seek is a video of a terminal, not a record of one.
                 let! _ = await (page.WaitForSelectorAsync "#replay .ap-control-bar")
+                // …and the chapter marks (Plan 14, stage 4), which are what make a
+                // whole-terminal recording navigable by what ran in it. Asserted here
+                // because a marker option the player silently ignored would leave every
+                // DOM-free test green and the chapters absent.
 
                 // Then play it, and wait for the recording's own output to appear on the
                 // screen. This is the assertion that spans the whole stage: bytes the Session
@@ -586,6 +590,14 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         "document.querySelector('#replay').textContent.includes('total 0')")
+
+                // …and the chapter marks (Plan 14, stage 4), which are what make a
+                // whole-terminal recording navigable by what ran in it. Asserted after play
+                // rather than before, because the recording's metadata — its duration, and
+                // therefore where a marker sits on the bar — is not known until it loads.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelectorAll('#replay .ap-marker').length === 1")
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()
@@ -599,7 +611,7 @@ let editorTests =
         // Neither is visible to a rendered string, and both are the WCAG floor rather than a
         // nicety: a chip that opens a pane and leaves focus behind, or a close that strands
         // focus on a control it just removed, is exactly the failure the floor names.
-        testCaseAsync "a chat chip opens a pane tab, the strip walks, and closing hands focus back" <|
+        testCaseAsync "a chat chip opens a pane tab that plays, the strip walks, and closing hands focus back" <|
             async {
                 let server = serveStatic harnessRoot (EDITOR_PORT + 4)
                 let! pw = await (Playwright.CreateAsync ())
@@ -614,26 +626,33 @@ let editorTests =
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-block]")
                 do! awaitU (page.ClickAsync "#shell [data-chat-block]")
 
-                // A tab opened, showing that block read-only — command and output, from the
-                // records the client already has.
+                // A tab opened, showing that block.
                 let showingBlock =
                     """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel')?.startsWith('block:') === true"""
                 let! _ = await (page.WaitForFunctionAsync showingBlock)
-                let! _ =
-                    await (page.WaitForFunctionAsync
-                        """document.querySelector('#shell [data-pane-block]')?.textContent.includes('total 0') === true""")
 
-                // Focus followed it into the pane.
+                // Focus followed it into the pane. Asserted BEFORE anything is played,
+                // because pressing play is itself a focus move.
                 let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
 
-                // The strip is a real tablist: an arrow key walks it, and because activation
-                // is MANUAL, walking does not swap the panel under the reader per keypress.
+                // The strip is a real tablist: an arrow key walks it. MANUAL activation, so
+                // walking does not swap the panel under the reader per keypress.
                 do! awaitU (page.FocusAsync "#shell [data-pane-tab^='block:']")
                 do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
                 let! _ =
                     await (page.WaitForFunctionAsync
                         """document.activeElement?.getAttribute('data-pane-tab')?.startsWith('terminal:') === true""")
                 let! _ = await (page.WaitForFunctionAsync showingBlock)
+
+                // The block's recording is PLAYED, not printed: the real player, over the
+                // ranged cast the model built, inside the tab the chip opened. A stream
+                // renderer would show a cursor-moving program as garbage, which is the whole
+                // reason the transcript was written as asciicast.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay] .ap-overlay-start")
+                do! awaitU (page.ClickAsync "#shell [data-pane-replay] .ap-overlay-start")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-block]')?.textContent.includes('total 0') === true""")
 
                 // Closing the tab hands focus back to the chip that opened it, rather than
                 // stranding it on a control that has just left the document.

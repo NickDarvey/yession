@@ -81,7 +81,17 @@ do
             { Width = 80; Height = 24; Timestamp = 0L }
             [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\r\n" }
               1, { At = 0.1; Kind = TranscriptOutput; Data = "total 0\r\n" } ]
-    Replay.mount replayHost cast |> ignore
+    // Markers and a poster ride the same mount (Plan 14, stage 4): they are the player's own
+    // options, and whether they resolve through this bundle is the same question the import
+    // itself is. A `startAt` is deliberately absent here — it would skip past the very frame
+    // the replay assertion below waits for.
+    Replay.mount
+        replayHost
+        { Cast = cast
+          Markers = [ 0.0, "ls -la" ]
+          StartAt = None
+          Poster = None }
+    |> ignore
 
 // --- The shell, host-free (Plan 14, stage 2) --------------------------------------------
 //
@@ -153,9 +163,14 @@ let private shellModel : ClientModel =
 
 do
     let actions = { ViewActions.ssr with FocusPane = PaneFocus.toPane; FocusChat = PaneFocus.toChatItem }
+    // The app's own player sync, so a block tab in the harness really plays its recording —
+    // which is the point of driving this in a browser rather than asserting a string.
+    let replays = PaneReplays.create ()
     let mutable model = shellModel
     let rec dispatch (msg: ClientMsg) : unit =
         model <- ClientModel.update msg model
         render ()
-    and render () = Lit.render (unbox shellHost) (View.view actions model dispatch)
+    and render () =
+        Lit.render (unbox shellHost) (View.view actions model dispatch)
+        replays.Sync model
     render ()

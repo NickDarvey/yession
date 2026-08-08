@@ -182,6 +182,20 @@ module PaneTab =
         | TerminalTab _ -> false
         | BlockTab _ | StretchTab _ -> true
 
+/// What a pane tab's player should be handed (Plan 14, stage 4) — a whole recording, or a
+/// range of one, plus the things the stock player already knows how to do with it.
+type PaneReplay =
+    { /// The `.cast` text, ready to mount.
+      Cast : string
+      /// Chapter marks, in the recording's own clock: one per block, labelled with its
+      /// command. A whole-terminal recording becomes navigable by what ran in it.
+      Markers : (float * string) list
+      /// Where to start playing — how "play whole terminal" from a chip lands on that block
+      /// in full context, without slicing anything.
+      StartAt : float option
+      /// The time whose frame becomes the still shown before anyone presses play.
+      Poster : float option }
+
 type ClientModel =
     { Peer          : PeerState
       Connection    : ConnectionState
@@ -249,6 +263,11 @@ type ClientModel =
       /// Which tab the pane is showing. `None` = the first open terminal, resolved by
       /// `selectedPane`.
       PaneChoice    : PaneTab option
+      /// Where a whole-terminal recording should start playing, when a chip stepped out to
+      /// it (Plan 14, stage 4). The transcript line, turned into a time by the records the
+      /// client has — a "play whole terminal" from a block chip lands on that block, in the
+      /// context around it, which is the question the sliced view cannot answer.
+      PaneStartAt   : (TerminalId * int) option
       /// Whether the terminals panel is open. View state, never synced: two people in one
       /// session may reasonably want different columns on screen.
       TerminalsOpen : bool
@@ -341,6 +360,10 @@ type ClientMsg =
     /// Close one. Only tabs a person opened can be closed; a terminal's own tab is the
     /// strip's furniture, and "close" on one of those already means closing the terminal.
     | ClosePaneTabMsg of PaneTab
+    /// Step out from a block's sliced view to the terminal's WHOLE recording, landing on
+    /// that block (Plan 14, stage 4). Two paths on purpose: the slice answers "what did this
+    /// command print", the whole answers "what was going on around it".
+    | PlayWholeTerminalMsg of TerminalId * fromSeq: int
     /// Open or close the terminals column.
     | ToggleTerminalsMsg
     /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
@@ -406,6 +429,7 @@ module ClientModel =
           TerminalKeyframes = Map.empty
           PaneTabs = []
           PaneChoice = None
+          PaneStartAt = None
           TerminalsOpen = false
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
@@ -502,16 +526,110 @@ module ClientModel =
     /// the naive slice, approximately right for command output and wrong wherever the screen
     /// carried state in. Refusing to play a recording we do have would be the worse answer,
     /// and the surface says which one it is showing.
+    let private rangedCastFrom
+        (header: TranscriptHeader)
+        (feed: TerminalFeed)
+        (model: ClientModel)
+        (terminal: TerminalId)
+        (fromSeq: int)
+        (toSeq: int)
+        : string =
+        TranscriptReplay.range
+            header
+            (Map.tryFind (terminal, fromSeq) model.TerminalKeyframes)
+            fromSeq
+            toSeq
+            (feed.Records |> Map.toList)
+
     let rangedCast (terminal: TerminalId) (fromSeq: int) (toSeq: int) (model: ClientModel) : string option =
         let feed = model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
-        feed.Header
-        |> Option.map (fun header ->
-            TranscriptReplay.range
-                header
-                (Map.tryFind (terminal, fromSeq) model.TerminalKeyframes)
-                fromSeq
-                toSeq
-                (feed.Records |> Map.toList))
+        feed.Header |> Option.map (fun header -> rangedCastFrom header feed model terminal fromSeq toSeq)
+
+    /// What a tab's player should be handed (Plan 14, stage 4).
+    ///
+    /// Assembled here rather than in the browser entry because every part of it is a
+    /// function of the model, and a value the cheap tier can assert on is worth more than
+    /// one only a real player can.
+    let paneReplay (tab: PaneTab) (model: ClientModel) : PaneReplay option =
+        let feed = model.TerminalFeeds |> Map.tryFind (PaneTab.terminal tab) |> Option.defaultValue TerminalFeed.empty
+        /// The recording's own clock at a transcript line — what a marker, a poster and a
+        /// start position are all measured in. `None` for a line this client has not read.
+        let timeOf (seq: int) = feed.Records |> Map.tryFind seq |> Option.map (fun r -> r.At)
+        match feed.Header with
+        // The header is transcript line 0; without it the geometry is a guess, and a
+        // recording replayed under the wrong one rewraps every line in it.
+        | None -> None
+        | Some header ->
+            match tab with
+            | BlockTab (terminal, blockId) ->
+                TerminalProjection.tryFind terminal model.Terminals
+                |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+                // A block's range is only a RANGE once it has an end. While it runs, its
+                // recording grows on every record, and a player rebuilt on each one would
+                // thrash through a streaming build; a refused command never ran at all. Both
+                // are cases the surface reports rather than plays.
+                |> Option.bind (fun block -> block.ToSeq |> Option.map (fun toSeq -> block, toSeq))
+                |> Option.filter (fun (block, _) -> match block.Status with BlockRejected _ -> false | _ -> true)
+                |> Option.map (fun (block, toSeq) ->
+                    { Cast = rangedCastFrom header feed model terminal block.FromSeq toSeq
+                      // One command is one chapter; there is nothing to mark.
+                      Markers = []
+                      StartAt = None
+                      Poster = None })
+            | StretchTab stretch ->
+                match stretch.Range with
+                // Nothing to replay, and the surface says so rather than mounting a player
+                // over an empty recording — which is indistinguishable from a quiet session.
+                | None -> None
+                | Some (fromSeq, toSeq) ->
+                    let origin = timeOf fromSeq |> Option.defaultValue 0.0
+                    Some
+                        { Cast = rangedCastFrom header feed model stretch.TerminalId fromSeq toSeq
+                          Markers = []
+                          StartAt = None
+                          // A still of the FINAL screen, so the item has a face before anyone
+                          // presses play. It costs nothing extra: the player builds it by
+                          // replaying internally to that time.
+                          Poster = timeOf (toSeq - 1) |> Option.map (fun at -> at - origin) }
+            | TerminalTab terminal ->
+                let markers =
+                    TerminalProjection.tryFind terminal model.Terminals
+                    |> Option.map (fun view ->
+                        view.Blocks
+                        |> List.choose (fun block ->
+                            // A block whose first line this client has not read has no time
+                            // to mark, and a marker at a guessed one would point at the
+                            // wrong command.
+                            timeOf block.FromSeq |> Option.map (fun at -> at, block.Command)))
+                    |> Option.defaultValue []
+                Some
+                    { Cast = TranscriptReplay.cast header (feed.Records |> Map.toList)
+                      Markers = markers
+                      StartAt =
+                        model.PaneStartAt
+                        |> Option.filter (fun (id, _) -> id = terminal)
+                        |> Option.bind (fun (_, seq) -> timeOf seq)
+                      Poster = None }
+
+    /// The keyframe a tab's replay needs and this client does not have (Plan 14, stage 4).
+    ///
+    /// Fetched on demand rather than streamed: a keyframe is read by somebody opening a
+    /// recording, not by everybody watching one grow, and there is one per block in a
+    /// session that may have run thousands.
+    let missingKeyframe (tab: PaneTab) (model: ClientModel) : (TerminalId * int) option =
+        let wanted =
+            match tab with
+            | BlockTab (terminal, blockId) ->
+                TerminalProjection.tryFind terminal model.Terminals
+                |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+                // A refused command has an empty range and never ran, so there is no screen
+                // it started from and nothing to fetch.
+                |> Option.filter (fun block -> block.Status <> BlockRunning && (match block.Status with BlockRejected _ -> false | _ -> true))
+                |> Option.map (fun block -> terminal, block.FromSeq)
+            | StretchTab stretch -> stretch.Range |> Option.map (fun (fromSeq, _) -> stretch.TerminalId, fromSeq)
+            // A whole recording starts at the start; the header is its keyframe.
+            | TerminalTab _ -> None
+        wanted |> Option.filter (fun key -> not (Map.containsKey key model.TerminalKeyframes))
 
     /// A terminal's feed, empty when nothing has arrived for it yet.
     let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
@@ -801,9 +919,17 @@ module ClientModel =
         | TerminalKeyframeMsg (terminal, keyframe) ->
             { model with TerminalKeyframes = Map.add (terminal, keyframe.Seq) keyframe model.TerminalKeyframes }
         | SelectTerminalMsg terminal ->
-            { model with PaneChoice = Some (TerminalTab terminal); TerminalsOpen = true }
+            { model with PaneChoice = Some (TerminalTab terminal); PaneStartAt = None; TerminalsOpen = true }
         | SelectPaneTabMsg tab ->
-            { model with PaneChoice = Some tab; TerminalsOpen = true }
+            // The start hint belongs to the step-out that set it, so choosing anything else
+            // drops it — a recording that opened halfway through because of a chip somebody
+            // tapped ten minutes ago would be a surprise with no cause on screen.
+            { model with PaneChoice = Some tab; PaneStartAt = None; TerminalsOpen = true }
+        | PlayWholeTerminalMsg (terminal, fromSeq) ->
+            { model with
+                PaneChoice = Some (TerminalTab terminal)
+                PaneStartAt = Some (terminal, fromSeq)
+                TerminalsOpen = true }
         | OpenPaneTabMsg tab ->
             // Idempotent on the tab's key: tapping the same chip twice brings its tab
             // forward rather than opening a second one that says exactly the same thing.
@@ -811,6 +937,7 @@ module ClientModel =
             { model with
                 PaneTabs = if already then model.PaneTabs else model.PaneTabs @ [ tab ]
                 PaneChoice = Some tab
+                PaneStartAt = None
                 TerminalsOpen = true }
         | ClosePaneTabMsg tab ->
             // The selection falls back through `selectedPane` — a choice naming a tab that

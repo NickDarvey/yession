@@ -13,6 +13,9 @@
     <!-- Focus moves the model cannot make: shared by the app entry and the host-free
          shell harness, so there is one implementation rather than two. -->
     <Compile Include="PaneFocus.fs" />
+    <!-- Keeping the mounted players in step with the model: shared by the app entry and
+         the host-free shell harness, so there is one mount path rather than two. -->
+    <Compile Include="PaneReplays.fs" />
     <Compile Include="Browser.fs" />
     <!-- Host-free harness for the rich-editor browser E2E; bundled only by the test build,
          never imported by the app entry (Browser.fs), so it does not ship. -->

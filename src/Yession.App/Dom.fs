@@ -154,7 +154,6 @@ module Dom =
         /// The replay of a CLOSED terminal (Plan 13, stage 3e): the mount the player attaches
         /// to, the tab that reaches a closed terminal at all, and the banner shown instead
         /// when retention has deleted the recording.
-        let terminalReplay = "data-terminal-replay"
         let terminalClosedTab = "data-terminal-closed-tab"
         let terminalReplayGone = "data-terminal-replay-gone"
         /// Terminal work in the CHAT (Plan 14, stage 1). A chip per block, anchored where the
@@ -182,6 +181,15 @@ module Dom =
         let panePanel = "data-pane-panel"
         /// A block's read-only view: its command line and everything it printed.
         let paneBlock = "data-pane-block"
+        /// Where a player mounts (Plan 13, stage 3e; Plan 14, stage 4). ONE hook for all
+        /// three kinds of recording — a whole terminal, a block's range, a stretch's — with
+        /// the tab's key as its value, because they differ in what they play rather than in
+        /// how they are mounted. Two hooks would be two mount paths to keep correct.
+        let paneReplay = "data-pane-replay"
+        /// A stretch's facts, above its recording.
+        let paneStretch = "data-pane-stretch"
+        /// The step-out from a block's sliced view to the whole terminal's recording.
+        let panePlayWhole = "data-pane-play-whole"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).

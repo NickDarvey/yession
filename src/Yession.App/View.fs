@@ -1036,10 +1036,10 @@ module View =
     /// immutable chunk cache the rest of the history does.
     let private terminalReplay (model: ClientModel) (view: TerminalView) : TemplateResult =
         let feed = ClientModel.terminalFeed view.TerminalId model
-        // Retention (stage 3d) deletes a closed terminal's transcript whole once it is old
-        // enough, and its chunks then 404. Saying so is the point: an empty player would be
-        // indistinguishable from a terminal that printed nothing, and the whole reason the
-        // drop is recorded is that a gap in an audit trail must be a stated fact.
+        // The per-terminal output cap (stage 3d) can eat a whole recording. Saying so is the
+        // point: an empty player would be indistinguishable from a terminal that printed
+        // nothing, and the whole reason the drop is recorded is that a gap in an audit trail
+        // must be a stated fact.
         let gone = Map.isEmpty feed.Records && view.DroppedBytes > 0
         let closedFor =
             match view.ClosedReason with
@@ -1050,7 +1050,7 @@ module View =
                 <section class="{Style.terminalComposer}" data-terminal-replay-gone="{TerminalId.value view.TerminalId}">
                   <div class="{Style.terminalQueuedRow}">
                     <span class="{Style.statusFaint}">{closedFor}</span>
-                    <span class="{Style.small}">This terminal's recording has passed its retention window and was deleted. The commands it ran are above; what they printed is no longer kept.</span>
+                    <span class="{Style.small}">This terminal printed more than its recording keeps. The commands it ran are above; what they printed is no longer kept.</span>
                   </div>
                 </section>"""
         else
@@ -1061,7 +1061,7 @@ module View =
                     <span class="{Style.small}">A recording of everything this terminal printed.</span>
                   </div>
                   <div class="{Style.terminalBlocks}" role="region" aria-label="Terminal recording"
-                       data-terminal-replay="{TerminalId.value view.TerminalId}"></div>
+                       data-pane-replay="{PaneTab.key (TerminalTab view.TerminalId)}"></div>
                 </section>"""
 
     /// Arrow-key movement inside the pane's tablist — the half of the ARIA tabs pattern a
@@ -1092,7 +1092,7 @@ module View =
     ///
     /// The very same renderer the terminal's own history uses — a block read from the chat
     /// must not be a second rendering of a block, free to drift from the first.
-    let private paneBlockView (model: ClientModel) (terminalId: TerminalId) (blockId: BlockId) : TemplateResult =
+    let private paneBlockView (dispatch: ClientMsg -> unit) (model: ClientModel) (terminalId: TerminalId) (blockId: BlockId) : TemplateResult =
         let found =
             TerminalProjection.tryFind terminalId model.Terminals
             |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
@@ -1103,12 +1103,46 @@ module View =
                   <div class="{Style.terminalOutputEmpty}">This command is not in the record this client has read.</div>
                 </div>"""
         | Some block ->
-            let feed = ClientModel.terminalFeed terminalId model
+            // The step-out, offered only where there is a whole recording to step out INTO.
+            // A live terminal's recording is still being written, and rewinding one of those
+            // is the DVR — a different mechanism, and not this one pretending.
+            let isClosed =
+                TerminalProjection.tryFind terminalId model.Terminals
+                |> Option.map (fun v -> not v.IsOpen)
+                |> Option.defaultValue false
+            let stepOut =
+                if not isClosed then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.btn}" data-pane-play-whole="{BlockId.value blockId}"
+                                @click={Ev(fun _ -> dispatch (PlayWholeTerminalMsg (terminalId, block.FromSeq)))}>Play whole terminal</button>"""
+            let body =
+                match block.Status with
+                // A refused command printed nothing because it never ran, and a player over
+                // nothing is indistinguishable from a quiet one. The reason is the thing the
+                // next reader actually wants.
+                | BlockRejected (by, reason) ->
+                    let text = reason |> Option.defaultValue "did not run"
+                    html $"""<div class="{Style.terminalOutputEmpty}">rejected by {authorLabel by} — {text}</div>"""
+                // A recording that is still being written has no end to replay to, and a
+                // player rebuilt on every record would thrash through a streaming build.
+                // The terminal's own tab is where you watch this happen.
+                | BlockRunning ->
+                    html $"""<div class="{Style.terminalOutputEmpty}">Still running — the recording is ready when it finishes.</div>"""
+                | BlockFinished _ ->
+                    html $"""
+                        <div class="{Style.paneReadonly}" role="region" aria-label="Command output"
+                             data-pane-replay="{PaneTab.key (BlockTab (terminalId, blockId))}"></div>"""
             html $"""
-                <div class="{Style.paneReadonly}" data-pane-block="{BlockId.value blockId}"
-                     role="region" aria-label="Command output">
-                  {terminalBlockView feed block}
-                </div>"""
+                <section class="{Style.paneBody}" data-pane-block="{BlockId.value blockId}">
+                  <div class="{Style.terminalBlockCommand}">
+                    <span class="{Style.terminalPrompt}">$</span>
+                    <code class="{Style.terminalCommandText}">{block.Command}</code>
+                    <span class="ml-auto shrink-0">{terminalBlockStatus block.Status}</span>
+                  </div>
+                  {body}
+                  <div class="{Style.paneFacts}">{stepOut}</div>
+                </section>"""
 
     /// A stretch's facts: who held the terminal, for how long, and how it ended. The
     /// recording itself mounts beneath this (Plan 14, stage 4); these are the parts that
@@ -1123,14 +1157,24 @@ module View =
             // and an empty player would be indistinguishable from a quiet session.
             | None ->
                 html $"""<span class="{Style.small}">No range was recorded for this session, so there is nothing to play back.</span>"""
+        let player =
+            match stretch.Range with
+            | Some _ ->
+                html $"""
+                    <div class="{Style.paneReadonly}" role="region" aria-label="Session recording"
+                         data-pane-replay="{PaneTab.key (StretchTab stretch)}"></div>"""
+            | None -> Lit.nothing
         html $"""
-            <section class="{Style.paneFacts}" data-pane-stretch="{TerminalStretch.key stretch}">
-              <div class="{Style.terminalQueuedRow}">
-                <span class="{Style.chatChipWho}">{authorLabel stretch.Holder}</span>
-                <span class="{Style.small}">typed in {stretch.Title} for {length}</span>
-                <span class="ml-auto shrink-0">{stretchEnding stretch.End}</span>
+            <section class="{Style.paneBody}">
+              <div class="{Style.paneFacts}" data-pane-stretch="{TerminalStretch.key stretch}">
+                <div class="{Style.terminalQueuedRow}">
+                  <span class="{Style.chatChipWho}">{authorLabel stretch.Holder}</span>
+                  <span class="{Style.small}">typed in {stretch.Title} for {length}</span>
+                  <span class="ml-auto shrink-0">{stretchEnding stretch.End}</span>
+                </div>
+                {recording}
               </div>
-              {recording}
+              {player}
             </section>"""
 
     /// The side pane: a tab strip over three kinds of thing — a terminal, a block's
@@ -1235,7 +1279,7 @@ module View =
                         match TerminalProjection.tryFind id model.Terminals with
                         | Some view -> terminalBody view
                         | None -> Lit.nothing
-                    | BlockTab (terminalId, blockId) -> paneBlockView model terminalId blockId
+                    | BlockTab (terminalId, blockId) -> paneBlockView dispatch model terminalId blockId
                     | StretchTab stretch -> paneStretchView stretch
                 // `tabindex="-1"` so the panel can take focus programmatically when a chip
                 // opens it, without becoming a Tab stop of its own. A DOM swap that leaves

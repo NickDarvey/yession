@@ -429,7 +429,9 @@ let private paneTests =
                   "the panel showing it", Dom.attr Dom.Hooks.panePanel "block:term-a:b-1"
                   "the block's read-only view", Dom.attr Dom.Hooks.paneBlock "b-1"
                   "the command", "ls -la"
-                  "what it printed", "total 0" ]
+                  // The output is PLAYED, not printed: what a command wrote is a recording,
+                  // and a stream renderer would show a cursor-moving program as garbage.
+                  "where its recording mounts", Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1" ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
             // Read-only: no composer for a block you are reading back.
@@ -583,6 +585,157 @@ let private keyframeTests =
             Expect.isNone (ClientModel.rangedCast terminalA 0 2 model) "nothing to render until line 0 arrives"
     ]
 
+// --- The video item (stage 4) -----------------------------------------------------------------
+
+/// A closed terminal with two blocks and the records they produced, which is what a
+/// whole-terminal recording is made of.
+let private recordedTerminal =
+    [ at 1L 0.0 (opened terminalA "build")
+      at 2L 1.0 (started terminalA "1" (PeerRef ada) "make" 1)
+      at 3L 2.0 (completed terminalA "1" (CommandSucceeded 0) 3)
+      at 4L 3.0 (started terminalA "2" (PeerRef ada) "make test" 3)
+      at 5L 4.0 (completed terminalA "2" (CommandFailed 1) 5)
+      at 6L 5.0 (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" }) ]
+
+let private withRecords (model: ClientModel) =
+    [ 1, { At = 10.0; Kind = TranscriptOutput; Data = "building\r\n" }
+      2, { At = 11.0; Kind = TranscriptOutput; Data = "done\r\n" }
+      3, { At = 40.0; Kind = TranscriptOutput; Data = "testing\r\n" }
+      4, { At = 43.5; Kind = TranscriptOutput; Data = "FAILED\r\n" } ]
+    |> List.fold (fun m (seq, record) -> ClientModel.update (TerminalRecordMsg (terminalA, seq, record)) m) model
+    |> ClientModel.update (TerminalHeaderMsg (terminalA, baseHeader))
+
+let private videoTests =
+    testList "The video item (Plan 14, stage 4)" [
+        testCase "a whole recording is chaptered by the commands that ran in it" <| fun () ->
+            // `markers` is the player's own option, which is why the step-out needs no second
+            // recording: a whole cast with chapters and a start position expresses everything
+            // a slice can.
+            let model = withRecords (clientOf recordedTerminal)
+            match ClientModel.paneReplay (TerminalTab terminalA) model with
+            | Some replay ->
+                Expect.equal replay.Markers [ 10.0, "make"; 40.0, "make test" ] "one chapter per block, at its first line"
+                Expect.isNone replay.StartAt "and it starts at the start until somebody steps out to it"
+            | None -> failwith "the header is known, so there is a recording"
+
+        testCase "'play whole terminal' lands on the block it stepped out from" <| fun () ->
+            // The two paths answer different questions: the slice is "what did this command
+            // print", the whole is "what was going on around it".
+            let model =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (PlayWholeTerminalMsg (terminalA, 3))
+            Expect.equal
+                (ClientModel.selectedPane model |> Option.map PaneTab.key)
+                (Some "terminal:term-a")
+                "the pane moved to the terminal's own recording"
+            match ClientModel.paneReplay (TerminalTab terminalA) model with
+            | Some replay -> Expect.equal replay.StartAt (Some 40.0) "starting where the second block did"
+            | None -> failwith "the header is known, so there is a recording"
+
+        testCase "a start hint belongs to the step-out that set it, and dies with it" <| fun () ->
+            let model =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (PlayWholeTerminalMsg (terminalA, 3))
+                |> ClientModel.update (SelectTerminalMsg terminalA)
+            match ClientModel.paneReplay (TerminalTab terminalA) model with
+            | Some replay -> Expect.isNone replay.StartAt "choosing the tab again starts it from the start"
+            | None -> failwith "the header is known, so there is a recording"
+
+        testCase "a stretch's item carries a poster: the still of its final screen" <| fun () ->
+            // It costs nothing extra — the player builds the still by replaying to that point
+            // internally — and the time is in the RANGE's own clock, because the cast it is
+            // shown over has been rebased.
+            let stretch =
+                { Offset = EventOffset.create 9L |> expect
+                  TerminalId = terminalA
+                  Title = "build"
+                  Holder = PeerRef bob
+                  End = LeaseReleased
+                  Range = Some (1, 4)
+                  StartedAt = epoch
+                  EndedAt = epoch.AddMinutes 1.0 }
+            let model = withRecords (clientOf recordedTerminal)
+            match ClientModel.paneReplay (StretchTab stretch) model with
+            | Some replay ->
+                Expect.equal replay.Poster (Some 30.0) "the last frame of the range, from its own zero"
+                Expect.isTrue (replay.Cast.Contains "testing") "and the recording is the range"
+            | None -> failwith "the header is known, so there is a recording"
+
+        testCase "a stretch with no recorded range has no player at all" <| fun () ->
+            // An empty player is indistinguishable from a quiet session, and the item says
+            // which one it is instead.
+            let stretch =
+                { Offset = EventOffset.create 9L |> expect
+                  TerminalId = terminalA
+                  Title = "build"
+                  Holder = PeerRef bob
+                  End = LeaseHolderGone
+                  Range = None
+                  StartedAt = epoch
+                  EndedAt = epoch.AddMinutes 1.0 }
+            Expect.isNone
+                (ClientModel.paneReplay (StretchTab stretch) (withRecords (clientOf recordedTerminal)))
+                "nothing to play"
+
+        testCase "a RUNNING block has no range yet, so nothing is mounted over it" <| fun () ->
+            // Its recording grows on every record, and a player rebuilt on each one would
+            // thrash through a streaming build. The terminal's own tab is where you watch it.
+            let running =
+                [ at 1L 0.0 (opened terminalA "build")
+                  at 2L 1.0 (started terminalA "1" (PeerRef ada) "make" 1) ]
+            let model = withRecords (clientOf running)
+            Expect.isNone (ClientModel.paneReplay (BlockTab (terminalA, block "1")) model) "not yet"
+            let finished = withRecords (clientOf (running @ [ at 3L 9.0 (completed terminalA "1" (CommandSucceeded 0) 3) ]))
+            Expect.isSome (ClientModel.paneReplay (BlockTab (terminalA, block "1")) finished) "and now"
+
+        testCase "a refused command is reported, never played" <| fun () ->
+            let rejected =
+                [ at 1L 0.0 (opened terminalA "build")
+                  at 2L 1.0 (
+                      SessionEvent.TerminalCommandRejected
+                          { TerminalId = terminalA
+                            QueueId = QueueId.create "q-1" |> expect
+                            BlockId = block "no"
+                            Author = ActorRef.Agent
+                            RejectedBy = PeerRef ada
+                            Command = "rm -rf /"
+                            Reason = Some "no" }) ]
+            let model = withRecords (clientOf rejected)
+            Expect.isNone (ClientModel.paneReplay (BlockTab (terminalA, block "no")) model) "it never ran"
+            Expect.isNone (ClientModel.missingKeyframe (BlockTab (terminalA, block "no")) model) "so there is no screen to fetch"
+            let html = Support.render (ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "no"))) model)
+            Expect.isTrue (html.Contains "rejected by ada") "the tab says who refused it"
+            Expect.isFalse (html.Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-no")) "and mounts no player"
+
+        testCase "the step-out is offered only where there IS a whole recording" <| fun () ->
+            // A live terminal's recording is still being written, and rewinding one of those
+            // is the DVR — a different mechanism, not this one pretending.
+            let closed =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+            Expect.isTrue
+                ((Support.render closed).Contains (Dom.attr Dom.Hooks.panePlayWhole "b-1"))
+                "a closed terminal's block can step out to the whole recording"
+            let stillOpen =
+                withRecords (clientOf (recordedTerminal |> List.filter (fun e -> match e.Event with SessionEvent.TerminalClosed _ -> false | _ -> true)))
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+            Expect.isFalse
+                ((Support.render stillOpen).Contains Dom.Hooks.panePlayWhole)
+                "a live one does not, because there is no finished recording to step into"
+
+        testCase "the keyframe a tab needs is asked for exactly once, and only when it can help" <| fun () ->
+            let model = withRecords (clientOf recordedTerminal)
+            Expect.equal
+                (ClientModel.missingKeyframe (BlockTab (terminalA, block "2")) model)
+                (Some (terminalA, 3))
+                "the block's first line"
+            let fetched = ClientModel.update (TerminalKeyframeMsg (terminalA, { Seq = 3; Cols = 80; Rows = 24; Screen = "S" })) model
+            Expect.isNone (ClientModel.missingKeyframe (BlockTab (terminalA, block "2")) fetched) "and not again"
+            Expect.isNone
+                (ClientModel.missingKeyframe (TerminalTab terminalA) model)
+                "a whole recording starts at the start; its header is its keyframe"
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
         orderTests
@@ -591,4 +744,5 @@ let tests =
         unchangedTests
         paneTests
         keyframeTests
+        videoTests
     ]

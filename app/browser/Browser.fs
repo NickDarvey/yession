@@ -286,17 +286,6 @@ let private hostReadOnly (el: obj) : bool = jsNative
 [<Emit("Array.from(document.querySelectorAll('[data-terminal-input]'))")>]
 let private terminalInputs () : obj[] = jsNative
 
-// --- The replay of a closed terminal (Plan 13, stage 3e) -------------------------------
-// The view renders an empty `<div data-terminal-replay="<id>">`; the player is attached here,
-// because a `.cast` is a whole artefact rather than a value to bind and the player owns its
-// own DOM once mounted.
-
-[<Emit("Array.from(document.querySelectorAll('[data-terminal-replay]'))")>]
-let private replayMounts () : obj[] = jsNative
-
-[<Emit("$0.getAttribute('data-terminal-replay')")>]
-let private replayMountId (el: obj) : string = jsNative
-
 [<Emit("$0.childElementCount > 0")>]
 let private isMounted (el: obj) : bool = jsNative
 
@@ -650,37 +639,34 @@ let private start () =
                         |> ignore
                     setInputValue el (TerminalText.read texts key)
 
-        /// Attach a player to any replay mount that has not got one, and dispose the players
-        /// whose mount has gone.
-        ///
-        /// Keyed on the mount being EMPTY rather than on a model flag: the view re-renders for
-        /// reasons that have nothing to do with this terminal, and re-mounting a player on
-        /// every render would restart the recording under whoever was watching it.
-        let replays = System.Collections.Generic.Dictionary<string, Replay.Mounted> ()
+        /// Fetch the keyframes the open tabs need, once each (Plan 14, stage 4). A keyframe
+        /// is immutable at a position that never moves, so the browser cache serves the
+        /// second read — this set only stops a burst of identical in-flight requests while
+        /// the first one is still out.
+        let keyframesAsked = System.Collections.Generic.HashSet<string> ()
 
-        let syncReplays () =
-            let live = System.Collections.Generic.HashSet<string> ()
-            for el in replayMounts () do
-                let id = replayMountId el
-                if not (isNull (box id)) && id <> "" then
-                    live.Add id |> ignore
-                    if not (isMounted el) then
-                        match TerminalId.create id with
-                        | Error _ -> ()
-                        | Ok terminalId ->
-                            let feed = ClientModel.terminalFeed terminalId latestModel
-                            match feed.Header with
-                            // No header means chunk 0 has not arrived, so there is nothing to
-                            // replay YET — the next fetch re-renders and this runs again.
-                            | None -> ()
-                            | Some header ->
-                                let cast =
-                                    TranscriptReplay.cast header (feed.Records |> Map.toList)
-                                replays.[id] <- Replay.mount (unbox el) cast
-            // A player whose mount is gone keeps a worker alive; take it down with the node.
-            for stale in replays.Keys |> Seq.filter (fun k -> not (live.Contains k)) |> Seq.toList do
-                replays.[stale].Dispose ()
-                replays.Remove stale |> ignore
+        let syncKeyframes (model: ClientModel) =
+            for tab in ClientModel.paneTabs model do
+                match ClientModel.missingKeyframe tab model with
+                | None -> ()
+                | Some (terminal, seq) ->
+                    let key = sprintf "%s@%d" (TerminalId.value terminal) seq
+                    if keyframesAsked.Add key then
+                        Async.StartImmediate (
+                            async {
+                                let url = SessionRoute.relative (TerminalKeyframe (TerminalId.value terminal, seq))
+                                match! httpGet url with
+                                // A keyframe that does not answer is not a failure: the range
+                                // still rebases and still plays, as the naive slice. Asking
+                                // again on every render would be a spin with nothing to gain.
+                                | Error _ -> ()
+                                | Ok body ->
+                                    match Codec.fromString Codec.transcriptKeyframe body with
+                                    | Ok keyframe -> dispatchRef (TerminalKeyframeMsg (terminal, keyframe))
+                                    | Error _ -> ()
+                            })
+
+        let replays = PaneReplays.create ()
 
         // The publication rule, one subscription per open terminal. Started when a terminal
         // appears and stopped when it goes, so a closed terminal's rule cannot republish a
@@ -916,7 +902,8 @@ let private start () =
             // measured against the just-rendered input.
             syncRichBodies ()
             syncTerminalInputs ()
-            syncReplays ()
+            syncKeyframes model
+            replays.Sync model
             // The terminals column's open state is a class on the shell root, like the
             // sidebar's — presentation, so a re-render never fights it — but driven FROM the
             // model, because unlike the sidebar this column's visibility is something the app

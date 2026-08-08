@@ -131,6 +131,7 @@ let private representativeModel : ClientModel =
       TerminalKeyframes = Map.empty
       PaneTabs = []
       PaneChoice = None
+      PaneStartAt = None
       TerminalsOpen = true
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
@@ -324,7 +325,7 @@ let private uiChecklistTests =
                 [ "a closed terminal has a tab of its own",
                   Dom.attr Dom.Hooks.terminalClosedTab (TerminalId.value terminalId)
                   "and the mount the player attaches to",
-                  Dom.attr Dom.Hooks.terminalReplay (TerminalId.value terminalId)
+                  Dom.attr Dom.Hooks.paneReplay (PaneTab.key (TerminalTab terminalId))
                   // The blocks are still the other half of the read: what ran, beside how it
                   // behaved.
                   "the commands it ran are still listed", Dom.attr Dom.Hooks.terminalBlock "block-ui" ] do
@@ -401,7 +402,7 @@ let private uiChecklistTests =
                 (html.Contains (Dom.attr Dom.Hooks.terminalReplayGone (TerminalId.value terminalId)))
                 "the gap is named"
             Expect.isFalse
-                (html.Contains (Dom.attr Dom.Hooks.terminalReplay (TerminalId.value terminalId)))
+                (html.Contains (Dom.attr Dom.Hooks.paneReplay (PaneTab.key (TerminalTab terminalId))))
                 "and no player is mounted over nothing"
 
         testCase "the random peer display name is human-readable" <| fun () ->
