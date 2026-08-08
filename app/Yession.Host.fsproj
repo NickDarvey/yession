@@ -24,6 +24,7 @@
     <Compile Include="Emulator.fs" />
     <Compile Include="Fs.fs" />
     <Compile Include="Sandboxes.fs" />
+    <Compile Include="Repos.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="ManagerStore.fs" />
     <Compile Include="SecretsCipher.fs" />
@@ -36,6 +37,7 @@
     <Compile Include="Control.fs" />
     <Compile Include="ControlClient.fs" />
     <Compile Include="ClaudeConnection.fs" />
+    <Compile Include="GitHubConnection.fs" />
     <Compile Include="Spawn.fs" />
     <Compile Include="ProcessManager.fs" />
     <Compile Include="ManagerUi.fs" />

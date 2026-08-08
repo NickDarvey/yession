@@ -475,6 +475,11 @@ module Style =
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 
+    /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
+    /// avatar gutter so the reading edge lines up with message bodies.
+    let repoNote = "max-w-[46rem] pl-[32px]"
+    let repoNoteText = caps + " text-ink-faint"
+
     /// Read-only rendered Markdown in the timeline (the mirror of the composer's live
     /// formatting). Preflight strips heading/list defaults, so each rendered element carries
     /// its own utilities — the same "F# composes utilities, no hand CSS" rule as everything

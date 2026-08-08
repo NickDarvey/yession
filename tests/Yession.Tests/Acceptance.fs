@@ -69,11 +69,13 @@ let private representativeModel : ClientModel =
             [ { MessageId = MessageId.create "msg-1" |> expect
                 Author = PeerRef ada
                 Body = "ship it"
-                Status = Complete }
+                Status = Complete
+                Kind = ConversationItemKind.Message }
               { MessageId = MessageId.create "msg-agent" |> expect
                 Author = ActorRef.Agent
                 Body = "Sounds go"
-                Status = Streaming } ]
+                Status = Streaming
+                Kind = ConversationItemKind.Message } ]
           ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ] }
       EventConsumer =
         { LastProcessedOffset = Some (EventOffset.create 5L |> expect)
@@ -124,7 +126,18 @@ let private representativeModel : ClientModel =
       TerminalsOpen = true
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
-          Flow = ClaudeIdle } }
+          Flow = ClaudeIdle }
+      GitHub =
+        { Status = { SessionCredential = None; MineCredential = None }
+          Flow = GitHubIdle }
+      Repos =
+        { Listings =
+            Some
+                [ { Repo = RepoRef.create "octo/hello" |> expect
+                    Branch = "main"
+                    Dirty = true } ]
+          Busy = false
+          Error = None } }
 
 /// The composer when a PEER is the one writing: their draft is what you are in, yours (if any)
 /// is a summary you can open, and "new message" is the way out of collaborating.
@@ -391,7 +404,8 @@ let private uiChecklistTests =
                 { MessageId = MessageId.create "msg-rich" |> expect
                   Author = PeerRef ada
                   Body = "# Heading one\n\nText with **bold** and `code`.\n\n- item one\n- item two"
-                  Status = Complete }
+                  Status = Complete
+                  Kind = ConversationItemKind.Message }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ richItem ] } }
@@ -411,6 +425,35 @@ let private uiChecklistTests =
             // …and the Markdown syntax itself is transformed away, never left as literal source.
             Expect.isFalse (timeline.Contains "# Heading one") "the heading '#' is not literal text"
             Expect.isFalse (timeline.Contains "**bold**") "the bold '**' is not literal text"
+
+        // A repo note (Plan 14) is an ACT in the timeline, not a message: it renders as
+        // the quiet attributed line, never as an avatar'd message article.
+        testCase "a repo note renders as an attributed act-line, not a message" <| fun () ->
+            let note : ConversationItem =
+                { MessageId = MessageId.create "msg-repo-note" |> expect
+                  Author = PeerRef ada
+                  Body = "added repo octo/hello (branch main)"
+                  Status = Complete
+                  Kind = ConversationItemKind.RepoNote }
+            let model =
+                { representativeModel with
+                    Conversation = { representativeModel.Conversation with Items = [ note ] } }
+            let html = Support.render model
+            Expect.isTrue (html.Contains "data-repo-note") "the note hook renders"
+            Expect.isTrue (html.Contains "added repo octo/hello (branch main)") "the act reads as its sentence"
+            let noteStart = html.IndexOf "data-repo-note"
+            let article = html.Substring (html.LastIndexOf ("<article", noteStart), 300)
+            Expect.isFalse (article.Contains "data-message-body") "no message body — it is not something someone said"
+
+        // The Repos panel (Plan 14) states the shared-trust boundary where the act
+        // happens, and the representative model's dirty checkout is told, not hidden.
+        testCase "the repos panel lists the checkout, its dirty state, and the disclosure" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains "data-repos-panel") "the panel renders"
+            Expect.isTrue (html.Contains "octo/hello") "the repo is listed"
+            Expect.isTrue (html.Contains "uncommitted changes") "dirty state is told"
+            Expect.isTrue (html.Contains "readable by everyone in this session") "the disclosure is stated where adding happens"
+            Expect.isTrue (html.Contains "data-repo-add-input") "the add input renders"
     ]
 
 // The offer to bring a stopped session back (Plan 11). It replaces the connection status

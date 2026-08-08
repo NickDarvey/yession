@@ -66,7 +66,8 @@ let private codecTests =
                     [ { MessageId = messageId
                         Author = ActorRef.System
                         Body = "secret history"
-                        Status = Complete } ]
+                        Status = Complete
+                        Kind = ConversationItemKind.Message } ]
                   ActiveAgentMessages = Map.empty }
             let initial = { ClientModel.init (peer "ada" "Ada") with Conversation = conversation }
             let p = Harness.run (App.makeProgram doc initial)
@@ -271,7 +272,8 @@ let private queueUnitTests =
                 [ { MessageId = message.MessageId
                     Author = PeerRef ada
                     Body = "ship it"
-                    Status = Complete } ]
+                    Status = Complete
+                    Kind = ConversationItemKind.Message } ]
                 "the sent message is a complete conversation item"
 
         testCase "duplicate event pages do not duplicate conversation items" <| fun () ->

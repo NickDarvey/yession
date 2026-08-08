@@ -475,6 +475,40 @@ let private parseAuthorizeUrl (body: string) : string = jsNative
 [<Emit("(document.querySelector($0)?.value || '')")>]
 let private panelInput (selector: string) : string = jsNative
 
+// --- GitHub connection panel round-trips (Plan 14) ---------------------------------------
+// Same fetch shapes as the Claude panel's; the flow differs (device code) so the two
+// extra parsers below read the begin/poll replies.
+
+[<Emit("""fetch($0 + '?peer_id=' + encodeURIComponent($1), { cache: 'no-store' })
+  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine })) : Promise.resolve({ ok: false, session: null, mine: null }))
+  .catch(() => ({ ok: false, session: null, mine: null }))""")>]
+let private fetchGitHubStatusAt (url: string) (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
+
+let private fetchGitHubStatus (peerId: string) =
+    fetchGitHubStatusAt (SessionRoute.relative GitHubStatus) peerId
+
+[<Emit("JSON.stringify({ scope: $0, peerId: $1, token: $2 || undefined })")>]
+let private githubBody (scope: string) (peerId: string) (token: string) : string = jsNative
+
+[<Emit("(() => { try { const o = JSON.parse($0); return { userCode: o.userCode || '', verificationUri: o.verificationUri || '', interval: o.interval || 5 } } catch { return { userCode: '', verificationUri: '', interval: 5 } } })()")>]
+let private parseDeviceBegin (body: string) : {| userCode: string; verificationUri: string; interval: int |} = jsNative
+
+[<Emit("(() => { try { const o = JSON.parse($0); return { status: o.status || '', interval: o.interval || 0 } } catch { return { status: '', interval: 0 } } })()")>]
+let private parseDevicePoll (body: string) : {| status: string; interval: int |} = jsNative
+
+// --- Repos panel round-trips (Plan 14) ---------------------------------------------------
+
+[<Emit("""fetch($0 + '?peer_id=' + encodeURIComponent($1), { cache: 'no-store' })
+  .then(async r => ({ ok: r.ok, body: await r.text() }))
+  .catch(e => ({ ok: false, body: String(e) }))""")>]
+let private fetchRepoList (url: string) (peerId: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
+
+[<Emit("(() => { try { const a = JSON.parse($0); return Array.isArray(a) ? a.map(x => ({ repo: String(x.repo || ''), branch: String(x.branch || ''), dirty: !!x.dirty })) : [] } catch { return [] } })()")>]
+let private parseRepoList (body: string) : {| repo: string; branch: string; dirty: bool |} array = jsNative
+
+[<Emit("JSON.stringify({ repo: $0, branch: $1 || undefined, create: $2 || undefined, peerId: $3 })")>]
+let private repoBody (repo: string) (branch: string) (create: bool) (peerId: string) : string = jsNative
+
 // --- Entry -----------------------------------------------------------------------------
 
 let private start () =
@@ -818,6 +852,83 @@ let private start () =
                     })
                 scope
 
+        // The GitHub panel's round-trips (Plan 14). Device flow: begin puts the user
+        // code on screen, then this tab drives the session's poll at GitHub's stated
+        // interval until the grant lands (a status probe then flips the flow to idle),
+        // the human cancels, or the flow dies.
+        let refreshGitHub () =
+            Async.StartImmediate (
+                async {
+                    let! status = fetchGitHubStatus (PeerId.value peerId) |> Async.AwaitPromise
+                    if status.ok then
+                        dispatchRef (GitHubStatusMsg { SessionCredential = status.session; MineCredential = status.mine })
+                })
+        let rec pollGitHubWhileAwaiting () =
+            Async.StartImmediate (
+                async {
+                    let interval =
+                        match latestModel.GitHub.Flow with
+                        | GitHubAwaitingApproval (_, _, _, interval) -> max 1 interval
+                        | _ -> 0
+                    do! Async.Sleep (interval * 1000)
+                    match latestModel.GitHub.Flow with
+                    | GitHubAwaitingApproval (userCode, verificationUri, scope, interval) ->
+                        let! reply =
+                            postClaude
+                                (SessionRoute.relative (GitHub GitHubAction.Poll))
+                                (githubBody scope (PeerId.value peerId) "")
+                            |> Async.AwaitPromise
+                        if not reply.ok then dispatchRef (GitHubFlowMsg (GitHubError reply.body))
+                        else
+                            let outcome = parseDevicePoll reply.body
+                            match outcome.status with
+                            | "connected" -> refreshGitHub ()
+                            | _ ->
+                                if outcome.interval > interval then
+                                    dispatchRef (GitHubFlowMsg (GitHubAwaitingApproval (userCode, verificationUri, scope, outcome.interval)))
+                                pollGitHubWhileAwaiting ()
+                    | _ -> ()
+                })
+        // The Repos panel's round-trips (Plan 14). The listing probe is the outcome of
+        // every action: an add/remove/switch answers, then the panel re-asks for the
+        // filesystem's truth rather than patching its own copy.
+        let refreshRepos () =
+            Async.StartImmediate (
+                async {
+                    let! reply = fetchRepoList (SessionRoute.relative RepoList) (PeerId.value peerId) |> Async.AwaitPromise
+                    if reply.ok then
+                        let listings =
+                            parseRepoList reply.body
+                            |> Array.choose (fun raw ->
+                                match RepoRef.create raw.repo with
+                                | Ok ref -> Some { Repo = ref; Branch = raw.branch; Dirty = raw.dirty }
+                                | Error _ -> None)
+                            |> Array.toList
+                        dispatchRef (ReposListMsg listings)
+                })
+        let repoAction (route: string) (repo: string) (branch: string) (create: bool) =
+            dispatchRef (ReposFlowMsg (true, None))
+            Async.StartImmediate (
+                async {
+                    let! reply = postClaude route (repoBody repo branch create (PeerId.value peerId)) |> Async.AwaitPromise
+                    if not reply.ok then dispatchRef (ReposFlowMsg (false, Some reply.body))
+                    else refreshRepos ()
+                })
+
+        let githubAction (run: unit -> Async<Result<GitHubFlowState option, string>>) =
+            dispatchRef (GitHubFlowMsg GitHubBusy)
+            Async.StartImmediate (
+                async {
+                    match! run () with
+                    | Error reason -> dispatchRef (GitHubFlowMsg (GitHubError reason))
+                    | Ok (Some flow) ->
+                        dispatchRef (GitHubFlowMsg flow)
+                        pollGitHubWhileAwaiting ()
+                    | Ok None ->
+                        dispatchRef (GitHubFlowMsg GitHubIdle)
+                        refreshGitHub ()
+                })
+
         // The side effects a template can't derive from the model. Send routes to the one
         // implementation in `App.connect` (capture markdown, enqueue, seed the queue fragment).
         let actions : ViewActions =
@@ -831,6 +942,8 @@ let private start () =
                     // current truth the moment it appears.
                     toggleSettings ()
                     refreshClaude ()
+                    refreshGitHub ()
+                    refreshRepos ()
               ReportTitleSelection =
                 fun sel ->
                     // The title lives in the `title` Y.Text root; turn the input's char offsets
@@ -869,6 +982,61 @@ let private start () =
                             false
               ClaudeDisconnect =
                 fun scope -> postClaudeAction (SessionRoute.relative (Claude ClaudeAction.Disconnect)) scope "" "" false
+              GitHubConnect =
+                fun () ->
+                    let scope = match panelInput "[data-github-scope]" with "" -> "mine" | s -> s
+                    githubAction (fun () ->
+                        async {
+                            let! reply =
+                                postClaude
+                                    (SessionRoute.relative (GitHub GitHubAction.Begin))
+                                    (githubBody scope (PeerId.value peerId) "")
+                                |> Async.AwaitPromise
+                            if not reply.ok then return Error reply.body
+                            else
+                                let began = parseDeviceBegin reply.body
+                                match began.userCode with
+                                | "" -> return Error "no device code in the reply"
+                                | _ -> return Ok (Some (GitHubAwaitingApproval (began.userCode, began.verificationUri, scope, began.interval)))
+                        })
+              GitHubPasteToken =
+                fun () ->
+                    match panelInput "[data-github-token]" with
+                    | "" -> dispatchRef (GitHubFlowMsg (GitHubError "paste a token first"))
+                    | token ->
+                        let scope = match panelInput "[data-github-scope]" with "" -> "mine" | s -> s
+                        githubAction (fun () ->
+                            async {
+                                let! reply =
+                                    postClaude
+                                        (SessionRoute.relative (GitHub GitHubAction.Token))
+                                        (githubBody scope (PeerId.value peerId) token)
+                                    |> Async.AwaitPromise
+                                if not reply.ok then return Error reply.body else return Ok None
+                            })
+              GitHubDisconnect =
+                fun scope ->
+                    githubAction (fun () ->
+                        async {
+                            let! reply =
+                                postClaude
+                                    (SessionRoute.relative (GitHub GitHubAction.Disconnect))
+                                    (githubBody scope (PeerId.value peerId) "")
+                                |> Async.AwaitPromise
+                            if not reply.ok then return Error reply.body else return Ok None
+                        })
+              RepoAdd =
+                fun () ->
+                    match panelInput "[data-repo-add-input]" with
+                    | "" -> dispatchRef (ReposFlowMsg (false, Some "type an owner/repo first"))
+                    | repo -> repoAction (SessionRoute.relative (Repo RepoPanelAction.Add)) repo "" false
+              RepoRemove =
+                fun repo -> repoAction (SessionRoute.relative (Repo RepoPanelAction.Remove)) repo "" false
+              RepoSwitchBranch =
+                fun repo ->
+                    match panelInput (sprintf "[data-repo-branch-input=\"%s\"]" repo) with
+                    | "" -> dispatchRef (ReposFlowMsg (false, Some "type a branch first"))
+                    | branch -> repoAction (SessionRoute.relative (Repo RepoPanelAction.Switch)) repo branch false
               OpenTerminal = fun title -> connectionRef |> Option.iter (fun c -> c.OpenTerminal title)
               CloseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.CloseTerminal id)
               TakeTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.TakeTerminal id)

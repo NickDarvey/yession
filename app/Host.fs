@@ -363,7 +363,17 @@ let startFull
               DeleteSecret =
                 match secretsCapabilities with
                 | Some secrets -> secrets.DeleteSecret
-                | None -> AgentCapabilities.none.DeleteSecret }
+                | None -> AgentCapabilities.none.DeleteSecret
+              // The repo verbs (Plan 14) are denials HERE and rebound per turn by
+              // SessionMain's dispatching wrapper — the token is the TURN ACTOR's, and
+              // only the dispatcher knows who that is.
+              AddRepo = AgentCapabilities.none.AddRepo
+              ListRepos = AgentCapabilities.none.ListRepos
+              SwitchRepoBranch = AgentCapabilities.none.SwitchRepoBranch
+              FetchRepo = AgentCapabilities.none.FetchRepo
+              RepoStatus = AgentCapabilities.none.RepoStatus
+              RepoLog = AgentCapabilities.none.RepoLog
+              RepoDiff = AgentCapabilities.none.RepoDiff }
 
         // The queue drain and turn scheduler (Phase 3) — the real machinery lives in
         // `Scheduler` (shared with the property harness); the Host wires it to this
