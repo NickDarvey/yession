@@ -541,7 +541,8 @@ let private uiChecklistTests =
                   Author = PeerRef ada
                   Body = "added repo octo/hello (branch main)"
                   Status = Complete
-                  Kind = ConversationItemKind.RepoNote }
+                  Kind = ConversationItemKind.RepoNote
+                  Offset = EventOffset.create 1L |> expect }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }

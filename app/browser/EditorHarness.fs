@@ -139,6 +139,7 @@ let private shellModel : ClientModel =
                     Author = PeerRef peerId
                     Body = "ship it"
                     Status = Complete
+                    Kind = ConversationItemKind.Message
                     Offset = offset 1L } ]
               ActiveAgentMessages = Map.empty }
         Timeline = { TimelineProjection.empty with TerminalItems = [ TimelineBlock (offset 2L, terminalId, blockId) ] }
