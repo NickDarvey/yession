@@ -1,7 +1,6 @@
 # Plan 02 — The Manager as its own process
 
-> **Status: delivered.** Steps 21–27 implemented and accepted — see the
-> [tracker](TODO.md) Phase 4 table for evidence per step.
+> **Status: delivered.** Steps 21–27 implemented and accepted.
 >
 > Phase 4 · Process split, management UI, real packaging
 > Addresses the top items from [GAPS.md](../GAPS.md) § Runtime & topology: the Manager
