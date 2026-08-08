@@ -41,3 +41,19 @@ module ReposProjection =
 
     let tryFind (repo: RepoRef) (proj: ReposProjection) : SessionRepo option =
         proj.Repos |> List.tryFind (fun s -> s.Repo = repo)
+
+/// One repo as the verbs and the panel report it: the FILESYSTEM's answer, not the
+/// projection's — the checkout is the truth, and a listing that disagreed with `git
+/// status` would teach everyone to distrust the panel.
+type RepoListing =
+    { Repo : RepoRef
+      Branch : string
+      /// Uncommitted changes present. Told, not fixed: resume drift is a fact to
+      /// surface, never something a list call quietly cleans.
+      Dirty : bool }
+
+module RepoListing =
+
+    /// Render one listing line the way both interfaces say it.
+    let describe (listing: RepoListing) : string =
+        sprintf "%s (branch %s%s)" (RepoRef.value listing.Repo) listing.Branch (if listing.Dirty then ", uncommitted changes" else "")

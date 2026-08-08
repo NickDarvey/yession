@@ -253,6 +253,44 @@ let mutable private connectionStatus : Map<SecretId, ConnectionKind> = Map.empty
 let private connectionsClient =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.connections url secret)
 
+// The repo manager (Plan 14): one service, two interfaces (the agent's verbs and the
+// settings panel). Constructed once the event log exists (inside the boot async), so a
+// module-level cell carries it to the per-turn dispatcher.
+let mutable private reposService : Repos.ReposService option = None
+
+/// The acting party's GitHub token for a repo network verb: the session's explicit
+/// credential first, then the named actor's own, then the ambient `GITHUB_TOKEN` (the
+/// same last-resort idiom as the agent credential). None = anonymous — public repos
+/// still clone.
+let private resolveGitHubToken (credentialActor: ActorRef) : Async<string option> =
+    async {
+        let targets =
+            GitHubConnection.turnTargets sessionId credentialActor
+            |> List.filter (fun target -> Map.containsKey target connectionStatus)
+        match connectionsClient, targets with
+        | Some client, target :: _ ->
+            match! client.Resolve target with
+            | Ok (_, value) -> return Some value
+            | Error _ -> return (match Interop.envOr "GITHUB_TOKEN" "" with "" -> None | t -> Some t)
+        | _ -> return (match Interop.envOr "GITHUB_TOKEN" "" with "" -> None | t -> Some t)
+    }
+
+/// The turn's repo capabilities: the service bound to the agent as acting party and
+/// the TURN ACTOR as credential owner. Denials when the service could not start.
+let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
+    match reposService with
+    | None -> capabilities
+    | Some service ->
+        let caller = Repos.agentCaller turnActor
+        { capabilities with
+            AddRepo = service.AddRepo caller
+            ListRepos = service.ListRepos
+            SwitchRepoBranch = service.SwitchBranch caller
+            FetchRepo = service.FetchRepo caller
+            RepoStatus = service.RepoStatus
+            RepoLog = service.RepoLog
+            RepoDiff = service.RepoDiff }
+
 /// Per-turn credential dispatch (Plan 08): resolve the credential the TURN ACTOR runs
 /// on — the session's own explicit credential first, then the actor's — fresh from the
 /// Manager (which lazily refreshes a due OAuth grant). Ambient env is the last resort;
@@ -260,6 +298,9 @@ let private connectionsClient =
 let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
+            // The repo verbs are rebound to THIS turn's actor here (Plan 14): the acting
+            // party on the events is the agent, the credential is the turn human's.
+            let capabilities = repoCapabilitiesFor context.CurrentMessage.Author capabilities
             // A dispatch-level failure streams its reason as the message body first:
             // the turn's item is already open (AgentMessageStarted precedes the
             // runner), so this is what makes the reason VISIBLE in the timeline.
@@ -325,6 +366,21 @@ Async.StartImmediate (
     async {
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
+        // The repo manager (Plan 14), over the same log and the agent backend's sandbox
+        // family. A backend that cannot host it fails the boot — the same fail-closed
+        // stance as the WorkSandbox composition above.
+        do
+            match Repos.create
+                    { Backend = agentBackend
+                      ReposDir = reposDir
+                      ExtraReadPaths = []
+                      AllowedDomains = [ "github.com" ]
+                      AllowProtocol = "https"
+                      CloneUrl = RepoRef.cloneUrl
+                      ResolveToken = resolveGitHubToken
+                      Log = log } with
+            | Ok service -> reposService <- Some service
+            | Error e -> failwithf "repos: %s" e
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
         // The connection-status stream (Plan 08): each frame replaces the whole cache
         // (snapshot semantics), flipping the agent gate and the /claude status as
