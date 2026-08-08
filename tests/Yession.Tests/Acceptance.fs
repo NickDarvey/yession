@@ -124,7 +124,10 @@ let private representativeModel : ClientModel =
       TerminalsOpen = true
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
-          Flow = ClaudeIdle } }
+          Flow = ClaudeIdle }
+      GitHub =
+        { Status = { SessionCredential = None; MineCredential = None }
+          Flow = GitHubIdle } }
 
 /// The composer when a PEER is the one writing: their draft is what you are in, yours (if any)
 /// is a summary you can open, and "new message" is the way out of collaborating.

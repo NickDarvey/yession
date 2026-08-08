@@ -329,10 +329,30 @@ Async.StartImmediate (
                         (fun () -> envCreds || connectedSomewhere ())
                         sessionMount)
             | _ -> None
+        // The GitHub connection surface (Plan 14) rides the same status cache and control
+        // channel; the two panel handlers compose into the one extra-routes seam, each
+        // claiming only its own paths.
+        let connectionRoutes =
+            let githubRoutes =
+                match auth, connectionsClient with
+                | Some a, Some client ->
+                    Some (
+                        GitHubConnection.routes
+                            sessionId
+                            a
+                            client
+                            (fun target -> Map.tryFind target connectionStatus)
+                            sessionMount)
+                | _ -> None
+            match claudeRoutes, githubRoutes with
+            | Some claude, Some github -> Some (fun req res -> claude req res || github req res)
+            | Some one, None
+            | None, Some one -> Some one
+            | None, None -> None
         // Transcripts live beside the event log and the doc sidecar, one `.cast` file per
         // terminal — a durable, replayable record of everything its commands printed.
         let transcriptStore = TranscriptStore.openStore (sprintf "%s/terminals" dataDir)
-        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
+        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp connectionRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

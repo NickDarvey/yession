@@ -53,6 +53,15 @@ type ViewActions =
       ClaudePasteToken : unit -> unit
       /// Disconnect the credential stored for a scope choice ("session" | "mine").
       ClaudeDisconnect : string -> unit
+      /// GitHub connection panel (Plan 14). Same imperative shape as the Claude set;
+      /// the flow differs (device code, no paste-back) so there is no Complete — the
+      /// browser polls while awaiting approval.
+      /// Begin the device-flow sign-in for the scope in the panel's selector.
+      GitHubConnect : unit -> unit
+      /// Store the pasted personal-access/user token from the panel's token input.
+      GitHubPasteToken : unit -> unit
+      /// Disconnect the credential stored for a scope choice ("session" | "mine").
+      GitHubDisconnect : string -> unit
       /// Ask the Manager to bring this session back and take the browser to it (Plan 11).
       /// Imperative because it is a navigation, and a navigation is not a state change this
       /// document survives to fold.
@@ -88,6 +97,9 @@ module ViewActions =
           ClaudeComplete = ignore
           ClaudePasteToken = ignore
           ClaudeDisconnect = ignore
+          GitHubConnect = ignore
+          GitHubPasteToken = ignore
+          GitHubDisconnect = ignore
           ReopenSession = ignore
           OpenTerminal = ignore
           CloseTerminal = ignore
@@ -381,6 +393,52 @@ module View =
               {controls}
             </section>"""
 
+    /// The GitHub connection panel (Plan 14), beside the Claude one: status per sign-in
+    /// scope, the device flow (show the code → approve on github.com → the poll lands
+    /// the grant), and the paste-a-token fallback.
+    let private githubSection (actions: ViewActions) (dispatch: ClientMsg -> unit) (github: GitHubViewState) : TemplateResult =
+        let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
+            match kind with
+            | Some kind ->
+                html $"""<div class="{Style.sideRow}" data-github-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconDanger}" aria-label="Disconnect GitHub" data-github-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.GitHubDisconnect scopeChoice)}>{Icon.close}</button></div>"""
+            | None -> html $""""""
+        let controls =
+            match github.Flow with
+            | GitHubBusy ->
+                html $"""<span class="{Style.statusRun}" data-github-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
+            | GitHubAwaitingApproval (userCode, verificationUri, _, _) ->
+                html $"""
+                    <span class="{Style.small}">enter this code on github.com — this panel completes itself once you approve</span>
+                    <span class="{Style.field}" data-github-user-code aria-label="GitHub device code">{userCode}</span>
+                    <div class="flex gap-2">
+                      <a class="{Style.btnPrimary}" href="{verificationUri}" target="_blank" rel="noreferrer" data-github-authorize>Approve on github.com</a>
+                      <button type="button" class="{Style.btn}" data-github-cancel @click={Ev(fun _ -> dispatch (GitHubFlowMsg GitHubIdle))}>Cancel</button>
+                    </div>"""
+            | GitHubIdle | GitHubError _ ->
+                html $"""
+                    <label class="{Style.label}" for="github-scope">sign in for</label>
+                    <select id="github-scope" class="{Style.field}" data-github-scope aria-label="GitHub sign-in scope">
+                      <option value="mine">All my sessions</option>
+                      <option value="session">This session only</option>
+                    </select>
+                    <button type="button" class="{Style.btnPrimary}" data-github-connect @click={Ev(fun _ -> actions.GitHubConnect ())}>Connect GitHub</button>
+                    <span class="{Style.small} pt-2">or paste a personal access token</span>
+                    <input type="password" class="{Style.field}" data-github-token placeholder="github_pat_…" />
+                    <button type="button" class="{Style.btn}" data-github-save-token @click={Ev(fun _ -> actions.GitHubPasteToken ())}>Save token</button>"""
+        let error =
+            match github.Flow with
+            | GitHubError reason -> html $"""<span class="{Style.statusErr}" data-github-error>{reason}</span>"""
+            | _ -> html $""""""
+        html $"""
+            <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-github-panel>
+              <span class="{Style.label}">github</span>
+              <span class="{Style.small}">repos are fetched with the account of whoever asks — sign in to bring yours</span>
+              {connectedRow "all my sessions" "mine" github.Status.MineCredential}
+              {connectedRow "this session" "session" github.Status.SessionCredential}
+              {error}
+              {controls}
+            </section>"""
+
     /// Settings, as the sidebar column's OTHER FACE. Not a drawer over the conversation: you
     /// go there and come back, the timeline never moves under a scrim, and configuration keeps
     /// the section rhythm it already had. Open state is the root element's `settings-open`
@@ -398,6 +456,7 @@ module View =
                 <button type="button" class="{Style.navChevronBack}" aria-label="Collapse sidebar" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.left}</button>
               </div>
               {claudeSection actions dispatch model.Claude}
+              {githubSection actions dispatch model.GitHub}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
             </div>"""

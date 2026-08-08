@@ -11,6 +11,12 @@ open Fable.Pyxpecto
 open Yession.Domain
 open Yession.Manager
 
+#if FABLE_COMPILER
+open Thoth.Json
+#else
+open Thoth.Json.Net
+#endif
+
 let private expect =
     function
     | Ok v -> v
@@ -101,8 +107,8 @@ let private flowTests =
             let exchange = BrokerFlow.exchangeRequest JsonEncoded "cid" "http://m/cb" "ver" "st" "the-code"
             Expect.equal exchange.ContentType "application/json" "JSON content type"
             let decoded =
-                Thoth.Json.Decode.fromString
-                    (Thoth.Json.Decode.dict Thoth.Json.Decode.string)
+                Decode.fromString
+                    (Decode.dict Decode.string)
                     exchange.Body
                 |> expect
             Expect.equal (Map.tryFind "grant_type" decoded) (Some "authorization_code") "exchange grant"
@@ -244,6 +250,69 @@ let private claudeTests =
             // (`invalid_request_error: "Invalid request format"`), so the session must say
             // so — the broker has no provider knowledge to fall back on.
             Expect.equal (ClaudeConnection.beginRequest (target (UserScope alice))).TokenDialect JsonEncoded "json, declared session-side"
+    ]
+
+// --- Pure: the session-side GitHub module (Plan 14) ------------------------------------------
+
+let private githubName = SecretName.create "github" |> expect
+let private githubTarget scope : SecretId = { Scope = scope; Name = githubName }
+
+let private githubTests =
+    testList "github connection module" [
+        testCase "pasted credentials classify by prefix" <| fun () ->
+            Expect.equal (GitHubConnection.classifyPasted "  github_pat_11ABC  ") (Ok "github_pat_11ABC") "fine-grained PAT, trimmed"
+            Expect.equal (GitHubConnection.classifyPasted "ghp_classic") (Ok "ghp_classic") "classic PAT"
+            Expect.equal (GitHubConnection.classifyPasted "ghu_apptoken") (Ok "ghu_apptoken") "app user token"
+            Expect.equal (GitHubConnection.classifyPasted "gho_devicetoken") (Ok "gho_devicetoken") "oauth device token"
+            Expect.isError (GitHubConnection.classifyPasted "hunter2") "not a github credential"
+            Expect.isError (GitHubConnection.classifyPasted "sk-ant-api03-x") "a claude credential is a paste mistake"
+            Expect.isError (GitHubConnection.classifyPasted "   ") "blank"
+
+        testCase "every kind rides GITHUB_TOKEN" <| fun () ->
+            Expect.equal (GitHubConnection.envVarFor OAuthConnection "t") ("GITHUB_TOKEN", "t") "oauth"
+            Expect.equal (GitHubConnection.envVarFor StaticConnection "t") ("GITHUB_TOKEN", "t") "static"
+
+        testCase "scope choices map to targets" <| fun () ->
+            Expect.equal (GitHubConnection.targetFor sessionA (UserOwner alice) "session") (Ok (githubTarget (SessionScope sessionA))) "this session"
+            Expect.equal (GitHubConnection.targetFor sessionA (UserOwner alice) "mine") (Ok (githubTarget (UserScope alice))) "all my sessions (user)"
+            Expect.isError (GitHubConnection.targetFor sessionA (UserOwner alice) "everyone") "unknown choice"
+
+        testCase "operation targets: session first, then the actor's own scope, nothing for non-humans" <| fun () ->
+            Expect.equal
+                (GitHubConnection.turnTargets sessionA (UserRef alice))
+                [ githubTarget (SessionScope sessionA); githubTarget (UserScope alice) ]
+                "session shadows the actor"
+            Expect.equal (GitHubConnection.turnTargets sessionA ActorRef.Agent) [ githubTarget (SessionScope sessionA) ] "agent has no own scope"
+
+        testCase "a device-code grant decodes, defaulting the interval" <| fun () ->
+            let full = """{"device_code":"dc-1","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","expires_in":900,"interval":7}"""
+            let decoded = Decode.fromString GitHubConnection.deviceCodeDecoder full |> expect
+            Expect.equal decoded.DeviceCode "dc-1" "device code"
+            Expect.equal decoded.UserCode "ABCD-1234" "user code"
+            Expect.equal decoded.Interval 7 "explicit interval"
+            let bare = """{"device_code":"dc-2","user_code":"EFGH-5678","verification_uri":"https://github.com/login/device"}"""
+            Expect.equal (Decode.fromString GitHubConnection.deviceCodeDecoder bare |> expect).Interval 5 "default interval"
+            Expect.isError (Decode.fromString GitHubConnection.deviceCodeDecoder """{"user_code":"X"}""") "missing device code refused"
+
+        testCase "poll outcomes fold from the body, never the status code" <| fun () ->
+            Expect.equal (GitHubConnection.pollOutcome 5 """{"access_token":"gho_t","token_type":"bearer"}""") (GitHubConnection.PollGranted "gho_t") "granted"
+            Expect.equal (GitHubConnection.pollOutcome 5 """{"error":"authorization_pending"}""") (GitHubConnection.PollPending 5) "pending keeps the pace"
+            Expect.equal (GitHubConnection.pollOutcome 5 """{"error":"slow_down"}""") (GitHubConnection.PollPending 10) "slow_down widens by the spec's 5s"
+            Expect.equal
+                (GitHubConnection.pollOutcome 5 """{"error":"expired_token"}""")
+                (GitHubConnection.PollFailed "the device code expired — start the sign-in again")
+                "expiry is terminal"
+            Expect.equal
+                (GitHubConnection.pollOutcome 5 """{"error":"access_denied"}""")
+                (GitHubConnection.PollFailed "the sign-in was denied on github.com")
+                "denial is terminal"
+            Expect.equal
+                (GitHubConnection.pollOutcome 5 """{"error":"incorrect_device_code","error_description":"The device code is wrong"}""")
+                (GitHubConnection.PollFailed "The device code is wrong")
+                "unknown errors surface their description"
+            match GitHubConnection.pollOutcome 5 "not json" with
+            | GitHubConnection.PollFailed _ -> ()
+            | other -> failwithf "garbage should fail the poll, got %A" other
     ]
 
 // --- [Ports]: the broker service against a fake token endpoint ------------------------------
@@ -790,6 +859,7 @@ let tests =
         flowTests
         wireTests
         claudeTests
+        githubTests
         Tag.needs "Broker service" [ Tag.Ports ] (fun () -> brokerTests)
         Tag.needs "Connection control routes" [ Tag.Ports ] (fun () -> routeTests)
         Tag.needs "Per-actor credentials E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)

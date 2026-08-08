@@ -209,8 +209,9 @@ let start
     // The routes this server owns, dispatched by one match over `SessionRoute` — so the
     // paths it serves, the paths the shell emits, and the paths the browser fetches are
     // one declaration, and a route added there fails this build until it is handled here.
-    // `ClaudeStatus`/`Claude` are the session's too but live in `extraRoutes` (defined
-    // later in compile order), so they fall through to it exactly as an unknown path does.
+    // The connection-panel routes (`ClaudeStatus`/`Claude`, `GitHubStatus`/`GitHub`) are
+    // the session's too but live in `extraRoutes` (defined later in compile order), so
+    // they fall through to it exactly as an unknown path does.
     let handler (req: IncomingMessage) (res: ServerResponse) =
         let handleWithExtraRoutes () =
             let handledByExtra =
@@ -332,6 +333,8 @@ let start
                     res.``end`` "unauthorized"
         | Some ClaudeStatus
         | Some (Claude _)
+        | Some GitHubStatus
+        | Some (GitHub _)
         | None -> handleWithExtraRoutes ()
 
     let server = createServer handler
