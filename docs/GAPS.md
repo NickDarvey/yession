@@ -1,11 +1,15 @@
 # Known gaps
 
-An honest inventory of what Yession does **not** do yet, as of `1.0.0-beta.*`. Phases
+An honest inventory of what Yession does **not** do yet, as of the `5.x-beta` line. Phases
 1–4 are accepted, plus later work delivered outside the numbered phases — client
 presentation (Metro/Zune styling, rich-text editing, collaborative presence cursors),
-telemetry (Plan 04), and the Manager→Session control-RPC reverse legs
-([tracker](plans/TODO.md)). Everything below is deliberate scope, recorded so nobody
-discovers it in production. Items are roughly ordered by how much they matter.
+telemetry (Plan 04), the Manager→Session control-RPC reverse legs, secrets + ABAC
+(Plan 06), BYO user authorization (Plan 07), connections and Claude sign-in (Plan 08),
+remote and mounted session access (Plans 09/10/12), idle reaping (Plan 11), and
+terminals on the WorkSandbox (Plan 13, every stage) — each with its own plan doc under
+[plans/](plans/), which carries its status.
+Everything below is deliberate scope, recorded so nobody discovers it in production.
+Items are roughly ordered by how much they matter.
 
 ## Security & trust
 
@@ -153,16 +157,27 @@ discovers it in production. Items are roughly ordered by how much they matter.
   control RPC (environments are session-owned via the sandbox seam), and
   sessions are created/launched/resumed/stopped from the htmx management UI — but
   **children die with the Manager** (no daemonising, no orphan adoption): a Manager
-  restart stops every running session, and resumes are manual clicks.
+  restart stops every running session. Relaunching one is no longer a manual click:
+  `GET /sessions/{id}/open` launches a stopped session and lands on its address
+  ([Plan 11](plans/11-idle-session-reaping.md)), and the client offers that route when
+  the session it was talking to has gone.
 - **The Manager is practically a singleton.** Nothing global is assumed (per-instance
   data directories, OS-assigned session ports), but two Managers over the SAME data
   directory are unsupported — there is no lock until the SQLite move — and the
   management UI's fixed default port (8321) means a second instance must configure its
   own.
-- **Session ports are OS-assigned and change on every launch**, so a session's client
-  URL is not stable across resumes; the management UI's open link is the way in.
-- **No health checks beyond the readiness line**: a child that wedges after readiness
-  shows as running until it exits.
+- **Session ports are OS-assigned and change on every launch.** A session has one stable
+  URL — `/sessions/{id}/open` — but the address it lands on is only stable where
+  `YESSION_SESSION_URL` derives it from `{id}` ([Plan 12](plans/12-path-mounted-by-default.md)).
+  On the zero-config loopback default the origin moves with the port, so a browser's
+  IndexedDB store (partitioned by origin) is left behind; the client says so instead of
+  promising otherwise (`PublicAccess.sessionAddressIsStable`), and that is the whole
+  remedy — nothing migrates the stranded store.
+- **Health is a liveness report, not a health check.** A launch reports busy/idle on
+  `POST /control/activity` and the Manager reaps on silence — but only when an operator
+  sets an idle timeout (`IdleTimeout` is `None` by default). Unset, a child that wedges
+  after readiness still shows as running until it exits; set, it is stopped as
+  `NeverReported` rather than diagnosed.
 - **The Manager→Session notification channel is a transport without a producer yet.**
   The reverse leg of the control RPC exists end to end — the child subscribes to
   `GET /control/notifications` (SSE, per-launch secret), the Manager multiplexes and
@@ -246,13 +261,10 @@ discovers it in production. Items are roughly ordered by how much they matter.
   and selection with a colour + name label, relayed over ephemeral `Presence` frames (never
   durable). Invariant 4 (clean send) has a dedicated Hedgehog property; broader draft-op
   schedules (participation, offline rejoin) are the follow-up.
-- **Reconnect is manual** (reload). The model reaches `Reconnecting`, but the browser
-  shell does not yet redial and resume (the protocol supports it — E2E-4 proves resume
-  works, and the client now pushes its full local state on every accept — the browser
-  redial wiring is what's missing).
 - **A 401 from `/me` renavigates to `/login` unconditionally** — there is no in-app
-  "signed out" state; the client simply rides the OIDC bounce again. Offline, the
-  probe's network failure keeps the cached shell read-only with no reconnect UI.
+  "signed out" state; the client simply rides the OIDC bounce again. (The other axis is
+  handled: an unreachable session keeps the cached shell local-first and, once the
+  disconnection settles, offers the `/sessions/{id}/open` card rather than a status word.)
 - **No browser support matrix**: verified on Chromium (headless, in CI); the ICE
   gathering settle-fallback should cover Safari/Firefox mDNS behaviour, but they are
   untested.
@@ -260,20 +272,45 @@ discovers it in production. Items are roughly ordered by how much they matter.
 ## Agent
 
 - **The live agent's tool results are text renderings** of the typed capability
-  results; there is no structured tool-result schema and no tool for reading the
-  command log or session history beyond the prompt transcript.
+  results; there is no structured tool-result schema. The agent can read back what its
+  own terminal commands did (`read_terminal_block`, plus the digest on the context pack
+  — Plan 13 stages 3a/3b), but there is still no tool for reading session history beyond
+  the prompt transcript.
 - **The context pack is a flat transcript** rebuilt per turn from the full projection —
   no windowing, summarisation, or token budgeting. Bodies are now Markdown (rich text
   landed), but the transcript is still a naive `author: body` join with no multi-line
   handling, so long sessions or large rich bodies will eventually overflow the model context.
+  Only the terminal digest is bounded (an output tail, with the elided count stated).
 - **Turn discipline is done** (Phase 3): single-flight is enforced by the queue drain,
   interrupt is explicit, and the invariants are property-tested — but the queue has
   **no size cap**, a drain coalesces any backlog into ONE turn (no per-message turns
   option), and the queued-message UI has no "locked" visual during the drain broadcast
   window (a peer can briefly type into an entry that is about to vanish — the edit is
   safely discarded, but the UX flickers).
-- **No repository integration** (`.yession.yml`, clone, commit/push) — explicitly later
-  phases per the delivery plan.
+- **Repo integration is the read-only bootstrap slice** ([Plan 14](plans/14-git-repos.md)):
+  typed clone-and-orient verbs beside the agent, one repos dir shared into the
+  WorkSandbox, GitHub sign-in per user over the device flow. Remaining, deliberate:
+  - **A session's repos are session-readable, and bytes outlive revocation.** One
+    user's private repo, once added, is readable by every peer and everything in the
+    WorkSandbox — the same shared-trust boundary as "terminal access equals session
+    access". The `RepoAdded` event names who brought it in; GitHub-side revocation
+    does not claw back what is already on disk.
+  - **A pasted PAT bypasses the App-installation scope rule.** The device-flow token
+    is a GitHub App user-to-server token, so it can only reach repos where the App is
+    installed; a pasted `github_pat_`/`ghp_` answers to no such bound.
+  - **The stored token does not rotate.** Device flow + static storage (the broker is
+    a PKCE public client; GitHub's code exchange wants the App secret) means the App
+    must have user-token expiration disabled and revocation happens at GitHub.
+  - **`git push` in a WorkSandbox terminal has no forwarded credential yet** — v1
+    terminals do local git only; forwarding becomes `.yession.yml` configuration in a
+    later plan. Commit/push attribution machinery (author = requesting user,
+    `Co-Authored-By`) lands with it.
+  - **Under `YESSION_AGENT_SANDBOX=host` the git verbs run unconfined** — the
+    operator's explicitly lax choice, as everywhere `host` is chosen. The per-invocation
+    hardening (hooks/fsmonitor/ext off, no global config, protocol pinned) still
+    applies; the filesystem and egress boundaries do not.
+  - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
+    and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **Per-user agent credentials landed** ([Plan 08](plans/08-connections-and-claude-auth.md)):
   a human signs into their Claude account from the session's Connections panel — "this
   session only" (`SessionScope`) or "all my sessions" (their user/peer scope) — the
@@ -286,11 +323,12 @@ discovers it in production. Items are roughly ordered by how much they matter.
   the turn's failure (no panel-level health indicator); the panel's status is polled
   by the browser (the SESSION learns of changes live over its control stream, the
   open browser tab re-asks).
-- **Live-path verification is credential-gated by design.** Without
-  `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` the live tests self-report skipped;
-  a dedicated low-privilege key in CI would exercise them on every merge
-  (recommended). `YESSION_CLAUDE_PATH` matters in sandboxes that kill the SDK's
-  vendored binary.
+- **Live-path verification is credential-gated by design**, and asking for it now
+  requires it: `verify` declares the `LiveAgent` capability, so a run without
+  `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` fails rather than skipping quietly (which
+  is how every release up to `v5.0.0-beta.0` shipped with the live suite silently
+  skipped). A cheap-tier run simply never asks. `YESSION_CLAUDE_PATH` matters in sandboxes
+  that kill the SDK's vendored binary.
 
 ## Delivery & operations
 
@@ -298,20 +336,24 @@ discovers it in production. Items are roughly ordered by how much they matter.
   (`yession-manager`, `yession-session`); `npm i -g yession-*.tgz` pulls the platform-native
   deps — `node-datachannel`'s addon AND the SDK's native `claude` — via npm's optional
   dependencies, so install is all it takes and the agent works offline afterward. But
-  there is no self-contained binary anymore: a machine without Node ≥24 can't run it.
+  there is no self-contained binary anymore: a machine without Node ≥24 can't run it from
+  npm. (The Nix installable wraps `nodejs_24`, so that route brings its own — at the cost
+  of needing Nix.)
 - **First install downloads the native `claude`** (~240 MB, platform-specific): it is
   not in the 300 KB tarball, npm fetches it. So the *first* install needs network and
   disk; the SDK's own resolution finds it thereafter (no `YESSION_CLAUDE_PATH` needed).
-- **The composition E2E and install smoke run on Linux/CI**; other platforms' native
+- **The composition E2E and install smoke run on Linux/CI**; other platforms' npm
   resolution rides npm's own optional-dependency machinery, unverified per-commit.
-- **No per-platform build matrix, no code signing.** Release CI is a single `ubuntu-latest`
-  job that ships one platform-neutral npm tarball; the platform-native pieces are resolved
-  by npm's `optionalDependencies` on whichever machine runs `npm install`, not built by
-  Yession (this replaced the earlier SEA per-platform binaries — see Step 26→28). Yession
-  therefore has no compiled binary of its own to sign or notarise; the native `claude` and
-  `node-datachannel` addon npm pulls in are unsigned third-party downloads that may still
-  trip macOS Gatekeeper. Darwin and Windows resolution rides npm's own machinery, exercised
-  only by the Linux install-smoke — unverified per-commit on those platforms.
+- **No per-platform build matrix for the npm route, no code signing.** Release CI ships one
+  platform-neutral npm tarball and a Nix package, both from `ubuntu-latest`; the
+  platform-native pieces are resolved by npm's `optionalDependencies` on whichever machine
+  runs `npm install`, not built by Yession (this replaced the earlier SEA per-platform
+  binaries — see Step 26→28). Yession therefore has no compiled binary of its own to sign
+  or notarise; the native `claude` and `node-datachannel` addon npm pulls in are unsigned
+  third-party downloads that may still trip macOS Gatekeeper. Darwin has one foothold — the
+  PR gate builds the flake package on `macos-latest`, enters the dev shell, and loads the
+  native WebRTC addon there — but the npm INSTALL path on darwin, and everything on
+  Windows, is exercised only by the Linux install-smoke.
 - **Telemetry is agent-turn usage plus Manager audit records** (Plans 04 + 06): each
   completed turn emits one OpenTelemetry **log record** — the token/cache counts plus
   session/turn/model ids, never message content. Every process (Manager and each session)
@@ -326,8 +368,10 @@ discovers it in production. Items are roughly ordered by how much they matter.
   Still **no metrics pipeline, no traces** (the emitter path generalises to both — same env
   selection, no collector to touch), **audit records not yet forwarded to a collector**, and
   **no structured app logging or crash reporting** beyond stdout.
-- **Interactive terminal, multi-node/remote sessions, and work-intake integrations
-  (Slack/Linear)** remain out of scope, as planned.
+- **Multi-node operation and work-intake integrations (Slack/Linear)** remain out of
+  scope, as planned. (Terminals landed as Plan 13 and remote access as Plans 09/10/12 —
+  what is still out of scope there is a session that runs on a machine other than its
+  Manager's.)
 
 ## Testing debt
 
@@ -341,34 +385,20 @@ discovers it in production. Items are roughly ordered by how much they matter.
 
 ## Terminals (Plan 13)
 
-- **A queued command whose terminal closes stays queued for ever.** Nothing runs it and
-  nothing removes it; it is visible in the doc against a closed terminal and a person can
-  delete it. Deliberately non-destructive rather than silently dropping someone's text, but
-  the UI does not yet say why it will not run.
+- **A queued command whose terminal closes stays queued for ever, and is now unreachable.**
+  Nothing runs it and nothing removes it — deliberately non-destructive rather than silently
+  dropping someone's text. But a closed terminal renders its recording instead of its
+  composer (stage 3e), so the entry that was at least visible and deletable before is
+  neither now: it sits in the doc with no surface at all.
 - **Terminal access equals session access.** A terminal can read the sandbox's environment
   (`env`), which after resolve-at-spawn includes secrets the session's spec references.
   This is not a new privilege — any peer could already ask the agent to run `env` — but a
   terminal makes it one keystroke, and a future per-user terminal gate would attach here.
-- **Agent commands cannot hold a live-mode lease** (PR 2). A policy decision, not a
-  mechanism gap: leases are human-only until there is a reason to change that. The drain
-  gate that must accompany leases — a live terminal holds its queue rather than typing
-  into a session someone else owns — is designed in Plan 13 and lands with them, so the
-  hole does not exist yet only because live mode does not.
-- **Refusing a queued command leaves no record.** Approval is recorded on the block;
-  rejection is a CRDT delete, so the entry is simply gone and the log that captures every
-  yes captures no no. "The agent proposed this and a human said no" is the more
-  interesting half of a review gate, and it is currently thrown away — the queue also
-  cannot distinguish it from the author withdrawing their own text. Fixed by
-  `TerminalCommandRejected` and the `Rejected` block status in PR 2.
-- **`ApproveAgent` does not currently gate the agent.** It gates `queue_terminal_command`,
-  but `execute_command` still runs on the old path with no approval and no terminal, so an
-  agent that wants an answer has an ungated door. The mode is enforceable only once the two
-  tools converge (Plan 13 PR 3, "Closing the loophole"). Until then, treat the terminal
-  approval mode as covering what the agent chose to put in a terminal, not everything it
-  can run.
-- **The agent never learns what a queued command did.** Terminal events fold into
-  `TerminalProjection` and deliberately not into the conversation, and the agent's context
-  pack is built from the conversation — so a block's exit code and output are outside it,
-  on that turn and every later one. The agent cannot chain (run, read, decide, run again)
-  through a terminal, which is the substantive reason it reaches for `execute_command`.
-  Fixed by the terminal digest on `AgentContextPack` in PR 3.
+- **Agent commands cannot hold a live-mode lease.** A policy decision, not a mechanism
+  gap: leases are human-only until there is a reason to change that. The drain gate that
+  accompanies them shipped with live mode (stage 2e) — a leased terminal holds its queue
+  rather than typing into a session someone else owns.
+- **Live mode has no browser viewport.** The Session Process side is complete — lease,
+  detected flip, `TerminalInput`/`TerminalResize` frames, idle reclaim — and the panel
+  renders blocks and the lease bar, not a live screen. A lease can be taken and watched;
+  typing into one is not yet drivable from a browser.

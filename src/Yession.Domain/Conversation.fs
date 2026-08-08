@@ -12,11 +12,23 @@ type ConversationItemStatus =
     /// The turn was explicitly interrupted; the partial body streamed so far is kept.
     | Interrupted
 
+/// What an item in the timeline IS (Plan 14). A message is something someone said; a
+/// repo note is something someone DID (added/removed/switched a repo), folded into the
+/// same ordered list so humans see it where it happened and the agent's context —
+/// built from this projection — carries the same history. Distinguished by a field
+/// rather than by author or body convention, so a renderer can style a note without
+/// parsing anything.
+[<RequireQualifiedAccess>]
+type ConversationItemKind =
+    | Message
+    | RepoNote
+
 type ConversationItem =
     { MessageId : MessageId
       Author    : ActorRef
       Body      : string
       Status    : ConversationItemStatus
+      Kind      : ConversationItemKind
       /// The offset of the event that CREATED this item — the message that was sent, or the
       /// agent message that started (Plan 14, stage 1). Deltas and completions move the body
       /// and the status; they never move the item, so a streaming answer holds its place in
@@ -55,6 +67,7 @@ module ConversationProjection =
                           Author = m.Author
                           Body = m.Body
                           Status = Complete
+                          Kind = ConversationItemKind.Message
                           Offset = envelope.Offset } ] }
         | AgentTurnStarted _ -> proj   // lifecycle; the item appears at AgentMessageStarted
         | AgentContextBuilt _ -> proj  // lifecycle
@@ -89,6 +102,43 @@ module ConversationProjection =
         | SessionEvent.TerminalIntegrationLost _
         | SessionEvent.TerminalIntegrationRestored _
         | SessionEvent.TerminalTranscriptTruncated _ -> proj
+        // Repos (Plan 14) DO fold into the timeline — unlike terminals, a repo change is
+        // a session-shaping act ("we are now working on X, on branch Y") that reads like
+        // a sentence, carries no output stream, and is exactly what a joining human or
+        // the agent's next turn needs to know. Each note rides the Process-minted
+        // MessageId its event carries.
+        | SessionEvent.RepoAdded r ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = r.MessageId
+                          Author = r.Actor
+                          Body = sprintf "added repo %s (branch %s)" (RepoRef.value r.Repo) r.Branch
+                          Status = Complete
+                          Kind = ConversationItemKind.RepoNote
+                          Offset = envelope.Offset } ] }
+        | SessionEvent.RepoRemoved r ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = r.MessageId
+                          Author = r.Actor
+                          Body = sprintf "removed repo %s" (RepoRef.value r.Repo)
+                          Status = Complete
+                          Kind = ConversationItemKind.RepoNote
+                          Offset = envelope.Offset } ] }
+        | SessionEvent.RepoBranchSwitched r ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = r.MessageId
+                          Author = r.Actor
+                          Body =
+                            if r.Created then sprintf "created branch %s in %s" r.Branch (RepoRef.value r.Repo)
+                            else sprintf "switched %s to branch %s" (RepoRef.value r.Repo) r.Branch
+                          Status = Complete
+                          Kind = ConversationItemKind.RepoNote
+                          Offset = envelope.Offset } ] }
         | AgentMessageStarted a ->
             { Items =
                 proj.Items
@@ -96,6 +146,7 @@ module ConversationProjection =
                       Author = ActorRef.Agent
                       Body = ""
                       Status = Streaming
+                      Kind = ConversationItemKind.Message
                       Offset = envelope.Offset } ]
               ActiveAgentMessages = Map.add a.AgentTurnId a.MessageId proj.ActiveAgentMessages }
         | AgentMessageDelta a ->
@@ -140,6 +191,7 @@ module ConversationProjection =
                               Author = ActorRef.Agent
                               Body = a.Reason
                               Status = Failed
+                              Kind = ConversationItemKind.Message
                               Offset = envelope.Offset } ] }
 
     /// Fold ordered event envelopes into a conversation projection.

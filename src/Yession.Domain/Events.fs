@@ -82,6 +82,15 @@ type SessionEvent =
     | TerminalIntegrationLost of TerminalIntegrationLost
     | TerminalIntegrationRestored of TerminalIntegrationRestored
     | TerminalTranscriptTruncated of TerminalTranscriptTruncated
+    // Repos (Plan 14): durable facts about the session's repos directory — who brought
+    // which repo in, removed it, or moved its checkout to another branch. The agent's
+    // verbs and the settings panel are two interfaces over one function, and these
+    // events are that function's record; they also project into the conversation
+    // timeline (each carries the Process-minted MessageId its timeline note folds
+    // under), so humans and the agent's context both see the history.
+    | RepoAdded of RepoAdded
+    | RepoRemoved of RepoRemoved
+    | RepoBranchSwitched of RepoBranchSwitched
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -304,3 +313,29 @@ and TerminalTranscriptTruncated =
       /// Output this terminal produced and the transcript did NOT keep. Recorded so a
       /// gap in an audit trail is a stated fact, never a silent one.
       DroppedBytes : int }
+
+and RepoAdded =
+    { /// The timeline note's identity, minted by the Process at append time — which is
+      /// what lets the conversation projection fold this without inventing ids.
+      MessageId : MessageId
+      Repo : RepoRef
+      /// The branch the clone landed on (the remote's default).
+      Branch : string
+      /// Who brought it in — the panel's human or the agent. Carried on the payload
+      /// because the projection reads events, not envelopes, and "who added this repo"
+      /// is the fact the shared-trust disclosure hangs off.
+      Actor : ActorRef }
+
+and RepoRemoved =
+    { MessageId : MessageId
+      Repo : RepoRef
+      Actor : ActorRef }
+
+and RepoBranchSwitched =
+    { MessageId : MessageId
+      Repo : RepoRef
+      Branch : string
+      /// True when the switch created the branch (`-b`), false when it checked out an
+      /// existing one — one event, because it is one act at the panel and one verb.
+      Created : bool
+      Actor : ActorRef }

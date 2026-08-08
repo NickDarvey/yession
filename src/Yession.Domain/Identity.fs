@@ -236,3 +236,41 @@ module ActorRef =
                     | "user" -> (match UserId.create rest with Ok u -> Some (UserRef u) | Error _ -> None)
                     | "peer" -> (match PeerId.create rest with Ok p -> Some (PeerRef p) | Error _ -> None)
                     | _ -> None
+
+/// A GitHub repository, named `owner/repo` (Plan 14). Validated at the boundary so the
+/// clone URL is CONSTRUCTED from it — there is no free-form remote anywhere downstream,
+/// which is what keeps the repo surface free of arbitrary-URL fetches. The charset is
+/// GitHub's own (word characters, `.`/`-`; no leading dot or hyphen abuse is worth
+/// modelling beyond what the API itself enforces), and both halves are length-capped.
+type RepoRef = private RepoRef of owner: string * repo: string
+
+module RepoRef =
+
+    let private segmentOk (maxLen: int) (s: string) : bool =
+        s <> ""
+        && s.Length <= maxLen
+        && s |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '-' || c = '_' || c = '.')
+        && s <> "." && s <> ".."
+
+    /// Parse `owner/repo`. A trailing `.git` is stripped rather than refused — it is how
+    /// people paste repo names, and the canonical form should win.
+    let create (raw: string) : Result<RepoRef, string> =
+        let trimmed = (defaultArg (Option.ofObj raw) "").Trim()
+        match trimmed.Split '/' with
+        | [| owner; repo |] ->
+            let repo = if repo.EndsWith ".git" then repo.Substring (0, repo.Length - 4) else repo
+            if segmentOk 39 owner && segmentOk 100 repo then Ok (RepoRef (owner, repo))
+            else Error (sprintf "'%s' is not an owner/repo name" trimmed)
+        | _ -> Error (sprintf "'%s' is not an owner/repo name (expected exactly one '/')" trimmed)
+
+    let owner (RepoRef (o, _)) = o
+    let repo (RepoRef (_, r)) = r
+
+    /// The canonical `owner/repo` rendering — also the codec's wire form.
+    let value (RepoRef (o, r)) = sprintf "%s/%s" o r
+
+    /// The one place a clone URL is spelled.
+    let cloneUrl (ref: RepoRef) : string = sprintf "https://github.com/%s.git" (value ref)
+
+    /// Where the checkout lives under the session's repos directory.
+    let relativePath (RepoRef (o, r)) : string = sprintf "%s/%s" o r

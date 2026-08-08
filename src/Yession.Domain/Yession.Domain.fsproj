@@ -24,6 +24,7 @@
     <Compile Include="Notifications.fs" />
     <Compile Include="Mcp.fs" />
     <Compile Include="Conversation.fs" />
+    <Compile Include="Repos.fs" />
     <!-- Before SessionState: the synced terminal state carries the approval mode this
          declares, so the policy type precedes the collaborative state that holds it. -->
     <Compile Include="Terminals.fs" />

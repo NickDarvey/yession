@@ -524,6 +524,55 @@ module Codec =
                   TerminalTranscriptTruncated.BlockId = get.Required.Field "blockId" (Decode.option blockId.Decode)
                   TerminalTranscriptTruncated.DroppedBytes = get.Required.Field "droppedBytes" Decode.int }) }
 
+    let repoRef : Codec<RepoRef> =
+        { Encode = RepoRef.value >> Encode.string
+          Decode = viaSmartCtor RepoRef.create Decode.string }
+
+    let private repoAdded : Codec<RepoAdded> =
+        { Encode =
+            fun (p: RepoAdded) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "repo", repoRef.Encode p.Repo
+                      "branch", Encode.string p.Branch
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { RepoAdded.MessageId = get.Required.Field "messageId" messageId.Decode
+                  RepoAdded.Repo = get.Required.Field "repo" repoRef.Decode
+                  RepoAdded.Branch = get.Required.Field "branch" Decode.string
+                  RepoAdded.Actor = get.Required.Field "actor" actor.Decode }) }
+
+    let private repoRemoved : Codec<RepoRemoved> =
+        { Encode =
+            fun (p: RepoRemoved) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "repo", repoRef.Encode p.Repo
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { RepoRemoved.MessageId = get.Required.Field "messageId" messageId.Decode
+                  RepoRemoved.Repo = get.Required.Field "repo" repoRef.Decode
+                  RepoRemoved.Actor = get.Required.Field "actor" actor.Decode }) }
+
+    let private repoBranchSwitched : Codec<RepoBranchSwitched> =
+        { Encode =
+            fun (p: RepoBranchSwitched) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "repo", repoRef.Encode p.Repo
+                      "branch", Encode.string p.Branch
+                      "created", Encode.bool p.Created
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { RepoBranchSwitched.MessageId = get.Required.Field "messageId" messageId.Decode
+                  RepoBranchSwitched.Repo = get.Required.Field "repo" repoRef.Decode
+                  RepoBranchSwitched.Branch = get.Required.Field "branch" Decode.string
+                  RepoBranchSwitched.Created = get.Required.Field "created" Decode.bool
+                  RepoBranchSwitched.Actor = get.Required.Field "actor" actor.Decode }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -593,7 +642,13 @@ module Codec =
                 | TerminalLeaseReleased p ->
                     Encode.object [ "type", Encode.string "terminalLeaseReleased"; "payload", terminalLeaseReleased.Encode p ]
                 | TerminalTranscriptTruncated p ->
-                    Encode.object [ "type", Encode.string "terminalTranscriptTruncated"; "payload", terminalTranscriptTruncated.Encode p ])
+                    Encode.object [ "type", Encode.string "terminalTranscriptTruncated"; "payload", terminalTranscriptTruncated.Encode p ]
+                | RepoAdded p ->
+                    Encode.object [ "type", Encode.string "repoAdded"; "payload", repoAdded.Encode p ]
+                | RepoRemoved p ->
+                    Encode.object [ "type", Encode.string "repoRemoved"; "payload", repoRemoved.Encode p ]
+                | RepoBranchSwitched p ->
+                    Encode.object [ "type", Encode.string "repoBranchSwitched"; "payload", repoBranchSwitched.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -632,6 +687,9 @@ module Codec =
                 | "terminalLeaseReleased" -> Decode.field "payload" terminalLeaseReleased.Decode |> Decode.map TerminalLeaseReleased
                 | "terminalTranscriptTruncated" ->
                     Decode.field "payload" terminalTranscriptTruncated.Decode |> Decode.map TerminalTranscriptTruncated
+                | "repoAdded" -> Decode.field "payload" repoAdded.Decode |> Decode.map RepoAdded
+                | "repoRemoved" -> Decode.field "payload" repoRemoved.Decode |> Decode.map RepoRemoved
+                | "repoBranchSwitched" -> Decode.field "payload" repoBranchSwitched.Decode |> Decode.map RepoBranchSwitched
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

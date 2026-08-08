@@ -106,6 +106,32 @@ type ExecuteCommand = TerminalId option -> string -> Async<Result<TerminalComman
 /// late, a long build. Returns the same shape, so the agent learns one thing rather than two.
 type ReadTerminalBlock = QueueId -> Async<Result<TerminalCommandOutcome, string>>
 
+/// The read-only repo verbs (Plan 14): clone-and-orient, NO mutation of history and NO
+/// push — everything irreversible goes through `ExecuteCommand` in the WorkSandbox,
+/// where the approval gate and the transcript already are. Git runs confined beside the
+/// agent (the agent backend's sandbox family), and the clone URL is constructed from
+/// the validated `owner/repo`, so no verb can name an arbitrary remote.
+
+/// Clone a repo into the session's repos directory (a no-op returning the current state
+/// when it is already there). The checkout is visible to every peer and to the
+/// WorkSandbox from the moment it lands.
+type AddRepo = RepoRef -> Async<Result<RepoListing, string>>
+
+/// The session's repos as the filesystem reports them — branch and dirty state per
+/// checkout, which is also how resume drift is told.
+type ListRepos = unit -> Async<Result<RepoListing list, string>>
+
+/// Switch a repo's checkout to a branch, optionally creating it. Local ref movement
+/// only — never touches the remote.
+type SwitchRepoBranch = RepoRef -> string -> bool -> Async<Result<RepoListing, string>>
+
+/// Fetch a repo's remote refs (prune, no submodules). The one network verb besides the
+/// clone itself; runs on the same per-invocation credential.
+type FetchRepo = RepoRef -> Async<Result<string, string>>
+
+/// A read-only look at a checkout — status, log, or diff — rendered as text, capped.
+type InspectRepo = RepoRef -> Async<Result<string, string>>
+
 /// Persist a secret under the session's own scope (Plan 06). WRITE-ONLY from the
 /// agent's side: there is no capability that returns a value — a stored secret is used
 /// by referencing its name in an environment spec (`SecretRef`), resolved at sandbox
@@ -136,7 +162,16 @@ type AgentCapabilities =
       ReadTerminalBlock : ReadTerminalBlock
       SetSecret : SetSessionSecret
       ListSecrets : ListSessionSecrets
-      DeleteSecret : DeleteSessionSecret }
+      DeleteSecret : DeleteSessionSecret
+      // The repo verbs (Plan 14): read-only bootstrap — clone and orient. Commit/push
+      // stay behind ExecuteCommand, which is what keeps the one-door invariant intact.
+      AddRepo : AddRepo
+      ListRepos : ListRepos
+      SwitchRepoBranch : SwitchRepoBranch
+      FetchRepo : FetchRepo
+      RepoStatus : InspectRepo
+      RepoLog : InspectRepo
+      RepoDiff : InspectRepo }
 
 module AgentCapabilities =
 
@@ -146,7 +181,14 @@ module AgentCapabilities =
           ReadTerminalBlock = fun _ -> async { return Error "no terminal capability" }
           SetSecret = fun _ _ -> async { return Error "no secrets capability" }
           ListSecrets = fun () -> async { return Error "no secrets capability" }
-          DeleteSecret = fun _ -> async { return Error "no secrets capability" } }
+          DeleteSecret = fun _ -> async { return Error "no secrets capability" }
+          AddRepo = fun _ -> async { return Error "no repos capability" }
+          ListRepos = fun () -> async { return Error "no repos capability" }
+          SwitchRepoBranch = fun _ _ _ -> async { return Error "no repos capability" }
+          FetchRepo = fun _ -> async { return Error "no repos capability" }
+          RepoStatus = fun _ -> async { return Error "no repos capability" }
+          RepoLog = fun _ -> async { return Error "no repos capability" }
+          RepoDiff = fun _ -> async { return Error "no repos capability" } }
 
 /// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
 /// Session Process owns the signal; the runner observes it — poll `IsAborted` at

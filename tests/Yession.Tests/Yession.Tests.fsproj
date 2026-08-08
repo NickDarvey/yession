@@ -38,6 +38,7 @@
     <Compile Include="Phase2.fs" />
     <Compile Include="DockerIntegration.fs" />
     <Compile Include="SrtIntegration.fs" />
+    <Compile Include="GitIntegration.fs" />
     <Compile Include="PtyIntegration.fs" />
     <Compile Include="Phase3.fs" />
     <Compile Include="EventsHttp.fs" />

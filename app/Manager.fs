@@ -74,6 +74,7 @@ let createFull
                                     HostBackend
                                     (fun name -> async { return Error (sprintf "no secrets channel for '%s'" (SecretName.value name)) })
                                     None
+                                    None
                                     EnvironmentSpec.defaults)
                                 (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
                                 (sprintf "env-%s" (SessionId.value request.SessionId)))

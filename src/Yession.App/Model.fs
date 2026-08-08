@@ -81,6 +81,36 @@ type ClaudeViewState =
     { Status : ClaudeStatus
       Flow : ClaudeFlowState }
 
+/// Where the GitHub sign-in flow is (Plan 14). Device flow: the panel shows a user
+/// code, the human approves it on github.com in their own tab, and the browser polls
+/// the session (which polls GitHub) until the grant lands.
+type GitHubFlowState =
+    | GitHubIdle
+    /// The code is on screen. `scope` remembers the sign-in choice ("session" |
+    /// "mine"); `interval` is GitHub's polling pace in seconds, which `slow_down`
+    /// replies may widen mid-flow.
+    | GitHubAwaitingApproval of userCode: string * verificationUri: string * scope: string * interval: int
+    | GitHubBusy
+    | GitHubError of string
+
+/// What the /github status probe reported: kind label ("oauth"/"static") per sign-in
+/// scope, when connected.
+type GitHubStatus =
+    { SessionCredential : string option
+      MineCredential : string option }
+
+type GitHubViewState =
+    { Status : GitHubStatus
+      Flow : GitHubFlowState }
+
+/// The Repos panel's state (Plan 14), fed by the /repos probe — the filesystem's
+/// answer, not the event projection's, so the panel can never disagree with `git
+/// status`. `None` until the first probe answers.
+type ReposViewState =
+    { Listings : RepoListing list option
+      Busy : bool
+      Error : string option }
+
 /// Which draft the composer has open. `Unchosen` is the state a fresh client is in, and the only
 /// one where the DEFAULT applies (join the draft already in flight rather than start a rival) —
 /// once someone picks, the pick stands, so "new message" is not undone by a peer starting to type.
@@ -290,7 +320,11 @@ type ClientModel =
       /// session may reasonably want different columns on screen.
       TerminalsOpen : bool
       /// The Claude connection panel's state (Plan 08), driven by the /claude routes.
-      Claude        : ClaudeViewState }
+      Claude        : ClaudeViewState
+      /// The GitHub connection panel's state (Plan 14), driven by the /github routes.
+      GitHub        : GitHubViewState
+      /// The Repos panel's state (Plan 14), driven by the /repos routes.
+      Repos         : ReposViewState }
 
 /// Messages that drive the client model. Connection-lifecycle messages are produced by
 /// the connection driver (Connection.fs); the suffix avoids clashing with the
@@ -354,6 +388,14 @@ type ClientMsg =
     | ClaudeStatusMsg of ClaudeStatus
     /// The Claude sign-in flow moved (begin/busy/error/reset).
     | ClaudeFlowMsg of ClaudeFlowState
+    /// A fresh /github status probe result (Plan 14).
+    | GitHubStatusMsg of GitHubStatus
+    /// The GitHub sign-in flow moved (begin/awaiting/busy/error/reset).
+    | GitHubFlowMsg of GitHubFlowState
+    /// A fresh /repos probe result (Plan 14).
+    | ReposListMsg of RepoListing list
+    /// A repos-panel action moved (busy/error/reset). `None` error = idle.
+    | ReposFlowMsg of busy: bool * error: string option
     // --- Terminals (Plan 13) ---------------------------------------------------------
     /// One transcript record arrived — live over the data channel, or from a fetched
     /// history chunk. Both routes carry the sequence number, so both fold the same way.
@@ -462,7 +504,11 @@ module ClientModel =
           TerminalsOpen = false
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
-              Flow = ClaudeIdle } }
+              Flow = ClaudeIdle }
+          GitHub =
+            { Status = { SessionCredential = None; MineCredential = None }
+              Flow = GitHubIdle }
+          Repos = { Listings = None; Busy = false; Error = None } }
 
     /// Advance the latest-known offset and recompute the catch-up indicator. "Slow" is a
     /// property of a catch-up that is STILL RUNNING, so it dies with the catch-up it
@@ -980,6 +1026,22 @@ module ClientModel =
             { model with Claude = { Status = status; Flow = flow } }
         | ClaudeFlowMsg flow ->
             { model with Claude = { model.Claude with Flow = flow } }
+        | GitHubStatusMsg status ->
+            // A connected credential ends an in-flight wait (the poll completed, or the
+            // grant landed from another tab); otherwise a mere probe leaves the flow be.
+            let connected = status.SessionCredential.IsSome || status.MineCredential.IsSome
+            let flow =
+                match model.GitHub.Flow, connected with
+                | (GitHubAwaitingApproval _ | GitHubBusy), true -> GitHubIdle
+                | flow, _ -> flow
+            { model with GitHub = { Status = status; Flow = flow } }
+        | GitHubFlowMsg flow ->
+            { model with GitHub = { model.GitHub with Flow = flow } }
+        | ReposListMsg listings ->
+            // A fresh listing settles any in-flight action: the probe IS the outcome.
+            { model with Repos = { Listings = Some listings; Busy = false; Error = None } }
+        | ReposFlowMsg (busy, error) ->
+            { model with Repos = { model.Repos with Busy = busy; Error = error } }
         | TerminalRecordMsg (terminal, seq, record) ->
             let feed = terminalFeed terminal model |> TerminalFeed.withRecord seq record
             { model with TerminalFeeds = Map.add terminal feed model.TerminalFeeds }

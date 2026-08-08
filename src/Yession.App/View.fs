@@ -53,6 +53,23 @@ type ViewActions =
       ClaudePasteToken : unit -> unit
       /// Disconnect the credential stored for a scope choice ("session" | "mine").
       ClaudeDisconnect : string -> unit
+      /// GitHub connection panel (Plan 14). Same imperative shape as the Claude set;
+      /// the flow differs (device code, no paste-back) so there is no Complete — the
+      /// browser polls while awaiting approval.
+      /// Begin the device-flow sign-in for the scope in the panel's selector.
+      GitHubConnect : unit -> unit
+      /// Store the pasted personal-access/user token from the panel's token input.
+      GitHubPasteToken : unit -> unit
+      /// Disconnect the credential stored for a scope choice ("session" | "mine").
+      GitHubDisconnect : string -> unit
+      /// Repos panel (Plan 14). Imperative like the connection sets: they read panel
+      /// inputs and drive the /repos round-trips; the reducer folds the results.
+      /// Add the owner/repo in the panel's add input.
+      RepoAdd : unit -> unit
+      /// Remove a repo's checkout (the argument is its owner/repo rendering).
+      RepoRemove : string -> unit
+      /// Switch a repo to the branch typed in its row's input.
+      RepoSwitchBranch : string -> unit
       /// Ask the Manager to bring this session back and take the browser to it (Plan 11).
       /// Imperative because it is a navigation, and a navigation is not a state change this
       /// document survives to fold.
@@ -111,6 +128,12 @@ module ViewActions =
           ClaudeComplete = ignore
           ClaudePasteToken = ignore
           ClaudeDisconnect = ignore
+          GitHubConnect = ignore
+          GitHubPasteToken = ignore
+          GitHubDisconnect = ignore
+          RepoAdd = ignore
+          RepoRemove = ignore
+          RepoSwitchBranch = ignore
           ReopenSession = ignore
           OpenTerminal = ignore
           CloseTerminal = ignore
@@ -409,6 +432,98 @@ module View =
               {controls}
             </section>"""
 
+    /// The GitHub connection panel (Plan 14), beside the Claude one: status per sign-in
+    /// scope, the device flow (show the code → approve on github.com → the poll lands
+    /// the grant), and the paste-a-token fallback.
+    let private githubSection (actions: ViewActions) (dispatch: ClientMsg -> unit) (github: GitHubViewState) : TemplateResult =
+        let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
+            match kind with
+            | Some kind ->
+                html $"""<div class="{Style.sideRow}" data-github-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconDanger}" aria-label="Disconnect GitHub" data-github-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.GitHubDisconnect scopeChoice)}>{Icon.close}</button></div>"""
+            | None -> html $""""""
+        let controls =
+            match github.Flow with
+            | GitHubBusy ->
+                html $"""<span class="{Style.statusRun}" data-github-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
+            | GitHubAwaitingApproval (userCode, verificationUri, _, _) ->
+                html $"""
+                    <span class="{Style.small}">enter this code on github.com — this panel completes itself once you approve</span>
+                    <span class="{Style.field}" data-github-user-code aria-label="GitHub device code">{userCode}</span>
+                    <div class="flex gap-2">
+                      <a class="{Style.btnPrimary}" href="{verificationUri}" target="_blank" rel="noreferrer" data-github-authorize>Approve on github.com</a>
+                      <button type="button" class="{Style.btn}" data-github-cancel @click={Ev(fun _ -> dispatch (GitHubFlowMsg GitHubIdle))}>Cancel</button>
+                    </div>"""
+            | GitHubIdle | GitHubError _ ->
+                html $"""
+                    <label class="{Style.label}" for="github-scope">sign in for</label>
+                    <select id="github-scope" class="{Style.field}" data-github-scope aria-label="GitHub sign-in scope">
+                      <option value="mine">All my sessions</option>
+                      <option value="session">This session only</option>
+                    </select>
+                    <button type="button" class="{Style.btnPrimary}" data-github-connect @click={Ev(fun _ -> actions.GitHubConnect ())}>Connect GitHub</button>
+                    <span class="{Style.small} pt-2">or paste a personal access token</span>
+                    <input type="password" class="{Style.field}" data-github-token placeholder="github_pat_…" />
+                    <button type="button" class="{Style.btn}" data-github-save-token @click={Ev(fun _ -> actions.GitHubPasteToken ())}>Save token</button>"""
+        let error =
+            match github.Flow with
+            | GitHubError reason -> html $"""<span class="{Style.statusErr}" data-github-error>{reason}</span>"""
+            | _ -> html $""""""
+        html $"""
+            <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-github-panel>
+              <span class="{Style.label}">github</span>
+              <span class="{Style.small}">repos are fetched with the account of whoever asks — sign in to bring yours</span>
+              {connectedRow "all my sessions" "mine" github.Status.MineCredential}
+              {connectedRow "this session" "session" github.Status.SessionCredential}
+              {error}
+              {controls}
+            </section>"""
+
+    /// The Repos panel (Plan 14): the session's checkouts, each with its branch and
+    /// dirty state (the filesystem's answer), a per-row branch switch, remove, and the
+    /// add input — with the shared-trust disclosure stated where the act happens.
+    let private reposSection (actions: ViewActions) (repos: ReposViewState) : TemplateResult =
+        let rows =
+            match repos.Listings with
+            | None -> [ html $"""<span class="{Style.small}" data-repos-loading>…</span>""" ]
+            | Some [] -> [ html $"""<span class="{Style.small}" data-repos-empty>no repos yet</span>""" ]
+            | Some listings ->
+                listings
+                |> List.map (fun listing ->
+                    let name = RepoRef.value listing.Repo
+                    let dirty =
+                        if listing.Dirty then html $"""<span class="{Style.statusFaint}">uncommitted changes</span>"""
+                        else Lit.nothing
+                    html $"""
+                        <div class="{Style.sideRow}" data-repo-row="{name}">
+                          <div class="flex flex-col gap-1 min-w-0">
+                            <span class="{Style.small}">{name} · {listing.Branch}</span>
+                            {dirty}
+                            <div class="flex gap-2">
+                              <input type="text" class="{Style.field}" data-repo-branch-input="{name}" aria-label="Branch for {name}" placeholder="branch" />
+                              <button type="button" class="{Style.btn}" data-repo-switch="{name}" @click={Ev(fun _ -> actions.RepoSwitchBranch name)}>Switch</button>
+                            </div>
+                          </div>
+                          <button type="button" class="{Style.btnIconDanger}" aria-label="Remove {name}" data-repo-remove="{name}" @click={Ev(fun _ -> actions.RepoRemove name)}>{Icon.close}</button>
+                        </div>""")
+        let busy =
+            if repos.Busy then html $"""<span class="{Style.statusRun}" data-repos-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
+            else Lit.nothing
+        let error =
+            match repos.Error with
+            | Some reason -> html $"""<span class="{Style.statusErr}" data-repos-error>{reason}</span>"""
+            | None -> Lit.nothing
+        html $"""
+            <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-repos-panel>
+              <span class="{Style.label}">repos</span>
+              <span class="{Style.small}">a repo added here is readable by everyone in this session, and inside the work environment</span>
+              {rows}
+              {busy}
+              {error}
+              <label class="{Style.label}" for="repo-add">add a repo</label>
+              <input id="repo-add" type="text" class="{Style.field}" data-repo-add-input placeholder="owner/repo" />
+              <button type="button" class="{Style.btnPrimary}" data-repo-add @click={Ev(fun _ -> actions.RepoAdd ())}>Add repo</button>
+            </section>"""
+
     /// Settings, as the sidebar column's OTHER FACE. Not a drawer over the conversation: you
     /// go there and come back, the timeline never moves under a scrim, and configuration keeps
     /// the section rhythm it already had. Open state is the root element's `settings-open`
@@ -426,6 +541,8 @@ module View =
                 <button type="button" class="{Style.navChevronBack}" aria-label="Collapse sidebar" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.left}</button>
               </div>
               {claudeSection actions dispatch model.Claude}
+              {githubSection actions dispatch model.GitHub}
+              {reposSection actions model.Repos}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
             </div>"""
@@ -816,7 +933,16 @@ module View =
     /// copied into the timeline, which is what makes a running chip mutate in place as its
     /// block finishes — the timeline holds where it goes, the projection holds what it says.
     let private chat (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
-        let message (item: ConversationItem) =
+        // A repo note is something someone DID, not said — one quiet line, actor-attributed,
+        // no avatar and no rich body (Plan 14, repos). It rides the same timeline slot a
+        // message does (both are `ConversationItem`s at an offset); `Kind` is what tells the
+        // two apart at render time.
+        let repoNoteItem (item: ConversationItem) =
+            html $"""
+                <article class="{Style.repoNote}" data-message-id="{MessageId.value item.MessageId}" data-repo-note data-message-author="{authorLabel item.Author}">
+                  <span class="{Style.repoNoteText}">{authorLabel item.Author} {item.Body}</span>
+                </article>"""
+        let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
             let whoClass = if isAgent then Style.whoAgent else Style.who
             let statusInner =
@@ -835,6 +961,10 @@ module View =
                   <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
+        let message (item: ConversationItem) =
+            match item.Kind with
+            | ConversationItemKind.RepoNote -> repoNoteItem item
+            | ConversationItemKind.Message -> messageItem item
         // One line: who ran what, and how it went. No output — a tail inline would make the
         // chat noisiest exactly when it is busiest, and would put everything a command
         // printed one glance from anyone in the session rather than one tap.

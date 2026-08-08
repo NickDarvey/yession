@@ -99,9 +99,25 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 // The WorkSandbox composition: an unavailable backend (or one this build does not
 // implement) refuses the boot with its reason. The environment itself stays lazy —
 // nothing is created until the first signalled need.
+// The session's repos directory (Plan 14): one host path both sandboxes see — the git
+// verbs clone into it, the WorkSandbox reads and builds it. Created at boot so its
+// existence is never a per-operation question, and living in the data dir so a checkout
+// survives idle reaping and relaunch with the session.
+let private reposDir = sprintf "%s/repos" dataDir
+do Fs.ensureDir reposDir
+
 let private makeEnvironment : Yession.SessionProcess.EventLog<SessionEvent> -> SessionEnvironment.SessionEnvironment =
     let name = SessionId.value sessionId
-    let workSpec = EnvironmentSpec.defaults
+    let workSpec =
+        // The docker backend cannot share a host path by policy, so the repos dir rides
+        // the spec as a bind mount at /repos — beside the named workspace volume, not
+        // replacing it. Host-family backends share it by write path below.
+        match workBackend with
+        | DockerBackend ->
+            { EnvironmentSpec.defaults with
+                Mounts = [ { Source = HostPath reposDir; Target = "/repos"; Mode = ReadWrite } ] }
+        | HostBackend
+        | SrtBackend -> EnvironmentSpec.defaults
     match Sandboxes.forBackend workBackend name workSpec with
     | Error e -> failwithf "work sandbox: %s" e
     | Ok createSandbox ->
@@ -112,11 +128,16 @@ let private makeEnvironment : Yession.SessionProcess.EventLog<SessionEvent> -> S
             | HostBackend
             | SrtBackend -> Some (sprintf "%s/workspace" dataDir)
             | DockerBackend -> workSpec.WorkingDirectory
+        let sharedRepos =
+            match workBackend with
+            | HostBackend
+            | SrtBackend -> Some reposDir
+            | DockerBackend -> None
         fun log ->
             SessionEnvironment.create
                 log
                 createSandbox
-                (Sandboxes.preparePolicy workBackend resolveSecretRef workspace workSpec)
+                (Sandboxes.preparePolicy workBackend resolveSecretRef workspace sharedRepos workSpec)
                 (Sandboxes.summaryFor workBackend workSpec)
                 (sprintf "env-%s" name)
 
@@ -232,6 +253,44 @@ let mutable private connectionStatus : Map<SecretId, ConnectionKind> = Map.empty
 let private connectionsClient =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.connections url secret)
 
+// The repo manager (Plan 14): one service, two interfaces (the agent's verbs and the
+// settings panel). Constructed once the event log exists (inside the boot async), so a
+// module-level cell carries it to the per-turn dispatcher.
+let mutable private reposService : Repos.ReposService option = None
+
+/// The acting party's GitHub token for a repo network verb: the session's explicit
+/// credential first, then the named actor's own, then the ambient `GITHUB_TOKEN` (the
+/// same last-resort idiom as the agent credential). None = anonymous — public repos
+/// still clone.
+let private resolveGitHubToken (credentialActor: ActorRef) : Async<string option> =
+    async {
+        let targets =
+            GitHubConnection.turnTargets sessionId credentialActor
+            |> List.filter (fun target -> Map.containsKey target connectionStatus)
+        match connectionsClient, targets with
+        | Some client, target :: _ ->
+            match! client.Resolve target with
+            | Ok (_, value) -> return Some value
+            | Error _ -> return (match Interop.envOr "GITHUB_TOKEN" "" with "" -> None | t -> Some t)
+        | _ -> return (match Interop.envOr "GITHUB_TOKEN" "" with "" -> None | t -> Some t)
+    }
+
+/// The turn's repo capabilities: the service bound to the agent as acting party and
+/// the TURN ACTOR as credential owner. Denials when the service could not start.
+let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
+    match reposService with
+    | None -> capabilities
+    | Some service ->
+        let caller = Repos.agentCaller turnActor
+        { capabilities with
+            AddRepo = service.AddRepo caller
+            ListRepos = service.ListRepos
+            SwitchRepoBranch = service.SwitchBranch caller
+            FetchRepo = service.FetchRepo caller
+            RepoStatus = service.RepoStatus
+            RepoLog = service.RepoLog
+            RepoDiff = service.RepoDiff }
+
 /// Per-turn credential dispatch (Plan 08): resolve the credential the TURN ACTOR runs
 /// on — the session's own explicit credential first, then the actor's — fresh from the
 /// Manager (which lazily refreshes a due OAuth grant). Ambient env is the last resort;
@@ -239,6 +298,9 @@ let private connectionsClient =
 let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
+            // The repo verbs are rebound to THIS turn's actor here (Plan 14): the acting
+            // party on the events is the agent, the credential is the turn human's.
+            let capabilities = repoCapabilitiesFor context.CurrentMessage.Author capabilities
             // A dispatch-level failure streams its reason as the message body first:
             // the turn's item is already open (AgentMessageStarted precedes the
             // runner), so this is what makes the reason VISIBLE in the timeline.
@@ -304,6 +366,21 @@ Async.StartImmediate (
     async {
         let log =
             EventStore.openLog (sprintf "%s/events.jsonl" dataDir) sessionId (fun () -> System.DateTimeOffset.UtcNow)
+        // The repo manager (Plan 14), over the same log and the agent backend's sandbox
+        // family. A backend that cannot host it fails the boot — the same fail-closed
+        // stance as the WorkSandbox composition above.
+        do
+            match Repos.create
+                    { Backend = agentBackend
+                      ReposDir = reposDir
+                      ExtraReadPaths = []
+                      AllowedDomains = [ "github.com" ]
+                      AllowProtocol = "https"
+                      CloneUrl = RepoRef.cloneUrl
+                      ResolveToken = resolveGitHubToken
+                      Log = log } with
+            | Ok service -> reposService <- Some service
+            | Error e -> failwithf "repos: %s" e
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
         // The connection-status stream (Plan 08): each frame replaces the whole cache
         // (snapshot semantics), flipping the agent gate and the /claude status as
@@ -329,10 +406,37 @@ Async.StartImmediate (
                         (fun () -> envCreds || connectedSomewhere ())
                         sessionMount)
             | _ -> None
+        // The GitHub connection surface (Plan 14) rides the same status cache and control
+        // channel; the two panel handlers compose into the one extra-routes seam, each
+        // claiming only its own paths.
+        let connectionRoutes =
+            let githubRoutes =
+                match auth, connectionsClient with
+                | Some a, Some client ->
+                    Some (
+                        GitHubConnection.routes
+                            sessionId
+                            a
+                            client
+                            (fun target -> Map.tryFind target connectionStatus)
+                            sessionMount)
+                | _ -> None
+            // The Repos panel (Plan 14): the human interface over the same service the
+            // agent's verbs drive. Needs only a login surface — the service itself is
+            // always there.
+            let repoRoutes =
+                match auth, reposService with
+                | Some a, Some service -> Some (Repos.routes a service sessionMount)
+                | _ -> None
+            [ claudeRoutes; githubRoutes; repoRoutes ]
+            |> List.choose id
+            |> function
+               | [] -> None
+               | handlers -> Some (fun req res -> handlers |> List.exists (fun handler -> handler req res))
         // Transcripts live beside the event log and the doc sidecar, one `.cast` file per
         // terminal — a durable, replayable record of everything its commands printed.
         let transcriptStore = TranscriptStore.openStore (sprintf "%s/terminals" dataDir)
-        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp claudeRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
+        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp connectionRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

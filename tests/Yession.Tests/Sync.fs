@@ -67,6 +67,7 @@ let private codecTests =
                         Author = ActorRef.System
                         Body = "secret history"
                         Status = Complete
+                        Kind = ConversationItemKind.Message
                         Offset = EventOffset.zero } ]
                   ActiveAgentMessages = Map.empty }
             let initial = { ClientModel.init (peer "ada" "Ada") with Conversation = conversation }
@@ -273,6 +274,7 @@ let private queueUnitTests =
                     Author = PeerRef ada
                     Body = "ship it"
                     Status = Complete
+                    Kind = ConversationItemKind.Message
                     Offset = envelope.Offset } ]
                 "the sent message is a complete conversation item"
 

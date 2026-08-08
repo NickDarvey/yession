@@ -74,4 +74,4 @@ catch-up status
 - [ ] All required E2E scenarios pass in one suite.
 - [ ] All required model/protocol tests pass.
 - [ ] UI checklist verified.
-- [ ] Phase 1 acceptance recorded in [../TODO.md](../TODO.md).
+- [ ] Phase 1 acceptance recorded.

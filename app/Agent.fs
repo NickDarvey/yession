@@ -63,6 +63,48 @@ type private RunOutcome =
           'Delete one of this session\'s stored secrets by name.',
           { name: z.string().describe('the secret name to delete') },
           async (args) => ({ content: [{ type: 'text', text: await $9(args.name) }] })
+        ),
+        sdk.tool(
+          'add_repo',
+          'Clone a GitHub repo into this session\'s shared repos directory (visible to everyone here, and inside the work environment). Takes owner/repo — never a URL — and only repos the session\'s GitHub credential can reach. Read-only bootstrap: to commit or push, use execute_command in a terminal. Already-added repos just report their current state.',
+          { repo: z.string().describe('the repo as owner/name, e.g. "octocat/hello-world"') },
+          async (args) => ({ content: [{ type: 'text', text: await $11(args.repo) }] })
+        ),
+        sdk.tool(
+          'list_repos',
+          'List this session\'s repos with each checkout\'s current branch and whether it has uncommitted changes.',
+          {},
+          async () => ({ content: [{ type: 'text', text: await $12() }] })
+        ),
+        sdk.tool(
+          'switch_branch',
+          'Switch a repo\'s checkout to a branch (optionally creating it). Local only — never touches the remote. Everyone in the session sees the switch in the timeline.',
+          { repo: z.string().describe('owner/name'), branch: z.string().describe('the branch to switch to'), create: z.boolean().optional().describe('create the branch (like switch -c)') },
+          async (args) => ({ content: [{ type: 'text', text: await $13(args.repo, args.branch, !!args.create) }] })
+        ),
+        sdk.tool(
+          'fetch_repo',
+          'Fetch a repo\'s remote refs (prune, no submodules). Use before switching to a branch that only exists on the remote.',
+          { repo: z.string().describe('owner/name') },
+          async (args) => ({ content: [{ type: 'text', text: await $14(args.repo) }] })
+        ),
+        sdk.tool(
+          'repo_status',
+          'A repo checkout\'s git status (porcelain, with branch header).',
+          { repo: z.string().describe('owner/name') },
+          async (args) => ({ content: [{ type: 'text', text: await $15(args.repo) }] })
+        ),
+        sdk.tool(
+          'repo_log',
+          'The last 30 commits of a repo checkout, one line each.',
+          { repo: z.string().describe('owner/name') },
+          async (args) => ({ content: [{ type: 'text', text: await $16(args.repo) }] })
+        ),
+        sdk.tool(
+          'repo_diff',
+          'The uncommitted diff of a repo checkout (capped; use a terminal for the full thing).',
+          { repo: z.string().describe('owner/name') },
+          async (args) => ({ content: [{ type: 'text', text: await $17(args.repo) }] })
         )
       ]
     })
@@ -74,14 +116,14 @@ type private RunOutcome =
         settingSources: [],
         includePartialMessages: true,
         mcpServers: { yession },
-        // The turn's ONLY tools are the five above. `tools: []` drops every built-in
-        // (Bash/Read/Glob/Grep/WebFetch/Agent/Skill) from the model's context; MCP
-        // servers ride a separate channel, so `yession`'s tools survive it.
+        // The turn's ONLY tools are the yession ones above. `tools: []` drops every
+        // built-in (Bash/Read/Glob/Grep/WebFetch/Agent/Skill) from the model's context;
+        // MCP servers ride a separate channel, so `yession`'s tools survive it.
         // `allowedTools` is NOT a restriction — it is the auto-approve list, and on its
         // own it left the read-only built-ins reachable (a session could list the host
         // filesystem). It stays so our tools run without a permission round-trip.
         tools: [],
-        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__read_terminal_block', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret'],
+        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__read_terminal_block', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__add_repo', 'mcp__yession__list_repos', 'mcp__yession__switch_branch', 'mcp__yession__fetch_repo', 'mcp__yession__repo_status', 'mcp__yession__repo_log', 'mcp__yession__repo_diff'],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
         env: $1,
@@ -133,6 +175,13 @@ let private runQuery
     (listSecrets: unit -> JS.Promise<string>)
     (deleteSecret: string -> JS.Promise<string>)
     (claudeSpawner: obj)
+    (addRepo: string -> JS.Promise<string>)
+    (listRepos: unit -> JS.Promise<string>)
+    (switchBranch: string -> string -> bool -> JS.Promise<string>)
+    (fetchRepo: string -> JS.Promise<string>)
+    (repoStatus: string -> JS.Promise<string>)
+    (repoLog: string -> JS.Promise<string>)
+    (repoDiff: string -> JS.Promise<string>)
     : JS.Promise<RunOutcome> =
     jsNative
 
@@ -321,6 +370,63 @@ let private deleteSecretFor (capabilities: AgentCapabilities) : string -> JS.Pro
         }
         |> Async.StartAsPromise
 
+/// The repo tool bodies (Plan 14): the typed read-only verbs rendered as tool text.
+/// Every body parses the raw `owner/repo` at this boundary, so the capabilities behind
+/// it only ever see a validated `RepoRef`.
+let private withRepo (raw: string) (inner: RepoRef -> Async<string>) : JS.Promise<string> =
+    async {
+        match RepoRef.create raw with
+        | Error e -> return sprintf "not a repo name: %s" e
+        | Ok repo -> return! inner repo
+    }
+    |> Async.StartAsPromise
+
+let private addRepoFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+    fun raw ->
+        withRepo raw (fun repo ->
+            async {
+                match! capabilities.AddRepo repo with
+                | Ok listing -> return sprintf "added %s — the checkout is shared with everyone in this session and visible in the work environment" (RepoListing.describe listing)
+                | Error e -> return sprintf "could not add the repo: %s" e
+            })
+
+let private listReposFor (capabilities: AgentCapabilities) : unit -> JS.Promise<string> =
+    fun () ->
+        async {
+            match! capabilities.ListRepos () with
+            | Error e -> return sprintf "could not list repos: %s" e
+            | Ok [] -> return "no repos in this session — add_repo brings one in"
+            | Ok listed -> return listed |> List.map RepoListing.describe |> String.concat "\n"
+        }
+        |> Async.StartAsPromise
+
+let private switchBranchFor (capabilities: AgentCapabilities) : string -> string -> bool -> JS.Promise<string> =
+    fun raw branch create ->
+        withRepo raw (fun repo ->
+            async {
+                match! capabilities.SwitchRepoBranch repo branch create with
+                | Ok listing -> return sprintf "now on %s" (RepoListing.describe listing)
+                | Error e -> return sprintf "could not switch branch: %s" e
+            })
+
+let private fetchRepoFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+    fun raw ->
+        withRepo raw (fun repo ->
+            async {
+                match! capabilities.FetchRepo repo with
+                | Ok said -> return said
+                | Error e -> return sprintf "could not fetch: %s" e
+            })
+
+let private inspectRepoFor (inspect: AgentCapabilities -> InspectRepo) (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+    fun raw ->
+        withRepo raw (fun repo ->
+            async {
+                match! inspect capabilities repo with
+                | Ok said -> return said
+                | Error e -> return sprintf "could not inspect the repo: %s" e
+            })
+
 /// The Claude Agent SDK–backed `RunAgent`, parameterized by the turn's credential:
 /// `None` = the ambient credential variables pass through (the documented last resort
 /// — how CI's LiveAgent tier feeds the agent); `Some (envVar, value)` = the spawned
@@ -353,6 +459,13 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (listSecretsFor capabilities)
                     (deleteSecretFor capabilities)
                     (Sandboxes.AgentSandbox.claudeSpawnerFor (agentBackend ()) ambient home env)
+                    (addRepoFor capabilities)
+                    (listReposFor capabilities)
+                    (switchBranchFor capabilities)
+                    (fetchRepoFor capabilities)
+                    (inspectRepoFor (fun c -> c.RepoStatus) capabilities)
+                    (inspectRepoFor (fun c -> c.RepoLog) capabilities)
+                    (inspectRepoFor (fun c -> c.RepoDiff) capabilities)
                 |> Interop.awaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens
