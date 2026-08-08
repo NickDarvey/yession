@@ -84,4 +84,4 @@ The Elmish/Ylmish/WebRTC/event-log split from Phase 1 is preserved.
 - [ ] All required Phase 2 E2E scenarios pass.
 - [ ] Integration and model/protocol suites pass.
 - [ ] Phase 1 regression suite passes.
-- [ ] Phase 2 acceptance recorded in [../TODO.md](../TODO.md).
+- [ ] Phase 2 acceptance recorded.
