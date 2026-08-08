@@ -73,6 +73,15 @@ type ViewActions =
       /// Type the shell instrumentation in again after the terminal stopped marking (Plan 13,
       /// stage 2f). Any peer may — it repairs rather than takes.
       RearmTerminal : TerminalId -> unit
+      /// Send keystrokes to a terminal this peer holds (Plan 14, stage 6). Imperative
+      /// because it is a frame, and deliberately not acknowledged: a keystroke that needed a
+      /// reply would make typing a round trip. The Session Process checks the lease, which
+      /// is the only place it CAN be checked — a client that believes it holds one may be
+      /// looking at a steal it has not seen yet.
+      TypeIntoTerminal : TerminalId -> string -> unit
+      /// Report the holder's viewport size, so the pty and the program inside it agree about
+      /// the screen (Plan 14, stage 6).
+      ResizeTerminal : TerminalId -> int -> int -> unit
       /// Move focus into the side pane after a chip opened a tab there (Plan 14, stage 2).
       /// Imperative because it is a focus move: the model says which tab is showing, and the
       /// browser has to wait for the render that put it on screen. A chip that opened a pane
@@ -105,6 +114,8 @@ module ViewActions =
           TakeTerminal = ignore
           ReleaseTerminal = ignore
           RearmTerminal = ignore
+          TypeIntoTerminal = fun _ _ -> ()
+          ResizeTerminal = fun _ _ _ -> ()
           FocusPane = ignore
           FocusChat = ignore }
 
@@ -519,6 +530,47 @@ module View =
     /// type-check sees a signature it never runs. (A Fable tuple is a 2-array at runtime.)
     [<Fable.Core.Emit("($0 && $0.target && typeof $0.target.selectionStart === 'number') ? [$0.target.selectionStart, $0.target.selectionEnd] : null")>]
     let private selectionOf (e: obj) : (int * int) option = Fable.Core.Util.jsNative
+
+    /// The bytes a keydown means to a pty (Plan 14, stage 6).
+    ///
+    /// A keyboard event is not a byte stream, and the translation is the whole of what a
+    /// terminal front end does with keys: printable characters go as themselves, Ctrl-<key>
+    /// as the control code, and the keys with no character at all (arrows, Home, the
+    /// function block) as the escape sequences a program is waiting for. `null` means a key
+    /// that sends nothing — a bare modifier, or a shortcut the browser owns.
+    ///
+    /// `preventDefault` on everything that IS sent, because otherwise the browser also acts
+    /// on it: Tab would leave the terminal mid-session, and Backspace used to navigate.
+    [<Fable.Core.Emit("""(() => {
+  const ev = $0
+  if (ev.metaKey || ev.altKey) return null
+  const k = ev.key
+  const send = d => { ev.preventDefault(); return d }
+  if (ev.ctrlKey) {
+    if (k.length === 1) {
+      const c = k.toUpperCase().charCodeAt(0)
+      if (c >= 64 && c <= 95) return send(String.fromCharCode(c - 64))
+    }
+    return null
+  }
+  switch (k) {
+    case 'Enter': return send('\r')
+    case 'Backspace': return send('\x7f')
+    case 'Tab': return send('\t')
+    case 'Escape': return send('\x1b')
+    case 'ArrowUp': return send('\x1b[A')
+    case 'ArrowDown': return send('\x1b[B')
+    case 'ArrowRight': return send('\x1b[C')
+    case 'ArrowLeft': return send('\x1b[D')
+    case 'Home': return send('\x1b[H')
+    case 'End': return send('\x1b[F')
+    case 'PageUp': return send('\x1b[5~')
+    case 'PageDown': return send('\x1b[6~')
+    case 'Delete': return send('\x1b[3~')
+  }
+  return k.length === 1 ? send(k) : null
+})()""")>]
+    let private keystrokeOf (e: obj) : string option = Fable.Core.Util.jsNative
 
     /// One collaborator's title caret+selection marker: a selection highlight span and a caret
     /// bar with a name label. The browser positions all three by measurement after render (from
@@ -935,6 +987,42 @@ module View =
               <div class="ml-auto flex items-center gap-2">{control}</div>
             </div>"""
 
+    /// The live screen of a terminal in live mode (Plan 14, stage 6).
+    ///
+    /// A SCREEN, not a stream: the program running here moves the cursor, and what it
+    /// displays is a projection of what it emitted. The platform half keeps an emulator —
+    /// the same one the Session Process uses, so the two screens cannot disagree — and hands
+    /// this its serialization; here it is rendered through the same ANSI spans a block's
+    /// output uses.
+    ///
+    /// The holder's copy takes keystrokes. Everyone else's is the identical screen, live and
+    /// read-only, which is the whole point of a shared terminal: watching is not a lesser
+    /// mode, it is the ordinary one.
+    let private terminalScreenView (actions: ViewActions) (model: ClientModel) (terminal: TerminalId) (holder: ActorRef) : TemplateResult =
+        let mine = ActorRef.PeerRef model.Peer.PeerId
+        let screen = ClientModel.terminalScreen terminal model |> Option.defaultValue ""
+        let id = TerminalId.value terminal
+        let body =
+            if screen = "" then
+                html $"""<div class="{Style.terminalOutputEmpty}">Waiting for this terminal's screen…</div>"""
+            else html $"""{ansiText screen}"""
+        if holder = mine then
+            // `tabindex="0"` and a keydown handler rather than a text input: what is being
+            // typed here is not a value, it is a byte stream, and an input would fight the
+            // program on the other end over what the "value" is. The accessible name says
+            // what it is and who has it.
+            html $"""
+                <div class="{Style.terminalScreen}" data-terminal-screen="{id}"
+                     role="application" tabindex="0" aria-label="Live terminal, you are typing here"
+                     @keydown={Ev(fun e ->
+                                     match keystrokeOf e with
+                                     | Some data -> actions.TypeIntoTerminal terminal data
+                                     | None -> ())}>{body}</div>"""
+        else
+            html $"""
+                <div class="{Style.terminalScreen}" data-terminal-screen="{id}"
+                     role="region" aria-live="off" aria-label="Live terminal, {authorLabel holder} is typing">{body}</div>"""
+
     /// The terminal composer: your command line, and everyone else's as they type them.
     let private terminalComposer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult =
         let mine = model.Peer.PeerId
@@ -1256,11 +1344,26 @@ module View =
                 if List.isEmpty view.Blocks then
                     [ html $"""<div class="{Style.terminalOutputEmpty}">Nothing has run here yet.</div>""" ]
                 else view.Blocks |> List.map (terminalBlockView feed)
+            // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
+            // program is running here and what it displays is not a list of commands and
+            // their output — the blocks are block mode's view of a terminal, and they come
+            // back the moment the lease does. The transcript keeps both either way.
+            let above =
+                match view.Lease with
+                | Some holder ->
+                    html $"""
+                        <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
+                          {truncated}
+                        </div>
+                        {terminalScreenView actions model view.TerminalId holder}"""
+                | None ->
+                    html $"""
+                        <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
+                          {truncated}
+                          {blocks}
+                        </div>"""
             html $"""
-                <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
-                  {truncated}
-                  {blocks}
-                </div>
+                {above}
                 {if view.IsOpen then terminalComposer actions dispatch model view.TerminalId
                  else terminalReplay model view}"""
         let body =

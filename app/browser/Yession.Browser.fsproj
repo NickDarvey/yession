@@ -9,6 +9,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The Session Process's own emulator binding, LINKED rather than copied: the browser
+         composes a live screen with the same `@xterm/headless` the Process does, so the two
+         screens cannot disagree — the property `TerminalSnapshot` already rests on, and one
+         a second browser-only renderer would quietly break. Pure JS, no Node API. -->
+    <Compile Include="..\Emulator.fs" Link="Emulator.fs" />
     <Compile Include="Replay.fs" />
     <!-- Presentation the model drives but a Lit render cannot do — focus moves, and the
          column's open state as a root class. Shared by the app entry and the host-free
@@ -17,6 +22,9 @@
     <!-- Keeping the mounted players in step with the model: shared by the app entry and
          the host-free shell harness, so there is one mount path rather than two. -->
     <Compile Include="PaneReplays.fs" />
+    <!-- The live terminal screen: the emulator this client folds output into, and the
+         serialization the model renders. -->
+    <Compile Include="Screens.fs" />
     <Compile Include="Browser.fs" />
     <!-- Host-free harness for the rich-editor browser E2E; bundled only by the test build,
          never imported by the app entry (Browser.fs), so it does not ship. -->
@@ -33,6 +41,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Yession.Domain\Yession.Domain.fsproj" />
+    <ProjectReference Include="..\..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
     <ProjectReference Include="..\..\src\Yession.App\Yession.App.fsproj" />
   </ItemGroup>
 

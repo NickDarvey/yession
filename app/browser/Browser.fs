@@ -659,6 +659,31 @@ let private start () =
 
         let replays = PaneReplays.create ()
 
+        /// The live screens (Plan 14, stage 6): one emulator per terminal this client has a
+        /// snapshot for, folded forward from the records the model already holds.
+        let screens = Screens.create (fun msg -> dispatchRef msg)
+
+        /// The size each terminal's viewport was last reported at, so a re-render does not
+        /// re-send a size nothing changed — a resize is a signal to the program on the other
+        /// end, and repeating it makes a full-screen program redraw for no reason.
+        let reportedSize = System.Collections.Generic.Dictionary<string, int * int> ()
+
+        /// Tell the Session Process how big the holder's screen is. Only the HOLDER: the pty
+        /// has one size and every peer is looking at the same screen, so a viewer with a
+        /// narrower pane must scroll rather than reshape everyone else's terminal.
+        let syncScreenSize (model: ClientModel) =
+            let mine = ActorRef.PeerRef model.Peer.PeerId
+            for terminal in TerminalProjection.openTerminals model.Terminals do
+                if terminal.Lease = Some mine then
+                    let key = TerminalId.value terminal.TerminalId
+                    match Screens.measure key with
+                    | None -> ()
+                    | Some (cols, rows) ->
+                        let last = match reportedSize.TryGetValue key with | true, v -> Some v | _ -> None
+                        if last <> Some (cols, rows) then
+                            reportedSize.[key] <- (cols, rows)
+                            connectionRef |> Option.iter (fun c -> c.ResizeTerminal terminal.TerminalId cols rows)
+
         // The publication rule, one subscription per open terminal. Started when a terminal
         // appears and stopped when it goes, so a closed terminal's rule cannot republish a
         // slot into a terminal that no longer exists.
@@ -851,6 +876,10 @@ let private start () =
               TakeTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.TakeTerminal id)
               ReleaseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.ReleaseTerminal id)
               RearmTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.RearmTerminal id)
+              TypeIntoTerminal =
+                fun id data -> connectionRef |> Option.iter (fun c -> c.TypeIntoTerminal id data)
+              ResizeTerminal =
+                fun id cols rows -> connectionRef |> Option.iter (fun c -> c.ResizeTerminal id cols rows)
               SendTerminalDraft =
                 fun terminal author -> connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
               ReopenSession =
@@ -895,6 +924,11 @@ let private start () =
             syncTerminalInputs ()
             syncKeyframes model
             replays.Sync model
+            // The live screens, and the size the holder's viewport actually is. Both AFTER
+            // the render: one folds records into an emulator whose serialization the next
+            // render draws, the other measures a box that has to exist first.
+            screens.Sync model
+            syncScreenSize model
             // The terminals column's open state is a class on the shell root, like the
             // sidebar's — presentation, so a re-render never fights it — but driven FROM the
             // model, because unlike the sidebar this column's visibility is something the app
@@ -972,6 +1006,10 @@ let private start () =
                 { App.ConnectOptions.defaults with
                     FetchEvents = Some feed
                     FetchTranscripts = Some transcripts
+                    // A terminal's screen seeds this client's emulator. The transcript stays
+                    // the record; this is the view, and a peer that arrives mid-session gets
+                    // one frame instead of every byte the terminal ever printed.
+                    OnTerminalSnapshot = fun id seq screen -> screens.Snapshot id seq screen
                     // The model is the read position (see `ConnectOptions.ReadPosition`):
                     // `latestModel` is kept current by `setState`, so a fold rolled back by
                     // a racing doc update is visibly behind and gets re-read.

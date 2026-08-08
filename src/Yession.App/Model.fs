@@ -252,6 +252,14 @@ type ClientModel =
       /// the session ever ran: they are fetched on demand, and a range is only opened by
       /// somebody choosing to read it.
       TerminalKeyframes : Map<TerminalId * int, TranscriptKeyframe>
+      /// The live SCREEN of each terminal, as this client has composed it (Plan 14, stage
+      /// 6): the serialized output of an emulator fed the Process's snapshot and every
+      /// record since.
+      ///
+      /// A screen, not a stream — a terminal in live mode is running a program that moves
+      /// the cursor, and what it DISPLAYS is a projection of what it emitted. The transcript
+      /// stays the record; this is the view.
+      TerminalScreens : Map<TerminalId, string>
       /// The read-only tabs this client opened from the chat, oldest first (Plan 14, stage
       /// 2). Terminal tabs are NOT here: every terminal the session has is always in the
       /// strip, and these are the ones a person added by tapping a chip.
@@ -350,6 +358,10 @@ type ClientMsg =
     /// starts from. Fetched when a tab needs one, never streamed — a keyframe is read by
     /// somebody opening a recording, not by everybody watching one grow.
     | TerminalKeyframeMsg of TerminalId * TranscriptKeyframe
+    /// The live screen, recomposed (Plan 14, stage 6). Dispatched by the platform half,
+    /// which owns the emulator: a screen is a projection an emulator maintains, and the
+    /// reducer is pure.
+    | TerminalScreenMsg of TerminalId * screen: string
     /// Show this terminal in the pane.
     | SelectTerminalMsg of TerminalId
     /// Bring an already-open tab forward (Plan 14, stage 2).
@@ -427,6 +439,7 @@ module ClientModel =
           Terminals = TerminalProjection.empty
           TerminalFeeds = Map.empty
           TerminalKeyframes = Map.empty
+          TerminalScreens = Map.empty
           PaneTabs = []
           PaneChoice = None
           PaneStartAt = None
@@ -630,6 +643,10 @@ module ClientModel =
             // A whole recording starts at the start; the header is its keyframe.
             | TerminalTab _ -> None
         wanted |> Option.filter (fun key -> not (Map.containsKey key model.TerminalKeyframes))
+
+    /// The live screen of a terminal, when this client has composed one.
+    let terminalScreen (terminal: TerminalId) (model: ClientModel) : string option =
+        model.TerminalScreens |> Map.tryFind terminal
 
     /// A terminal's feed, empty when nothing has arrived for it yet.
     let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
@@ -918,6 +935,8 @@ module ClientModel =
                         model.TerminalFeeds }
         | TerminalKeyframeMsg (terminal, keyframe) ->
             { model with TerminalKeyframes = Map.add (terminal, keyframe.Seq) keyframe model.TerminalKeyframes }
+        | TerminalScreenMsg (terminal, screen) ->
+            { model with TerminalScreens = Map.add terminal screen model.TerminalScreens }
         | SelectTerminalMsg terminal ->
             { model with PaneChoice = Some (TerminalTab terminal); PaneStartAt = None; TerminalsOpen = true }
         | SelectPaneTabMsg tab ->

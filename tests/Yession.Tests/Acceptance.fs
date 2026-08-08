@@ -129,6 +129,7 @@ let private representativeModel : ClientModel =
                 ReadThrough = 2
                 Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
       TerminalKeyframes = Map.empty
+      TerminalScreens = Map.empty
       PaneTabs = []
       PaneChoice = None
       PaneStartAt = None
@@ -162,7 +163,18 @@ let private leasedTerminalModel : ClientModel =
         Terminals =
             { Terminals =
                 representativeModel.Terminals.Terminals
-                |> List.map (fun t -> { t with Lease = Some (PeerRef bob) }) } }
+                |> List.map (fun t -> { t with Lease = Some (PeerRef bob) }) }
+        // The screen this client composed from the Process's snapshot and the records since
+        // (Plan 14, stage 6). Coloured, so the render exercises the ANSI path.
+        TerminalScreens = Map.ofList [ terminalId, "\u001b[32mvim ~/notes\u001b[0m" ] }
+
+/// The same terminal, held by THIS peer: the one copy of the screen that takes keystrokes.
+let private heldTerminalModel : ClientModel =
+    { leasedTerminalModel with
+        Terminals =
+            { Terminals =
+                leasedTerminalModel.Terminals.Terminals
+                |> List.map (fun t -> { t with Lease = Some (PeerRef ada) }) } }
 
 /// The same session with the terminal's shell no longer marking (Plan 13, stage 2f). The
 /// queued command is a PEER's, so it needs no approval — otherwise the approval hold would
@@ -392,6 +404,28 @@ let private uiChecklistTests =
                   "for how long", "2m 0s" ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+
+        testCase "live mode shows the SCREEN, and every peer sees the same one" <| fun () ->
+            // Plan 14, stage 6. A program is running here, and what it displays is a
+            // projection of what it emitted — the block history is block mode's view of a
+            // terminal, and it comes back the moment the lease does.
+            let watching = Support.render leasedTerminalModel
+            Expect.isTrue
+                (watching.Contains (Dom.attr Dom.Hooks.terminalScreen (TerminalId.value terminalId)))
+                "the screen renders for a peer who is only watching"
+            Expect.isTrue (watching.Contains "vim ~/notes") "with what the program drew"
+            // ANSI through the same theme tokens a block's output uses — a raw ANSI colour
+            // would not clear the contrast floor on this ground.
+            Expect.isTrue (watching.Contains "text-term-green") "coloured by the theme, not by the escape"
+            Expect.isFalse
+                (watching.Contains (Dom.attr Dom.Hooks.terminalBlock (BlockId.value blockId)))
+                "and the block history gives way to it"
+            // Watching is not a lesser mode; it is the ordinary one. What the holder gets in
+            // addition is the keyboard.
+            Expect.isFalse (watching.Contains "role=\"application\"") "a watcher's screen takes no keystrokes"
+            let held = Support.render heldTerminalModel
+            Expect.isTrue (held.Contains "role=\"application\"") "the holder's does"
+            Expect.isTrue (held.Contains "tabindex=\"0\"") "and it is a Tab stop, so a keyboard can reach it"
 
         testCase "a recording the cap ate is a STATED gap, not an empty player" <| fun () ->
             // The one place stage 3d's behaviour reaches the surface. An empty player is

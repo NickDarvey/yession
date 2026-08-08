@@ -730,6 +730,58 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+        // The live viewport (Plan 14, stage 6). What only a browser can answer here is the
+        // KEYSTROKE TRANSLATION: a `KeyboardEvent` is not a byte stream, and turning one
+        // into what a pty expects — printable characters as themselves, Ctrl-<key> as the
+        // control code, the keys with no character at all as their escape sequences — is the
+        // whole of what a terminal front end does with a keyboard.
+        testCaseAsync "the holder types into the live screen, and the keys reach it as a pty expects" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 6)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 6)))
+
+                // The column starts shut, as it does for a fresh client.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                // The terminal the harness holds the lease on renders its screen, and the
+                // screen shows what the program drew.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
+                let screen = "#shell [data-terminal-screen='term-live']"
+                let! _ = await (page.WaitForSelectorAsync screen)
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        (sprintf "document.querySelector(%s).textContent.includes('vim ~/notes')" "\"#shell [data-terminal-screen='term-live']\""))
+
+                // It is a Tab stop, because its whole purpose is having the keyboard.
+                do! awaitU (page.FocusAsync screen)
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-screen') === 'term-live'""")
+
+                do! awaitU (page.Keyboard.TypeAsync "ls")
+                do! awaitU (page.Keyboard.PressAsync "ArrowUp")
+                do! awaitU (page.Keyboard.PressAsync "Control+c")
+                do! awaitU (page.Keyboard.PressAsync "Backspace")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! typed = await (page.EvaluateAsync<string> "() => window.__typed || ''")
+                Expect.equal typed "ls\u001b[A\u0003\u007f\r" "printable, escape, control code, delete, carriage return"
+
+                // Tab is SENT rather than moving focus out of the terminal mid-session, and
+                // the shift is that `preventDefault` fires for everything the terminal takes.
+                let! before = await (page.EvaluateAsync<string> "() => document.activeElement?.getAttribute('data-terminal-screen')")
+                do! awaitU (page.Keyboard.PressAsync "Tab")
+                let! after = await (page.EvaluateAsync<string> "() => document.activeElement?.getAttribute('data-terminal-screen')")
+                Expect.equal after before "Tab types a tab; it does not leave the terminal"
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 // --- A path-mounted session in a real browser (docs/plans/10) ---------------------------

@@ -728,6 +728,14 @@ module Style =
     /// missing audit trail is not a neutral fact.
     let terminalTruncated = caps + " px-3 py-2 text-err"
 
+    /// The live screen (Plan 14, stage 6). Monospaced, preformatted, and scrollable in both
+    /// axes — a terminal's lines are as wide as the program made them, and wrapping them
+    /// would redraw a screen the program laid out. The focus ring matters more here than
+    /// anywhere: this is the one surface whose whole purpose is having the keyboard.
+    let terminalScreen =
+        cls [ "flex-1 min-h-0 overflow-auto px-3 py-2 font-mono text-code-sm leading-4"
+              "whitespace-pre text-ink bg-bg"; focusRing ]
+
     /// The composer area beneath the blocks.
     let terminalComposer = "shrink-0 flex flex-col gap-2 px-3 py-3 " + Stroke.dividerTop
     /// A queued command awaiting its turn (or its approval) — a listed row, so its leading

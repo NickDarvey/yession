@@ -190,6 +190,10 @@ module Dom =
         let paneStretch = "data-pane-stretch"
         /// The step-out from a block's sliced view to the whole terminal's recording.
         let panePlayWhole = "data-pane-play-whole"
+        /// The live screen of a terminal in live mode (Plan 14, stage 6). Its value is the
+        /// terminal's id; the holder's copy is the one that takes keystrokes, and every other
+        /// peer's is the same screen read-only.
+        let terminalScreen = "data-terminal-screen"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).

@@ -17,13 +17,16 @@ module Connection =
     /// when the remote end closes the channel. `State` frame payloads are handed to
     /// `onState` (the sync boundary applies them to the local Yjs doc); command
     /// responses go to `onResponse` and event pages to `onEventsPage` (the driver
-    /// correlates both to their requests).
+    /// correlates both to their requests). A terminal's SCREEN goes to `onSnapshot` for
+    /// the same reason state does: it seeds an emulator, which is a live object the
+    /// platform half owns and the reducer cannot hold.
     let run
         (hello: PeerHelloPayload)
         (dispatch: ClientMsg -> unit)
         (onState: 'State -> unit)
         (onResponse: RequestId -> SessionCommandResult -> unit)
         (onEventsPage: RequestId -> EventPage<SessionEvent> -> unit)
+        (onSnapshot: TerminalId -> int -> string -> unit)
         (channel: FrameChannel<'State>)
         : Async<unit> =
         async {
@@ -63,6 +66,12 @@ module Connection =
                         return! pump ()
                     | Some (Terminal (TerminalTranscriptAvailable (terminal, nextSeq))) ->
                         dispatch (TerminalAvailableMsg (terminal, nextSeq))
+                        return! pump ()
+                    | Some (Terminal (TerminalSnapshot (terminal, seq, screen))) ->
+                        // The screen as the Process has it, and the transcript position it
+                        // represents. Composable with the live feed exactly as an event
+                        // offset is: seed from this, then fold records ABOVE that seq.
+                        onSnapshot terminal seq screen
                         return! pump ()
                     | Some _ ->
                         // Anything else (e.g. inbound command requests) is not part of

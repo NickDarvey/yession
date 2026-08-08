@@ -80,6 +80,14 @@ module App =
           ReleaseTerminal : TerminalId -> unit
           /// Type the shell instrumentation in again (Plan 13, stage 2f).
           RearmTerminal : TerminalId -> unit
+          /// Keystrokes for a terminal this peer holds (Plan 14, stage 6). A FRAME, not a
+          /// command: there is no response by design, because a keystroke that needed an
+          /// acknowledgement would make typing a round trip. The Session Process checks the
+          /// lease and drops what a non-holder sends.
+          TypeIntoTerminal : TerminalId -> string -> unit
+          /// The holder's viewport size, so the pty and the program inside it agree about
+          /// the shape of the screen (Plan 14, stage 6).
+          ResizeTerminal : TerminalId -> int -> int -> unit
           /// Send the command in a terminal composer slot: enqueue it. ANY co-editor may
           /// send, so the `PeerId` names whose slot it is. A pure CRDT write under the key
           /// the slot has carried since publication.
@@ -220,6 +228,11 @@ module App =
           /// leaves a client with only what arrives live — which is correct for a peer
           /// that has no HTTP leg, and is why this is optional rather than required.
           FetchTranscripts : TranscriptFetch.TranscriptFeed option
+          /// What to do with a terminal's screen when the Session Process sends one (Plan
+          /// 14, stage 6). The browser seeds its emulator; a client with none — a headless
+          /// peer, a test — ignores it and loses nothing, because the transcript is the
+          /// record and this is only the view.
+          OnTerminalSnapshot : TerminalId -> int -> string -> unit
           /// How far the MODEL has consumed the log. When given, this — not the read
           /// loop's own bookkeeping — is what "how far have we got" means.
           ///
@@ -241,6 +254,7 @@ module App =
               PageSize = 100
               FetchEvents = None
               FetchTranscripts = None
+              OnTerminalSnapshot = fun _ _ _ -> ()
               ReadPosition = None }
 
     /// The HTTP event feed for `ConnectOptions.FetchEvents`: translates "events after
@@ -534,7 +548,7 @@ module App =
             | _ -> ()
 
         { Run =
-            Connection.run hello dispatchAndConsume (DocSync.applyRemote doc) onResponse onEventsPage channel
+            Connection.run hello dispatchAndConsume (DocSync.applyRemote doc) onResponse onEventsPage options.OnTerminalSnapshot channel
           SendDraft =
             fun peerId ->
                 // Enqueue under the key the draft has carried since it was published, read from
@@ -604,6 +618,12 @@ module App =
           RearmTerminal =
             fun terminalId ->
                 Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), RearmTerminal terminalId))))
+          TypeIntoTerminal =
+            fun terminalId data ->
+                Async.StartImmediate (channel.Send (Terminal (TerminalInput (terminalId, data))))
+          ResizeTerminal =
+            fun terminalId cols rows ->
+                Async.StartImmediate (channel.Send (Terminal (TerminalResize (terminalId, cols, rows))))
           SendTerminalDraft =
             fun terminal author ->
                 // Enqueue under the key the slot has carried since publication — read from

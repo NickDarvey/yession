@@ -120,6 +120,10 @@ let private dressShell (className: string) : unit = jsNative
 let private shellModel : ClientModel =
     let expect = function Ok v -> v | Error e -> failwith e
     let terminalId : TerminalId = TerminalId.create "term-harness" |> expect
+    /// A second terminal, in LIVE mode and held by this peer — the screen that takes
+    /// keystrokes (Plan 14, stage 6). Its own terminal rather than the first one's, so the
+    /// block-mode flows above keep a block-mode terminal to run in.
+    let liveId : TerminalId = TerminalId.create "term-live" |> expect
     let blockId : BlockId = BlockId.create "block-harness" |> expect
     let peerId : PeerId = PeerId.create "ada" |> expect
     let messageId : MessageId = MessageId.create "msg-harness" |> expect
@@ -154,6 +158,15 @@ let private shellModel : ClientModel =
                           FromSeq = 0
                           ToSeq = Some 2
                           Status = BlockFinished (CommandSucceeded 0) } ]
+                    DroppedBytes = 0 }
+                  { TerminalId = liveId
+                    Title = "shell"
+                    OpenedBy = PeerRef peerId
+                    IsOpen = true
+                    ClosedReason = None
+                    Lease = Some (PeerRef peerId)
+                    IntegrationLost = false
+                    Blocks = []
                     DroppedBytes = 0 } ] }
         TerminalFeeds =
             Map.ofList
@@ -167,11 +180,23 @@ let private shellModel : ClientModel =
                     Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
         // SHUT to begin with, like a fresh client: the phone case is about what happens when
         // a chip brings the pane on screen, which is nothing to watch if it is already there.
+        TerminalScreens = Map.ofList [ liveId, "\u001b[32mvim ~/notes\u001b[0m" ]
         TerminalsOpen = false }
+
+/// Every byte the live screen decided to send, for the E2E to read back. The keystroke
+/// translation is the whole of what a terminal front end does with a keyboard event, and it
+/// is the one part of it that only a real browser can exercise: `KeyboardEvent` is not
+/// something a rendered string has.
+[<Emit("(function(d){ window.__typed = (window.__typed || '') + d })($1)")>]
+let private recordTyped (_terminal: TerminalId) (data: string) : unit = jsNative
 
 do
     dressShell Style.app
-    let actions = { ViewActions.ssr with FocusPane = PaneShell.toPane; FocusChat = PaneShell.toChatItem }
+    let actions =
+        { ViewActions.ssr with
+            FocusPane = PaneShell.toPane
+            FocusChat = PaneShell.toChatItem
+            TypeIntoTerminal = recordTyped }
     // The app's own player sync, so a block tab in the harness really plays its recording —
     // which is the point of driving this in a browser rather than asserting a string.
     let replays = PaneReplays.create ()
