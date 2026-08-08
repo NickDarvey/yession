@@ -128,7 +128,8 @@ let private representativeModel : ClientModel =
                 KnownLength = 2
                 ReadThrough = 2
                 Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
-      TerminalChoice = None
+      PaneTabs = []
+      PaneChoice = None
       TerminalsOpen = true
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
@@ -185,7 +186,7 @@ let private closedTerminalModel : ClientModel =
             { Terminals =
                 representativeModel.Terminals.Terminals
                 |> List.map (fun t -> { t with IsOpen = false; ClosedReason = Some "closed by a peer" }) }
-        TerminalChoice = Some terminalId }
+        PaneChoice = Some (TerminalTab terminalId) }
 
 /// …and after the per-terminal output cap ate its recording (stage 3d): the blocks survive
 /// in the projection, the transcript does not, and the byte count is the only trace of what

@@ -893,7 +893,9 @@ let private start () =
                     match latestModel.Manager, latestModel.Session with
                     | Some origin, Some sessionId ->
                         navigateTo (sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId))
-                    | _ -> () }
+                    | _ -> ()
+              FocusPane = PaneFocus.toPane
+              FocusChat = PaneFocus.toChatItem }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.

@@ -686,6 +686,24 @@ module Style =
     /// the strip rather than only from inside it.
     let terminalTabPeers = "inline-flex items-center gap-0.5 ml-1.5 align-[1px]"
 
+    /// A tab a person opened from the chat (Plan 14, stage 2): the tab itself plus its own
+    /// close control. A group rather than one control, because a `<button>` inside a
+    /// `<button>` is not markup — and the two do different things.
+    let paneTabGroup = "inline-flex items-stretch shrink-0"
+    /// The close control, sized to the tab band beside it.
+    let paneTabClose =
+        cls [ "bg-transparent cursor-pointer px-1.5 grid place-items-center transition-colors"
+              Stroke.clear; "text-ink-faint hover:text-err"; focusRing ]
+
+    /// The pane's body — whatever the selected tab shows. It takes the column's remaining
+    /// height so the thing inside it scrolls rather than the column.
+    let paneBody = "flex-1 min-h-0 flex flex-col"
+    /// A read-only tab's body: the same scrolling region the block history uses, so a block
+    /// read from the chat looks exactly like the block read in its terminal.
+    let paneReadonly = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
+    /// A stretch tab's facts, above whatever renders its recording.
+    let paneFacts = "shrink-0 flex flex-col gap-1 px-3 py-3 " + Stroke.dividerBottom
+
     /// The scrolling block history.
     let terminalBlocks = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
 

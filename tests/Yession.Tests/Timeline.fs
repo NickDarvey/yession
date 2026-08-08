@@ -7,6 +7,7 @@ module Yession.Tests.Timeline
 open System
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.App
 
 let private expect =
     function
@@ -320,10 +321,142 @@ let private unchangedTests =
             | other -> failwithf "expected one item, got %d" (List.length other)
     ]
 
+// --- The pane's tabs (stage 2) -------------------------------------------------------------
+
+/// A client that has folded these events — the real path a browser takes, so the tab tests
+/// run against the model a session actually produces rather than a hand-built one.
+let private clientOf (events: EventEnvelope<SessionEvent> list) : ClientModel =
+    ClientModel.update
+        (EventsPageMsg { Events = events; LastOffset = events |> List.tryLast |> Option.map (fun e -> e.Offset); IsEnd = true })
+        (ClientModel.init { PeerId = ada; DisplayName = "swift-heron" })
+
+let private oneBlock =
+    [ at 1L 0.0 (opened terminalA "build")
+      at 2L 1.0 (started terminalA "1" (PeerRef ada) "ls -la" 1)
+      at 3L 2.0 (completed terminalA "1" (CommandSucceeded 0) 3) ]
+
+let private stripKeys (model: ClientModel) = ClientModel.paneTabs model |> List.map PaneTab.key
+
+let private paneTests =
+    testList "The pane's tabs (Plan 14, stage 2)" [
+        testCase "every terminal is furniture in the strip; opened tabs come after" <| fun () ->
+            let model = clientOf (oneBlock @ [ at 4L 3.0 (opened terminalB "logs") ])
+            Expect.equal (stripKeys model) [ "terminal:term-a"; "terminal:term-b" ] "the terminals, in open order"
+            let withTab = ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1"))) model
+            Expect.equal
+                (stripKeys withTab)
+                [ "terminal:term-a"; "terminal:term-b"; "block:term-a:b-1" ]
+                "and the opened tab after them"
+
+        testCase "opening a tab shows it, and opens the column it is in" <| fun () ->
+            let model = clientOf oneBlock
+            Expect.isFalse model.TerminalsOpen "the column starts shut"
+            let opened' = ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1"))) model
+            Expect.equal
+                (ClientModel.selectedPane opened' |> Option.map PaneTab.key)
+                (Some "block:term-a:b-1")
+                "the tab that was just opened is the one showing"
+            Expect.isTrue opened'.TerminalsOpen "and the column came with it"
+
+        testCase "tapping the same chip twice brings its tab forward, not a second copy" <| fun () ->
+            let model =
+                clientOf oneBlock
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+                |> ClientModel.update (SelectTerminalMsg terminalA)
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+            Expect.equal (List.length model.PaneTabs) 1 "one tab"
+            Expect.equal
+                (ClientModel.selectedPane model |> Option.map PaneTab.key)
+                (Some "block:term-a:b-1")
+                "and it is showing again"
+
+        testCase "closing a tab falls back to the first OPEN terminal" <| fun () ->
+            // Through the same resolver a closed terminal already relies on: a choice naming
+            // something no longer in the strip resolves to somewhere you can type. Clearing
+            // the choice as well would be a second mechanism for one fact.
+            let tab = BlockTab (terminalA, block "1")
+            let model =
+                clientOf oneBlock
+                |> ClientModel.update (OpenPaneTabMsg tab)
+                |> ClientModel.update (ClosePaneTabMsg tab)
+            Expect.isEmpty model.PaneTabs "the tab is gone"
+            Expect.equal
+                (ClientModel.selectedPane model |> Option.map PaneTab.key)
+                (Some "terminal:term-a")
+                "and the pane landed somewhere usable"
+
+        testCase "a terminal's own tab cannot be closed — the strip is where every terminal is" <| fun () ->
+            Expect.isFalse (PaneTab.isClosable (TerminalTab terminalA)) "furniture"
+            Expect.isTrue (PaneTab.isClosable (BlockTab (terminalA, block "1"))) "a block view is a person's"
+
+        testCase "a block tab and its terminal have DIFFERENT keys drawn from the same ids" <| fun () ->
+            // The reason a tab's key is prefixed per kind: a block id and a terminal id come
+            // from the same alphabet, and a collision would silently select the wrong tab.
+            let sameName = TerminalId.create "xy" |> expect
+            let asBlock = BlockId.create "xy" |> expect
+            Expect.notEqual
+                (PaneTab.key (TerminalTab sameName))
+                (PaneTab.key (BlockTab (sameName, asBlock)))
+                "one name, two tabs"
+
+        testCase "every tab is about a terminal, whichever kind it is" <| fun () ->
+            // What the composer, the presence marks and the transcript reads are keyed by.
+            let stretch =
+                { Offset = EventOffset.create 9L |> expect
+                  TerminalId = terminalB
+                  Title = "shell"
+                  Holder = PeerRef bob
+                  End = LeaseReleased
+                  Range = Some (1, 9)
+                  StartedAt = epoch
+                  EndedAt = epoch.AddMinutes 1.0 }
+            Expect.equal (PaneTab.terminal (TerminalTab terminalA)) terminalA "a terminal's own"
+            Expect.equal (PaneTab.terminal (BlockTab (terminalA, block "1"))) terminalA "a block's"
+            Expect.equal (PaneTab.terminal (StretchTab stretch)) terminalB "a stretch's"
+
+        testCase "a block tab renders the command and its output, read-only" <| fun () ->
+            // Stage 2's deliverable: from the chunks the client already has, through the very
+            // renderer the terminal's own history uses — a block read from the chat must not
+            // be a second rendering free to drift from the first.
+            let model =
+                clientOf oneBlock
+                |> ClientModel.update (TerminalRecordMsg (terminalA, 1, { At = 0.0; Kind = TranscriptOutput; Data = "total 0\n" }))
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+            let html = Support.render model
+            let required =
+                [ "the tab", Dom.attr Dom.Hooks.paneTab "block:term-a:b-1"
+                  "its close control", Dom.attr Dom.Hooks.paneTabClose "block:term-a:b-1"
+                  "the panel showing it", Dom.attr Dom.Hooks.panePanel "block:term-a:b-1"
+                  "the block's read-only view", Dom.attr Dom.Hooks.paneBlock "b-1"
+                  "the command", "ls -la"
+                  "what it printed", "total 0" ]
+            for label, marker in required do
+                Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+            // Read-only: no composer for a block you are reading back.
+            Expect.isFalse
+                (html.Contains (Dom.attr Dom.Hooks.terminalInput (BodyKey.terminalDraft terminalA ada)))
+                "no command line in a block's view"
+
+        testCase "the strip is one tablist, and every tab in it is a real tab" <| fun () ->
+            let model =
+                clientOf oneBlock |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+            let html = Support.render model
+            Expect.isTrue (html.Contains "role=\"tablist\"") "one tablist"
+            // Roving tabindex, ARIA's manual-activation variant: exactly one tab is a Tab
+            // stop, and the arrow keys move between them without mounting a panel per keypress.
+            let selectedStops =
+                html.Split ([| "role=\"tab\"" |], System.StringSplitOptions.None)
+                |> Array.skip 1
+                |> Array.filter (fun after -> (after.Split '>').[0].Contains "tabindex=\"0\"")
+            Expect.equal (Array.length selectedStops) 1 "exactly one tab is a Tab stop"
+            Expect.isTrue (html.Contains "aria-selected=\"true\"") "and it is the selected one"
+    ]
+
 let tests =
-    testList "Timeline (Plan 14, stage 1)" [
+    testList "Timeline and the pane (Plan 14)" [
         orderTests
         chipTests
         stretchTests
         unchangedTests
+        paneTests
     ]

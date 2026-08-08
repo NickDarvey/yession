@@ -169,6 +169,19 @@ module Dom =
         let chatBlockStatus = "data-chat-block-status"
         let chatStretch = "data-chat-stretch"
         let chatStretchEnd = "data-chat-stretch-end"
+        /// The pane's tab strip (Plan 14, stage 2). One hook for every tab whatever it shows
+        /// — a terminal, a block's read-only view, a stretch's replay — because they are one
+        /// tablist and a test asserting keyboard order should not have to know which is which.
+        /// Its value is `PaneTab.key`.
+        let paneTab = "data-pane-tab"
+        /// The close control on a tab a person opened. Terminal tabs have none: the strip
+        /// lists every terminal the session has, and "close" there already means something
+        /// else (`terminalClose`).
+        let paneTabClose = "data-pane-tab-close"
+        /// The pane's body, carrying the key of whatever it is showing.
+        let panePanel = "data-pane-panel"
+        /// A block's read-only view: its command line and everything it printed.
+        let paneBlock = "data-pane-block"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).

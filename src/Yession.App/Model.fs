@@ -139,6 +139,49 @@ module TerminalFeed =
         |> List.map (fun r -> r.Data)
         |> String.concat ""
 
+/// One thing the side pane can show (Plan 14, stage 2).
+///
+/// The pane stops being "the terminal panel" and becomes a tab strip over three kinds of
+/// thing. That is a genuine model change rather than a rename: the selection used to be a
+/// `TerminalId option`, and a block's read-only view is not a terminal — one terminal can
+/// contribute a hundred tabs.
+type PaneTab =
+    /// A terminal itself: its composer while it is open, its recording once it is closed.
+    /// Every terminal the session has ever had is always in the strip, so these are never
+    /// "opened" and never closed — they are the strip's furniture.
+    | TerminalTab of TerminalId
+    /// One block, read-only: the command and what it printed. Opened by tapping its chip in
+    /// the chat, and closeable.
+    | BlockTab of TerminalId * BlockId
+    /// One stretch of live mode. Opened from its chat item, and closeable.
+    | StretchTab of TerminalStretch
+
+module PaneTab =
+
+    /// A tab's identity, and the value its DOM hook carries. Prefixed per kind because a
+    /// block id and a terminal id are drawn from the same alphabet and a collision would
+    /// silently select the wrong tab.
+    let key =
+        function
+        | TerminalTab id -> "terminal:" + TerminalId.value id
+        | BlockTab (id, blockId) -> "block:" + TerminalId.value id + ":" + BlockId.value blockId
+        | StretchTab stretch -> "stretch:" + TerminalStretch.key stretch
+
+    /// Which terminal this tab is about — what the strip groups by and what a replay reads.
+    let terminal =
+        function
+        | TerminalTab id -> id
+        | BlockTab (id, _) -> id
+        | StretchTab stretch -> stretch.TerminalId
+
+    /// Whether this tab is one a person opened and can close. Terminal tabs are not: the
+    /// strip lists every terminal the session has, and a "close" on one of those already
+    /// means something else entirely (closing the terminal).
+    let isClosable =
+        function
+        | TerminalTab _ -> false
+        | BlockTab _ | StretchTab _ -> true
+
 type ClientModel =
     { Peer          : PeerState
       Connection    : ConnectionState
@@ -190,9 +233,17 @@ type ClientModel =
       /// because it arrives on a different leg: facts fold from the event log, bytes
       /// stream from the transcript.
       TerminalFeeds : Map<TerminalId, TerminalFeed>
-      /// Which terminal the panel is showing. `None` = the first open one, resolved by
-      /// `selectedTerminal`.
-      TerminalChoice : TerminalId option
+      /// The read-only tabs this client opened from the chat, oldest first (Plan 14, stage
+      /// 2). Terminal tabs are NOT here: every terminal the session has is always in the
+      /// strip, and these are the ones a person added by tapping a chip.
+      ///
+      /// LOCAL to this client, never synced. Opening a recording to read it must not move
+      /// anyone else's screen — that is reading, not collaborating. Presence still shows who
+      /// is IN a terminal, because that is about the shared thing.
+      PaneTabs      : PaneTab list
+      /// Which tab the pane is showing. `None` = the first open terminal, resolved by
+      /// `selectedPane`.
+      PaneChoice    : PaneTab option
       /// Whether the terminals panel is open. View state, never synced: two people in one
       /// session may reasonably want different columns on screen.
       TerminalsOpen : bool
@@ -271,8 +322,16 @@ type ClientMsg =
     | TerminalReadThroughMsg of TerminalId * seq: int
     /// The transcript's header, from the chunk that carried line 0 (Plan 13, stage 3e).
     | TerminalHeaderMsg of TerminalId * TranscriptHeader
-    /// Show this terminal in the panel.
+    /// Show this terminal in the pane.
     | SelectTerminalMsg of TerminalId
+    /// Bring an already-open tab forward (Plan 14, stage 2).
+    | SelectPaneTabMsg of PaneTab
+    /// Open a read-only tab from the chat — a block's view or a stretch's replay — and show
+    /// it. Idempotent on the tab's key.
+    | OpenPaneTabMsg of PaneTab
+    /// Close one. Only tabs a person opened can be closed; a terminal's own tab is the
+    /// strip's furniture, and "close" on one of those already means closing the terminal.
+    | ClosePaneTabMsg of PaneTab
     /// Open or close the terminals column.
     | ToggleTerminalsMsg
     /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
@@ -335,7 +394,8 @@ module ClientModel =
           Environment = EnvironmentNotStarted
           Terminals = TerminalProjection.empty
           TerminalFeeds = Map.empty
-          TerminalChoice = None
+          PaneTabs = []
+          PaneChoice = None
           TerminalsOpen = false
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
@@ -393,21 +453,33 @@ module ClientModel =
         |> List.filter (fun (_, presence) -> presence.Focus.Field = DraftBody peer)
         |> List.map (fun (editor, presence) -> editor, presence.DisplayName)
 
-    /// Which terminal the panel shows: the stored choice while it is still open, else the
-    /// first open one. Resolved rather than stored, for the same reason `composerTarget`
-    /// is: a choice that outlives what it pointed at is a blank pane nobody asked for.
-    /// Which terminal the panel shows. A CHOICE may name any terminal this client knows,
-    /// closed ones included (Plan 13, stage 3e): a closed terminal is where the recording is
-    /// read, so a selection that silently fell back to a live terminal the moment the shell
-    /// closed would put the audit out of reach exactly when it starts to matter. The DEFAULT
-    /// is still the first open one, because opening the panel should land somewhere you can
-    /// type. A choice naming a terminal that is not in the projection at all is stale and
-    /// falls back the same way.
+    /// The tab strip, in the order it renders: every terminal the session has ever had,
+    /// then the read-only tabs this client opened from the chat.
+    ///
+    /// Closed terminals stay in the strip (Plan 13, stage 3e) — a closed terminal is where
+    /// its recording is read, so dropping it the moment its shell exits would put the audit
+    /// out of reach exactly when it starts to matter.
+    let paneTabs (model: ClientModel) : PaneTab list =
+        (model.Terminals.Terminals |> List.map (fun t -> TerminalTab t.TerminalId)) @ model.PaneTabs
+
+    /// Which tab the pane shows: the stored choice while it is still in the strip, else the
+    /// first OPEN terminal. Resolved rather than stored, for the same reason `composerTarget`
+    /// is: a choice that outlives what it pointed at is a blank pane nobody asked for. The
+    /// default lands somewhere you can type.
+    let selectedPane (model: ClientModel) : PaneTab option =
+        let known = paneTabs model |> List.map PaneTab.key
+        match model.PaneChoice with
+        | Some chosen when List.contains (PaneTab.key chosen) known -> Some chosen
+        | _ ->
+            TerminalProjection.openTerminals model.Terminals
+            |> List.map (fun t -> TerminalTab t.TerminalId)
+            |> List.tryHead
+
+    /// Which terminal the pane is about — the selected tab's, whichever kind it is. A block
+    /// tab and a stretch tab still belong to a terminal, which is what the composer, the
+    /// presence marks and the transcript reads are keyed by.
     let selectedTerminal (model: ClientModel) : TerminalId option =
-        let known = model.Terminals.Terminals |> List.map (fun t -> t.TerminalId)
-        match model.TerminalChoice with
-        | Some chosen when List.contains chosen known -> Some chosen
-        | _ -> TerminalProjection.openTerminals model.Terminals |> List.map (fun t -> t.TerminalId) |> List.tryHead
+        selectedPane model |> Option.map PaneTab.terminal
 
     /// A terminal's feed, empty when nothing has arrived for it yet.
     let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
@@ -695,7 +767,23 @@ module ClientModel =
                         { feed with ReadThrough = max feed.ReadThrough seq; KnownLength = max feed.KnownLength seq }
                         model.TerminalFeeds }
         | SelectTerminalMsg terminal ->
-            { model with TerminalChoice = Some terminal; TerminalsOpen = true }
+            { model with PaneChoice = Some (TerminalTab terminal); TerminalsOpen = true }
+        | SelectPaneTabMsg tab ->
+            { model with PaneChoice = Some tab; TerminalsOpen = true }
+        | OpenPaneTabMsg tab ->
+            // Idempotent on the tab's key: tapping the same chip twice brings its tab
+            // forward rather than opening a second one that says exactly the same thing.
+            let already = model.PaneTabs |> List.exists (fun t -> PaneTab.key t = PaneTab.key tab)
+            { model with
+                PaneTabs = if already then model.PaneTabs else model.PaneTabs @ [ tab ]
+                PaneChoice = Some tab
+                TerminalsOpen = true }
+        | ClosePaneTabMsg tab ->
+            // The selection falls back through `selectedPane` — a choice naming a tab that
+            // is no longer in the strip resolves to the first open terminal, which is the
+            // same rule a closed terminal already relies on. Clearing it here as well would
+            // be a second mechanism for one fact.
+            { model with PaneTabs = model.PaneTabs |> List.filter (fun t -> PaneTab.key t <> PaneTab.key tab) }
         | ToggleTerminalsMsg ->
             { model with TerminalsOpen = not model.TerminalsOpen }
         | EnsureTerminalDraftMsg (terminal, author, queueId) ->

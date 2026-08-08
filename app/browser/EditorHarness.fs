@@ -15,6 +15,7 @@ module Yession.Browser.EditorHarness
 // Module-level `do` runs on import — module scripts are deferred, so `#host` already exists.
 
 open Fable.Core
+open Lit
 open Yjs
 open Yession.Domain
 open Yession.App
@@ -81,3 +82,80 @@ do
             [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\r\n" }
               1, { At = 0.1; Kind = TranscriptOutput; Data = "total 0\r\n" } ]
     Replay.mount replayHost cast |> ignore
+
+// --- The shell, host-free (Plan 14, stage 2) --------------------------------------------
+//
+// The same page, for the same reason the replay shares it: this is the same KIND of thing —
+// a surface that needs a real browser and nothing else. What only a browser can answer here
+// is where FOCUS goes when a chip in the chat opens a tab in the pane, and whether the tab
+// strip is a tablist the arrow keys actually walk. Both are DOM-swap behaviours a rendered
+// string cannot show, and neither needs a Session Process, a channel or a native addon.
+//
+// A minimal Elmish: `View.view` over a `ClientModel`, re-rendered on dispatch. The reducer,
+// the view and the focus moves are the app's own — only the loop is local, because Program
+// would want a doc and a connection this page deliberately does not have.
+
+[<Emit("document.getElementById('shell')")>]
+let private shellHost : obj = jsNative
+
+/// A session that has run one command: one open terminal, one finished block, and the two
+/// transcript records it produced. Enough for a chip to render in the chat and for its tab
+/// to have something to show.
+let private shellModel : ClientModel =
+    let expect = function Ok v -> v | Error e -> failwith e
+    let terminalId : TerminalId = TerminalId.create "term-harness" |> expect
+    let blockId : BlockId = BlockId.create "block-harness" |> expect
+    let peerId : PeerId = PeerId.create "ada" |> expect
+    let messageId : MessageId = MessageId.create "msg-harness" |> expect
+    let offset (n: int64) : EventOffset = EventOffset.create n |> expect
+    { ClientModel.init { PeerId = peerId; DisplayName = "swift-heron" } with
+        Connection = Connected
+        Session = Some (SessionId.create "harness" |> expect)
+        Conversation =
+            { Items =
+                [ { MessageId = messageId
+                    Author = PeerRef peerId
+                    Body = "ship it"
+                    Status = Complete
+                    Offset = offset 1L } ]
+              ActiveAgentMessages = Map.empty }
+        Timeline = { TimelineProjection.empty with TerminalItems = [ TimelineBlock (offset 2L, terminalId, blockId) ] }
+        Terminals =
+            { Terminals =
+                [ { TerminalId = terminalId
+                    Title = "build"
+                    OpenedBy = PeerRef peerId
+                    IsOpen = true
+                    ClosedReason = None
+                    Lease = None
+                    IntegrationLost = false
+                    Blocks =
+                      [ { BlockId = blockId
+                          QueueId = None
+                          Author = PeerRef peerId
+                          ApprovedBy = None
+                          Command = "ls -la"
+                          FromSeq = 0
+                          ToSeq = Some 2
+                          Status = BlockFinished (CommandSucceeded 0) } ]
+                    DroppedBytes = 0 } ] }
+        TerminalFeeds =
+            Map.ofList
+                [ terminalId,
+                  { Records =
+                      Map.ofList
+                          [ 0, { At = 0.0; Kind = TranscriptInput; Data = "ls -la\n" }
+                            1, { At = 0.1; Kind = TranscriptOutput; Data = "total 0\n" } ]
+                    KnownLength = 2
+                    ReadThrough = 2
+                    Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
+        TerminalsOpen = true }
+
+do
+    let actions = { ViewActions.ssr with FocusPane = PaneFocus.toPane; FocusChat = PaneFocus.toChatItem }
+    let mutable model = shellModel
+    let rec dispatch (msg: ClientMsg) : unit =
+        model <- ClientModel.update msg model
+        render ()
+    and render () = Lit.render (unbox shellHost) (View.view actions model dispatch)
+    render ()

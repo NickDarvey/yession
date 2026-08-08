@@ -591,6 +591,60 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+
+        // Terminal work in the chat, and the pane's tabs (Plan 14, stages 1-2). Host-free,
+        // like the editor and the replay beside it: what needs a real browser here is not the
+        // Session Process but the DOM swaps — where FOCUS goes when a chip in the chat opens
+        // a tab in the pane, and whether the tab strip is a tablist the arrow keys walk.
+        // Neither is visible to a rendered string, and both are the WCAG floor rather than a
+        // nicety: a chip that opens a pane and leaves focus behind, or a close that strands
+        // focus on a control it just removed, is exactly the failure the floor names.
+        testCaseAsync "a chat chip opens a pane tab, the strip walks, and closing hands focus back" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 4)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 4)))
+
+                // The chip the harness model's one block puts in the chat.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-block]")
+                do! awaitU (page.ClickAsync "#shell [data-chat-block]")
+
+                // A tab opened, showing that block read-only — command and output, from the
+                // records the client already has.
+                let showingBlock =
+                    """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel')?.startsWith('block:') === true"""
+                let! _ = await (page.WaitForFunctionAsync showingBlock)
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-block]')?.textContent.includes('total 0') === true""")
+
+                // Focus followed it into the pane.
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
+
+                // The strip is a real tablist: an arrow key walks it, and because activation
+                // is MANUAL, walking does not swap the panel under the reader per keypress.
+                do! awaitU (page.FocusAsync "#shell [data-pane-tab^='block:']")
+                do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-pane-tab')?.startsWith('terminal:') === true""")
+                let! _ = await (page.WaitForFunctionAsync showingBlock)
+
+                // Closing the tab hands focus back to the chip that opened it, rather than
+                // stranding it on a control that has just left the document.
+                do! awaitU (page.ClickAsync "#shell [data-pane-tab-close]")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-pane-block]')""")
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 // --- A path-mounted session in a real browser (docs/plans/10) ---------------------------
