@@ -1240,6 +1240,31 @@ let private transcriptTests =
             Expect.isTrue ((TranscriptChunk.cacheControl true).Contains "immutable") "a full chunk caches hard"
             Expect.equal (TranscriptChunk.cacheControl false) "no-store" "the growing tail never does"
 
+        testCase "keyframes live in a SIDECAR, and survive the process that wrote them" <| fun () ->
+            // Plan 14, stage 3. Never in the `.cast`: Plan 13 bought a standard, replayable
+            // format on purpose, and a private record type inside it spends that — so the
+            // transcript a stranger's player reads must be byte-identical with or without
+            // keyframes beside it.
+            let dir = sprintf "tests/Yession.Tests/out/.data/keyframes-%s" (string (System.Guid.NewGuid ()))
+            let store = Yession.Host.TranscriptStore.openStore dir
+            let transcript = store.Open terminalA { Width = 80; Height = 24; Timestamp = 0L }
+            transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "before\r\n" } |> ignore
+            transcript.Keyframe { Seq = 2; Cols = 100; Rows = 30; Screen = "SCREEN" }
+            transcript.Append { At = 0.1; Kind = TranscriptOutput; Data = "after\r\n" } |> ignore
+
+            let cast = readFileSync nodeFs (sprintf "%s/%s.cast" dir (TerminalId.value terminalA))
+            Expect.isFalse (cast.Contains "SCREEN") "the recording is exactly what the terminal printed"
+
+            // Read back through a SECOND store over the same directory — the restart case,
+            // and the only one that shows the sidecar is a file rather than a field.
+            let reopened = Yession.Host.TranscriptStore.openStore dir
+            Expect.equal
+                (reopened.ReadKeyframe terminalA 2)
+                (Some { Seq = 2; Cols = 100; Rows = 30; Screen = "SCREEN" })
+                "the keyframe outlives the handle that wrote it"
+            Expect.isNone (reopened.ReadKeyframe terminalA 1) "and a line with no keyframe says so"
+            Expect.isNone (reopened.ReadKeyframe terminalB 2) "as does a terminal with no sidecar at all"
+
         testCase "records encode as asciicast v2, so any player can read a transcript" <| fun () ->
             let header = Codec.toString Codec.transcriptLine (TranscriptHeaderLine { Width = 80; Height = 24; Timestamp = 1754092800L })
             Expect.isTrue (header.Contains "\"version\":2") "the header declares version 2"
@@ -1451,9 +1476,19 @@ let private scriptedEnvironment (script: string -> (OutputStream * string) list 
           CurrentRef = fun () -> Some "scripted" }
     environment, spawned
 
-/// An in-memory transcript, and a reader for what it holds.
+/// An in-memory transcript, a reader for what it holds, and a reader for the keyframes the
+/// Session Process recorded beside it (Plan 14, stage 3).
 let private recordingTranscripts () =
     let lines = Collections.Generic.Dictionary<string, ResizeArray<TranscriptLine>> ()
+    let keyframes = Collections.Generic.Dictionary<string, ResizeArray<TranscriptKeyframe>> ()
+    let keyframesFor (id: TerminalId) =
+        let key = TerminalId.value id
+        match keyframes.TryGetValue key with
+        | true, existing -> existing
+        | _ ->
+            let created = ResizeArray<TranscriptKeyframe> ()
+            keyframes.[key] <- created
+            created
     let linesFor (id: TerminalId) =
         let key = TerminalId.value id
         match lines.TryGetValue key with
@@ -1471,8 +1506,11 @@ let private recordingTranscripts () =
                     let seq = held.Count
                     held.Add (TranscriptRecordLine record)
                     seq
-              NextSeq = fun () -> held.Count }
-    openTranscript, (fun (id: TerminalId) -> linesFor id |> List.ofSeq)
+              NextSeq = fun () -> held.Count
+              Keyframe = fun keyframe -> (keyframesFor id).Add keyframe }
+    openTranscript,
+    (fun (id: TerminalId) -> linesFor id |> List.ofSeq),
+    (fun (id: TerminalId) -> keyframesFor id |> List.ofSeq)
 
 let private mintFrom (ids: string list) =
     let remaining = ResizeArray<string> ids
@@ -1515,7 +1553,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1533,7 +1571,7 @@ let private managerTests =
                 let log = newLog ()
                 let environment, spawned =
                     scriptedEnvironment (fun _ -> [ Stdout, "hello\n"; Stderr, "warn\n" ], 0)
-                let openTranscript, readTranscript = recordingTranscripts ()
+                let openTranscript, readTranscript, _ = recordingTranscripts ()
                 let terminals, records = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1583,7 +1621,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stderr, "no such file\n" ], 2)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1594,11 +1632,42 @@ let private managerTests =
                 Expect.equal completedEvent.Result (CommandFailed 2) "the exit code is the result"
             }
 
+        testCaseAsync "a keyframe is recorded at the block's first line, and paints the screen before it" <|
+            async {
+                // Plan 14, stage 3. The keyframe is written at range STARTS and nowhere
+                // else, because those are the only positions a ranged replay ever asks for.
+                // A block that runs after another has a screen it inherited, and that is
+                // exactly what this has to carry.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "\u001b[31mred\r\n" ], 0)
+                let openTranscript, _, readKeyframes = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript []
+                let! opened = terminals.Open (PeerRef ada) "build"
+                let id = opened |> expect
+                do! terminals.RunBlock (entry "a1" id (PeerRef ada) 1.0 None) "first" ignore
+                do! terminals.RunBlock (entry "a2" id (PeerRef ada) 2.0 None) "second" ignore
+
+                let! events = eventsOf log
+                let starts =
+                    events |> List.choose (function SessionEvent.TerminalBlockStarted e -> Some e.FromSeq | _ -> None)
+                let keyframes = readKeyframes id
+                Expect.equal (keyframes |> List.map (fun k -> k.Seq)) starts "one keyframe per block, at its first line"
+                // The second block inherited a screen the first one drew, and the keyframe
+                // carries it — which is the whole reason a slice into a fresh VT is wrong.
+                match List.tryItem 1 keyframes with
+                | Some second -> Expect.isTrue (second.Screen.Contains "red") "the screen the second block started from"
+                | None -> failwith "the second block recorded no keyframe"
+                Expect.equal
+                    (keyframes |> List.map (fun k -> k.Cols, k.Rows))
+                    (keyframes |> List.map (fun _ -> TerminalSize.default'.Cols, TerminalSize.default'.Rows))
+                    "each one carries the geometry the range actually ran under"
+            }
+
         testCaseAsync "an approval is recorded on the block, so the audit says who let it run" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1616,7 +1685,7 @@ let private managerTests =
                 // Comfortably past the 4 MiB per-block cap.
                 let flood = String.replicate 200 (String.replicate 40000 "y")
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, flood ], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1635,7 +1704,7 @@ let private managerTests =
                 // session. Closing them is what keeps the projection describing reality.
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript [ terminalA; terminalB ]
                 Expect.isTrue (terminals.IsOpen terminalA) "before boot reconciliation it still reads as open"
                 do! terminals.ReconcileAtBoot ()
@@ -1650,7 +1719,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1672,7 +1741,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "ok\n" ], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1695,7 +1764,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1728,7 +1797,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect

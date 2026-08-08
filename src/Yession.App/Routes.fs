@@ -49,6 +49,10 @@ type SessionRoute =
     /// is carried as a raw string because a route is a PATH, and validating it into a
     /// `TerminalId` is the server's job at dispatch, not the router's at parse.
     | TerminalTranscript of terminal: string * index: int
+    /// The keyframe for transcript line `seq` of a terminal (Plan 14, stage 3) — the screen
+    /// a ranged replay starts from. Immutable on the same argument the chunks are: a
+    /// keyframe is written once, at a position that never moves.
+    | TerminalKeyframe of terminal: string * seq: int
     /// The Claude panel's current credential status.
     | ClaudeStatus
     /// One of the Claude panel's write actions.
@@ -102,6 +106,7 @@ module SessionRoute =
         | Callback -> "callback"
         | Events index -> sprintf "events/%d" index
         | TerminalTranscript (terminal, index) -> sprintf "terminals/%s/%d" terminal index
+        | TerminalKeyframe (terminal, seq) -> sprintf "terminals/%s/keyframes/%d" terminal seq
         | ClaudeStatus -> "claude"
         | Claude action -> "claude/" + claudeSegment action
 
@@ -127,6 +132,10 @@ module SessionRoute =
         | "GET", [ "events"; index ] ->
             match System.Int32.TryParse index with
             | true, parsed when parsed >= 0 -> Some (Events parsed)
+            | _ -> None
+        | "GET", [ "terminals"; terminal; "keyframes"; seq ] ->
+            match System.Int32.TryParse seq with
+            | true, parsed when parsed >= 0 && terminal <> "" -> Some (TerminalKeyframe (terminal, parsed))
             | _ -> None
         | "GET", [ "terminals"; terminal; index ] ->
             match System.Int32.TryParse index with

@@ -17,7 +17,11 @@ type Transcript =
       /// `FromSeq`/`ToSeq`, and in the HTTP chunk a client fetches.
       Append : TranscriptRecord -> int
       /// The line index the next append will use — i.e. how long the transcript is.
-      NextSeq : unit -> int }
+      NextSeq : unit -> int
+      /// Record the screen as it stood immediately before a given line (Plan 14, stage 3),
+      /// into the terminal's keyframe sidecar. Written at every range START and nowhere
+      /// else, because those are the only positions a ranged replay ever asks for.
+      Keyframe : TranscriptKeyframe -> unit }
 
 /// Open (or reopen) a terminal's transcript. The header is written once, when the file is
 /// created; reopening an existing transcript appends to it, because a transcript outlives
@@ -841,6 +845,30 @@ module SessionTerminals =
             | true, terminal -> terminal.Transcript.NextSeq ()
             | _ -> 0
 
+        /// Capture the screen at this terminal's current transcript position, and return
+        /// that position (Plan 14, stage 3).
+        ///
+        /// The seq is read FIRST and the serialize started in the same tick, which is what
+        /// makes the pairing exact: `emit` appends the record and feeds the emulator in one
+        /// synchronous step, and `Serialize`'s empty-write barrier resolves only once
+        /// everything queued BEFORE it has been applied. So the screen this returns is
+        /// exactly lines `< seq` — never a byte that arrived while we waited.
+        let markKeyframe (id: TerminalId) : Async<int> =
+            async {
+                match live.TryGetValue (TerminalId.value id) with
+                | false, _ -> return 0
+                | true, terminal ->
+                    let seq = terminal.Transcript.NextSeq ()
+                    let! screen = terminal.Emulator.Serialize ()
+                    let size =
+                        match appliedSize.TryGetValue (TerminalId.value id) with
+                        | true, applied -> applied
+                        | _ -> TerminalSize.default'
+                    terminal.Transcript.Keyframe
+                        { Seq = seq; Cols = size.Cols; Rows = size.Rows; Screen = screen }
+                    return seq
+            }
+
         /// Who a lease event is attributed to. A take and a steal are the acts of whoever took
         /// it; a voluntary release is the holder's; a lease ended because its holder vanished
         /// is nobody's but the Process's, which is the honest reading of `LeaseHolderGone`.
@@ -883,7 +911,9 @@ module SessionTerminals =
                     | true, actor -> Some actor
                     | _ -> None
                 match TerminalFlip.propose altScreen holder autoHeld author with
-                | FlipToLive by -> do! applyLease (TerminalLeases.take id by true (clock ()) (seqNow id) leases)
+                | FlipToLive by ->
+                    let! seq = markKeyframe id
+                    do! applyLease (TerminalLeases.take id by true (clock ()) seq leases)
                 | FlipToBlock -> do! applyLease (TerminalLeases.autoRelease id (seqNow id) leases)
                 | FlipNothing -> return ()
             }
@@ -1097,7 +1127,7 @@ module SessionTerminals =
                     // on the screen. The alternative — starting the range at the `C` mark —
                     // cannot be reconciled with appending the anchor first, because `C` does
                     // not exist until after the write.
-                    let fromSeq = transcript.NextSeq ()
+                    let! fromSeq = markKeyframe entry.Terminal
                     // Durable BEFORE the process starts: the block event is the
                     // exactly-once anchor, so a crash between here and the spawn leaves a
                     // block that never completed — visible and explicable — rather than a
@@ -1260,7 +1290,8 @@ module SessionTerminals =
                 | true, terminal when Option.isNone terminal.Shell ->
                     return Error "this terminal has no interactive shell"
                 | true, _ ->
-                    do! applyLease (TerminalLeases.take id by false (clock ()) (seqNow id) leases)
+                    let! seq = markKeyframe id
+                    do! applyLease (TerminalLeases.take id by false (clock ()) seq leases)
                     return Ok ()
             }
 

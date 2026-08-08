@@ -95,7 +95,11 @@ type TranscriptEndpoint =
       /// The raw terminal segment off the path, deliberately unvalidated here — parsing it
       /// into a `TerminalId` is the endpoint's job, and an unparseable one is simply a
       /// terminal that does not exist.
-      ReadChunk : string -> int -> Async<(string list * bool) option> }
+      ReadChunk : string -> int -> Async<(string list * bool) option>
+      /// The keyframe for one transcript line (Plan 14, stage 3), as its encoded JSON.
+      /// `None` covers both "no such terminal" and "no keyframe at that line" — a client
+      /// asking for one it cannot get plays the range without it, and says so.
+      ReadKeyframe : string -> int -> Async<string option> }
 
 /// Start the HTTP bootstrap + signalling server. For each offer posted to `/signal`, an
 /// answering peer connection is created; when its data channel opens, the resulting frame
@@ -206,6 +210,33 @@ let start
                     | None -> notFound res
                 })
 
+    let serveKeyframe
+        (endpoint: TranscriptEndpoint)
+        (req: IncomingMessage)
+        (url: string)
+        (terminal: string)
+        (seq: int)
+        (res: ServerResponse)
+        =
+        if not (authorized req url endpoint.ValidateToken) then unauthorized res
+        else
+            Async.StartImmediate (
+                async {
+                    match! endpoint.ReadKeyframe terminal seq with
+                    // `immutable` on the same argument the full chunks earn it on: a
+                    // keyframe is written once, at a position that never moves, so its
+                    // bytes can never change.
+                    | Some json ->
+                        res.writeHead (
+                            200,
+                            createObj
+                                [ "content-type", box "application/json; charset=utf-8"
+                                  "cache-control", box (TranscriptChunk.cacheControl true) ])
+                        |> ignore
+                        res.``end`` json
+                    | None -> notFound res
+                })
+
     // The routes this server owns, dispatched by one match over `SessionRoute` — so the
     // paths it serves, the paths the shell emits, and the paths the browser fetches are
     // one declaration, and a route added there fails this build until it is handled here.
@@ -262,6 +293,10 @@ let start
         | Some (TerminalTranscript (terminal, index)) ->
             match transcripts with
             | Some endpoint -> serveTranscript endpoint req req.url terminal index res
+            | None -> notFound res
+        | Some (TerminalKeyframe (terminal, seq)) ->
+            match transcripts with
+            | Some endpoint -> serveKeyframe endpoint req req.url terminal seq res
             | None -> notFound res
         | Some Login ->
             // Begin the authorization-code + PKCE dance: 302 to the Manager's authorize

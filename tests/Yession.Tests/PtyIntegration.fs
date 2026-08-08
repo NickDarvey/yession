@@ -105,7 +105,10 @@ let private withLiveTerminal
             let records = ResizeArray<TranscriptRecord> ()
             let transcript : Transcript =
                 { Append = fun record -> records.Add record; records.Count - 1
-                  NextSeq = fun () -> records.Count }
+                  NextSeq = fun () -> records.Count
+                  // Keyframes (Plan 14, stage 3) are covered where they are read; what this
+                  // fixture is about is the pty, so it takes them and says nothing.
+                  Keyframe = ignore }
             let mutable reDrains = 0
             let terminals =
                 SessionTerminals.create

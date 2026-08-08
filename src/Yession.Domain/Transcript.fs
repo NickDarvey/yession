@@ -69,6 +69,48 @@ type TranscriptLine =
     | TranscriptHeaderLine of TranscriptHeader
     | TranscriptRecordLine of TranscriptRecord
 
+/// The screen as it stood immediately BEFORE transcript line `Seq` (Plan 14, stage 3).
+///
+/// Replaying a slice of a transcript is wrong twice, and both look fine in a demo:
+///
+///   * **Times are absolute.** asciicast timestamps are relative to the start of the FILE,
+///     so a block that ran forty minutes in makes the player sit idle for forty minutes
+///     before its first frame. `TranscriptReplay.range` rebases them.
+///   * **Screen state is path-dependent.** What a terminal shows at line 500 is a function
+///     of every byte before it — colours set earlier, cursor position, scroll region,
+///     whether something entered the alternate screen. Replaying a slice into a fresh VT is
+///     *approximately* right for ordinary command output and wrong exactly when it matters,
+///     and it is not close at all for a lease stretch, which by definition begins with a
+///     program already owning the screen.
+///
+/// So the Session Process serializes the emulator at each range START — every block's
+/// `FromSeq`, every lease stretch's — and a ranged replay becomes *header + one synthesized
+/// output record that paints this + the rebased range*, which is a valid asciicast the stock
+/// player renders with no modification.
+///
+/// Note what this is **not** for. Keyframes are usually a seek-performance trick, and that
+/// was the weaker case: the player rebuilds VT state by re-feeding from `t=0`, which is
+/// milliseconds for an ordinary recording. The reason to keep them is *correctness of a
+/// ranged replay*, and their cost is bounded by the number of blocks and leases rather than
+/// by output volume — the same argument that keeps input and resize records uncapped while
+/// output is capped.
+///
+/// They live in a SIDECAR, never in the `.cast`. Plan 13 bought a standard, replayable
+/// format on purpose; putting a private record type in the file spends that.
+type TranscriptKeyframe =
+    { /// The transcript line this paints the screen for. A range `[from, to)` wants the
+      /// keyframe whose `Seq` is exactly `from`.
+      Seq : int
+      /// The terminal's size at that moment. Carried because a resize BEFORE the range
+      /// changed the screen's shape, and the header records only the size the terminal
+      /// OPENED at — a ranged replay under the wrong geometry rewraps every line in it.
+      Cols : int
+      Rows : int
+      /// The ANSI that repaints the screen, from the same serializer `TerminalSnapshot`
+      /// uses to bring a joining peer up to date. One serializer, so a replayed screen and
+      /// a joined screen cannot disagree.
+      Screen : string }
+
 /// What a transcript keeps (Plan 13, stage 3d; Plan 14, stage 0).
 ///
 /// The shape of this is forced by one fact: **a line index IS a sequence number**. It is what

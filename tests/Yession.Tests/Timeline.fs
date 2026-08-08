@@ -452,6 +452,137 @@ let private paneTests =
             Expect.isTrue (html.Contains "aria-selected=\"true\"") "and it is the selected one"
     ]
 
+// --- Keyframes and the ranged cast (stage 3) --------------------------------------------------
+
+/// The output records of a `.cast`, in order — what a player would feed the emulator.
+let private outputsOf (cast: string) : string list =
+    cast.Split '\n'
+    |> Array.filter (fun l -> l.Trim().Length > 0)
+    |> Array.toList
+    |> List.choose (fun line ->
+        match Codec.fromString Codec.transcriptLine line with
+        | Ok (TranscriptRecordLine r) when r.Kind = TranscriptOutput || r.Kind = TranscriptStderr -> Some r.Data
+        | _ -> None)
+
+let private timesOf (cast: string) : float list =
+    cast.Split '\n'
+    |> Array.filter (fun l -> l.Trim().Length > 0)
+    |> Array.toList
+    |> List.choose (fun line ->
+        match Codec.fromString Codec.transcriptLine line with
+        | Ok (TranscriptRecordLine r) -> Some r.At
+        | _ -> None)
+
+let private headerOf (cast: string) : TranscriptHeader =
+    match Codec.fromString Codec.transcriptLine ((cast.Split '\n').[0]) with
+    | Ok (TranscriptHeaderLine h) -> h
+    | _ -> failwith "the first line of a cast is its header"
+
+/// Feed an emulator and read the screen back.
+let private screenOf (cols: int) (rows: int) (chunks: string list) : Async<string> =
+    async {
+        let emulator = Yession.Host.Emulator.openEmulator cols rows
+        for chunk in chunks do emulator.Write chunk
+        let! screen = emulator.Serialize ()
+        emulator.Dispose ()
+        return screen
+    }
+
+let private baseHeader : TranscriptHeader = { Width = 80; Height = 24; Timestamp = 0L }
+
+let private keyframeTests =
+    testList "Keyframes and the ranged cast (Plan 14, stage 3)" [
+        testCase "a ranged cast REBASES its times to the range's first record" <| fun () ->
+            // asciicast times are relative to the start of the FILE. Slice a block that ran
+            // forty minutes in and the player sits idle for forty minutes before the first
+            // frame — broken in a way that looks exactly like a hang.
+            let records =
+                [ 1, { At = 0.5; Kind = TranscriptOutput; Data = "early\r\n" }
+                  2, { At = 2400.0; Kind = TranscriptOutput; Data = "the block\r\n" }
+                  3, { At = 2400.25; Kind = TranscriptOutput; Data = "more\r\n" } ]
+            let cast = TranscriptReplay.range baseHeader None 2 4 records
+            Expect.equal (timesOf cast) [ 0.0; 0.25 ] "the range starts at zero and keeps its own spacing"
+            Expect.equal (outputsOf cast) [ "the block\r\n"; "more\r\n" ] "and holds only the range"
+
+        testCase "a keyframe paints the screen FIRST, and overrides the header's geometry" <| fun () ->
+            // The header records the size the terminal OPENED at; a resize before the range
+            // changed it, and a recording replayed under the wrong geometry rewraps every
+            // line in it.
+            let keyframe = { Seq = 2; Cols = 120; Rows = 40; Screen = "PAINTED" }
+            let records = [ 2, { At = 9.0; Kind = TranscriptOutput; Data = "after\r\n" } ]
+            let cast = TranscriptReplay.range baseHeader (Some keyframe) 2 3 records
+            Expect.equal (outputsOf cast) [ "PAINTED"; "after\r\n" ] "the screen, then the range"
+            Expect.equal (timesOf cast) [ 0.0; 0.0 ] "both at zero: the paint is instantaneous"
+            let header = headerOf cast
+            Expect.equal (header.Width, header.Height) (120, 40) "the size the range actually ran at"
+
+        testCase "an EMPTY keyframe screen paints nothing rather than an empty frame" <| fun () ->
+            // What a degraded terminal's serializer returns. A zero-length output record is
+            // a frame in the recording that the terminal never printed.
+            let keyframe = { Seq = 2; Cols = 80; Rows = 24; Screen = "" }
+            let cast = TranscriptReplay.range baseHeader (Some keyframe) 2 3 [ 2, { At = 1.0; Kind = TranscriptOutput; Data = "x" } ]
+            Expect.equal (outputsOf cast) [ "x" ] "just the range"
+
+        testCase "an empty range is still a VALID cast — a header and no frames" <| fun () ->
+            // What a rejected command carries, and what a stretch with no recorded bounds
+            // resolves to. An empty file is one the player reports as broken.
+            let cast = TranscriptReplay.range baseHeader None 0 0 []
+            Expect.equal ((cast.Split '\n' |> Array.filter (fun l -> l.Trim() <> "")).Length) 1 "the header, alone"
+
+        testCaseAsync "the keyframe is what makes a ranged replay CORRECT, not merely faster" <|
+            async {
+                // The assertion the naive slice fails. The prefix sets colour and moves the
+                // cursor; the range then prints under that state. Replayed into a fresh VT
+                // the slice is *approximately* right — and wrong exactly where the screen
+                // carried state in, which for an audit trail is the whole point.
+                let prefix = [ "\u001b[31mred prefix\r\n"; "\u001b[44m"; "\u001b[10;5H" ]
+                let ranged = [ "printed under that state\r\n" ]
+
+                // The truth: one emulator fed the whole stream, exactly as the Session
+                // Process's own emulator was.
+                let! truth = screenOf 80 24 (prefix @ ranged)
+                // The keyframe: the same serializer, at the range's start.
+                let! keyScreen = screenOf 80 24 prefix
+
+                let records =
+                    ranged |> List.mapi (fun i data -> 4 + i, { At = 60.0 + float i; Kind = TranscriptOutput; Data = data })
+                let withKey =
+                    TranscriptReplay.range baseHeader (Some { Seq = 4; Cols = 80; Rows = 24; Screen = keyScreen }) 4 9 records
+                let without = TranscriptReplay.range baseHeader None 4 9 records
+
+                let! replayed = screenOf 80 24 (outputsOf withKey)
+                let! naive = screenOf 80 24 (outputsOf without)
+
+                // Asserted non-empty first, because the interesting way for this to fail is
+                // to pass: comparing one blank screen to another proves nothing.
+                Expect.isTrue (truth.Contains "printed under that state") "the screen was actually drawn"
+                Expect.equal replayed truth "the ranged replay reproduces the screen the emulator had"
+                Expect.notEqual naive truth "and the naive slice does not — which is why keyframes exist"
+            }
+
+        testCase "the keyframe a range wants is the one at its FIRST line" <| fun () ->
+            // Selection, stated as the property the writer relies on: keyframes are written
+            // at range STARTS and nowhere else, so a range whose `from` has no keyframe has
+            // no keyframe at all — there is nothing else to fall back to.
+            let model =
+                clientOf oneBlock
+                |> ClientModel.update (TerminalHeaderMsg (terminalA, baseHeader))
+                |> ClientModel.update (TerminalRecordMsg (terminalA, 1, { At = 3.0; Kind = TranscriptOutput; Data = "out\r\n" }))
+                |> ClientModel.update (TerminalKeyframeMsg (terminalA, { Seq = 1; Cols = 80; Rows = 24; Screen = "SCREEN" }))
+            match ClientModel.rangedCast terminalA 1 2 model with
+            | Some cast -> Expect.equal (outputsOf cast) [ "SCREEN"; "out\r\n" ] "painted from the keyframe at line 1"
+            | None -> failwith "the header is known, so there is a cast"
+            // A different range on the same terminal has no keyframe of its own, and plays
+            // without one rather than refusing.
+            match ClientModel.rangedCast terminalA 0 2 model with
+            | Some cast -> Expect.equal (outputsOf cast) [ "out\r\n" ] "no paint, just the range"
+            | None -> failwith "a missing keyframe is not a missing cast"
+
+        testCase "no header means no cast: a guessed geometry rewraps every line" <| fun () ->
+            let model = clientOf oneBlock
+            Expect.isNone (ClientModel.rangedCast terminalA 0 2 model) "nothing to render until line 0 arrives"
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
         orderTests
@@ -459,4 +590,5 @@ let tests =
         stretchTests
         unchangedTests
         paneTests
+        keyframeTests
     ]

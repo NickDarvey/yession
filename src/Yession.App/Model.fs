@@ -233,6 +233,11 @@ type ClientModel =
       /// because it arrives on a different leg: facts fold from the event log, bytes
       /// stream from the transcript.
       TerminalFeeds : Map<TerminalId, TerminalFeed>
+      /// Keyframes this client has fetched, keyed by terminal and the transcript line each
+      /// paints (Plan 14, stage 3). One per range this client has opened, not one per block
+      /// the session ever ran: they are fetched on demand, and a range is only opened by
+      /// somebody choosing to read it.
+      TerminalKeyframes : Map<TerminalId * int, TranscriptKeyframe>
       /// The read-only tabs this client opened from the chat, oldest first (Plan 14, stage
       /// 2). Terminal tabs are NOT here: every terminal the session has is always in the
       /// strip, and these are the ones a person added by tapping a chip.
@@ -322,6 +327,10 @@ type ClientMsg =
     | TerminalReadThroughMsg of TerminalId * seq: int
     /// The transcript's header, from the chunk that carried line 0 (Plan 13, stage 3e).
     | TerminalHeaderMsg of TerminalId * TranscriptHeader
+    /// A keyframe arrived for a terminal (Plan 14, stage 3): the screen a ranged replay
+    /// starts from. Fetched when a tab needs one, never streamed — a keyframe is read by
+    /// somebody opening a recording, not by everybody watching one grow.
+    | TerminalKeyframeMsg of TerminalId * TranscriptKeyframe
     /// Show this terminal in the pane.
     | SelectTerminalMsg of TerminalId
     /// Bring an already-open tab forward (Plan 14, stage 2).
@@ -394,6 +403,7 @@ module ClientModel =
           Environment = EnvironmentNotStarted
           Terminals = TerminalProjection.empty
           TerminalFeeds = Map.empty
+          TerminalKeyframes = Map.empty
           PaneTabs = []
           PaneChoice = None
           TerminalsOpen = false
@@ -480,6 +490,28 @@ module ClientModel =
     /// presence marks and the transcript reads are keyed by.
     let selectedTerminal (model: ClientModel) : TerminalId option =
         selectedPane model |> Option.map PaneTab.terminal
+
+    /// The `.cast` for one range of a terminal's recording — a block's output, or a stretch
+    /// of live mode — from the records and the keyframe this client has (Plan 14, stage 3).
+    ///
+    /// `None` when the header has not arrived: the header is transcript line 0, so a client
+    /// that has not read the first chunk cannot say how big the screen is, and a recording
+    /// under a guessed geometry rewraps every line in it.
+    ///
+    /// A MISSING keyframe is not `None`. The range still rebases and still plays; it is then
+    /// the naive slice, approximately right for command output and wrong wherever the screen
+    /// carried state in. Refusing to play a recording we do have would be the worse answer,
+    /// and the surface says which one it is showing.
+    let rangedCast (terminal: TerminalId) (fromSeq: int) (toSeq: int) (model: ClientModel) : string option =
+        let feed = model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
+        feed.Header
+        |> Option.map (fun header ->
+            TranscriptReplay.range
+                header
+                (Map.tryFind (terminal, fromSeq) model.TerminalKeyframes)
+                fromSeq
+                toSeq
+                (feed.Records |> Map.toList))
 
     /// A terminal's feed, empty when nothing has arrived for it yet.
     let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
@@ -766,6 +798,8 @@ module ClientModel =
                         terminal
                         { feed with ReadThrough = max feed.ReadThrough seq; KnownLength = max feed.KnownLength seq }
                         model.TerminalFeeds }
+        | TerminalKeyframeMsg (terminal, keyframe) ->
+            { model with TerminalKeyframes = Map.add (terminal, keyframe.Seq) keyframe model.TerminalKeyframes }
         | SelectTerminalMsg terminal ->
             { model with PaneChoice = Some (TerminalTab terminal); TerminalsOpen = true }
         | SelectPaneTabMsg tab ->

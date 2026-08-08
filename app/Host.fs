@@ -598,6 +598,16 @@ let startFull
                         match TerminalId.create terminal with
                         | Ok id -> return transcripts.ReadChunk id index
                         | Error _ -> return None
+                    }
+              ReadKeyframe =
+                fun terminal seq ->
+                    async {
+                        match TerminalId.create terminal with
+                        | Ok id ->
+                            return
+                                transcripts.ReadKeyframe id seq
+                                |> Option.map (Codec.toString Codec.transcriptKeyframe)
+                        | Error _ -> return None
                     } }
 
         let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) (Some transcriptEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin ephemeralStorage port

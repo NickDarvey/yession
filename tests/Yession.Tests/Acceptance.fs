@@ -128,6 +128,7 @@ let private representativeModel : ClientModel =
                 KnownLength = 2
                 ReadThrough = 2
                 Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
+      TerminalKeyframes = Map.empty
       PaneTabs = []
       PaneChoice = None
       TerminalsOpen = true

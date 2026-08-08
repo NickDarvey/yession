@@ -25,6 +25,13 @@ let private every =
       Callback
       Events 0
       Events 7
+      // A terminal's transcript chunks (Plan 13) and the keyframes beside them (Plan 14):
+      // deeper paths than anything else here, and the pair the router has to keep apart —
+      // `terminals/<id>/<n>` and `terminals/<id>/keyframes/<n>` differ only by depth.
+      TerminalTranscript ("term-a", 0)
+      TerminalTranscript ("term-a", 3)
+      TerminalKeyframe ("term-a", 0)
+      TerminalKeyframe ("term-a", 41)
       ClaudeStatus
       Claude ClaudeAction.Begin
       Claude ClaudeAction.Complete
