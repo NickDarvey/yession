@@ -158,6 +158,7 @@ let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order:
       Author = author
       Order = order
       Payload = CommandLine
+      OnBehalfOf = None
       ApprovedBy = approved
       RejectedBy = None
       RejectedReason = None }

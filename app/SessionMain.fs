@@ -337,66 +337,171 @@ let private resolveGitHubToken (credentialActor: ActorRef) : Async<string option
 /// puts the change on the humans' screen without anyone refreshing: a command is the only
 /// thing that can change a query's answer, so a command is the only thing that has to say
 /// it did. Nothing polls.
+let private encodeArgs (values: string list) : string = Codec.toString Codec.gatedArgs values
+
+let private decodeArgs (raw: string) : string list =
+    match Codec.fromString Codec.gatedArgs raw with
+    | Ok values -> values
+    | Error _ -> []
+
+/// Invalidate a query once a command has actually changed its answer. A command is the only
+/// thing that can, so a command is the only thing that has to say so — nothing polls.
+let private andPublish (name: QueryName) (outcome: Async<Result<'a, string>>) : Async<Result<'a, string>> =
+    async {
+        let! result = outcome
+        match result with
+        | Ok _ -> queryRegistry.Invalidate name
+        | Error _ -> ()
+        return result
+    }
+
+/// How each gated command is carried out — the table the gate reads, INCLUDING for an act
+/// some previous process parked (Plan 15, stage 3b). Everything it needs arrives in the
+/// invocation, off the pending act: the arguments, whose credential to run on, and who
+/// released it. Nothing is closed over from the turn that proposed it, which is exactly what
+/// makes an approval outlive that turn.
+///
+/// A malformed invocation FAILS rather than guessing. These come out of a replicated doc,
+/// and "run something adjacent to what was approved" is the one outcome an approval gate
+/// must never produce.
+let private commandDispatch () : CommandDispatch =
+    let repoCaller (invocation: GatedInvocation) (fallback: ActorRef) =
+        Repos.agentCaller (invocation.OnBehalfOf |> Option.defaultValue fallback) invocation.ApprovedBy
+    let sandboxCaller (invocation: GatedInvocation) (fallback: ActorRef) : WorkSandboxes.SandboxCaller =
+        { Actor = ActorRef.Agent
+          Credential = invocation.OnBehalfOf |> Option.defaultValue fallback
+          ApprovedBy = invocation.ApprovedBy }
+    Map.ofList
+        [ GatedCommands.addRepo.Tool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match reposService, decodeArgs invocation.Args with
+                | None, _ -> return Error "this session has no repos"
+                | Some service, [ repo ] ->
+                    match RepoRef.create repo with
+                    | Error e -> return Error (sprintf "not a repo name: %s" e)
+                    | Ok repo ->
+                        return!
+                            andPublish Repos.queryName (
+                                async {
+                                    match! service.AddRepo (repoCaller invocation ActorRef.Agent) repo with
+                                    | Error e -> return Error e
+                                    | Ok listing ->
+                                        return
+                                            Ok (
+                                                sprintf
+                                                    "added %s — the checkout is shared with everyone in this session and visible in the work environment"
+                                                    (RepoListing.describe listing))
+                                })
+                | Some _, other -> return Error (sprintf "add_repo takes one repo, got %d arguments" (List.length other))
+            }
+
+          GatedCommands.switchBranch.Tool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match reposService, decodeArgs invocation.Args with
+                | None, _ -> return Error "this session has no repos"
+                | Some service, [ repo; branch; create ] ->
+                    match RepoRef.create repo with
+                    | Error e -> return Error (sprintf "not a repo name: %s" e)
+                    | Ok repo ->
+                        return!
+                            andPublish Repos.queryName (
+                                async {
+                                    match! service.SwitchBranch (repoCaller invocation ActorRef.Agent) repo branch (create = "true") with
+                                    | Error e -> return Error e
+                                    | Ok listing -> return Ok (sprintf "now on %s" (RepoListing.describe listing))
+                                })
+                | Some _, other ->
+                    return Error (sprintf "switch_branch takes a repo, a branch and a flag, got %d arguments" (List.length other))
+            }
+
+          GatedCommands.startWorkSandbox.Tool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match decodeArgs invocation.Args with
+                | name :: forward ->
+                    match SandboxName.create name with
+                    | Error e -> return Error (sprintf "not a sandbox name: %s" e)
+                    | Ok name ->
+                        match! workSandboxes.Ensure (sandboxCaller invocation ActorRef.Agent) name forward with
+                        | Error e -> return Error e
+                        | Ok entry ->
+                            queryRegistry.Invalidate WorkSandboxes.queryName
+                            let forwarding =
+                                match entry.Forwarded with
+                                | [] -> "nothing forwarded into it"
+                                | names -> "forwarding " + String.concat ", " names
+                            return
+                                Ok (
+                                    sprintf
+                                        "sandbox '%s' is up on %s, %s — run things in it with execute_command"
+                                        (SandboxName.value entry.Name)
+                                        entry.Backend
+                                        forwarding)
+                | [] -> return Error "start_work_sandbox takes a sandbox name"
+            }
+
+          GatedCommands.stopWorkSandbox.Tool,
+          fun (invocation: GatedInvocation) ->
+            async {
+                match decodeArgs invocation.Args with
+                | [ name ] ->
+                    match SandboxName.create name with
+                    | Error e -> return Error (sprintf "not a sandbox name: %s" e)
+                    | Ok name ->
+                        match! workSandboxes.Stop (sandboxCaller invocation ActorRef.Agent) name with
+                        | Error e -> return Error e
+                        | Ok () ->
+                            queryRegistry.Invalidate WorkSandboxes.queryName
+                            return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxName.value name))
+                | other -> return Error (sprintf "stop_work_sandbox takes one sandbox name, got %d arguments" (List.length other))
+            } ]
+
+/// The turn's repo verbs (Plan 14), bound to the acting party. The MUTATING ones are now
+/// three lines each: encode the arguments, render the summary, hand both to the gate. What
+/// they used to do lives in `commandDispatch`, where a process that did not propose the act
+/// can still reach it.
 let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
     match reposService with
     | None -> capabilities
     | Some service ->
-        let caller = Repos.agentCaller turnActor
-        let andPublish (outcome: Async<Result<'a, string>>) : Async<Result<'a, string>> =
-            async {
-                let! result = outcome
-                match result with
-                | Ok _ -> queryRegistry.Invalidate Repos.queryName
-                | Error _ -> ()
-                return result
-            }
-        // Through the gate (Plan 15, stage 3b), which for an ungated command — every command,
-        // until somebody configures otherwise — is the call itself and nothing more. The
-        // rendering lives inside the thunk because what the gate carries IS what the agent
-        // reads, and the approver arrives here so the event can name them.
-        let gated (tool: string) (summary: string) (run: ActorRef option -> Async<Result<string, string>>) =
-            capabilities.RunGated { Tool = tool; Summary = summary; Author = ActorRef.Agent } run
+        // Takes a CATALOGUE value, not a name. A gated call site therefore cannot name a
+        // command the settings surface does not render, or the boot configuration cannot
+        // accept — the three read one list, so they cannot drift.
+        let gated (command: GatedCommand) (args: string list) (summary: string) =
+            capabilities.RunGated
+                { Command = command
+                  Args = encodeArgs args
+                  Summary = summary
+                  Author = ActorRef.Agent
+                  OnBehalfOf = Some turnActor }
         { capabilities with
             AddRepo =
               fun repo ->
-                gated "add_repo" (sprintf "add_repo %s" (RepoRef.value repo)) (fun approvedBy ->
-                    andPublish (
-                        async {
-                            match! service.AddRepo (caller approvedBy) repo with
-                            | Error e -> return Error e
-                            | Ok listing ->
-                                return
-                                    Ok (
-                                        sprintf
-                                            "added %s — the checkout is shared with everyone in this session and visible in the work environment"
-                                            (RepoListing.describe listing))
-                        }))
+                gated GatedCommands.addRepo [ RepoRef.value repo ] (sprintf "add_repo %s" (RepoRef.value repo))
             SwitchRepoBranch =
               fun repo branch create ->
                 let summary =
                     if create then sprintf "switch_branch %s -> new branch %s" (RepoRef.value repo) branch
                     else sprintf "switch_branch %s -> %s" (RepoRef.value repo) branch
-                gated "switch_branch" summary (fun approvedBy ->
-                    andPublish (
-                        async {
-                            match! service.SwitchBranch (caller approvedBy) repo branch create with
-                            | Error e -> return Error e
-                            | Ok listing -> return Ok (sprintf "now on %s" (RepoListing.describe listing))
-                        }))
-            FetchRepo = service.FetchRepo (caller None)
+                gated GatedCommands.switchBranch [ RepoRef.value repo; branch; (if create then "true" else "false") ] summary
+            // The READS take no gate and no approver: they change nothing, so there is
+            // nothing to approve and nothing to resume.
+            FetchRepo = service.FetchRepo (Repos.agentCaller turnActor None)
             RepoStatus = service.RepoStatus
             RepoLog = service.RepoLog
             RepoDiff = service.RepoDiff }
 
-/// The turn's sandbox commands (Plan 15, stage 2), bound to the acting party. Both
-/// invalidate the `work_sandboxes` query on the way out, so what the humans see follows
-/// the act without anybody refreshing — a command is the only thing that can change the
-/// answer, so it is the only thing that has to say so.
+/// The turn's sandbox commands (Plan 15, stage 2), bound to the acting party.
 let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
-    let caller (approvedBy: ActorRef option) : WorkSandboxes.SandboxCaller =
-        { Actor = ActorRef.Agent; Credential = turnActor; ApprovedBy = approvedBy }
-    let gated (tool: string) (summary: string) (run: ActorRef option -> Async<Result<string, string>>) =
-        capabilities.RunGated { Tool = tool; Summary = summary; Author = ActorRef.Agent } run
+    let gated (command: GatedCommand) (args: string list) (summary: string) =
+        capabilities.RunGated
+            { Command = command
+              Args = encodeArgs args
+              Summary = summary
+              Author = ActorRef.Agent
+              OnBehalfOf = Some turnActor }
     { capabilities with
         StartWorkSandbox =
           fun name forward ->
@@ -405,34 +510,13 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
                 | [] -> sprintf "start_work_sandbox %s" (SandboxName.value name)
                 | names ->
                     sprintf "start_work_sandbox %s forwarding %s" (SandboxName.value name) (String.concat ", " names)
-            gated "start_work_sandbox" summary (fun approvedBy ->
-                async {
-                    match! workSandboxes.Ensure (caller approvedBy) name forward with
-                    | Error e -> return Error e
-                    | Ok entry ->
-                        queryRegistry.Invalidate WorkSandboxes.queryName
-                        let forwarding =
-                            match entry.Forwarded with
-                            | [] -> "nothing forwarded into it"
-                            | names -> "forwarding " + String.concat ", " names
-                        return
-                            Ok (
-                                sprintf
-                                    "sandbox '%s' is up on %s, %s — run things in it with execute_command"
-                                    (SandboxName.value entry.Name)
-                                    entry.Backend
-                                    forwarding)
-                })
+            gated GatedCommands.startWorkSandbox (SandboxName.value name :: forward) summary
         StopWorkSandbox =
           fun name ->
-            gated "stop_work_sandbox" (sprintf "stop_work_sandbox %s" (SandboxName.value name)) (fun approvedBy ->
-                async {
-                    match! workSandboxes.Stop (caller approvedBy) name with
-                    | Error e -> return Error e
-                    | Ok () ->
-                        queryRegistry.Invalidate WorkSandboxes.queryName
-                        return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxName.value name))
-                }) }
+            gated
+                GatedCommands.stopWorkSandbox
+                [ SandboxName.value name ]
+                (sprintf "stop_work_sandbox %s" (SandboxName.value name)) }
 
 /// Per-turn credential dispatch (Plan 08): resolve the credential the TURN ACTOR runs
 /// on — the session's own explicit credential first, then the actor's — fresh from the
@@ -616,6 +700,11 @@ Async.StartImmediate (
         // capabilities and the `work_sandboxes` query read is filled here — before the
         // readiness line, and therefore before any turn or any browser can ask.
         workSandboxes <- host.Sandboxes
+        // How each gated command is carried out, handed to the gate the Host owns. Doing it
+        // here — and not by closing over a turn — is what lets the gate honour an approval
+        // for an act that a previous process parked: it drains the doc, and this is the only
+        // thing it was missing.
+        host.SetCommandDispatch (commandDispatch ())
         // The operator's gate configuration (Plan 15, stage 3b), SEEDED into the synced
         // register rather than consulted at decision time — which is what leaves exactly one
         // place a mode is ever read from, and lets a human change their mind mid-session
@@ -624,12 +713,18 @@ Async.StartImmediate (
         // configuration is what the session BOOTS as, and a mid-session change is a change to
         // this run.
         match CommandGates.parseConfiguredGates (Interop.envOr "YESSION_GATED_COMMANDS" "") with
-        | [] -> ()
-        | tools ->
-            for tool in tools do
-                SyncedStateSync.setGate host.Doc (ForCommand tool) ApproveAgent
+        // A name that is not a gated command is fatal, not skipped: an operator who believes
+        // a command is gated and finds it silently is not has the blind spot this whole
+        // stage exists to remove.
+        | Error reason ->
+            eprintfn "YESSION_GATED_COMMANDS: %s" reason
+            Interop.exit 1
+        | Ok [] -> ()
+        | Ok commands ->
+            for command in commands do
+                SyncedStateSync.setGate host.Doc (GatedCommands.subject command) ApproveAgent
             eprintfn "[session %s] these commands need a human to approve them: %s"
-                (SessionId.value sessionId) (String.concat ", " tools)
+                (SessionId.value sessionId) (commands |> List.map (fun c -> c.Tool) |> String.concat ", ")
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

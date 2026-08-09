@@ -46,6 +46,11 @@ type SessionHost =
       Sandboxes : WorkSandboxes.WorkSandboxes
       /// The session's terminals (Plan 13) — opening one starts the environment.
       Terminals : SessionTerminals.SessionTerminals
+      /// Tell the command gate how each gated command is actually carried out (Plan 15,
+      /// stage 3b). Set once, from SessionMain, where the repo and sandbox services are
+      /// composed — the Host owns the gate because it owns the doc and the log, and the
+      /// table has to arrive from the layer above it.
+      SetCommandDispatch : CommandDispatch -> unit
       /// The agent's terminal capabilities (Plan 13, stage 3b), exposed so a test can drive
       /// the agent's HALF of the approval flow without a model in the loop. Production reaches
       /// them through `AgentCapabilities`, which is built from this same value.
@@ -355,6 +360,11 @@ let startFull
                 (fun () -> DateTimeOffset.UtcNow)
                 subscribeToChanges
 
+        // How each gated command is actually carried out, by tool name. Assigned once
+        // SessionMain has composed the services; empty until then, which is honest — a
+        // command proposed before the session is up has nothing to run it.
+        let commandDispatch : CommandDispatch ref = ref Map.empty
+
         // The approval gate for structured commands (Plan 15, stage 3b): the terminal drain
         // with the serial scheduler taken out. It parks an act in the same `Pending` map the
         // terminal queue lives in, reads the same `ApprovalMode` register, and hands back the
@@ -363,6 +373,9 @@ let startFull
             CommandGates.create
                 doc
                 (fun () -> SyncedStateSync.ofDoc doc)
+                // A getter: the table is assembled in SessionMain, where the repo and
+                // sandbox services are, which is after this Host exists.
+                (fun () -> commandDispatch.Value)
                 (fun actor event ->
                     async {
                         let! _ = log.Append actor event
@@ -560,29 +573,15 @@ let startFull
         // command in a terminal that is gone.
         do! terminals.ReconcileAtBoot ()
 
-        // A parked COMMAND belongs to the continuation that proposed it, and that died with
-        // the previous process (Plan 15, stage 3b). A terminal command survives here because
-        // the doc holds its whole payload; a structured call's does not, so leaving the card
-        // up would put an approve button on everyone's screen that can never do anything.
-        // Refuse them, visibly and with the reason — the agent can simply ask again.
-        let! stranded =
-            CommandGates.sweepAtBoot
-                doc
-                (fun actor event ->
-                    async {
-                        let! _ = log.Append actor event
-                        return ()
-                    })
-                mintMessageId
-        if stranded > 0 then
-            eprintfn "[session %s] refused %d command(s) left waiting by the previous process"
-                (SessionId.value sessionId) stranded
-
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the
         // crash window — the log-anchored dedup repairs them without re-consuming).
         drain ()
         drainTerminals ()
+        // ...and the command gate's, for the same reason: an act a previous process parked
+        // carries everything needed to run it, so an approval given before the restart is
+        // honoured now rather than refused.
+        commandGate.Drain ()
 
         let mutable endWaiters : (unit -> unit) list = []
         let signalSessionEnded () =
@@ -749,6 +748,12 @@ let startFull
               Environment = environment
               Sandboxes = sandboxes
               Terminals = terminals
+              SetCommandDispatch =
+                fun table ->
+                    commandDispatch.Value <- table
+                    // Anything a previous process parked and a human already approved runs
+                    // the moment there is something to run it with.
+                    commandGate.Drain ()
               TerminalCommands = terminalCommands
               WaitForNextSessionEnd = waitForNextSessionEnd
               Connect = onConnection

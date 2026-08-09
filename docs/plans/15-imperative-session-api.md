@@ -285,22 +285,29 @@ focus on.
   - **The watcher is detached from the MCP call.** An approval must take effect whether or
     not an agent turn is still waiting, or a human pressing approve would watch nothing
     happen. The call observes; a background continuation acts.
-  - **A parked command does NOT survive a restart, and says so.** A terminal command does,
-    because the doc holds its whole payload — a line of text a cold drain can run. A
-    structured call's arguments are typed and the entry holds only what a human was shown, so
-    the thing that would carry it out is the continuation this process is holding.
-    `sweepAtBoot` therefore refuses whatever was still parked, attributed to the session and
-    with the reason, rather than leaving a card up whose approve button can never do anything.
-    Buying durability instead would mean putting the raw arguments in the doc and dispatching
-    by tool name — named in Deferred rather than half-built.
+  - **A parked command survives a restart.** It did not at first: the only thing that could
+    carry an act out was the continuation of the call that proposed it, so a process that
+    died left a card whose approve button could never fire, and `sweepAtBoot` refused those
+    visibly rather than leave them. That was the honest version of a gap, not a design — so
+    the gap was closed instead. The act now carries its ARGUMENTS and whose credential it
+    runs on, a `CommandDispatch` maps a tool name to how it is carried out, and the gate is a
+    DRAIN over doc state rather than a set of waiting continuations. A new process over the
+    same doc honours an approval given to the old one — exactly as the terminal queue has
+    always done with a command line, and for the same reason: the doc holds the whole
+    payload. `sweepAtBoot` is gone; there is one mechanism, not a mechanism and a sweep.
 - **3c** — the one card, both mounts, and the mode control generalized from the terminal's
   existing `<select>`. Two concretions:
 
-  - **The gate settings surface lists the commands somebody has CONFIGURED**, not every
-    command the session has. Gating one nobody has named needs the browser to know what
-    commands exist, and nothing declares that to it — the read half of this plan does exactly
-    that for queries, and doing it for commands is the same shape. Deferred rather than faked
-    with a hard-coded list that goes stale the first time a command is added.
+  - **The gate settings surface lists EVERY gated command**, on its default when nobody has
+    configured it. It first listed only the configured ones, on the assumption that a
+    catalogue needed a declaration protocol — it does not: `GatedCommands.all` is a value in
+    the shared domain, and the browser compiles against that assembly, so inventing a
+    transport to send a build-time constant over a wire would have been work in exchange for
+    a way to disagree. The same catalogue is what the gated call sites name (they take a
+    `GatedCommand`, not a string) and what `YESSION_GATED_COMMANDS` validates against — three
+    consumers, one list, no drift. A name in that variable that is not a gated command now
+    REFUSES the boot: a typo that silently gates nothing reads as prudence and behaves as a
+    blind spot.
   - **A verdict hands focus on** (`ViewActions.FocusAfterVerdict`): to the next proposal's
     primary control, else the list, else the timeline. Approving REMOVES the card the button
     was on, which is the stranded-focus case CLAUDE.md names — and worse here than for the
@@ -322,9 +329,6 @@ focus on.
   DSL is the only thing in the way; a JSON-Schema-subset renderer is the missing piece.
 - MCP resource subscriptions for the agent side of live updates.
 - Per-query authorization (today every signed-in session member reads every query).
-- Restart-durable command acts: the raw arguments in the doc plus a dispatch-by-tool-name
-  table, which is what would let a cold process carry out an approval it did not propose.
-  Today a restart refuses them, visibly (`CommandGates.sweepAtBoot`).
 - Editing a structured proposal before approving it. A `CommandCall` card is approve-or-reject;
   making its arguments editable needs the same JSON-Schema-subset renderer the external-server
   item above is waiting on, and a half-built form is worse than a legible refusal.

@@ -59,10 +59,18 @@ type PendingPayload =
     /// `BodyKey.terminalQueued`. Editable in place by any peer, which IS the approval UX
     /// Plan 13 built: the thing you approve is a thing you can fix first.
     | CommandLine
-    /// A structured call: the MCP tool name, and its arguments rendered for a human to
-    /// read. Approve-or-reject only — editing typed arguments needs a form per command,
-    /// and a half-built form is worse than a legible refusal (Plan 15, Deferred).
-    | CommandCall of tool: string * summary: string
+    /// A structured call: the MCP tool name, the arguments it was made with, and those
+    /// arguments rendered for a human to read.
+    ///
+    /// `args` is what makes an approval survive a restart. Without it the only thing that
+    /// could carry the act out is the continuation of the call that proposed it, so a
+    /// process that died left a card whose approve button could never do anything. With it
+    /// the doc holds everything needed to run the command from cold — which is exactly why
+    /// a terminal command has always survived, its whole payload being the line of text.
+    ///
+    /// Approve-or-reject only, still: `args` is for the machine and `summary` for the
+    /// person, and editing typed arguments needs a form per command (Plan 15, Deferred).
+    | CommandCall of tool: string * args: string * summary: string
 
 /// An act waiting for a verdict. Collaborative until whatever carries it out consumes it:
 /// any peer may reorder, delete, approve or reject it, and edit its text where it has
@@ -85,6 +93,13 @@ type PendingAct =
       Order    : float
       /// What is being proposed.
       Payload  : PendingPayload
+      /// Whose credential the act runs on, when that is not the author's own. The
+      /// `SandboxCaller`/`RepoCaller` split, written down: for an agent-issued command the
+      /// AGENT is the acting party and the credential is the turn human's (Plan 08 — no
+      /// borrowing, and an agent has no scope of its own). Recorded here because a restart
+      /// has no turn to ask, and an act resumed against the wrong credential is worse than
+      /// one that does not resume.
+      OnBehalfOf : ActorRef option
       /// The peer who approved it, if one has. Whether an approval is REQUIRED is not
       /// stored: it is computed from the subject's mode and `Author` at the moment of
       /// acting (`ApprovalMode.requiresApproval`), so changing the mode re-decides every

@@ -138,6 +138,7 @@ let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : P
       Author = author
       Order = 1.0
       Payload = CommandLine
+      OnBehalfOf = None
       ApprovedBy = None
       RejectedBy = None
       RejectedReason = None }
