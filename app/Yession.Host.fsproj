@@ -24,6 +24,9 @@
     <Compile Include="Emulator.fs" />
     <Compile Include="Fs.fs" />
     <Compile Include="Sandboxes.fs" />
+    <!-- The query registry (Plan 15). Before every capability that declares a query, and
+         after Sse/SessionAuth, which are the only things its route needs. -->
+    <Compile Include="Queries.fs" />
     <Compile Include="Repos.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="ManagerStore.fs" />

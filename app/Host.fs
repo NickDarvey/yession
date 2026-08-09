@@ -347,12 +347,16 @@ let startFull
               // SessionMain's dispatching wrapper — the token is the TURN ACTOR's, and
               // only the dispatcher knows who that is.
               AddRepo = AgentCapabilities.none.AddRepo
-              ListRepos = AgentCapabilities.none.ListRepos
               SwitchRepoBranch = AgentCapabilities.none.SwitchRepoBranch
               FetchRepo = AgentCapabilities.none.FetchRepo
               RepoStatus = AgentCapabilities.none.RepoStatus
               RepoLog = AgentCapabilities.none.RepoLog
-              RepoDiff = AgentCapabilities.none.RepoDiff }
+              RepoDiff = AgentCapabilities.none.RepoDiff
+              // Likewise the query surface (Plan 15): the registry is composed in
+              // SessionMain, so a Host started without it declares nothing rather than
+              // declaring queries it cannot answer.
+              Queries = AgentCapabilities.none.Queries
+              ReadQuery = AgentCapabilities.none.ReadQuery }
 
         // The queue drain and turn scheduler (Phase 3) — the real machinery lives in
         // `Scheduler` (shared with the property harness); the Host wires it to this

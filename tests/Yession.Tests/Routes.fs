@@ -36,7 +36,10 @@ let private every =
       Claude ClaudeAction.Begin
       Claude ClaudeAction.Complete
       Claude ClaudeAction.Token
-      Claude ClaudeAction.Disconnect ]
+      Claude ClaudeAction.Disconnect
+      // A single-segment GET, so it shares the shape the fingerprinted-asset fallback
+      // matches — the round trip below is what pins that the literal still wins.
+      Queries ]
 
 let private methodOf (route: SessionRoute) =
     match route with

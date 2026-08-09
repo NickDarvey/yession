@@ -62,14 +62,10 @@ type ViewActions =
       GitHubPasteToken : unit -> unit
       /// Disconnect the credential stored for a scope choice ("session" | "mine").
       GitHubDisconnect : string -> unit
-      /// Repos panel (Plan 14). Imperative like the connection sets: they read panel
-      /// inputs and drive the /repos round-trips; the reducer folds the results.
-      /// Add the owner/repo in the panel's add input.
-      RepoAdd : unit -> unit
-      /// Remove a repo's checkout (the argument is its owner/repo rendering).
-      RepoRemove : string -> unit
-      /// Switch a repo to the branch typed in its row's input.
-      RepoSwitchBranch : string -> unit
+      // The Repos panel's three actions (Plan 14) were RETIRED by Plan 15: adding,
+      // removing and switching a repo are commands, and commands belong to the agent, so
+      // a human asks and reads the act-line in the timeline. What is left of that panel is
+      // the `repos` QUERY, which needs no action at all.
       /// Ask the Manager to bring this session back and take the browser to it (Plan 11).
       /// Imperative because it is a navigation, and a navigation is not a state change this
       /// document survives to fold.
@@ -131,9 +127,6 @@ module ViewActions =
           GitHubConnect = ignore
           GitHubPasteToken = ignore
           GitHubDisconnect = ignore
-          RepoAdd = ignore
-          RepoRemove = ignore
-          RepoSwitchBranch = ignore
           ReopenSession = ignore
           OpenTerminal = ignore
           CloseTerminal = ignore
@@ -478,51 +471,75 @@ module View =
               {controls}
             </section>"""
 
-    /// The Repos panel (Plan 14): the session's checkouts, each with its branch and
-    /// dirty state (the filesystem's answer), a per-row branch switch, remove, and the
-    /// add input — with the shared-trust disclosure stated where the act happens.
-    let private reposSection (actions: ViewActions) (repos: ReposViewState) : TemplateResult =
-        let rows =
-            match repos.Listings with
-            | None -> [ html $"""<span class="{Style.small}" data-repos-loading>…</span>""" ]
-            | Some [] -> [ html $"""<span class="{Style.small}" data-repos-empty>no repos yet</span>""" ]
-            | Some listings ->
-                listings
-                |> List.map (fun listing ->
-                    let name = RepoRef.value listing.Repo
-                    let dirty =
-                        if listing.Dirty then html $"""<span class="{Style.statusFaint}">uncommitted changes</span>"""
-                        else Lit.nothing
+    /// The generated read surface (Plan 15): ONE renderer for every query this session
+    /// declares, now and later. Registering a query is what puts it on this screen —
+    /// nobody writes a panel, which is the whole reason the surface is generated rather
+    /// than hand-built.
+    ///
+    /// It is deliberately read-only. The commands that change any of this belong to the
+    /// agent: a human asks, and the act lands in the timeline attributed. So there are no
+    /// buttons here, no inputs, and nothing that can be in flight — which is also what
+    /// makes the accessibility floor cheap to hold, because it is held once, here, for
+    /// every query that will ever exist.
+    let private queryValueView (shape: QueryShape) (value: QueryValue option) : TemplateResult =
+        let cellText (row: (string * QueryCell) list) (column: QueryColumn) =
+            row
+            |> List.tryFind (fun (key, _) -> key = column.Key)
+            |> Option.map snd
+            |> Option.defaultValue CellAbsent
+            |> QueryCell.describe
+        match shape, value with
+        | _, None -> html $"""<span class="{Style.small}" data-query-pending>…</span>"""
+        | Value, Some (ValueOf cellValue) ->
+            html $"""<span class="{Style.small}" data-query-value>{QueryCell.describe cellValue}</span>"""
+        | Fields columns, Some (FieldsOf fields) ->
+            let rows =
+                columns
+                |> List.map (fun column ->
                     html $"""
-                        <div class="{Style.sideRow}" data-repo-row="{name}">
-                          <div class="flex flex-col gap-1 min-w-0">
-                            <span class="{Style.small}">{name} · {listing.Branch}</span>
-                            {dirty}
-                            <div class="flex gap-2">
-                              <input type="text" class="{Style.field}" data-repo-branch-input="{name}" aria-label="Branch for {name}" placeholder="branch" />
-                              <button type="button" class="{Style.btn}" data-repo-switch="{name}" @click={Ev(fun _ -> actions.RepoSwitchBranch name)}>Switch</button>
-                            </div>
-                          </div>
-                          <button type="button" class="{Style.btnIconDanger}" aria-label="Remove {name}" data-repo-remove="{name}" @click={Ev(fun _ -> actions.RepoRemove name)}>{Icon.close}</button>
+                        <div class="{Style.sideRow}" data-query-field="{column.Key}">
+                          <span class="{Style.statusFaint}">{column.Label}</span>
+                          <span class="{Style.small}">{cellText fields column}</span>
                         </div>""")
-        let busy =
-            if repos.Busy then html $"""<span class="{Style.statusRun}" data-repos-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
-            else Lit.nothing
-        let error =
-            match repos.Error with
-            | Some reason -> html $"""<span class="{Style.statusErr}" data-repos-error>{reason}</span>"""
-            | None -> Lit.nothing
-        html $"""
-            <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-repos-panel>
-              <span class="{Style.label}">repos</span>
-              <span class="{Style.small}">a repo added here is readable by everyone in this session, and inside the work environment</span>
-              {rows}
-              {busy}
-              {error}
-              <label class="{Style.label}" for="repo-add">add a repo</label>
-              <input id="repo-add" type="text" class="{Style.field}" data-repo-add-input placeholder="owner/repo" />
-              <button type="button" class="{Style.btnPrimary}" data-repo-add @click={Ev(fun _ -> actions.RepoAdd ())}>Add repo</button>
-            </section>"""
+            html $"""<div class="flex flex-col gap-1">{rows}</div>"""
+        | Rows _, Some (RowsOf []) ->
+            html $"""<span class="{Style.small}" data-query-empty>(none)</span>"""
+        | Rows columns, Some (RowsOf rows) ->
+            // A real `<table>` with `<th scope="col">`, because this IS tabular data and a
+            // grid of divs tells a screen reader nothing about which heading a value sits
+            // under (CLAUDE.md, UI baseline: structure).
+            let head =
+                columns
+                |> List.map (fun column ->
+                    html $"""<th scope="col" class="{Style.queryHeadCell}">{column.Label}</th>""")
+            let body =
+                rows
+                |> List.map (fun row ->
+                    let cells =
+                        columns
+                        |> List.map (fun column ->
+                            html $"""<td class="{Style.queryCell}" data-query-cell="{column.Key}">{cellText row column}</td>""")
+                    html $"""<tr>{cells}</tr>""")
+            html $"""
+                <div class="{Style.queryTable}">
+                  <table class="w-full">
+                    <thead><tr>{head}</tr></thead>
+                    <tbody>{body}</tbody>
+                  </table>
+                </div>"""
+        // A value that does not match its declared shape never reaches here — the registry
+        // refuses it Process-side — so this arm exists only to keep the match total.
+        | _, Some _ -> html $"""<span class="{Style.small}" data-query-pending>…</span>"""
+
+    let private queriesSection (queries: QueriesViewState) : TemplateResult list =
+        queries.Declared
+        |> List.map (fun def ->
+            let name = QueryName.value def.Name
+            html $"""
+                <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-query-panel="{name}">
+                  <span class="{Style.label}">{def.Title}</span>
+                  {queryValueView def.Shape (Map.tryFind name queries.Values)}
+                </section>""")
 
     /// Settings, as the sidebar column's OTHER FACE. Not a drawer over the conversation: you
     /// go there and come back, the timeline never moves under a scrim, and configuration keeps
@@ -542,7 +559,7 @@ module View =
               </div>
               {claudeSection actions dispatch model.Claude}
               {githubSection actions dispatch model.GitHub}
-              {reposSection actions model.Repos}
+              {queriesSection model.Queries}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
             </div>"""
