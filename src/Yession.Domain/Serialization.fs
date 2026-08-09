@@ -1317,6 +1317,21 @@ module Codec =
     let fromString (codec: Codec<'a>) (json: string) : Result<'a, string> =
         Decode.fromString codec.Decode json
 
+    /// A gated command's arguments, on the wire (Plan 15, stage 3b).
+    ///
+    /// A list of strings, deliberately — every gated command's arguments are names, branches
+    /// and flags, and a positional list is the smallest thing that survives the doc and comes
+    /// back to a process that did not write it. A per-command schema would be the
+    /// JSON-Schema-subset renderer this plan already deferred, arriving through the back
+    /// door; when that lands, the card can read these and this becomes its encoding.
+    ///
+    /// Never a credential. `PendingAct.OnBehalfOf` names WHOSE, and the value is resolved at
+    /// execution — the pending list replicates to every peer, and a shape that could hold a
+    /// token eventually does.
+    let gatedArgs : Codec<string list> =
+        { Encode = fun values -> Encode.list (values |> List.map Encode.string)
+          Decode = Decode.list Decode.string }
+
 /// Rebuilding a `.cast` file from what a client has fetched (Plan 13, stage 3e).
 ///
 /// The audit read. A closed terminal's blocks survive in the projection, but a list of

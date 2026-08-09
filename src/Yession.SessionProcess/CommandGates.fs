@@ -12,12 +12,12 @@ open Yession.Domain
 /// scheduler — a shell has one working directory and one stdin — and a command has nothing
 /// to serialize, so it runs the moment its verdict arrives.
 ///
-/// What a command does NOT get is restart-durability. A terminal command survives a restart
-/// because the doc holds its whole payload — a line of text the drain can run from cold. A
-/// structured call's arguments are typed, and the entry holds only what a human was shown,
-/// so the thing that runs it is the continuation this process is holding. A restart
-/// therefore refuses whatever was still parked (`sweepAtBoot`), visibly and with a reason,
-/// rather than leaving a card on everyone's screen that no approval can ever release.
+/// It is a DRAIN, not a set of waiting continuations, and that is what makes an approval
+/// outlive the process that proposed the act. Everything needed to carry a command out is on
+/// the act — the tool, its arguments, and whose credential it runs on — so a session that
+/// restarted mid-review picks the act up and honours the approval, exactly as the terminal
+/// queue has always done with a command line. What the caller holds is only a place to come
+/// back for the outcome.
 module CommandGates =
 
     // The outcome shapes (`CommandStatus`, `CommandOutcome`, `GatedCall`) live in
@@ -33,75 +33,73 @@ module CommandGates =
           Read : QueueId -> Async<Result<CommandOutcome, string>>
           /// Whether a handle names a command act rather than a terminal one — the question
           /// the single `check_pending` tool asks before it decides which side to read.
-          Knows : QueueId -> bool }
+          Knows : QueueId -> bool
+          /// Settle every command act whose verdict is in. Wired to the doc's change feed
+          /// and called at boot; exposed so the Host can drain once before anything else
+          /// reads the session, the way it drains the terminal queue.
+          Drain : unit -> unit }
 
     let unavailable : CommandGate =
-        { Run = fun call run -> async { let! _ = run None in return Error ("no gate for " + call.Tool) }
+        { Run = fun call -> async { return Error ("no gate to run " + call.Command.Tool + " through") }
           Read = fun _ -> async { return Error "this session has no command gate" }
-          Knows = fun _ -> false }
-
-    /// A gate that runs everything immediately: no doc, no modes, no waiting. What a Host
-    /// with no collaborative state composes, and what the ungated path degrades to.
-    let passthrough : CommandGate =
-        { Run =
-            fun call run ->
-                async {
-                    match! run None with
-                    | Error reason -> return Error reason
-                    | Ok text ->
-                        return
-                            Ok
-                                { Handle = None
-                                  Tool = call.Tool
-                                  Summary = call.Summary
-                                  Status = CommandRan text }
-                }
-          Read = fun _ -> async { return Error "no such pending command" }
-          Knows = fun _ -> false }
+          Knows = fun _ -> false
+          Drain = ignore }
 
     /// Parse the operator's gate configuration: a comma- or space-separated list of tool
     /// names, each of which becomes `ApproveAgent` for its `ForCommand` subject. Empty by
     /// default, so a session nobody configured behaves exactly as it did before this stage.
     ///
+    /// A name that is not a gated command is an ERROR, not a name to skip. A typo here reads
+    /// as prudence and behaves as a blind spot: the operator believes `add_repo` needs an
+    /// approval, and it silently does not — the same failure shape as a test tier that drops
+    /// a capability it was asked for and goes green.
+    ///
     /// The interim form of what `yession.yaml` will own. It seeds the synced register rather
     /// than being consulted at decision time, which is what lets a human change their mind
     /// mid-session without a restart — and is why there is only ever ONE place the mode is
     /// read from.
-    let parseConfiguredGates (raw: string) : string list =
-        raw.Split ([| ','; ' '; ';' |])
-        |> Array.map (fun name -> name.Trim ())
-        |> Array.filter (fun name -> name <> "")
-        |> Array.distinct
-        |> Array.sort
-        |> List.ofArray
+    let parseConfiguredGates (raw: string) : Result<GatedCommand list, string> =
+        let named =
+            raw.Split ([| ','; ' '; ';' |])
+            |> Array.map (fun name -> name.Trim ())
+            |> Array.filter (fun name -> name <> "")
+            |> Array.distinct
+            |> Array.sort
+            |> List.ofArray
+        let unknown = named |> List.filter (fun name -> Option.isNone (GatedCommands.tryFind name))
+        if not (List.isEmpty unknown) then
+            Error (
+                sprintf
+                    "these are not gated commands: %s. The ones that can be gated are: %s"
+                    (String.concat ", " unknown)
+                    (GatedCommands.all |> List.map (fun c -> c.Tool) |> String.concat ", "))
+        else Ok (named |> List.choose GatedCommands.tryFind)
 
-    /// A parked act's verdict, as the watcher reads it off the doc.
+    /// A parked act's verdict, as the drain reads it off the doc.
     type private Verdict =
         | Approved of PeerId option
         | Refused of PeerId * string option
         | Undecided
-        /// The entry is gone — a peer deleted it, which is a withdrawal rather than a
-        /// refusal and is the one outcome that records nothing.
-        | Withdrawn
 
-    let private verdictOf (handle: QueueId) (synced: SyncedSessionState) : Verdict =
-        match Map.tryFind handle synced.Pending with
-        | None -> Withdrawn
-        | Some act ->
-            // A refusal outranks an approval, exactly as it does in the terminal drain: a
-            // policy that would have released the act must not beat a person who said no.
-            match act.RejectedBy, act.ApprovedBy with
-            | Some by, _ -> Refused (by, act.RejectedReason)
-            | None, approved when not (ApprovalMode.requiresApproval (SyncedSessionState.gateOf act.Subject synced) act.Author) ->
-                Approved approved
-            | None, Some by -> Approved (Some by)
-            | None, None -> Undecided
+    let private verdictOf (act: PendingAct) (synced: SyncedSessionState) : Verdict =
+        // A refusal outranks an approval, exactly as it does in the terminal drain: a
+        // policy that would have released the act must not beat a person who said no.
+        match act.RejectedBy, act.ApprovedBy with
+        | Some by, _ -> Refused (by, act.RejectedReason)
+        | None, approved when not (ApprovalMode.requiresApproval (SyncedSessionState.gateOf act.Subject synced) act.Author) ->
+            Approved approved
+        | None, Some by -> Approved (Some by)
+        | None, None -> Undecided
 
     /// `syncedOf` is read fresh on every observation, so the gate holds no copy of the doc
     /// and a mode changed mid-wait re-decides the act that is waiting.
+    ///
+    /// `dispatch` is a GETTER: the table is assembled where the capabilities are, which is
+    /// after the Host that owns this gate exists.
     let create
         (doc: Yjs.Y.Doc)
         (syncedOf: unit -> Result<SyncedSessionState, Ylmish.Codec.Error list>)
+        (dispatch: unit -> CommandDispatch)
         (appendAs: ActorRef -> SessionEvent -> Async<unit>)
         (mintQueueId: unit -> QueueId)
         (mintMessageId: unit -> MessageId)
@@ -109,176 +107,177 @@ module CommandGates =
         (onChanged: TerminalCommands.OnChanged)
         : CommandGate =
 
-        // The acts this process parked, by handle, each holding its outcome once it has one.
-        // An entry is NOT dropped when it resolves: the handle exists so the agent can come
-        // back later, and a resume that answers "no such command" for something that just
-        // succeeded is the one answer it must never give. In memory on purpose, and the
-        // reason `sweepAtBoot` exists: see the module comment.
-        let parked = System.Collections.Generic.Dictionary<string, CommandOutcome option ref> ()
+        // Outcomes, by handle, so a caller can come back for one. NOT where the act lives —
+        // the act lives in the doc, and the drain below settles it from there. An entry is
+        // never dropped once it resolves: a resume that answers "no such command" for
+        // something that just succeeded is the one answer it must never give.
+        let outcomes = System.Collections.Generic.Dictionary<string, CommandOutcome> ()
+        // Handles this process is already settling, so a re-entrant drain does not run one
+        // act twice. The doc removal is what makes it permanent; this covers the window.
+        let settling = System.Collections.Generic.HashSet<string> ()
 
-        let outcome (call: GatedCall) (handle: QueueId option) (status: CommandStatus) =
-            { Handle = handle; Tool = call.Tool; Summary = call.Summary; Status = status }
+        let record (handle: QueueId) (outcome: CommandOutcome) =
+            outcomes.[QueueId.value handle] <- outcome
 
-        let recordRefusal (call: GatedCall) (handle: QueueId) (by: PeerId) (reason: string option) =
+        let refuse (handle: QueueId) (tool: string) (summary: string) (author: ActorRef) (by: ActorRef) (reason: string option) =
             async {
                 do!
                     appendAs
-                        (PeerRef by)
+                        by
                         (SessionEvent.CommandRefused
                             { MessageId = mintMessageId ()
                               QueueId = handle
-                              Tool = call.Tool
-                              Summary = call.Summary
-                              Author = call.Author
-                              RejectedBy = PeerRef by
+                              Tool = tool
+                              Summary = summary
+                              Author = author
+                              RejectedBy = by
                               Reason = reason })
                 SyncedStateSync.removePending doc [ handle ]
+                record handle { Handle = Some handle; Tool = tool; Summary = summary; Status = CommandRefusedBy (by, reason) }
             }
 
-        /// Watch one parked act to its end, and carry it out. Runs detached from the MCP
-        /// call: an approval must take effect whether or not anybody is still waiting on it,
-        /// or a human pressing approve would watch nothing happen.
-        let rec settle
-            (call: GatedCall)
-            (handle: QueueId)
-            (run: ActorRef option -> Async<Result<string, string>>)
-            (slot: CommandOutcome option ref)
-            : Async<unit> =
+        /// Carry out one act whose verdict is in. Everything it needs comes off the ACT, so
+        /// this works for an act proposed by a process that is no longer running — which is
+        /// the whole reason `args` and `OnBehalfOf` are on it.
+        let settleOne (handle: QueueId) (act: PendingAct) (tool: string) (args: string) (summary: string) (verdict: Verdict) =
             async {
-                match syncedOf () with
-                | Error _ ->
-                    do! TerminalCommands.nextWake onChanged
-                    return! settle call handle run slot
-                | Ok synced ->
-                    match verdictOf handle synced with
-                    | Undecided ->
-                        do! TerminalCommands.nextWake onChanged
-                        return! settle call handle run slot
-                    | Withdrawn ->
-                        // Nothing recorded: a peer taking their own proposal back is not a
-                        // verdict, and the agent learns it as the act simply not existing.
-                        slot.Value <- Some (outcome call (Some handle) (CommandRefusedBy (ActorRef.System, Some "it was withdrawn before anyone decided")))
-                    | Refused (by, reason) ->
-                        do! recordRefusal call handle by reason
-                        slot.Value <- Some (outcome call (Some handle) (CommandRefusedBy (PeerRef by, reason)))
-                    | Approved approver ->
+                match verdict with
+                | Undecided -> ()
+                | Refused (by, reason) -> do! refuse handle tool summary act.Author (PeerRef by) reason
+                | Approved approver ->
+                    match Map.tryFind tool (dispatch ()) with
+                    // A command the running build does not have: refuse it rather than leave
+                    // it, and say which — a card that cannot be carried out is worse than a
+                    // refusal, and this is what a rename or a downgrade looks like from here.
+                    | None ->
+                        do!
+                            refuse handle tool summary act.Author ActorRef.System
+                                (Some (sprintf "this session has no command called '%s'" tool))
+                    | Some run ->
                         // The entry goes BEFORE the command runs, for the terminal drain's
-                        // reason: the act has been consumed at the moment its verdict is in,
-                        // and leaving the card up while the work happens invites a second
+                        // reason: the act is consumed the moment its verdict is in, and
+                        // leaving the card up while the work happens invites a second
                         // approval of the same thing.
                         SyncedStateSync.removePending doc [ handle ]
-                        let! result = run (approver |> Option.map PeerRef)
-                        slot.Value <-
-                            Some (
+                        let! result =
+                            run { Args = args; OnBehalfOf = act.OnBehalfOf; ApprovedBy = approver |> Option.map PeerRef }
+                        record
+                            handle
+                            { Handle = Some handle
+                              Tool = tool
+                              Summary = summary
+                              Status =
                                 match result with
-                                | Ok text -> outcome call (Some handle) (CommandRan text)
-                                | Error reason -> outcome call (Some handle) (CommandRan ("failed: " + reason)))
+                                | Ok text -> CommandRan text
+                                | Error reason -> CommandRan ("failed: " + reason) }
             }
+
+        /// Every command act in the doc whose verdict is in, settled. Runs at boot and on
+        /// every doc change — the terminal's arrangement exactly, and the reason an approval
+        /// takes effect whether or not the turn that proposed it is still alive.
+        let drain () =
+            match syncedOf () with
+            | Error _ -> ()
+            | Ok synced ->
+                for handle, act in Map.toList synced.Pending do
+                    match act.Payload with
+                    | CommandLine -> ()
+                    | CommandCall (tool, args, summary) ->
+                        let key = QueueId.value handle
+                        if not (settling.Contains key) then
+                            match verdictOf act synced with
+                            | Undecided -> ()
+                            | verdict ->
+                                settling.Add key |> ignore
+                                Async.StartImmediate (
+                                    async {
+                                        try do! settleOne handle act tool args summary verdict
+                                        finally settling.Remove key |> ignore
+                                    })
+
+        // Wake on every doc change, for the drain's whole life. Unsubscribed never: the gate
+        // lives as long as the session does, and an act can be approved at any point in it.
+        onChanged drain |> ignore
 
         /// Wait for a parked act for as long as the terminal waits for an approval, then
         /// yield. Same bound, same reason: a supervised session chains normally, and an
         /// unsupervised one does not hold the turn open.
-        let rec awaitSettled (handle: QueueId) (slot: CommandOutcome option ref) (startedAt: DateTimeOffset) =
+        let rec awaitSettled (call: GatedCall) (handle: QueueId) (startedAt: DateTimeOffset) =
             async {
-                match slot.Value with
-                | Some outcome -> return outcome
-                | None when now () - startedAt >= TerminalCommands.approvalGrace ->
+                match outcomes.TryGetValue (QueueId.value handle) with
+                | true, outcome -> return outcome
+                | false, _ when now () - startedAt >= TerminalCommands.approvalGrace ->
                     return
                         { Handle = Some handle
-                          Tool = ""
-                          Summary = ""
+                          Tool = call.Command.Tool
+                          Summary = call.Summary
                           Status = CommandAwaitingApproval }
-                | None ->
+                | false, _ ->
                     do! TerminalCommands.nextWake onChanged
-                    return! awaitSettled handle slot startedAt
+                    return! awaitSettled call handle startedAt
             }
 
-        let run (call: GatedCall) (thunk: ActorRef option -> Async<Result<string, string>>) =
+        let run (call: GatedCall) =
             async {
                 match syncedOf () with
                 | Error _ -> return Error "the session's collaborative state could not be read"
                 | Ok synced ->
-                    let subject = ForCommand call.Tool
-                    if not (ApprovalMode.requiresApproval (SyncedSessionState.gateOf subject synced) call.Author) then
-                        // Ungated: the call, and nothing else. No entry, no event, no wait —
-                        // today's behaviour for every command that exists.
-                        match! thunk None with
-                        | Error reason -> return Error reason
-                        | Ok text -> return Ok (outcome call None (CommandRan text))
-                    else
-                        let handle = mintQueueId ()
-                        // Visible to every peer the instant this lands, before any waiting,
-                        // for the one door's reason: what the agent is about to do is
-                        // something people can read and refuse.
-                        SyncedStateSync.enqueueCommandCall
-                            doc
-                            handle
-                            call.Tool
-                            call.Summary
-                            call.Author
-                            (PendingAct.nextOrder subject synced.Pending)
-                        let slot = ref None
-                        parked.[QueueId.value handle] <- slot
-                        Async.StartImmediate (settle call handle thunk slot)
-                        let! settled = awaitSettled handle slot (now ())
-                        return
-                            Ok
-                                (match settled.Status with
-                                 // The yield carries the call's own identity: `awaitSettled`
-                                 // knows the handle and the deadline, not what was asked.
-                                 | CommandAwaitingApproval -> outcome call (Some handle) CommandAwaitingApproval
-                                 | status -> outcome call (Some handle) status)
+                    let subject = GatedCommands.subject call.Command
+                    let handle = mintQueueId ()
+                    // The act is written whether or not it is gated, and that is what makes
+                    // the two paths ONE path: an ungated act is written, drained and removed
+                    // in the same breath, so nothing about carrying a command out depends on
+                    // whether somebody had to say yes to it.
+                    SyncedStateSync.enqueueCommandCall
+                        doc
+                        handle
+                        call.Command.Tool
+                        call.Args
+                        call.Summary
+                        call.Author
+                        call.OnBehalfOf
+                        (PendingAct.nextOrder subject synced.Pending)
+                    drain ()
+                    let! settled = awaitSettled call handle (now ())
+                    return Ok settled
             }
 
         let read (handle: QueueId) =
             async {
-                match parked.TryGetValue (QueueId.value handle) with
-                | false, _ -> return Error "no such pending command"
-                | true, slot ->
-                    let! settled = awaitSettled handle slot (now ())
-                    return Ok settled
+                match outcomes.TryGetValue (QueueId.value handle) with
+                | true, outcome -> return Ok outcome
+                | false, _ ->
+                    match syncedOf () with
+                    | Ok synced ->
+                        match Map.tryFind handle synced.Pending with
+                        | Some act ->
+                            match act.Payload with
+                            | CommandCall (tool, _, summary) ->
+                                let call =
+                                    { Command = GatedCommands.tryFind tool |> Option.defaultValue { Tool = tool; Title = tool }
+                                      Args = ""
+                                      Summary = summary
+                                      Author = act.Author
+                                      OnBehalfOf = act.OnBehalfOf }
+                                let! settled = awaitSettled call handle (now ())
+                                return Ok settled
+                            | CommandLine -> return Error "that handle names a terminal command"
+                        | None -> return Error "no such pending command"
+                    | Error _ -> return Error "the session's collaborative state could not be read"
             }
 
         { Run = run
           Read = read
-          Knows = fun handle -> parked.ContainsKey (QueueId.value handle) }
-
-    /// Refuse every command act still parked in a doc, attributed to the session itself.
-    /// A boot repair, run where the other doc repairs run.
-    ///
-    /// The alternative is worse than it looks: the continuation that would have carried the
-    /// act out died with the previous process, so the card would sit on every screen with an
-    /// approve button that can never do anything. Recording a refusal says what actually
-    /// happened, and the agent can simply ask again.
-    let sweepAtBoot
-        (doc: Yjs.Y.Doc)
-        (appendAs: ActorRef -> SessionEvent -> Async<unit>)
-        (mintMessageId: unit -> MessageId)
-        : Async<int> =
-        async {
-            match SyncedStateSync.ofDoc doc with
-            | Error _ -> return 0
-            | Ok synced ->
-                let stranded =
-                    synced.Pending
-                    |> Map.toList
-                    |> List.choose (fun (handle, act) ->
-                        match act.Payload with
-                        | CommandCall (tool, summary) -> Some (handle, act, tool, summary)
-                        | CommandLine -> None)
-                for handle, act, tool, summary in stranded do
-                    do!
-                        appendAs
-                            ActorRef.System
-                            (SessionEvent.CommandRefused
-                                { MessageId = mintMessageId ()
-                                  QueueId = handle
-                                  Tool = tool
-                                  Summary = summary
-                                  Author = act.Author
-                                  RejectedBy = ActorRef.System
-                                  Reason = Some "the session restarted before anyone decided" })
-                if not (List.isEmpty stranded) then
-                    SyncedStateSync.removePending doc (stranded |> List.map (fun (handle, _, _, _) -> handle))
-                return List.length stranded
-        }
+          // A handle this process settled, or one still waiting in the doc as a command act.
+          // The second half is what lets `check_pending` resolve a handle from a session that
+          // has since restarted — the act is in the doc, so it is still answerable.
+          Knows =
+            fun handle ->
+                outcomes.ContainsKey (QueueId.value handle)
+                || (match syncedOf () with
+                    | Ok synced ->
+                        match Map.tryFind handle synced.Pending with
+                        | Some act -> (match act.Payload with CommandCall _ -> true | CommandLine -> false)
+                        | None -> false
+                    | Error _ -> false)
+          Drain = drain }

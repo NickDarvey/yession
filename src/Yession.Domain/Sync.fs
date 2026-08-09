@@ -131,16 +131,22 @@ module SyncedStateSync =
     /// payload here carries only which KIND it is; a `CommandCall` has no editable text and
     /// carries its rendered arguments inline, because nobody is going to merge them.
     let private encodePendingAct (q: PendingAct) : Encoded =
-        let tool, summary =
+        let tool, args, summary =
             match q.Payload with
-            | CommandLine -> "", ""
-            | CommandCall (tool, summary) -> tool, summary
+            | CommandLine -> "", "", ""
+            | CommandCall (tool, args, summary) -> tool, args, summary
         Encode.object
             [ "subject", Encode.string (AVal.constant (GateSubject.describe q.Subject))
               "payload",
               Encode.string (AVal.constant (match q.Payload with CommandLine -> "line" | CommandCall _ -> "call"))
               "tool", Encode.string (AVal.constant tool)
+              // The arguments the call was made with, so a process that did not propose the
+              // act can still carry it out. Never a credential: `onBehalfOf` names WHOSE,
+              // and what it IS is resolved at execution, never replicated.
+              "args", Encode.string (AVal.constant args)
               "summary", Encode.string (AVal.constant summary)
+              "onBehalfOf",
+              Encode.string (AVal.constant (q.OnBehalfOf |> Option.map ActorRef.token |> Option.defaultValue ""))
               "author", Encode.string (AVal.constant (ActorRef.token q.Author))
               "order", Encode.float (AVal.constant q.Order)
               "approvedBy",
@@ -214,7 +220,9 @@ module SyncedStateSync =
         { Subject : string
           Payload : string
           Tool : string
+          Args : string
           Summary : string
+          OnBehalfOf : string
           Author : string
           Order : float
           ApprovedBy : string
@@ -234,7 +242,9 @@ module SyncedStateSync =
             let! subject = Decode.object.required "subject" Decode.string
             let! payload = Decode.object.optional "payload" Decode.string
             let! tool = Decode.object.optional "tool" Decode.string
+            let! args = Decode.object.optional "args" Decode.string
             let! summary = Decode.object.optional "summary" Decode.string
+            let! onBehalfOf = Decode.object.optional "onBehalfOf" Decode.string
             let! author = Decode.object.required "author" Decode.string
             let! order = Decode.object.optional "order" Decode.float
             let! approvedBy = Decode.object.optional "approvedBy" Decode.string
@@ -244,7 +254,9 @@ module SyncedStateSync =
                 { Subject = subject
                   Payload = defaultArg payload ""
                   Tool = defaultArg tool ""
+                  Args = defaultArg args ""
                   Summary = defaultArg summary ""
+                  OnBehalfOf = defaultArg onBehalfOf ""
                   Author = author
                   Order = defaultArg order 0.0
                   ApprovedBy = defaultArg approvedBy ""
@@ -328,7 +340,7 @@ module SyncedStateSync =
                 // card with no arguments on it — approving something you cannot see.
                 let payload =
                     match f.Payload with
-                    | "call" when f.Tool <> "" -> CommandCall (f.Tool, f.Summary)
+                    | "call" when f.Tool <> "" -> CommandCall (f.Tool, f.Args, f.Summary)
                     | _ -> CommandLine
                 acc
                 |> Map.add
@@ -338,6 +350,10 @@ module SyncedStateSync =
                       Author = author
                       Order = f.Order
                       Payload = payload
+                      // An unreadable credential owner reads as NONE, which makes the act
+                      // run on nothing rather than on somebody else's — the safe direction,
+                      // and the dispatch refuses it with a reason.
+                      OnBehalfOf = (if f.OnBehalfOf = "" then None else ActorRef.ofToken f.OnBehalfOf)
                       ApprovedBy = approvedBy
                       RejectedBy = rejectedBy
                       RejectedReason = (if f.RejectedReason = "" then None else Some f.RejectedReason) }
@@ -478,7 +494,9 @@ module SyncedStateSync =
                 { Subject = entryString entry "subject"
                   Payload = entryString entry "payload"
                   Tool = entryString entry "tool"
+                  Args = entryString entry "args"
                   Summary = entryString entry "summary"
+                  OnBehalfOf = entryString entry "onBehalfOf"
                   Author = entryString entry "author"
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
                   ApprovedBy = entryString entry "approvedBy"
@@ -635,8 +653,10 @@ module SyncedStateSync =
         (doc: Yjs.Y.Doc)
         (id: QueueId)
         (tool: string)
+        (args: string)
         (summary: string)
         (author: ActorRef)
+        (onBehalfOf: ActorRef option)
         (order: float)
         : unit =
         doc.transact (
@@ -647,7 +667,9 @@ module SyncedStateSync =
                 entry.set ("subject", box (GateSubject.describe (ForCommand tool))) |> ignore
                 entry.set ("payload", box "call") |> ignore
                 entry.set ("tool", box tool) |> ignore
+                entry.set ("args", box args) |> ignore
                 entry.set ("summary", box summary) |> ignore
+                entry.set ("onBehalfOf", box (onBehalfOf |> Option.map ActorRef.token |> Option.defaultValue "")) |> ignore
                 entry.set ("author", box (ActorRef.token author)) |> ignore
                 entry.set ("order", box order) |> ignore
                 // Never approved on arrival, for `enqueueTerminalCommand`'s reason: whether

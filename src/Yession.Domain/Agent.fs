@@ -140,23 +140,44 @@ type CommandOutcome =
 
 /// One command, as its gate needs to know it.
 type GatedCall =
-    { /// The MCP tool name: what the model called, and what a mode is configured against.
-      Tool : string
+    { /// Which command — the catalogue value, not a bare name, so a gated call site cannot
+      /// name something the settings surface does not render.
+      Command : GatedCommand
+      /// The arguments, encoded. What lets a process that did NOT propose the act still
+      /// carry it out after an approval — the doc holds this, so a restart resumes instead
+      /// of refusing. Opaque here: only the command's own dispatch entry reads it.
+      Args : string
       /// The arguments as a human should READ them (`add_repo octo/hello`) — what the card
       /// shows and what a refusal records, rendered once here rather than three times
       /// downstream.
       Summary : string
       /// Who is asking. Always the agent today; `yession.yaml` will ask too.
-      Author : ActorRef }
+      Author : ActorRef
+      /// Whose credential it runs on, when that is not the author's own (Plan 08: the agent
+      /// acts, the turn human's credential is used). Recorded on the act, because a restart
+      /// has no turn to ask.
+      OnBehalfOf : ActorRef option }
+
+/// A command being carried out, as its dispatch entry sees it. Everything comes off the
+/// pending act rather than out of a closure, which is what makes an approval survive the
+/// process that proposed it.
+type GatedInvocation =
+    { Args : string
+      OnBehalfOf : ActorRef option
+      /// Who released it, when a gate held it. Goes onto the command's own event.
+      ApprovedBy : ActorRef option }
+
+/// How a command is actually carried out, by tool name. Built where the capabilities are
+/// composed; read by the gate, including at boot for acts it never proposed.
+type CommandDispatch = Map<string, GatedInvocation -> Async<Result<string, string>>>
 
 /// Run a command through its approval gate (Plan 15, stage 3b). A capability rather than a
 /// detail of the MCP adapter, so the declarative executor gets the same gate the agent does
 /// instead of a second path around it.
-/// The thunk receives WHO approved it, when somebody had to, so the command's own event can
-/// carry `ApprovedBy` — the approver stays attached to the act they released rather than to
-/// a second event beside it. `None` is the ordinary case: nothing was gated.
-type RunGatedCommand =
-    GatedCall -> (ActorRef option -> Async<Result<string, string>>) -> Async<Result<CommandOutcome, string>>
+/// No thunk: the gate looks the command up in the `CommandDispatch` and runs it from the
+/// pending act's own fields. A closure would tie the act to the process that proposed it,
+/// which is precisely the restart that used to lose it.
+type RunGatedCommand = GatedCall -> Async<Result<CommandOutcome, string>>
 
 /// What a handle resolved to. One tool, two shapes — the alternative being an agent that has
 /// to know, before it asks, which kind of thing it is waiting on.
@@ -278,12 +299,10 @@ module AgentCapabilities =
           // A denial that still RUNS the command: the gate is a wrapper, and a session with
           // no collaborative state to park an act in must not lose the act.
           RunGated =
-            fun call run ->
+            fun call ->
                 async {
-                    match! run None with
-                    | Error reason -> return Error reason
-                    | Ok text ->
-                        return Ok { Handle = None; Tool = call.Tool; Summary = call.Summary; Status = CommandRan text }
+                    return
+                        Error (sprintf "no gate to run %s through in this session" call.Command.Tool)
                 }
           SetSecret = fun _ _ -> async { return Error "no secrets capability" }
           ListSecrets = fun () -> async { return Error "no secrets capability" }

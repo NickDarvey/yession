@@ -1162,6 +1162,9 @@ module ClientModel =
                       Author = PeerRef author
                       Order = TerminalQueueOrder.nextFor terminal model.Synced.Pending
                       Payload = CommandLine
+                      // A terminal command runs as its own author: it is a shell line in a
+                      // sandbox, not a call against somebody's credential.
+                      OnBehalfOf = None
                       ApprovedBy = None
                       RejectedBy = None
                       RejectedReason = None }

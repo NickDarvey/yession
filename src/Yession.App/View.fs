@@ -547,33 +547,27 @@ module View =
                   {queryValueView def.Shape (Map.tryFind name queries.Values)}
                 </section>""")
 
-    /// The command gates a session has (Plan 15, stage 3c): the same three-option control the
-    /// terminal's header carries, over `ForCommand` subjects instead of `ForTerminal` ones.
-    /// One register, one vocabulary, one control.
+    /// The command gates a session has: the same three-option control the terminal's header
+    /// carries, over `ForCommand` subjects instead of `ForTerminal` ones. One register, one
+    /// vocabulary, one control.
     ///
-    /// It lists the commands somebody has already configured — the operator's
-    /// `YESSION_GATED_COMMANDS`, or a mode a peer set earlier — rather than every command the
-    /// session has. Gating one that nobody has named needs the browser to know what commands
-    /// EXIST, which nothing declares to it yet; the read half of this API does exactly that
-    /// for queries, and doing it for commands is the same shape. Deferred rather than faked
-    /// with a hard-coded list that goes stale the first time a command is added.
+    /// It lists EVERY gated command, not only the ones somebody has configured — the
+    /// catalogue is a value in the shared domain, so the browser has it at compile time and
+    /// a command nobody has touched renders on its default rather than being invisible until
+    /// an operator names it in an environment variable.
     let private gatesSection (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult list =
-        model.Synced.Gates
-        |> Map.toList
-        |> List.choose (fun (subject, mode) ->
-            match subject with
-            | ForTerminal _ -> None
-            | ForCommand tool -> Some (tool, mode))
-        |> List.sortBy fst
-        |> List.map (fun (tool, mode) ->
+        GatedCommands.all
+        |> List.map (fun command ->
+            let subject = GatedCommands.subject command
+            let mode = SyncedSessionState.gateOf subject model.Synced
             html $"""
-                <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-gate-panel="{tool}">
-                  <label class="{Style.label}" for="gate-{tool}">{tool}</label>
-                  <select id="gate-{tool}" class="{Style.field} w-auto" data-gate-mode="{ApprovalMode.describe mode}"
-                          @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (ForCommand tool, m)) | None -> ())}>
-                    <option value="approve-agent" ?selected={mode = ApproveAgent}>needs a human to approve it</option>
-                    <option value="approve-all" ?selected={mode = ApproveAll}>needs a human to approve it, always</option>
-                    <option value="auto" ?selected={mode = AutoRun}>runs without asking</option>
+                <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-gate-panel="{command.Tool}">
+                  <label class="{Style.label}" for="gate-{command.Tool}">{command.Title}</label>
+                  <select id="gate-{command.Tool}" class="{Style.field} w-auto" data-gate-mode="{ApprovalMode.describe mode}"
+                          @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (subject, m)) | None -> ())}>
+                    <option value="auto" ?selected={mode = AutoRun}>happens without asking</option>
+                    <option value="approve-agent" ?selected={mode = ApproveAgent}>the agent asks first</option>
+                    <option value="approve-all" ?selected={mode = ApproveAll}>always ask, whoever proposed it</option>
                   </select>
                 </section>""")
 
@@ -1132,7 +1126,7 @@ module View =
         let what =
             match entry.Payload with
             | CommandLine -> subjectLabel
-            | CommandCall (_, summary) -> summary
+            | CommandCall (_, _, summary) -> summary
         let subject =
             if not showSubject then Lit.nothing
             else html $"""<span class="{Style.chatChipWho}" data-pending-subject="{GateSubject.describe entry.Subject}">{subjectLabel}</span>"""
@@ -1150,7 +1144,7 @@ module View =
                       <input type="text" class="{Style.fieldMonoBare}" aria-label="Queued command"
                              data-terminal-input="{BodyKey.terminalQueued id}">
                     </div>"""
-            | CommandCall (_, summary) ->
+            | CommandCall (_, _, summary) ->
                 html $"""
                     <div class="{Style.terminalQueuedRow}">
                       <code class="{Style.terminalCommandText}" data-pending-summary>{summary}</code>

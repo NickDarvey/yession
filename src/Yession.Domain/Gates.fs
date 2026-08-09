@@ -94,3 +94,38 @@ module GateSubject =
         function
         | ForTerminal _ -> ApproveAgent
         | ForCommand _ -> AutoRun
+
+/// One command a gate can be put on.
+///
+/// A terminal announces itself — it is in the projection, so every surface can see the list.
+/// A command has no such existence: it is a function somebody wrote, and nothing about it
+/// reaches a screen unless it is written down. That is what this is, and it is in the SHARED
+/// domain rather than behind a declaration protocol because the browser compiles against
+/// this assembly: the list is a value both sides already have, and inventing a transport to
+/// send a build-time constant across a wire would be work in exchange for a way to disagree.
+type GatedCommand =
+    { /// The MCP tool name: what the model calls, what the register is keyed by, and what a
+      /// refusal records.
+      Tool : string
+      /// What a human should see on the control. Prose, not the tool name — the surface is
+      /// for the person deciding whether they want to be asked.
+      Title : string }
+
+/// Every command with a gate on it. The single source of the set, which is what makes the
+/// two things that need it — the settings control and the boot configuration — impossible to
+/// disagree about.
+module GatedCommands =
+
+    let addRepo = { Tool = "add_repo"; Title = "adding a repo" }
+    let switchBranch = { Tool = "switch_branch"; Title = "switching a repo's branch" }
+    let startWorkSandbox = { Tool = "start_work_sandbox"; Title = "starting a work sandbox" }
+    let stopWorkSandbox = { Tool = "stop_work_sandbox"; Title = "stopping a work sandbox" }
+
+    /// In the order a human reads them, which is the order they render in.
+    let all : GatedCommand list = [ addRepo; switchBranch; startWorkSandbox; stopWorkSandbox ]
+
+    let tryFind (tool: string) : GatedCommand option =
+        all |> List.tryFind (fun command -> command.Tool = tool)
+
+    /// The subject a command's mode is stored under.
+    let subject (command: GatedCommand) : GateSubject = ForCommand command.Tool
