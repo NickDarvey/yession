@@ -324,9 +324,11 @@ Items are roughly ordered by how much they matter.
   - **No command is gated.** Plan 13's approval gate still lives inside
     `execute_command` and nowhere else; a general `Auto | RequiresHuman` property for
     every command is Plan 15's last stage and is not built.
-  - **Named WorkSandboxes and credential forwarding are not built** (Plan 15 stage 2),
-    so the Plan 14 gap above — no forwarded credential for `git push` in a terminal —
-    still stands.
+  - **A forwarded credential lives in a sandbox's env for that sandbox's lifetime**
+    (Plan 15 stage 2), readable by everyone in the session and by everything running in
+    it — the same shared trust boundary Plan 14 states. Revoking at the provider does
+    not claw back what was injected; `stop_work_sandbox` is what removes it. Only
+    `github` is forwardable so far.
   - **A third-party MCP server's read-only tools do not reach the registry.** The
     identification convention is the spec's own annotation, deliberately, so nothing
     yession-specific is in the way; the client machinery and a JSON-Schema-subset

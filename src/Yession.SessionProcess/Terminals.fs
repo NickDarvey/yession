@@ -571,6 +571,10 @@ module SessionTerminals =
         { Transcript : Transcript
           OpenedAt : DateTimeOffset
           Emulator : Emulator
+          /// Which WorkSandbox this terminal's shell lives in (Plan 15, stage 2). Not
+          /// mutable: a terminal IS a process inside one sandbox, so "moving" it would be
+          /// a close and an open, and those already exist.
+          Sandbox : SandboxName
           mutable Shell : PtyHandle option }
 
     /// Bytes of output one block may write to the transcript. Beyond it, output is dropped
@@ -614,7 +618,10 @@ module SessionTerminals =
     type SessionTerminals =
         { /// Open a terminal, ensuring the WorkSandbox exists first — opening one IS a
           /// need, so a session where nobody opens a terminal still starts nothing.
-          Open : ActorRef -> string -> Async<Result<TerminalId, string>>
+          /// Open a terminal in one of the session's WorkSandboxes (Plan 15, stage 2).
+          /// The sandbox is an argument rather than an option because `default` is a real
+          /// name — a caller that does not care passes it, and nothing is implicit.
+          Open : ActorRef -> string -> SandboxName -> Async<Result<TerminalId, string>>
           /// Close a terminal. Rejected when it is not open.
           Close : TerminalId -> string -> Async<Result<unit, string>>
           /// Run one drained queue entry to completion, recording the block and streaming
@@ -693,7 +700,7 @@ module SessionTerminals =
 
     /// A session with no terminals: every operation refuses, nothing is ever open.
     let unavailable : SessionTerminals =
-        { Open = fun _ _ -> async { return Error "this session has no environment" }
+        { Open = fun _ _ _ -> async { return Error "this session has no environment" }
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ -> async { return () }
           Reject = fun _ _ _ -> async { return () }
@@ -721,7 +728,12 @@ module SessionTerminals =
     /// as the message scheduler does.
     let create
         (log: EventLog<SessionEvent>)
-        (environment: SessionEnvironment.SessionEnvironment)
+        // Which sandbox a terminal runs in, resolved per terminal (Plan 15, stage 2). A
+        // function rather than one environment because a session now has several, and a
+        // terminal names the one it belongs to at open. Total by contract: a name this
+        // session does not have resolves to an environment that refuses with the reason,
+        // so there is no second way for a terminal to be told no.
+        (environmentFor: SandboxName -> SessionEnvironment.SessionEnvironment)
         (openTranscript: OpenTranscript)
         (openEmulator: OpenEmulator)
         (shell: TerminalShell)
@@ -771,6 +783,14 @@ module SessionTerminals =
         let mutable lost : Set<string> = Set.empty
         let mutable leases = TerminalLeases.empty
         let mutable leftOpen : Set<string> = openAtBoot |> List.map TerminalId.value |> Set.ofList
+
+        /// The sandbox a terminal's shell lives in. `default` for one this process has no
+        /// live record of — which is every terminal a previous process left open, and they
+        /// are closed at boot rather than run in.
+        let environmentOf (id: TerminalId) : SessionEnvironment.SessionEnvironment =
+            match live.TryGetValue (TerminalId.value id) with
+            | true, terminal -> environmentFor terminal.Sandbox
+            | _ -> environmentFor SandboxName.defaultName
 
         let append event =
             async {
@@ -1000,7 +1020,7 @@ module SessionTerminals =
                                         emit id current TranscriptOutput kept
                                 | _ -> emit id current TranscriptOutput clean
                     let! spawned =
-                        environment.SpawnPty
+                        (environmentFor terminal.Sandbox).SpawnPty
                             { Executable = shell.Executable
                               Arguments = shell.InteractiveArguments
                               Env = Map.empty
@@ -1061,12 +1081,14 @@ module SessionTerminals =
                             rearmers.Remove key |> ignore
             }
 
-        let openTerminal (openedBy: ActorRef) (title: string) : Async<Result<TerminalId, string>> =
+        let openTerminal (openedBy: ActorRef) (title: string) (sandbox: SandboxName) : Async<Result<TerminalId, string>> =
             async {
                 // A terminal is a need, and the need is identified before the terminal
                 // exists — so a failed environment start is reported as a failed open
-                // rather than as a terminal nothing can run in.
-                match! environment.Ensure None "a terminal was opened" with
+                // rather than as a terminal nothing can run in. A sandbox this session
+                // does not have refuses HERE, for the same reason: better no terminal than
+                // one whose every command fails.
+                match! (environmentFor sandbox).Ensure None "a terminal was opened" with
                 | EnvironmentUnavailable reason -> return Error reason
                 | EnvironmentAvailable ->
                     let id = mintTerminalId ()
@@ -1081,6 +1103,7 @@ module SessionTerminals =
                         { Transcript = transcript
                           OpenedAt = openedAt
                           Emulator = openEmulator 80 24
+                          Sandbox = sandbox
                           Shell = None }
                     // In the live map BEFORE the shell starts: the pty's output callback finds
                     // the terminal by id, and bytes can arrive the instant it spawns.
@@ -1088,7 +1111,7 @@ module SessionTerminals =
                     appliedSize.[TerminalId.value id] <- TerminalSize.default'
                     terminal.Emulator.OnAltScreen (fun alt -> Async.StartImmediate (flip id alt))
                     do! openShell id terminal
-                    do! appendAs openedBy (SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = openedBy; Title = title })
+                    do! appendAs openedBy (SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = openedBy; Title = title; Sandbox = sandbox })
                     return Ok id
             }
 
@@ -1228,7 +1251,7 @@ module SessionTerminals =
                                         let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
                                         emit entry.Terminal terminal kind kept
                                 let! spawned =
-                                    environment.Spawn
+                                    (environmentOf entry.Terminal).Spawn
                                         { Executable = shell.Executable
                                           Arguments = shell.Arguments @ [ command ]
                                           Env = Map.empty
@@ -1630,7 +1653,7 @@ module TerminalCommands =
         /// The session's agent terminal, opened on first use with `reason` as its TITLE — so
         /// the strip says "running the test suite" rather than "agent", which is what the
         /// retired `ensure_environment`'s one genuinely useful argument becomes.
-        (agentTerminal: string -> Async<Result<TerminalId, string>>)
+        (agentTerminal: SandboxName -> string -> Async<Result<TerminalId, string>>)
         (mintQueueId: unit -> QueueId)
         (now: unit -> DateTimeOffset)
         (onChanged: OnChanged)
@@ -1720,7 +1743,7 @@ module TerminalCommands =
                     return! awaitOutcome terminal handle startedAt runningSince
             }
 
-        let execute (requested: TerminalId option) (command: string) : Async<Result<TerminalCommandOutcome, string>> =
+        let execute (requested: CommandTarget option) (command: string) : Async<Result<TerminalCommandOutcome, string>> =
             async {
                 let command = command.Trim ()
                 if command = "" then return Error "a command cannot be empty"
@@ -1728,10 +1751,13 @@ module TerminalCommands =
                     let! terminal =
                         async {
                             match requested with
-                            | Some id when terminals.IsOpen id -> return Ok id
-                            | Some _ -> return Error "that terminal is not open"
-                            // The agent's own terminal, titled with what it is for.
-                            | None -> return! agentTerminal command
+                            | Some (InTerminal id) when terminals.IsOpen id -> return Ok id
+                            | Some (InTerminal _) -> return Error "that terminal is not open"
+                            // The agent's own terminal IN THAT SANDBOX, titled with what
+                            // it is for. One per sandbox, so a command sent to `test` does
+                            // not silently run in `default`.
+                            | Some (InSandbox sandbox) -> return! agentTerminal sandbox command
+                            | None -> return! agentTerminal SandboxName.defaultName command
                         }
                     match terminal, syncedOf () with
                     | Error reason, _ -> return Error reason

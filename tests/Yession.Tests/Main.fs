@@ -29,6 +29,7 @@ let all =
         Tag.needs "Secrets" [] (fun () -> Secrets.tests)
         Tag.needs "Connections" [] (fun () -> Connections.tests)
         Tag.needs "Queries" [] (fun () -> Queries.tests)
+        Tag.needs "WorkSandboxes" [] (fun () -> WorkSandboxes.tests)
         // The route is the same registry over real HTTP — SSE has no meaningful in-memory
         // stand-in, and what it must prove (the door, and one connection carrying the
         // burst and every later change) is exactly what crosses the wire.

@@ -106,7 +106,17 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 let private reposDir = sprintf "%s/repos" dataDir
 do Fs.ensureDir reposDir
 
-let private makeEnvironment : Yession.SessionProcess.EventLog<SessionEvent> -> SessionEnvironment.SessionEnvironment =
+/// The session's WorkSandboxes (Plan 15, stage 2), by name. `default` is the sandbox
+/// every session has always had and keeps its workspace path, so nothing about an
+/// existing session changes; a named one gets its own workspace under `sandboxes/<name>`,
+/// because two sandboxes exist precisely so that what happens in one does not happen in
+/// the other. The repos directory is shared by all of them — that is what it is for.
+/// `credentials` is a parameter rather than a module value because resolving one is a
+/// Plan 08 question answered further down this file (it needs the control channel and the
+/// connection-status cache), and a composition root should not have to be read backwards.
+let private makeSandboxes
+    (credentials: WorkSandboxes.CredentialSource list)
+    : Yession.SessionProcess.EventLog<SessionEvent> -> WorkSandboxes.WorkSandboxes =
     let name = SessionId.value sessionId
     let workSpec =
         // The docker backend cannot share a host path by policy, so the repos dir rides
@@ -118,28 +128,62 @@ let private makeEnvironment : Yession.SessionProcess.EventLog<SessionEvent> -> S
                 Mounts = [ { Source = HostPath reposDir; Target = "/repos"; Mode = ReadWrite } ] }
         | HostBackend
         | SrtBackend -> EnvironmentSpec.defaults
-    match Sandboxes.forBackend workBackend name workSpec with
-    | Error e -> failwithf "work sandbox: %s" e
-    | Ok createSandbox ->
-        // Host-family sandboxes work under the session's own data directory; a docker
-        // sandbox's workspace lives at the spec/backend default inside the container.
-        let workspace =
-            match workBackend with
-            | HostBackend
-            | SrtBackend -> Some (sprintf "%s/workspace" dataDir)
-            | DockerBackend -> workSpec.WorkingDirectory
-        let sharedRepos =
-            match workBackend with
-            | HostBackend
-            | SrtBackend -> Some reposDir
-            | DockerBackend -> None
-        fun log ->
-            SessionEnvironment.create
-                log
-                createSandbox
-                (Sandboxes.preparePolicy workBackend resolveSecretRef workspace sharedRepos workSpec)
-                (Sandboxes.summaryFor workBackend workSpec)
-                (sprintf "env-%s" name)
+    // Host-family sandboxes work under the session's own data directory; a docker
+    // sandbox's workspace lives at the spec/backend default inside the container.
+    let workspaceFor (sandbox: SandboxName) =
+        match workBackend with
+        | HostBackend
+        | SrtBackend ->
+            if sandbox = SandboxName.defaultName then Some (sprintf "%s/workspace" dataDir)
+            else Some (sprintf "%s/sandboxes/%s/workspace" dataDir (SandboxName.value sandbox))
+        | DockerBackend -> workSpec.WorkingDirectory
+    let sharedRepos =
+        match workBackend with
+        | HostBackend
+        | SrtBackend -> Some reposDir
+        | DockerBackend -> None
+    // The backend's own container/volume namespace has to differ per sandbox too, or two
+    // named sandboxes under docker would fight over one container name.
+    let backendNameFor (sandbox: SandboxName) =
+        if sandbox = SandboxName.defaultName then name
+        else sprintf "%s-%s" name (SandboxName.value sandbox)
+    fun log ->
+        let create (sandbox: SandboxName) (credentialEnv: Map<string, string>) =
+            match Sandboxes.forBackend workBackend (backendNameFor sandbox) workSpec with
+            | Error e -> Error e
+            | Ok createSandbox ->
+                let workspace = workspaceFor sandbox
+                workspace |> Option.iter Fs.ensureDir
+                let prepare =
+                    Sandboxes.preparePolicy workBackend resolveSecretRef workspace sharedRepos workSpec
+                Ok (
+                    SessionEnvironment.create
+                        log
+                        createSandbox
+                        // The forwarded credentials join the policy env HERE, at the last
+                        // moment before the sandbox comes up — the same place a `SecretRef`
+                        // resolves, and for the same reason: a value that exists earlier
+                        // than it must is a value with more places to leak from.
+                        (fun () ->
+                            async {
+                                match! prepare () with
+                                | Error e -> return Error e
+                                | Ok policy ->
+                                    return Ok { policy with Env = Sandboxes.mergeEnv policy.Env credentialEnv }
+                            })
+                        (Sandboxes.summaryFor workBackend workSpec)
+                        (sprintf "env-%s" (backendNameFor sandbox)))
+        match WorkSandboxes.create
+                { Backend = SandboxBackend.describe workBackend
+                  // The credentials this session knows how to forward. GitHub is the one
+                  // Plan 14 left deferred, and it is what makes `git push` from a terminal
+                  // work; resolution is the Plan 08 precedence, unchanged.
+                  Credentials = credentials
+                  Create = create
+                  Log = log
+                  Clock = fun () -> System.DateTimeOffset.UtcNow } with
+        | Ok sandboxes -> sandboxes
+        | Error e -> failwithf "work sandboxes: %s" e
 
 // Where this session is reachable from outside (docs/plans/09), from the same two
 // variables the Manager parsed, inherited by plain env. Fails the boot on a combination
@@ -264,6 +308,11 @@ let mutable private reposService : Repos.ReposService option = None
 // place.
 let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 
+// The session's named WorkSandboxes (Plan 15, stage 2). Built by the Host (it owns the
+// log the registry appends to), so this cell is filled once `startFull` resolves — before
+// which no turn can run, because nothing is listening.
+let mutable private workSandboxes : WorkSandboxes.WorkSandboxes = WorkSandboxes.unavailable
+
 /// The acting party's GitHub token for a repo network verb: the session's explicit
 /// credential first, then the named actor's own, then the ambient `GITHUB_TOKEN` (the
 /// same last-resort idiom as the agent credential). None = anonymous — public repos
@@ -309,6 +358,42 @@ let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabi
             RepoLog = service.RepoLog
             RepoDiff = service.RepoDiff }
 
+/// The turn's sandbox commands (Plan 15, stage 2), bound to the acting party. Both
+/// invalidate the `work_sandboxes` query on the way out, so what the humans see follows
+/// the act without anybody refreshing — a command is the only thing that can change the
+/// answer, so it is the only thing that has to say so.
+let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
+    let caller : WorkSandboxes.SandboxCaller = { Actor = ActorRef.Agent; Credential = turnActor }
+    { capabilities with
+        StartWorkSandbox =
+          fun name forward ->
+            async {
+                match! workSandboxes.Ensure caller name forward with
+                | Error e -> return Error e
+                | Ok entry ->
+                    queryRegistry.Invalidate WorkSandboxes.queryName
+                    let forwarding =
+                        match entry.Forwarded with
+                        | [] -> "nothing forwarded into it"
+                        | names -> "forwarding " + String.concat ", " names
+                    return
+                        Ok (
+                            sprintf
+                                "sandbox '%s' is up on %s, %s — run things in it with execute_command"
+                                (SandboxName.value entry.Name)
+                                entry.Backend
+                                forwarding)
+            }
+        StopWorkSandbox =
+          fun name ->
+            async {
+                match! workSandboxes.Stop caller name with
+                | Error e -> return Error e
+                | Ok () ->
+                    queryRegistry.Invalidate WorkSandboxes.queryName
+                    return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxName.value name))
+            } }
+
 /// Per-turn credential dispatch (Plan 08): resolve the credential the TURN ACTOR runs
 /// on — the session's own explicit credential first, then the actor's — fresh from the
 /// Manager (which lazily refreshes a due OAuth grant). Ambient env is the last resort;
@@ -325,6 +410,10 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
                 { capabilities with
                     Queries = queryRegistry.Definitions
                     ReadQuery = queryRegistry.Read }
+            // The sandbox commands are bound to THIS turn's actor for the repo verbs'
+            // reason (Plan 15, stage 2): the acting party on the event is the agent, and
+            // the credentials a forwarding start resolves are the turn human's.
+            let capabilities = sandboxCapabilitiesFor context.CurrentMessage.Author capabilities
             // A dispatch-level failure streams its reason as the message body first:
             // the turn's item is already open (AgentMessageStarted precedes the
             // runner), so this is what makes the reason VISIBLE in the timeline.
@@ -414,7 +503,10 @@ Async.StartImmediate (
             let registrations =
                 [ match reposService with
                   | Some service -> Repos.query service
-                  | None -> () ]
+                  | None -> ()
+                  // Reads the cell rather than a value: the registry is the Host's, and
+                  // the Host has not been started yet. By the time anyone reads it, it is.
+                  WorkSandboxes.query (fun () -> workSandboxes) ]
             match Queries.create registrations with
             | Ok registry -> queryRegistry <- registry
             | Error e -> failwithf "queries: %s" e
@@ -474,7 +566,16 @@ Async.StartImmediate (
         // Transcripts live beside the event log and the doc sidecar, one `.cast` file per
         // terminal — a durable, replayable record of everything its commands printed.
         let transcriptStore = TranscriptStore.openStore (sprintf "%s/terminals" dataDir)
-        let! host = Host.startFull runAgent (Some makeEnvironment) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp connectionRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
+        // The credentials this session can forward into a sandbox (Plan 15, stage 2).
+        // GitHub is what Plan 14 deferred, and it is what makes `git push` from a terminal
+        // work; the resolution is the Plan 08 precedence, unchanged.
+        let forwardableCredentials : WorkSandboxes.CredentialSource list =
+            [ { Name = "github"; EnvVar = "GITHUB_TOKEN"; Resolve = resolveGitHubToken } ]
+        let! host = Host.startFull runAgent (Some (makeSandboxes forwardableCredentials)) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp connectionRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
+        // The Host built the sandbox registry (it owns the log), so the cell the turn
+        // capabilities and the `work_sandboxes` query read is filled here — before the
+        // readiness line, and therefore before any turn or any browser can ask.
+        workSandboxes <- host.Sandboxes
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

@@ -104,6 +104,7 @@ let private representativeModel : ClientModel =
             [ { TerminalId = terminalId
                 Title = "build"
                 OpenedBy = PeerRef ada
+                Sandbox = SandboxName.defaultName
                 IsOpen = true
                 ClosedReason = None
                 Lease = None
@@ -566,15 +567,15 @@ let private uiChecklistTests =
                   Author = PeerRef ada
                   Body = "added repo octo/hello (branch main)"
                   Status = Complete
-                  Kind = ConversationItemKind.RepoNote
+                  Kind = ConversationItemKind.ActNote
                   Offset = EventOffset.create 1L |> expect }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }
             let html = Support.render model
-            Expect.isTrue (html.Contains "data-repo-note") "the note hook renders"
+            Expect.isTrue (html.Contains "data-act-note") "the note hook renders"
             Expect.isTrue (html.Contains "added repo octo/hello (branch main)") "the act reads as its sentence"
-            let noteStart = html.IndexOf "data-repo-note"
+            let noteStart = html.IndexOf "data-act-note"
             let article = html.Substring (html.LastIndexOf ("<article", noteStart), 300)
             Expect.isFalse (article.Contains "data-message-body") "no message body — it is not something someone said"
 

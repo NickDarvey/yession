@@ -100,7 +100,18 @@ type TerminalCommandOutcome =
 /// It waits, bounded twice over — a short grace for an approval, then the command timeout for
 /// the process — and yields a handle rather than blocking a turn on a human. See
 /// `TerminalCommandWait` for the policy.
-type ExecuteCommand = TerminalId option -> string -> Async<Result<TerminalCommandOutcome, string>>
+/// Where a command runs (Plan 15, stage 2). Before named sandboxes this was just "which
+/// terminal, or the agent's own"; now "the agent's own" has to say WHICH sandbox's, because
+/// a session has several and `execute_command` is still the only door into any of them.
+type CommandTarget =
+    /// A terminal that already exists — how a follow-up lands in the same shell, with the
+    /// same working directory, as the command before it.
+    | InTerminal of TerminalId
+    /// A named WorkSandbox: the agent's terminal there, opened on first use. This is what
+    /// makes a started sandbox usable rather than merely listed.
+    | InSandbox of SandboxName
+
+type ExecuteCommand = CommandTarget option -> string -> Async<Result<TerminalCommandOutcome, string>>
 
 /// Resume a handle `ExecuteCommand` yielded (Plan 13, stage 3b): an approval that arrived
 /// late, a long build. Returns the same shape, so the agent learns one thing rather than two.
@@ -142,6 +153,21 @@ type ListSessionSecrets = unit -> Async<Result<SecretMetadata list, string>>
 /// Delete one of the session's secrets; false = it did not exist.
 type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 
+/// Start (or get) one of the session's named WorkSandboxes (Plan 15, stage 2). ENSURE
+/// semantics: the same name with the same forwarding hands back the one already running
+/// and records nothing, so folding a declarative file into these commands at every boot
+/// converges instead of accumulating. The same name with DIFFERENT forwarding is refused,
+/// naming the difference — recreating would kill whatever is running inside it.
+///
+/// `forward` is a list of credential NAMES. Each resolves for the turn human (Plan 08
+/// precedence) into that sandbox's environment; the value goes nowhere else, and the
+/// event records which names and whose, never what.
+type StartWorkSandbox = SandboxName -> string list -> Async<Result<string, string>>
+
+/// Stop one, taking whatever is running in it down. The way to change a sandbox's
+/// forwarding, and stated as such wherever the change is refused.
+type StopWorkSandbox = SandboxName -> Async<Result<string, string>>
+
 /// Answer one of the session's registered queries (Plan 15). The agent reaches the SAME
 /// registry the humans' settings surface streams from — that is the whole point of a
 /// query being a declaration rather than a tool body: one declaration, two audiences, no
@@ -179,7 +205,12 @@ type AgentCapabilities =
       /// to sit above as its own capability and is now the `repos` query — one place, and
       /// the humans see the same answer without asking.
       Queries : QueryDef list
-      ReadQuery : ReadQuery }
+      ReadQuery : ReadQuery
+      // Named WorkSandboxes (Plan 15, stage 2). Commands, so agent-only: a human asks,
+      // and reads the act-line. `execute_command` is still the one door into a sandbox —
+      // these decide which sandboxes exist, not what runs in them.
+      StartWorkSandbox : StartWorkSandbox
+      StopWorkSandbox : StopWorkSandbox }
 
 module AgentCapabilities =
 
@@ -197,7 +228,9 @@ module AgentCapabilities =
           RepoLog = fun _ -> async { return Error "no repos capability" }
           RepoDiff = fun _ -> async { return Error "no repos capability" }
           Queries = []
-          ReadQuery = fun _ -> async { return Error "no query capability" } }
+          ReadQuery = fun _ -> async { return Error "no query capability" }
+          StartWorkSandbox = fun _ _ -> async { return Error "no sandbox capability" }
+          StopWorkSandbox = fun _ -> async { return Error "no sandbox capability" } }
 
 /// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
 /// Session Process owns the signal; the runner observes it — poll `IsAborted` at
