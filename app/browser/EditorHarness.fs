@@ -204,6 +204,14 @@ let private shellModel : ClientModel =
 [<Emit("(function(d){ window.__typed = (window.__typed || '') + d })($1)")>]
 let private recordTyped (_terminal: TerminalId) (data: string) : unit = jsNative
 
+/// Hand the shell a terminal SCREEN, as the Session Process does over the data channel
+/// (Plan 14, stage 6). Exposed so the E2E can drive the one path that puts a real emulator
+/// in a real browser: without it this bundle contains no xterm at all, and the browser tier
+/// silently proved nothing about the client's live screen — which is how a browser-only
+/// module-resolution failure got past it and into a release job.
+[<Emit("(function(f){ window.__snapshot = f })($0)")>]
+let private exposeSnapshot (f: string -> int -> string -> unit) : unit = jsNative
+
 do
     dressShell Style.app
     let actions =
@@ -219,6 +227,9 @@ do
     // the syncer.
     let mutable dispatchRef : ClientMsg -> unit = ignore
     let replays = PaneReplays.create (fun msg -> dispatchRef msg)
+    // …and the app's own screen composition, for the same reason: the emulator, the
+    // serialization and the fold are the client's, and only a browser runs them.
+    let screens = Screens.create (fun msg -> dispatchRef msg)
     let mutable model = shellModel
     let rec dispatch (msg: ClientMsg) : unit =
         model <- ClientModel.update msg model
@@ -226,6 +237,11 @@ do
     and render () =
         Lit.render (unbox shellHost) (View.view actions model dispatch)
         replays.Sync model
+        screens.Sync model
         PaneShell.setOpen model.TerminalsOpen
     dispatchRef <- dispatch
+    exposeSnapshot (fun id seq screen ->
+        match TerminalId.create id with
+        | Ok terminal -> screens.Snapshot terminal seq screen
+        | Error _ -> ())
     render ()

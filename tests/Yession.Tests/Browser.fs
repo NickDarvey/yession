@@ -763,6 +763,21 @@ let editorTests =
                     await (page.WaitForFunctionAsync
                         """document.activeElement?.getAttribute('data-terminal-screen') === 'term-live'""")
 
+                // The screen is composed by a REAL emulator in a real browser: the
+                // Session Process's snapshot seeds it, and the records the client already
+                // holds are folded on top. This is the only tier that runs xterm in the
+                // browser at all — and it exists because a browser-only module resolution
+                // failure in exactly this path reached a release job while the cheap tier
+                // and this one were both green.
+                // Seeded with something the assertion below does NOT look for: what is
+                // being proven is the FOLD — "earlier output" exists only in the transcript
+                // records, never in the screen the model was built with — so a client that
+                // rendered the snapshot and folded nothing would fail here.
+                do! awaitU (page.EvaluateAsync ("() => window.__snapshot('term-live', 0, 'session start\\r\\n')"))
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        (sprintf "document.querySelector(%s).textContent.includes('earlier output')" "\"#shell [data-terminal-screen='term-live']\""))
+
                 do! awaitU (page.Keyboard.TypeAsync "ls")
                 do! awaitU (page.Keyboard.PressAsync "ArrowUp")
                 do! awaitU (page.Keyboard.PressAsync "Control+c")
