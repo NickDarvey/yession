@@ -560,6 +560,16 @@ module ClientModel =
         let target = composerTarget model
         model.Synced.Drafts |> Map.toList |> List.map fst |> List.filter (fun peer -> peer <> target)
 
+    /// Whether a draft carries anything a send would take.
+    ///
+    /// The SLOT is the answer, not a second measurement: `DraftSlot` publishes a peer's slot
+    /// exactly while their body has content and retracts it the moment it empties, so this is
+    /// the same fact the send path already acts on. Serializing the body again here would cost
+    /// a Markdown pass per render and, worse, give the composer a way to disagree with the rule
+    /// about whether there is anything to send.
+    let draftHasContent (peer: PeerId) (model: ClientModel) : bool =
+        Map.containsKey peer model.Synced.Drafts
+
     /// Who is editing this draft right now, by their live caret (never the local peer — you are
     /// not your own collaborator). Names come from presence, which is where a live caret's name
     /// already travels.
@@ -871,15 +881,25 @@ module ClientModel =
         |> List.filter (fun (_, _, field) -> terminalOfFocus field model = Some terminal)
         |> List.map (fun (peer, name, _) -> peer, name)
 
-    /// A peer's display name: the roster's, else the peer's own live presence, else the raw id
-    /// (an id is a last resort, not a label — `PEER-129755065` is not a person).
+    /// A peer's display name: your own connection's, else the roster's, else the peer's own
+    /// live presence, else the raw id (an id is a last resort, not a label — `PEER-129755065`
+    /// is not a person).
+    ///
+    /// YOUR OWN name comes first and from your own connection, because those two can disagree
+    /// and only one of them is what the rest of the screen is showing. The roster is folded
+    /// from the durable `PeerJoined` log, while `Peer.DisplayName` is what THIS connection was
+    /// assigned — so a peer that rejoins under a new name has an old one still in the log, and
+    /// a client reading the roster for itself would put a name in the chat that the sidebar's
+    /// "you" row contradicts. Which is the exact defect resolving names was meant to end.
     let nameOf (peer: PeerId) (model: ClientModel) : string =
-        match Map.tryFind peer model.Peers with
-        | Some name -> name
-        | None ->
-            match Map.tryFind peer model.Presence with
-            | Some presence when presence.DisplayName <> "" -> presence.DisplayName
-            | _ -> PeerId.value peer
+        if peer = model.Peer.PeerId && model.Peer.DisplayName <> "" then model.Peer.DisplayName
+        else
+            match Map.tryFind peer model.Peers with
+            | Some name -> name
+            | None ->
+                match Map.tryFind peer model.Presence with
+                | Some presence when presence.DisplayName <> "" -> presence.DisplayName
+                | _ -> PeerId.value peer
 
     /// Fold a message into the model.
     let update (msg: ClientMsg) (model: ClientModel) : ClientModel =

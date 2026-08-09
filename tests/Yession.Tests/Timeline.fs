@@ -704,7 +704,9 @@ let private videoTests =
             Expect.isNone (ClientModel.paneReplay (BlockTab (terminalA, block "no")) model) "it never ran"
             Expect.isNone (ClientModel.missingKeyframe (BlockTab (terminalA, block "no")) model) "so there is no screen to fetch"
             let html = Support.render (ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "no"))) model)
-            Expect.isTrue (html.Contains "rejected by ada") "the tab says who refused it"
+            // By NAME. `ada` is this fixture's local peer, so the person who refused is called
+            // what every other surface calls them rather than by the id underneath.
+            Expect.isTrue (html.Contains "rejected by swift-heron") "the tab says who refused it"
             Expect.isFalse (html.Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-no")) "and mounts no player"
 
         testCase "the step-out is offered only where there IS a whole recording" <| fun () ->

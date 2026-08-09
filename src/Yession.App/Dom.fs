@@ -60,6 +60,10 @@ module Dom =
         let environment = "data-environment"
         // Conversation timeline.
         let conversation = "data-conversation"
+        /// The empty timeline's caret anchor: present ONLY while nothing has happened yet, so
+        /// its absence is as meaningful as its presence — a session with a conversation in it
+        /// has its own anchor, and two would be one too many.
+        let conversationIdle = "data-conversation-idle"
         let messageId = "data-message-id"
         let messageAuthor = "data-message-author"
         let messageStatus = "data-message-status"

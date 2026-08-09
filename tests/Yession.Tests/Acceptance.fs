@@ -953,12 +953,130 @@ let private chromeTests =
                 Expect.isFalse ((shell + settingsShell).Contains tone) (sprintf "focus must not be %s" tone)
     ]
 
+// The three UX findings from the session-page review, pinned so they cannot quietly come
+// back. Each asserts what a person SEES, not how the view is built — a refactor that keeps
+// the behaviour keeps these green.
+let private semanticsTests =
+    testList "What the screen says without words" [
+
+        /// What one message ELEMENT says, from its author hook to its body — so an assertion
+        /// about the chat's attribution cannot be satisfied by the same word appearing in the
+        /// roster, which is exactly how the first version of this test passed while the chat
+        /// was still printing a peer id.
+        let messageMetaOf (peer: PeerId) (html: string) : string =
+            let start = html.IndexOf (Dom.attr Dom.Hooks.messageAuthor (PeerId.value peer))
+            Expect.isTrue (start >= 0) "the message renders at all"
+            let stop = html.IndexOf (Dom.Hooks.messageBody, start)
+            html.Substring (start, stop - start)
+
+        /// The fixture with one message from a COLLABORATOR — `bob`, deliberately not the
+        /// local peer, so what the chat prints about him can only have come from the roster
+        /// lookup under test rather than from the client's own identity.
+        let withMessageFromBob (peers: Map<PeerId, string>) =
+            { representativeModel with
+                Peers = peers
+                Presence = Map.empty
+                Conversation =
+                    { Items =
+                        [ { MessageId = MessageId.create "msg-bob" |> expect
+                            Author = PeerRef bob
+                            Body = "on it"
+                            Status = Complete
+                            Kind = ConversationItemKind.Message
+                            Offset = EventOffset.create 1L |> expect } ]
+                      ActiveAgentMessages = Map.empty }
+                Timeline = TimelineProjection.empty }
+
+        // A peer id is a token, not a person. The roster, the draft summaries and the lease
+        // bar all resolved one to a name; the chat did not, so the same human appeared as
+        // `brave-owl` in the sidebar and `bob` on their own message.
+        testCase "the chat attributes a message to the name, not the peer id" <| fun () ->
+            let html = Support.render (withMessageFromBob (Map.ofList [ bob, "quiet-otter" ]))
+            let meta = messageMetaOf bob html
+            Expect.isTrue (meta.Contains ">quiet-otter<") "the author is the name the roster knows"
+            Expect.isFalse (meta.Contains ">bob<") "and never the raw id as a person's name"
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.messageAuthor (PeerId.value bob)))
+                "while the hook still carries the stable id, so tests and delegation do not move"
+
+        // The fallback is the reason this resolves through the roster rather than asserting a
+        // name exists: a peer who left before this client ever saw them has no name to show,
+        // and a blank author would be worse than an ugly one.
+        testCase "an unknown peer still gets attributed, by id" <| fun () ->
+            let html = Support.render (withMessageFromBob Map.empty)
+            Expect.isTrue
+                ((messageMetaOf bob html).Contains ">bob<")
+                "no name known, so the id stands in rather than nothing"
+
+        // The roster is folded from the durable `PeerJoined` log; your own display name comes
+        // from THIS connection. When a peer rejoined under a new name the two disagreed, and a
+        // chat reading the roster for its own messages would contradict the sidebar's "you"
+        // row — two names for one person, which is the defect this whole thread is about.
+        testCase "your own messages wear the name the sidebar calls you" <| fun () ->
+            let html =
+                Support.render
+                    { representativeModel with
+                        Peer = { PeerId = ada; DisplayName = "warm-tern" }
+                        Peers = Map.ofList [ ada, "a-stale-name-from-the-log" ] }
+            Expect.isTrue ((messageMetaOf ada html).Contains ">warm-tern<") "the chat says what you are called now"
+            Expect.isTrue (html.Contains (Dom.hookText Dom.Hooks.displayName "warm-tern")) "and so does the roster"
+            Expect.isFalse (html.Contains "a-stale-name-from-the-log") "the log's older name is nobody's current name"
+
+        // An empty session used to open on a column with nothing in it at all — no anchor for
+        // where the conversation starts, and a composer whose surface barely separates from
+        // the canvas. The idle caret is the chat's own version of the terminals pane's `$`.
+        testCase "an empty conversation stands a caret where the first message will land" <| fun () ->
+            let empty =
+                { representativeModel with
+                    Conversation = { Items = []; ActiveAgentMessages = Map.empty }
+                    Timeline = TimelineProjection.empty }
+            Expect.isTrue
+                ((Support.render empty).Contains Dom.Hooks.conversationIdle)
+                "nothing has happened yet, so the timeline says where it will"
+
+        testCase "a conversation with anything in it does not" <| fun () ->
+            Expect.isFalse
+                ((Support.render representativeModel).Contains Dom.Hooks.conversationIdle)
+                "the messages are the anchor once there are messages"
+
+        // The composer's left rail: present at rest so it marks where you type, and the
+        // gradient still GROWS on focus (`scale-y-0` -> `scale-y-100`), which is the motion
+        // this design language names. Both, or the fix traded one defect for another.
+        testCase "the composer is marked at rest and still grows on focus" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains Style.draftRail) "a rail marks the composer before you touch it"
+            Expect.isTrue (html.Contains "group-focus-within:scale-y-100") "and the edge still grows from the top"
+
+        // Discard is a verdict, and a verdict on nothing is a control that looks live and is
+        // dead. `DraftSlot` publishes a slot exactly while the body has content, so the slot
+        // IS the question "is there anything here".
+        testCase "an empty draft offers no discard, and send waits" <| fun () ->
+            let html = Support.render { representativeModel with Synced = { representativeModel.Synced with Drafts = Map.empty } }
+            Expect.isFalse (html.Contains Dom.Hooks.discardDraft) "nothing to discard, so nothing offers to"
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.sendDraft (PeerId.value ada)))
+                "send keeps its place — an empty composer is not a blocked one"
+            Expect.isTrue (html.Contains Style.btnWaiting) "and waits at a dimmed weight until there is something to send"
+
+        testCase "a draft with content offers discard, and send comes up to full strength" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains Dom.Hooks.discardDraft) "there is something to discard now"
+            Expect.isFalse (html.Contains Style.btnWaiting) "and something to send"
+
+        // The waiting weight is a BORDER, never a faded label: `text-blue` dimmed on the
+        // composer's surface falls to about 2.5:1, well under the 4.5:1 this product holds
+        // itself to for an 11px caps word (AGENTS.md, UI baseline).
+        testCase "the waiting weight never dims the word" <| fun () ->
+            Expect.isFalse (Style.btnWaiting.Contains "opacity") "waiting is carried by the frame, not by fading the text"
+    ]
+
 let tests =
     testList "Acceptance" [
         uiChecklistTests
         presenceTests
         syncStatusTests
         chromeTests
+        semanticsTests
         reconnectOfferTests
         shellTests
     ]

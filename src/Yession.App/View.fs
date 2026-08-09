@@ -168,6 +168,8 @@ module View =
         | FeedRetrying _ -> Dom.Text.feedRetrying
         | FeedStalled _ -> Dom.Text.feedPaused
 
+    /// An actor as a TOKEN: stable, model-free, and what every `data-*` hook carries — which is
+    /// why it stays a total function of the actor alone and why the tests can assert it.
     let private authorLabel =
         function
         | UserRef u -> UserId.value u
@@ -175,6 +177,19 @@ module View =
         | ActorRef.Agent -> Dom.Text.agent
         | ActorRef.SessionProcess -> Dom.Text.sessionProcess
         | ActorRef.System -> Dom.Text.system
+
+    /// The same actor, said to a person.
+    ///
+    /// A peer id is a fine token and a poor name — `PEER-129755065` is nobody — and the roster,
+    /// the draft summaries and the lease bar all resolve one through `nameOf` already. The chat
+    /// did not, so one human appeared under two identities on the one screen. Everything else is
+    /// already a word (`agent`, `system`, a user's own subject), so only a peer resolves; a peer
+    /// this client has never seen still falls back to the id, because a blank author would be
+    /// worse than an ugly one.
+    let private authorName (model: ClientModel) (actor: ActorRef) : string =
+        match actor with
+        | PeerRef peer -> ClientModel.nameOf peer model
+        | UserRef _ | ActorRef.Agent | ActorRef.SessionProcess | ActorRef.System -> authorLabel actor
 
     let private messageStatusLabel =
         function
@@ -871,17 +886,39 @@ module View =
         // The open draft: an editable rich editor bound to that body fragment (mounted
         // imperatively by the browser), Send for anyone, Discard for its author.
         let open' =
+            // Whether there is anything here to act ON. The draft slot is that fact
+            // (`ClientModel.draftHasContent` — `DraftSlot` publishes one exactly while the body
+            // has content), so the controls and the send path read the same truth rather than
+            // two measurements that can disagree.
+            let hasContent = ClientModel.draftHasContent target model
+            // Discard exists only once there is something to discard. An empty composer used to
+            // offer a destructive control over nothing — and offering a verdict on nothing is
+            // how a working button and a dead one come to look identical.
             let discard =
-                if target = myPeer then
+                if target = myPeer && hasContent then
                     html $"""
                         <button type="button" class="{Style.btnIconDangerLg}" aria-label="Discard draft"
                                 data-discard-draft @click={Ev(fun _ -> actions.DiscardDraft myPeer)}>{Icon.close}</button>"""
                 else Lit.nothing
+            // Send STAYS — same place in the layout, same place in focus order, so nothing
+            // moves under the hand and no Tab stop appears mid-sentence — and waits at a
+            // dimmed weight until there is something to send, coming to full strength with the
+            // first character.
+            //
+            // NOT marked disabled, in either spelling. Send is always pressable; on an empty
+            // draft it simply has nothing to do (already a no-op in the model), and announcing
+            // "unavailable" would claim more than that — a person with an empty composer is not
+            // blocked, they just have not typed yet. The weight is the signal; the control
+            // stays whole. `Resilience.fs` pins the same promise from the other direction.
+            let sendClass =
+                if hasContent then Style.cls [ Style.btnPrimary; "gap-2" ]
+                else Style.cls [ Style.btnPrimary; "gap-2"; Style.btnWaiting ]
             let author =
                 if target = myPeer then Lit.nothing
                 else html $"""<span class="{Style.draftAuthor}">{ClientModel.nameOf target model}'s message</span>"""
             html $"""
                 <article class="{Style.draftBox}" data-draft-id="{PeerId.value target}" data-draft-author="{PeerId.value target}">
+                  <span class="{Style.draftRail}"></span>
                   <span class="{Style.draftEdge}"></span>
                   <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft target}" data-rich-readonly="false" data-draft-input="{PeerId.value target}"></div>
                   <div class="{Style.draftActions}">
@@ -890,7 +927,7 @@ module View =
                     <span class="{Style.draftHint}">{Dom.Text.composerKeys}</span>
                     <div class="{Style.draftCommit}">
                       {discard}
-                      <button type="button" class="{Style.btnPrimary} gap-2" aria-keyshortcuts="Enter"
+                      <button type="button" class="{sendClass}" aria-keyshortcuts="Enter"
                               data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send{Icon.send}</button>
                     </div>
                   </div>
@@ -938,7 +975,7 @@ module View =
         | BlockFinished _ -> Dom.Text.blockFailed
         | BlockRejected _ -> Dom.Text.blockRejected
 
-    let private terminalBlockStatus =
+    let private terminalBlockStatus (model: ClientModel) =
         function
         | BlockRunning -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>running</span>"""
         | BlockFinished (CommandSucceeded code) -> html $"""<span class="{Style.statusOk}">{Icon.checkSm} {code}</span>"""
@@ -946,8 +983,9 @@ module View =
         | BlockFinished CommandTimedOut -> html $"""<span class="{Style.statusErr}">timed out</span>"""
         | BlockFinished (CommandExecutionFailed _) -> html $"""<span class="{Style.statusErr}">failed</span>"""
         // Named, not merely absent. "rejected by nick" in line with the commands that ran
-        // is the whole reason a refusal mints a block at all.
-        | BlockRejected (by, _) -> html $"""<span class="{Style.statusErr}">rejected by {authorLabel by}</span>"""
+        // is the whole reason a refusal mints a block at all — so it is a NAME, resolved like
+        // every other person on screen, not the id the hook carries.
+        | BlockRejected (by, _) -> html $"""<span class="{Style.statusErr}">rejected by {authorName model by}</span>"""
 
     let private stretchEndLabel =
         function
@@ -957,10 +995,10 @@ module View =
         | LeaseIdle -> Dom.Text.stretchIdle
 
     /// How a stretch ended, said the way a reader asks it.
-    let private stretchEnding =
+    let private stretchEnding (model: ClientModel) =
         function
         | LeaseReleased -> html $"""<span class="{Style.statusFaint}">handed back</span>"""
-        | LeaseStolen by -> html $"""<span class="{Style.statusFaint}">taken over by {authorLabel by}</span>"""
+        | LeaseStolen by -> html $"""<span class="{Style.statusFaint}">taken over by {authorName model by}</span>"""
         | LeaseHolderGone -> html $"""<span class="{Style.statusFaint}">holder left</span>"""
         | LeaseIdle -> html $"""<span class="{Style.statusFaint}">went idle</span>"""
 
@@ -985,7 +1023,7 @@ module View =
         let actNoteItem (item: ConversationItem) =
             html $"""
                 <article class="{Style.actNote}" data-message-id="{MessageId.value item.MessageId}" data-act-note data-message-author="{authorLabel item.Author}">
-                  <span class="{Style.actNoteText}">{authorLabel item.Author} {item.Body}</span>
+                  <span class="{Style.actNoteText}">{authorName model item.Author} {item.Body}</span>
                 </article>"""
         let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
@@ -1003,7 +1041,7 @@ module View =
             html $"""
                 <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
                   <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
-                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
+                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorName model item.Author}</span>{statusInner}</div>
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
         let message (item: ConversationItem) =
@@ -1028,10 +1066,10 @@ module View =
                             data-chat-block-status="{terminalBlockStatusLabel block.Status}"
                             data-terminal-id="{TerminalId.value terminalId}"
                             @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
-                      <span class="{Style.chatChipWho}">{authorLabel block.Author}</span>
+                      <span class="{Style.chatChipWho}">{authorName model block.Author}</span>
                       <span class="{Style.terminalPrompt}">$</span>
                       <code class="{Style.chatChipCommand}">{block.Command}</code>
-                      <span class="shrink-0">{terminalBlockStatus block.Status}</span>
+                      <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
                     </button>"""
         let stretchItem (stretch: TerminalStretch) =
             let length = durationText (TerminalStretch.duration stretch)
@@ -1041,9 +1079,9 @@ module View =
                         data-chat-stretch-end="{stretchEndLabel stretch.End}"
                         data-terminal-id="{TerminalId.value stretch.TerminalId}"
                         @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (StretchTab stretch)); actions.FocusPane ())}>
-                  <span class="{Style.chatChipWho}">{authorLabel stretch.Holder}</span>
+                  <span class="{Style.chatChipWho}">{authorName model stretch.Holder}</span>
                   <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
-                  <span class="shrink-0">{stretchEnding stretch.End}</span>
+                  <span class="shrink-0">{stretchEnding model stretch.End}</span>
                 </button>"""
         let items =
             TimelineProjection.items model.Conversation model.Timeline
@@ -1051,10 +1089,24 @@ module View =
                 | TimelineMessage item -> message item
                 | TimelineBlock (_, terminalId, blockId) -> blockChip terminalId blockId
                 | TimelineStretch stretch -> stretchItem stretch)
-        html $"""<section class="{Style.timeline}" data-conversation>{items}</section>"""
+        // A session with nothing in it yet opens on an empty column, and an empty column says
+        // nothing about where the conversation starts or that the near-black composer below it
+        // is where you type. So the chat carries its OWN idle symbol — a caret standing where
+        // the first message will land — exactly as the terminals pane stands an idle `$` in its
+        // empty pane. A mark, not a sentence: it is the same blinking caret a streaming message
+        // wears, so it reads as "text goes here" without a word of instruction.
+        //
+        // `aria-hidden`, because it is a typographic mark rather than content: a reader that
+        // cannot see it is told the timeline is empty by the timeline being empty.
+        let body =
+            match items with
+            | [] ->
+                [ html $"""<div class="{Style.timelineIdle}" data-conversation-idle aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
+            | items -> items
+        html $"""<section class="{Style.timeline}" data-conversation>{body}</section>"""
 
     /// One block: the command that ran, then everything it printed.
-    let private terminalBlockView (feed: TerminalFeed) (block: TerminalBlock) : TemplateResult =
+    let private terminalBlockView (model: ClientModel) (feed: TerminalFeed) (block: TerminalBlock) : TemplateResult =
         // A running block's output runs to whatever has arrived; a finished one is bounded
         // by the range its completion event recorded — which is what makes a reload show
         // exactly the same block as the live view did.
@@ -1078,7 +1130,7 @@ module View =
               <div class="{Style.terminalBlockCommand}">
                 <span class="{Style.terminalPrompt}">$</span>
                 <code class="{Style.terminalCommandText}">{block.Command}</code>
-                <span class="ml-auto shrink-0">{terminalBlockStatus block.Status}</span>
+                <span class="ml-auto shrink-0">{terminalBlockStatus model block.Status}</span>
               </div>
               {body}
             </article>"""
@@ -1198,7 +1250,7 @@ module View =
               <div class="{Style.terminalQueuedRow}">
                 {statusLine}
                 {subject}
-                <span class="{Style.small}">{authorLabel entry.Author}</span>
+                <span class="{Style.small}">{authorName model entry.Author}</span>
                 <div class="ml-auto flex items-center gap-2">
                   {reject}
                   {approval}
@@ -1232,11 +1284,14 @@ module View =
     /// keeps working while a peer is live and is precisely what the release will run.
     let private terminalLeaseBar (actions: ViewActions) (model: ClientModel) (terminal: TerminalId) (holder: ActorRef) : TemplateResult =
         let mine = ActorRef.PeerRef model.Peer.PeerId
+        // The hook keeps the stable token (a test asserting WHO holds a lease should not have
+        // to know what this client happens to have learned about their name); the words get
+        // the name, like every other person on screen.
         let label = authorLabel holder
         // Who holds it, said the way the roster says who is here: the square avatar and the
         // name. The pulsing "live" is the state; the button is what changes it; a sentence
         // ("X is using this terminal") restated all three.
-        let who = if holder = mine then "you" else label
+        let who = if holder = mine then "you" else authorName model holder
         let control =
             if holder = mine then
                 html $"""
@@ -1291,7 +1346,7 @@ module View =
         else
             html $"""
                 <div class="{Style.terminalScreen}" data-terminal-screen="{id}"
-                     role="region" aria-live="off" aria-label="Live terminal, {authorLabel holder} is typing">{body}</div>"""
+                     role="region" aria-live="off" aria-label="Live terminal, {authorName model holder} is typing">{body}</div>"""
 
     /// The terminal composer: your command line, and everyone else's as they type them.
     let private terminalComposer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult =
@@ -1486,7 +1541,7 @@ module View =
                 // next reader actually wants.
                 | BlockRejected (by, reason) ->
                     let text = reason |> Option.defaultValue "did not run"
-                    html $"""<div class="{Style.terminalOutputEmpty}">rejected by {authorLabel by} — {text}</div>"""
+                    html $"""<div class="{Style.terminalOutputEmpty}">rejected by {authorName model by} — {text}</div>"""
                 // A recording that is still being written has no end to replay to, and a
                 // player rebuilt on every record would thrash through a streaming build.
                 // The command row above already carries the pulsing "running" status; the
@@ -1503,7 +1558,7 @@ module View =
                   <div class="{Style.terminalBlockCommand}">
                     <span class="{Style.terminalPrompt}">$</span>
                     <code class="{Style.terminalCommandText}">{block.Command}</code>
-                    <span class="ml-auto shrink-0">{terminalBlockStatus block.Status}</span>
+                    <span class="ml-auto shrink-0">{terminalBlockStatus model block.Status}</span>
                   </div>
                   {body}
                   <div class="{Style.paneFacts}">{stepOut}</div>
@@ -1512,7 +1567,7 @@ module View =
     /// A stretch's facts: who held the terminal, for how long, and how it ended. The
     /// recording itself mounts beneath this (Plan 14, stage 4); these are the parts that
     /// come from the event log and therefore render at any scroll depth without a transcript.
-    let private paneStretchView (stretch: TerminalStretch) : TemplateResult =
+    let private paneStretchView (model: ClientModel) (stretch: TerminalStretch) : TemplateResult =
         let length = durationText (TerminalStretch.duration stretch)
         let recording =
             // The count in the metadata voice (caps, tabular figures); the raw transcript
@@ -1535,9 +1590,9 @@ module View =
             <section class="{Style.paneBody}">
               <div class="{Style.paneFacts}" data-pane-stretch="{TerminalStretch.key stretch}">
                 <div class="{Style.terminalQueuedRow}">
-                  <span class="{Style.chatChipWho}">{authorLabel stretch.Holder}</span>
+                  <span class="{Style.chatChipWho}">{authorName model stretch.Holder}</span>
                   <span class="{Style.small}">typed in {stretch.Title} for {length}</span>
-                  <span class="ml-auto shrink-0">{stretchEnding stretch.End}</span>
+                  <span class="ml-auto shrink-0">{stretchEnding model stretch.End}</span>
                 </div>
                 {recording}
               </div>
@@ -1595,7 +1650,7 @@ module View =
                     |> Option.bind (fun v -> v.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
                     |> Option.map (fun b -> b.Command)
                     |> Option.defaultValue (BlockId.value blockId)
-                | StretchTab stretch -> sprintf "%s · %s" (authorLabel stretch.Holder) stretch.Title
+                | StretchTab stretch -> sprintf "%s · %s" (authorName model stretch.Holder) stretch.Title
             html $"""
                 <span class="{Style.paneTabGroup}">
                   <button type="button" role="tab" class="{if on then Style.terminalTabActive else Style.terminalTab}"
@@ -1624,7 +1679,7 @@ module View =
                 // symbol for; "nothing has run here yet" was the same fact as a sentence.
                 if List.isEmpty view.Blocks then
                     [ html $"""<div class="{Style.terminalOutputEmpty}"><span class="{Style.terminalPrompt}">$</span></div>""" ]
-                else view.Blocks |> List.map (terminalBlockView feed)
+                else view.Blocks |> List.map (terminalBlockView model feed)
             // The DVR (Plan 14, stage 7): step back through what this terminal has recorded
             // so far while it keeps running, and catch back up. Offered on any LIVE terminal
             // — the mechanism does not care which mode it is in, and both are one growing
@@ -1713,7 +1768,7 @@ module View =
                         | Some view -> terminalBody view
                         | None -> Lit.nothing
                     | BlockTab (terminalId, blockId) -> paneBlockView dispatch model terminalId blockId
-                    | StretchTab stretch -> paneStretchView stretch
+                    | StretchTab stretch -> paneStretchView model stretch
                 // `tabindex="-1"` so the panel can take focus programmatically when a chip
                 // opens it, without becoming a Tab stop of its own. A DOM swap that leaves
                 // focus on the control that vanished is the failure this exists to avoid.

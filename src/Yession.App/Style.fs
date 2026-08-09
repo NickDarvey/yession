@@ -164,6 +164,18 @@ module Style =
     let btnDanger =
         cls [ btnBase; Stroke.rim; "text-ink-dim"; Stroke.hoverErr; "hover:text-err active:bg-err active:text-bg" ]
 
+    /// A button with nothing to do YET — composed over one of the faces above, never used
+    /// alone. It stays in the layout and in focus order (its work is coming, and a control
+    /// that appears mid-sentence moves everything under the reader's hand); the BORDER carries
+    /// the waiting, dropping to the quiet rim so the rectangle reads as an outline not yet
+    /// filled. Which is this design's own vocabulary: a Metro button IS its border, hover
+    /// brightens it, press fills it.
+    ///
+    /// Deliberately NOT an opacity dim: fading `text-blue` on the composer's `#111` takes it
+    /// from 6.5:1 to about 2.5:1, and an 11px caps label at 2.5:1 is below the AA floor this
+    /// product holds. The word stays exactly as legible as it was; only the frame changes.
+    let btnWaiting = "!border-edge"
+
     /// Square icon buttons — self-contained, NOT composed over `btn`: Tailwind emits `p-0`
     /// BEFORE `px-*`/`py-*` in the stylesheet, so "btn + p-0" kept the text button's padding
     /// and crushed the glyph into a corner of a lopsided box (measured live: 30×24, ×
@@ -489,6 +501,16 @@ module Style =
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 
+    /// The empty timeline's own mark: the streaming caret, standing where the first message
+    /// will land. Dimmed, because it is an invitation rather than an event — a full-strength
+    /// caret in an empty room reads as something already happening.
+    ///
+    /// Aligned to the message grid's content column (20px avatar + 12px gutter) so the first
+    /// real message appears exactly where the caret was standing, rather than stepping sideways
+    /// as it replaces it.
+    let timelineIdle = "pl-8 max-md:pl-8"
+    let caretIdle = caret + " opacity-50"
+
     /// Terminal work in the chat (Plan 14, stage 1): one line, subtler than a message, and a
     /// real `<button>` — so it is keyboard-operable and focus-ringed by construction rather
     /// than by a handler bolted onto a div.
@@ -575,8 +597,21 @@ module Style =
     /// is legible at a glance and not only from the 2px edge below.
     let draftBox = "group relative bg-surface focus-within:bg-surface-2 transition-colors"
 
-    /// The focus edge: grows top-to-bottom in the blue→green gradient on focus —
-    /// Zune's orange→pink signature, recast, spent exactly once.
+    /// The composer's left edge, in two parts — because it was doing two jobs as one element
+    /// and could only ever do one of them.
+    ///
+    /// The edge used to be scaled to NOTHING until focus, so an untouched session was a black
+    /// column containing a black box: the composer's `#111` barely separates from the `#000`
+    /// canvas, and the edge — the one thing marking "this is where you type" — appeared only
+    /// once you had already found it and clicked. But simply leaving it up at rest would spend
+    /// the focus gesture, and "grows from the top" is a named part of this design language.
+    ///
+    /// So: a dim rail that is always there (the marker), and the gradient growing over it on
+    /// focus (the gesture). Same 2px column, same gradient, spent exactly once in the product.
+    let draftRail = "absolute left-0 inset-y-0 w-0.5 bg-grad opacity-25"
+
+    /// The focus edge: grows top-to-bottom over the rail in the blue→green gradient —
+    /// Zune's orange→pink signature, recast.
     let draftEdge =
         "absolute left-0 inset-y-0 w-0.5 bg-grad scale-y-0 origin-top transition-transform "
         + "duration-300 ease-out group-focus-within:scale-y-100 motion-reduce:transition-none"
