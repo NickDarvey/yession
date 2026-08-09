@@ -329,10 +329,10 @@ module View =
             match model.Claude.Status.AgentAvailable with
             | Some true ->
                 html $"""<div class="{Style.person}" data-agent-presence="live"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]}"></span>agent<span class="{Style.statusOk} ml-auto"><span class="{Style.statusDot}"></span>ready</span></div>"""
-            // What actually happens with no agent: the drain appends the message with no turn
-            // (`Scheduler.create` — a `None` runner at drain time), so it is recorded and simply
-            // unanswered. The old strip promised messages "will wait", which is not what the
-            // queue does; the copy says what it does.
+            // The dimmed avatar and the status word carry the state; the button carries the
+            // fix. What a message does meanwhile (recorded, unanswered — `Scheduler.create`,
+            // a `None` runner at drain time) is behaviour the queue itself shows, not a
+            // sentence to hang here.
             | Some false ->
                 html $"""
                     <div class="{Style.noAgentBlock}" data-agent-presence="absent" data-no-agent>
@@ -340,7 +340,6 @@ module View =
                       <div class="{Style.noAgentPrompt}">
                         <span class="{Style.noAgentEdge}"></span>
                         <div class="{Style.noAgentBody}">
-                          <span class="{Style.small}">messages still send — they go unanswered until Claude is connected.</span>
                           <button type="button" class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}" data-settings-toggle="prompt" data-no-agent-connect @click={Ev(fun _ -> actions.ToggleSettings ())}>Connect Claude</button>
                         </div>
                       </div>
@@ -400,8 +399,8 @@ module View =
             | ClaudeAwaitingCode (url, _) ->
                 html $"""
                     <a class="{Style.btnPrimary}" href="{url}" target="_blank" rel="noreferrer" data-claude-authorize>Approve on claude.ai</a>
-                    <span class="{Style.small}">a code appears after you approve — paste it here</span>
-                    <input type="text" class="{Style.field}" data-claude-code placeholder="code#state" />
+                    <label class="{Style.label}" for="claude-code">code from claude.ai</label>
+                    <input id="claude-code" type="text" class="{Style.field}" data-claude-code placeholder="code#state" />
                     <div class="flex gap-2">
                       <button type="button" class="{Style.btnPrimary}" data-claude-complete @click={Ev(fun _ -> actions.ClaudeComplete ())}>Complete</button>
                       <button type="button" class="{Style.btn}" data-claude-cancel @click={Ev(fun _ -> dispatch (ClaudeFlowMsg ClaudeIdle))}>Cancel</button>
@@ -414,8 +413,8 @@ module View =
                       <option value="session">This session only</option>
                     </select>
                     <button type="button" class="{Style.btnPrimary}" data-claude-connect @click={Ev(fun _ -> actions.ClaudeConnect ())}>Connect Claude</button>
-                    <span class="{Style.small} pt-2">or paste a setup token / API key</span>
-                    <input type="password" class="{Style.field}" data-claude-token placeholder="sk-ant-…" />
+                    <label class="{Style.label} pt-2" for="claude-token">setup token / api key</label>
+                    <input id="claude-token" type="password" class="{Style.field}" data-claude-token placeholder="sk-ant-…" />
                     <button type="button" class="{Style.btn}" data-claude-save-token @click={Ev(fun _ -> actions.ClaudePasteToken ())}>Save token</button>"""
         let error =
             match claude.Flow with
@@ -424,7 +423,6 @@ module View =
         html $"""
             <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-claude-panel>
               <span class="{Style.label}">claude</span>
-              <span class="{Style.small}">the agent answers each message with its sender's Claude account</span>
               {connectedRow "all my sessions" "mine" claude.Status.MineCredential}
               {connectedRow "this session" "session" claude.Status.SessionCredential}
               {error}
@@ -446,7 +444,7 @@ module View =
                 html $"""<span class="{Style.statusRun}" data-github-busy><span class="{Style.statusDotPulse}"></span>working…</span>"""
             | GitHubAwaitingApproval (userCode, verificationUri, _, _) ->
                 html $"""
-                    <span class="{Style.small}">enter this code on github.com — this panel completes itself once you approve</span>
+                    <span class="{Style.label}">code for github.com</span>
                     <span class="{Style.field}" data-github-user-code aria-label="GitHub device code">{userCode}</span>
                     <div class="flex gap-2">
                       <a class="{Style.btnPrimary}" href="{verificationUri}" target="_blank" rel="noreferrer" data-github-authorize>Approve on github.com</a>
@@ -460,8 +458,8 @@ module View =
                       <option value="session">This session only</option>
                     </select>
                     <button type="button" class="{Style.btnPrimary}" data-github-connect @click={Ev(fun _ -> actions.GitHubConnect ())}>Connect GitHub</button>
-                    <span class="{Style.small} pt-2">or paste a personal access token</span>
-                    <input type="password" class="{Style.field}" data-github-token placeholder="github_pat_…" />
+                    <label class="{Style.label} pt-2" for="github-token">personal access token</label>
+                    <input id="github-token" type="password" class="{Style.field}" data-github-token placeholder="github_pat_…" />
                     <button type="button" class="{Style.btn}" data-github-save-token @click={Ev(fun _ -> actions.GitHubPasteToken ())}>Save token</button>"""
         let error =
             match github.Flow with
@@ -470,7 +468,6 @@ module View =
         html $"""
             <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-github-panel>
               <span class="{Style.label}">github</span>
-              <span class="{Style.small}">repos are fetched with the account of whoever asks — sign in to bring yours</span>
               {connectedRow "all my sessions" "mine" github.Status.MineCredential}
               {connectedRow "this session" "session" github.Status.SessionCredential}
               {error}
@@ -826,7 +823,7 @@ module View =
             match entries with
             | [] -> Lit.nothing
             | _ ->
-                html $"""<div class="{Style.queueHead}"><span class="{Style.queueCount}">queued · {List.length entries}</span><span class="{Style.small}">editable until the agent takes them</span></div>"""
+                html $"""<div class="{Style.queueHead}"><span class="{Style.queueCount}">queued · {List.length entries}</span></div>"""
         let items =
             entries
             |> List.map (fun entry ->
@@ -1113,6 +1110,18 @@ module View =
             elif ClientModel.awaitsIntegration entry model then Dom.Text.queuedAwaitingIntegration
             elif ClientModel.awaitsTerminal entry model then Dom.Text.queuedAwaitingTerminal
             else Dom.Text.queuedReady
+        // A held act is a WAIT, and the pulse dot is the wait — the word only names the
+        // blocker (the same status voice every other wait in the product wears). The full
+        // explanation used to be a clause per case; the Approve button beside an awaiting
+        // entry and the not-marking banner over a held queue already say what resolves it.
+        let statusLine =
+            if statusToken = Dom.Text.queuedAwaitingApproval then
+                html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>needs approval</span>"""
+            elif statusToken = Dom.Text.queuedAwaitingIntegration then
+                html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>not marking</span>"""
+            elif statusToken = Dom.Text.queuedAwaitingTerminal then
+                html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>terminal busy</span>"""
+            else html $"""<span class="{Style.statusOk}">queued</span>"""
         // What this act IS, in words — used both as the chip and as the accessible name on
         // the verdict buttons, because a screen reader hearing "Approve" eleven times learns
         // nothing about which one it is on.
@@ -1187,7 +1196,7 @@ module View =
                      data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
               {body}
               <div class="{Style.terminalQueuedRow}">
-                <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if statusToken = Dom.Text.queuedAwaitingApproval then "waiting for approval" elif statusToken = Dom.Text.queuedAwaitingIntegration then "waiting for the terminal to be re-armed" elif statusToken = Dom.Text.queuedAwaitingTerminal then "waiting for the terminal" else "queued"}</span>
+                {statusLine}
                 {subject}
                 <span class="{Style.small}">{authorLabel entry.Author}</span>
                 <div class="ml-auto flex items-center gap-2">
@@ -1224,7 +1233,10 @@ module View =
     let private terminalLeaseBar (actions: ViewActions) (model: ClientModel) (terminal: TerminalId) (holder: ActorRef) : TemplateResult =
         let mine = ActorRef.PeerRef model.Peer.PeerId
         let label = authorLabel holder
-        let who = if holder = mine then "You are typing here" else sprintf "%s is using this terminal" label
+        // Who holds it, said the way the roster says who is here: the square avatar and the
+        // name. The pulsing "live" is the state; the button is what changes it; a sentence
+        // ("X is using this terminal") restated all three.
+        let who = if holder = mine then "you" else label
         let control =
             if holder = mine then
                 html $"""
@@ -1239,7 +1251,8 @@ module View =
                             @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take over</button>"""
         html $"""
             <div class="{Style.terminalQueuedRow}" data-terminal-lease="{label}" aria-live="polite">
-              <span class="{Style.statusRun}">live</span>
+              <span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>live</span>
+              <span class="{Style.cls [ Style.avatarSm; authorAvatar holder ]}"></span>
               <span class="{Style.small}">{who}</span>
               <div class="ml-auto flex items-center gap-2">{control}</div>
             </div>"""
@@ -1261,7 +1274,7 @@ module View =
         let id = TerminalId.value terminal
         let body =
             if screen = "" then
-                html $"""<div class="{Style.terminalOutputEmpty}">Waiting for this terminal's screen…</div>"""
+                html $"""<div class="{Style.terminalOutputEmpty}">…</div>"""
             else html $"""{ansiText screen}"""
         if holder = mine then
             // `tabindex="0"` and a keydown handler rather than a text input: what is being
@@ -1348,10 +1361,10 @@ module View =
                 html $"""
                     <div class="{Style.terminalQueuedRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
                       <span class="{Style.statusErr}">not marking</span>
-                      <span class="{Style.small}">This terminal's shell stopped reporting when commands start and finish, so queued commands are held.</span>
+                      <span class="{Style.small}">queued commands held</span>
                       <div class="ml-auto flex items-center gap-2">
                         <button type="button" class="{Style.btnPrimary}" data-terminal-rearm="{TerminalId.value terminal}"
-                                @click={Ev(fun _ -> actions.RearmTerminal terminal)}>Re-arm it</button>
+                                @click={Ev(fun _ -> actions.RearmTerminal terminal)}>Re-arm</button>
                       </div>
                     </div>"""
         html $"""
@@ -1391,19 +1404,24 @@ module View =
             | Some reason -> sprintf "closed — %s" reason
             | None -> "closed"
         if gone then
+            // The gap in the audit trail, stated as a status rather than narrated: the drop
+            // is recorded so it can be SAID, and the caps-err voice is how this design says
+            // a fact that is wrong.
             html $"""
                 <section class="{Style.terminalComposer}" data-terminal-replay-gone="{TerminalId.value view.TerminalId}">
                   <div class="{Style.terminalQueuedRow}">
                     <span class="{Style.statusFaint}">{closedFor}</span>
-                    <span class="{Style.small}">This terminal printed more than its recording keeps. The commands it ran are above; what they printed is no longer kept.</span>
+                    <span class="{Style.statusErr}">recording not kept</span>
                   </div>
                 </section>"""
         else
+            // The player under this row is visibly a recording; a caption saying so was
+            // chrome. The row keeps only what the player cannot show — why the terminal
+            // closed.
             html $"""
                 <section class="{Style.terminalComposer}">
                   <div class="{Style.terminalQueuedRow}">
                     <span class="{Style.statusFaint}">{closedFor}</span>
-                    <span class="{Style.small}">A recording of everything this terminal printed.</span>
                   </div>
                   <div class="{Style.terminalBlocks}" role="region" aria-label="Terminal recording"
                        data-pane-replay="{PaneTab.key (TerminalTab view.TerminalId)}"></div>
@@ -1445,7 +1463,7 @@ module View =
         | None ->
             html $"""
                 <div class="{Style.paneReadonly}" data-pane-block="{BlockId.value blockId}">
-                  <div class="{Style.terminalOutputEmpty}">This command is not in the record this client has read.</div>
+                  <div class="{Style.terminalOutputEmpty}">not in this client's record</div>
                 </div>"""
         | Some block ->
             // The step-out, offered only where there is a whole recording to step out INTO.
@@ -1471,9 +1489,11 @@ module View =
                     html $"""<div class="{Style.terminalOutputEmpty}">rejected by {authorLabel by} — {text}</div>"""
                 // A recording that is still being written has no end to replay to, and a
                 // player rebuilt on every record would thrash through a streaming build.
-                // The terminal's own tab is where you watch this happen.
+                // The command row above already carries the pulsing "running" status; the
+                // body says only that output is still arriving, the same way a live block's
+                // empty output does.
                 | BlockRunning ->
-                    html $"""<div class="{Style.terminalOutputEmpty}">Still running — the recording is ready when it finishes.</div>"""
+                    html $"""<div class="{Style.terminalOutputEmpty}">…</div>"""
                 | BlockFinished _ ->
                     html $"""
                         <div class="{Style.paneReadonly}" role="region" aria-label="Command output"
@@ -1495,13 +1515,15 @@ module View =
     let private paneStretchView (stretch: TerminalStretch) : TemplateResult =
         let length = durationText (TerminalStretch.duration stretch)
         let recording =
+            // The count in the metadata voice (caps, tabular figures); the raw transcript
+            // seqs are plumbing and stay out of the room.
             match stretch.Range with
             | Some (fromSeq, toSeq) ->
-                html $"""<span class="{Style.small}">{toSeq - fromSeq} recorded lines, from {fromSeq} to {toSeq}.</span>"""
+                html $"""<span class="{Style.label} tabular-nums">{toSeq - fromSeq} lines</span>"""
             // Stated, not blank: a stretch with no recorded bounds is a gap in the record,
             // and an empty player would be indistinguishable from a quiet session.
             | None ->
-                html $"""<span class="{Style.small}">No range was recorded for this session, so there is nothing to play back.</span>"""
+                html $"""<span class="{Style.statusErr}">not recorded</span>"""
         let player =
             match stretch.Range with
             | Some _ ->
@@ -1595,11 +1617,13 @@ module View =
             let feed = ClientModel.terminalFeed view.TerminalId model
             let truncated =
                 if view.DroppedBytes > 0 then
-                    html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{view.DroppedBytes} bytes of output were not recorded</div>"""
+                    html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{view.DroppedBytes} bytes dropped</div>"""
                 else Lit.nothing
             let blocks =
+                // An idle prompt IS the empty state a terminal-shaped surface already has a
+                // symbol for; "nothing has run here yet" was the same fact as a sentence.
                 if List.isEmpty view.Blocks then
-                    [ html $"""<div class="{Style.terminalOutputEmpty}">Nothing has run here yet.</div>""" ]
+                    [ html $"""<div class="{Style.terminalOutputEmpty}"><span class="{Style.terminalPrompt}">$</span></div>""" ]
                 else view.Blocks |> List.map (terminalBlockView feed)
             // The DVR (Plan 14, stage 7): step back through what this terminal has recorded
             // so far while it keeps running, and catch back up. Offered on any LIVE terminal
@@ -1671,10 +1695,13 @@ module View =
                  else terminalComposer actions dispatch model view.TerminalId}"""
         let body =
             match selected with
+            // The empty pane wears the terminal's own symbol — an idle prompt, display-sized
+            // — and the one button that fills it. What a terminal IS was a paragraph here;
+            // the glyph and the verb say it.
             | None ->
                 html $"""
                     <div class="{Style.terminalEmpty}">
-                      <span class="{Style.small}">Nothing is open. A terminal runs commands in this session's workspace — everything it prints is recorded.</span>
+                      <span class="font-mono text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
                       <button type="button" class="{Style.btnPrimary}" data-terminal-new
                               @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
                     </div>"""

@@ -82,7 +82,7 @@ let private tableTemplate (access: PublicAccess) (views: ProcessManager.SessionV
         | [] ->
             [ html $"""
                 <tr>
-                  <td colspan="4" class="py-10 text-center {Style.small}">no sessions yet — name one above and create it</td>
+                  <td colspan="4" class="py-10 text-center {Style.small}">no sessions yet</td>
                 </tr>""" ]
         | views -> views |> List.map (rowTemplate access)
     html $"""
