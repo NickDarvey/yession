@@ -1,14 +1,17 @@
 # Plan 15 — The imperative session API: commands the agent runs, queries everyone reads
 
-> **Status: stages 1 and 2 shipped.** Stage 1: the query registry, its two projections
+> **Status: stages 1, 2 and 3 shipped.** Stage 1: the query registry, its two projections
 > (generated MCP tools and a generated settings surface over one multiplexed SSE stream),
 > and the repos migration that retired the Repos panel's write actions. Stage 2: named
 > WorkSandboxes with ensure semantics, named credential forwarding, terminals bound to a
-> sandbox, and the `work_sandboxes` query. Stage 3 (approval gates for commands in
-> general) follows. Builds on Plan 14's repo manager and Plan 13's one-door terminals.
+> sandbox, and the `work_sandboxes` query. Stage 3: ONE approval gate, of which the
+> terminal's is a case — one mode, one subject, one pending list, one handle, one resume
+> verb, one card at two mount points. Builds on Plan 14's repo manager and Plan 13's
+> one-door terminals.
 >
 > Deviations are in [What stage 1 shipped](#what-stage-1-shipped) and
-> [What stage 2 shipped](#what-stage-2-shipped) at the foot of this document.
+> [What stage 2 shipped](#what-stage-2-shipped) at the foot of this document; stage 3's
+> are recorded inline with its sub-stages, where the reasoning they belong to is.
 
 Plan 14 shipped one repo manager with two interfaces: the agent's MCP verbs and a Repos
 panel that could drive every one of them. That is symmetric, and symmetry is the wrong
@@ -291,7 +294,17 @@ focus on.
     Buying durability instead would mean putting the raw arguments in the doc and dispatching
     by tool name — named in Deferred rather than half-built.
 - **3c** — the one card, both mounts, and the mode control generalized from the terminal's
-  existing `<select>`.
+  existing `<select>`. Two concretions:
+
+  - **The gate settings surface lists the commands somebody has CONFIGURED**, not every
+    command the session has. Gating one nobody has named needs the browser to know what
+    commands exist, and nothing declares that to it — the read half of this plan does exactly
+    that for queries, and doing it for commands is the same shape. Deferred rather than faked
+    with a hard-coded list that goes stale the first time a command is added.
+  - **A verdict hands focus on** (`ViewActions.FocusAfterVerdict`): to the next proposal's
+    primary control, else the list, else the timeline. Approving REMOVES the card the button
+    was on, which is the stranded-focus case CLAUDE.md names — and worse here than for the
+    DVR's pair, because a reviewer working down a list loses their place on every decision.
 
 ## Stated risks
 

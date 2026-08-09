@@ -108,7 +108,12 @@ type ViewActions =
       /// Hand focus to whichever DVR control replaced the one just pressed (Plan 14,
       /// stage 7): Rewind and Jump-to-live each remove the other from the document, so the
       /// press that swaps them would otherwise strand focus on a control that has gone.
-      FocusDvr : TerminalId -> unit }
+      FocusDvr : TerminalId -> unit
+      /// Hand focus on after a verdict (Plan 15, stage 3c). Approving or refusing REMOVES
+      /// the card the button was on, which is precisely the stranded-focus case the WCAG
+      /// floor names — and it is worse here than for the DVR's pair, because a reviewer
+      /// working down a list of proposals loses their place on every decision.
+      FocusAfterVerdict : unit -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -138,7 +143,8 @@ module ViewActions =
           ResizeTerminal = fun _ _ _ -> ()
           FocusPane = ignore
           FocusChat = ignore
-          FocusDvr = ignore }
+          FocusDvr = ignore
+          FocusAfterVerdict = ignore }
 
 module View =
 
@@ -541,6 +547,36 @@ module View =
                   {queryValueView def.Shape (Map.tryFind name queries.Values)}
                 </section>""")
 
+    /// The command gates a session has (Plan 15, stage 3c): the same three-option control the
+    /// terminal's header carries, over `ForCommand` subjects instead of `ForTerminal` ones.
+    /// One register, one vocabulary, one control.
+    ///
+    /// It lists the commands somebody has already configured — the operator's
+    /// `YESSION_GATED_COMMANDS`, or a mode a peer set earlier — rather than every command the
+    /// session has. Gating one that nobody has named needs the browser to know what commands
+    /// EXIST, which nothing declares to it yet; the read half of this API does exactly that
+    /// for queries, and doing it for commands is the same shape. Deferred rather than faked
+    /// with a hard-coded list that goes stale the first time a command is added.
+    let private gatesSection (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult list =
+        model.Synced.Gates
+        |> Map.toList
+        |> List.choose (fun (subject, mode) ->
+            match subject with
+            | ForTerminal _ -> None
+            | ForCommand tool -> Some (tool, mode))
+        |> List.sortBy fst
+        |> List.map (fun (tool, mode) ->
+            html $"""
+                <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-gate-panel="{tool}">
+                  <label class="{Style.label}" for="gate-{tool}">{tool}</label>
+                  <select id="gate-{tool}" class="{Style.field} w-auto" data-gate-mode="{ApprovalMode.describe mode}"
+                          @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (ForCommand tool, m)) | None -> ())}>
+                    <option value="approve-agent" ?selected={mode = ApproveAgent}>needs a human to approve it</option>
+                    <option value="approve-all" ?selected={mode = ApproveAll}>needs a human to approve it, always</option>
+                    <option value="auto" ?selected={mode = AutoRun}>runs without asking</option>
+                  </select>
+                </section>""")
+
     /// Settings, as the sidebar column's OTHER FACE. Not a drawer over the conversation: you
     /// go there and come back, the timeline never moves under a scrim, and configuration keeps
     /// the section rhythm it already had. Open state is the root element's `settings-open`
@@ -560,6 +596,7 @@ module View =
               {claudeSection actions dispatch model.Claude}
               {githubSection actions dispatch model.GitHub}
               {queriesSection model.Queries}
+              {gatesSection dispatch model}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
             </div>"""
@@ -1055,63 +1092,137 @@ module View =
               {body}
             </article>"""
 
-    /// The queued commands for a terminal: still editable, still reorderable, and — when the
-    /// terminal's mode says so — still waiting for someone to say yes. That waiting state is
-    /// the approval UX: there is no modal, because the thing you approve is a thing you can
-    /// fix first.
-    let private terminalQueue (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult list =
-        ClientModel.terminalQueue terminal model
-        |> List.map (fun entry ->
-            let id = entry.QueueId
-            let awaiting = ClientModel.awaitsApproval entry model
-            // Approval outranks the lease in what is REPORTED, matching the drain's own gate
-            // order in reverse: an entry that needs a yes needs it whether or not the terminal
-            // is free, so saying "waiting for the terminal" would name the hold that will
-            // resolve first rather than the one that is actually blocking.
-            let statusToken =
-                if awaiting then Dom.Text.queuedAwaitingApproval
-                elif ClientModel.awaitsIntegration entry model then Dom.Text.queuedAwaitingIntegration
-                elif ClientModel.awaitsTerminal entry model then Dom.Text.queuedAwaitingTerminal
-                else Dom.Text.queuedReady
-            let approval =
-                if awaiting then
-                    html $"""
-                        <button type="button" class="{Style.btnPrimary}" data-terminal-approve="{QueueId.value id}"
-                                @click={Ev(fun _ -> dispatch (ApprovePendingMsg (id, model.Peer.PeerId)))}>Approve</button>"""
-                elif Option.isSome entry.ApprovedBy then
-                    html $"""
-                        <button type="button" class="{Style.btn}" data-terminal-unapprove="{QueueId.value id}"
-                                @click={Ev(fun _ -> dispatch (UnapprovePendingMsg id))}>Hold</button>"""
-                else Lit.nothing
-            // Reject sits beside approve wherever a verdict is possible, and it is offered
-            // on every entry rather than only awaiting ones: under AutoRun nothing is ever
-            // "awaiting", and that is exactly where being able to say no matters most.
-            // Deleting is still there and still means withdrawal — this means refusal, and
-            // the log records the difference.
-            let reject =
+    /// ONE card for anything waiting on a verdict (Plan 15, stage 3c): a command queued in a
+    /// terminal, or a structured command parked at its gate. Approving is the same act either
+    /// way, so it is the same component — the alternative being two surfaces that drift until
+    /// one of them grows a button the other does not have.
+    ///
+    /// Rendered at two mount points from this one function: the chat column, where every
+    /// pending act appears with the chip that says what it is about, and a terminal's own
+    /// panel, where the list is filtered to that terminal and the chip would only repeat the
+    /// heading above it.
+    let private pendingCard
+        (actions: ViewActions)
+        (dispatch: ClientMsg -> unit)
+        (model: ClientModel)
+        (showSubject: bool)
+        (entry: PendingAct)
+        : TemplateResult =
+        let id = entry.QueueId
+        let awaiting = ClientModel.awaitsApproval entry model
+        // Approval outranks the lease in what is REPORTED, matching the drain's own gate
+        // order in reverse: an entry that needs a yes needs it whether or not the terminal
+        // is free, so saying "waiting for the terminal" would name the hold that will
+        // resolve first rather than the one that is actually blocking.
+        let statusToken =
+            if awaiting then Dom.Text.queuedAwaitingApproval
+            elif ClientModel.awaitsIntegration entry model then Dom.Text.queuedAwaitingIntegration
+            elif ClientModel.awaitsTerminal entry model then Dom.Text.queuedAwaitingTerminal
+            else Dom.Text.queuedReady
+        // What this act IS, in words — used both as the chip and as the accessible name on
+        // the verdict buttons, because a screen reader hearing "Approve" eleven times learns
+        // nothing about which one it is on.
+        let subjectLabel =
+            match entry.Subject with
+            | ForTerminal terminal ->
+                TerminalProjection.tryFind terminal model.Terminals
+                |> Option.map (fun view -> view.Title)
+                |> Option.defaultValue (TerminalId.value terminal)
+            | ForCommand tool -> tool
+        let what =
+            match entry.Payload with
+            | CommandLine -> subjectLabel
+            | CommandCall (_, summary) -> summary
+        let subject =
+            if not showSubject then Lit.nothing
+            else html $"""<span class="{Style.chatChipWho}" data-pending-subject="{GateSubject.describe entry.Subject}">{subjectLabel}</span>"""
+        // The body is the ONE thing that differs between the kinds. A command line is
+        // characters, so it is an input any peer can fix before approving — that IS the
+        // approval UX. A structured call's arguments are typed, and a form per command is
+        // the JSON-Schema-subset renderer this plan deferred, so it is read-only and the
+        // verdict is the whole interaction.
+        let body =
+            match entry.Payload with
+            | CommandLine ->
                 html $"""
-                    <button type="button" class="{Style.btn}" data-terminal-reject="{QueueId.value id}"
-                            @click={Ev(fun _ -> dispatch (RejectPendingMsg (id, model.Peer.PeerId, None)))}>Reject</button>"""
+                    <div class="{Style.terminalQueuedRow}">
+                      <span class="{Style.terminalPrompt}">$</span>
+                      <input type="text" class="{Style.fieldMonoBare}" aria-label="Queued command"
+                             data-terminal-input="{BodyKey.terminalQueued id}">
+                    </div>"""
+            | CommandCall (_, summary) ->
+                html $"""
+                    <div class="{Style.terminalQueuedRow}">
+                      <code class="{Style.terminalCommandText}" data-pending-summary>{summary}</code>
+                    </div>"""
+        let approval =
+            if awaiting then
+                html $"""
+                    <button type="button" class="{Style.btnPrimary}" data-terminal-approve="{QueueId.value id}"
+                            aria-label="Approve {what}"
+                            @click={Ev(fun _ -> dispatch (ApprovePendingMsg (id, model.Peer.PeerId)); actions.FocusAfterVerdict ())}>Approve</button>"""
+            elif Option.isSome entry.ApprovedBy then
+                html $"""
+                    <button type="button" class="{Style.btn}" data-terminal-unapprove="{QueueId.value id}"
+                            aria-label="Hold {what}"
+                            @click={Ev(fun _ -> dispatch (UnapprovePendingMsg id))}>Hold</button>"""
+            else Lit.nothing
+        // Reject sits beside approve wherever a verdict is possible, and it is offered
+        // on every entry rather than only awaiting ones: under AutoRun nothing is ever
+        // "awaiting", and that is exactly where being able to say no matters most.
+        // Deleting is still there and still means withdrawal — this means refusal, and
+        // the log records the difference.
+        let reject =
             html $"""
-                <article class="{if awaiting then Style.terminalQueuedAwaiting else Style.terminalQueuedReady}"
-                         data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
-                  <div class="{Style.terminalQueuedRow}">
-                    <span class="{Style.terminalPrompt}">$</span>
-                    <input type="text" class="{Style.fieldMonoBare}" aria-label="Queued command"
-                           data-terminal-input="{BodyKey.terminalQueued id}">
-                  </div>
-                  <div class="{Style.terminalQueuedRow}">
-                    <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if statusToken = Dom.Text.queuedAwaitingApproval then "waiting for approval" elif statusToken = Dom.Text.queuedAwaitingIntegration then "waiting for the terminal to be re-armed" elif statusToken = Dom.Text.queuedAwaitingTerminal then "waiting for the terminal" else "queued"}</span>
-                    <span class="{Style.small}">{authorLabel entry.Author}</span>
-                    <div class="ml-auto flex items-center gap-2">
-                      {reject}
-                      {approval}
-                      <button type="button" class="{Style.btnIcon}" aria-label="Move up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.up}</button>
-                      <button type="button" class="{Style.btnIcon}" aria-label="Move down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.down}</button>
-                      <button type="button" class="{Style.btnIconDanger}" aria-label="Delete" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>
-                    </div>
-                  </div>
-                </article>""")
+                <button type="button" class="{Style.btn}" data-terminal-reject="{QueueId.value id}"
+                        aria-label="Reject {what}"
+                        @click={Ev(fun _ -> dispatch (RejectPendingMsg (id, model.Peer.PeerId, None)); actions.FocusAfterVerdict ())}>Reject</button>"""
+        // Order and withdrawal belong to a queue that DRAINS serially. A command act has no
+        // shell to wait for and no place in a line, so offering to move it up would be a
+        // control over nothing.
+        let ordering =
+            match PendingAct.terminal entry with
+            | None -> Lit.nothing
+            | Some _ ->
+                html $"""
+                    <button type="button" class="{Style.btnIcon}" aria-label="Move {what} up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                    <button type="button" class="{Style.btnIcon}" aria-label="Move {what} down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                    <button type="button" class="{Style.btnIconDanger}" aria-label="Delete {what}" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>"""
+        html $"""
+            <article class="{if awaiting then Style.terminalQueuedAwaiting else Style.terminalQueuedReady}"
+                     data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
+              {body}
+              <div class="{Style.terminalQueuedRow}">
+                <span class="{if awaiting then Style.statusRun else Style.statusOk}">{if statusToken = Dom.Text.queuedAwaitingApproval then "waiting for approval" elif statusToken = Dom.Text.queuedAwaitingIntegration then "waiting for the terminal to be re-armed" elif statusToken = Dom.Text.queuedAwaitingTerminal then "waiting for the terminal" else "queued"}</span>
+                {subject}
+                <span class="{Style.small}">{authorLabel entry.Author}</span>
+                <div class="ml-auto flex items-center gap-2">
+                  {reject}
+                  {approval}
+                  {ordering}
+                </div>
+              </div>
+            </article>"""
+
+    /// A terminal's own pending list: the same card, filtered to this terminal, with the
+    /// chip off because the heading above it already says which terminal this is.
+    let private terminalQueue (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult list =
+        ClientModel.terminalQueue terminal model |> List.map (pendingCard actions dispatch model false)
+
+    /// Everything waiting on a verdict, in the chat column, directly under the timeline
+    /// (Plan 15, stage 3c). Not INSIDE the timeline: that is a fold over events, and a
+    /// pending act is not one — it is the tail, and acts join the timeline when they resolve.
+    ///
+    /// Terminal commands appear here too, and that is the point rather than a side effect:
+    /// approving what the agent is about to run is the same act as reading what it is about
+    /// to say, and it should not require having the right panel open.
+    let private pendingActs (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        match ClientModel.pendingActs model with
+        | [] -> Lit.nothing
+        | acts ->
+            let cards = acts |> List.map (pendingCard actions dispatch model true)
+            html $"""
+                <section class="{Style.queue}" data-pending-acts aria-label="Waiting for a decision">{cards}</section>"""
 
     /// The lease bar (Plan 13, stage 2e): who is typing here, and the one control that
     /// changes it. Shown in place of the command lines — never in place of the queue, which
@@ -1255,14 +1366,14 @@ module View =
               <div class="{Style.sideRow}">
                 <label class="{Style.label}" for="terminal-mode">approval</label>
                 <select id="terminal-mode" class="{Style.field} w-auto" data-terminal-mode="{ApprovalMode.describe mode}"
-                        @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetTerminalModeMsg (terminal, m)) | None -> ())}>
+                        @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (ForTerminal terminal, m)) | None -> ())}>
                   <option value="approve-agent" ?selected={mode = ApproveAgent}>the agent's commands</option>
                   <option value="approve-all" ?selected={mode = ApproveAll}>every command</option>
                   <option value="auto" ?selected={mode = AutoRun}>nothing — run them</option>
                 </select>
                 {takeControl}
               </div>
-              {terminalQueue dispatch model terminal}
+              {terminalQueue actions dispatch model terminal}
               {commandLines}
             </section>"""
 
@@ -1635,6 +1746,7 @@ module View =
               {header actions dispatch model}
               {degradedBanner model}
               {chat actions dispatch model}
+              {pendingActs actions dispatch model}
               {agentStrip actions model.Agent}
               {queue dispatch model.Synced}
               {drafts actions dispatch model}

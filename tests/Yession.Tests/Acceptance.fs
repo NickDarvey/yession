@@ -596,6 +596,44 @@ let private uiChecklistTests =
             Expect.isFalse (html.Contains ">true<") "the wire's boolean does not reach the page"
             Expect.isTrue (html.Contains "data-query-pending") "an unanswered query says so rather than rendering nothing"
 
+        // The one approval card, at both mount points (Plan 15, stage 3c). What is worth
+        // pinning is that the CHAT column carries the terminal's pending commands too: the
+        // whole claim of this stage is that approving what the agent is about to run is the
+        // same act as reading what it is about to say, and a card only a panel shows would
+        // quietly make it a different one again.
+        testCase "everything waiting on a verdict appears in the chat column" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains "data-pending-acts") "the chat column carries the pending list"
+            let listStart = html.IndexOf "data-pending-acts"
+            Expect.isTrue (listStart > 0) "the list is rendered"
+            let list = html.Substring (listStart, min 2000 (html.Length - listStart))
+            // The representative model's one pending act is the AGENT's terminal command
+            // under the default mode — the case the gate exists for.
+            Expect.isTrue (list.Contains "data-terminal-queued") "with the terminal's own queued command in it"
+            Expect.isTrue (list.Contains "data-pending-subject") "and a chip saying what it is about"
+
+        // The a11y floor for a list of near-identical controls: "Approve" eleven times tells
+        // a screen-reader user nothing about which one they are on.
+        testCase "every verdict control is named for the act it decides" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains "aria-label=\"Approve ") "approve names its act"
+            Expect.isTrue (html.Contains "aria-label=\"Reject ") "reject names its act"
+
+        // The gate control, generalized (Plan 15, stage 3c): the same three options the
+        // terminal header carries, over a command subject. One register, one vocabulary.
+        testCase "a configured command gate renders the same control a terminal's mode does" <| fun () ->
+            let model =
+                { representativeModel with
+                    Synced =
+                        { representativeModel.Synced with
+                            Gates = Map.ofList [ ForCommand "add_repo", ApproveAgent ] } }
+            let html = Support.render model
+            Expect.isTrue (html.Contains "data-gate-panel=\"add_repo\"") "the configured command has a control"
+            Expect.isTrue (html.Contains "data-gate-mode=\"approve-agent\"") "showing the mode it is on"
+            // A terminal is not listed here — its control lives on the terminal, where the
+            // thing it is about is.
+            Expect.isFalse (html.Contains "data-gate-panel=\"term") "and a terminal subject is not in this list"
+
         // The structure a table owes a screen reader (CLAUDE.md, UI baseline). Held in the
         // renderer, so it is held for every query — the reason the surface is generated.
         testCase "a rows query renders a real table with column headers" <| fun () ->
