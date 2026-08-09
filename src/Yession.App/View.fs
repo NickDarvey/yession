@@ -954,10 +954,10 @@ module View =
         // no avatar and no rich body (Plan 14, repos). It rides the same timeline slot a
         // message does (both are `ConversationItem`s at an offset); `Kind` is what tells the
         // two apart at render time.
-        let repoNoteItem (item: ConversationItem) =
+        let actNoteItem (item: ConversationItem) =
             html $"""
-                <article class="{Style.repoNote}" data-message-id="{MessageId.value item.MessageId}" data-repo-note data-message-author="{authorLabel item.Author}">
-                  <span class="{Style.repoNoteText}">{authorLabel item.Author} {item.Body}</span>
+                <article class="{Style.actNote}" data-message-id="{MessageId.value item.MessageId}" data-act-note data-message-author="{authorLabel item.Author}">
+                  <span class="{Style.actNoteText}">{authorLabel item.Author} {item.Body}</span>
                 </article>"""
         let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
@@ -980,7 +980,7 @@ module View =
                 </article>"""
         let message (item: ConversationItem) =
             match item.Kind with
-            | ConversationItemKind.RepoNote -> repoNoteItem item
+            | ConversationItemKind.ActNote -> actNoteItem item
             | ConversationItemKind.Message -> messageItem item
         // One line: who ran what, and how it went. No output — a tail inline would make the
         // chat noisiest exactly when it is busiest, and would put everything a command

@@ -113,7 +113,7 @@ let private withLiveTerminal
             let terminals =
                 SessionTerminals.create
                     log
-                    environment
+                    (fun _ -> environment)
                     (fun _ _ -> transcript)
                     Yession.Host.Emulator.openEmulator
                     SessionTerminals.TerminalShell.bash
@@ -124,7 +124,7 @@ let private withLiveTerminal
                     (fun _ _ _ -> ())
                     (fun () -> reDrains <- reDrains + 1)
                     []
-            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) name with
+            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) name SandboxName.defaultName with
             | Error e -> failwith e
             | Ok id ->
                 do! body terminals id records log (fun () -> reDrains) advance

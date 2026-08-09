@@ -215,7 +215,22 @@ let private frameSerializationTests =
                   CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandExecutionFailed "denied" }
                   RepoAdded { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "main"; Actor = PeerRef peerId }
                   RepoRemoved { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Actor = ActorRef.Agent }
-                  RepoBranchSwitched { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "feature/x"; Created = true; Actor = UserRef (UserId.create "alice" |> expect) } ]
+                  RepoBranchSwitched { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "feature/x"; Created = true; Actor = UserRef (UserId.create "alice" |> expect) }
+                  WorkSandboxStarted
+                    { MessageId = messageId
+                      Sandbox = SandboxName.create "test" |> expect
+                      Backend = "srt"
+                      Forwarded = [ "github" ]
+                      CredentialOwner = Some (UserRef (UserId.create "alice" |> expect))
+                      Actor = ActorRef.Agent }
+                  WorkSandboxStarted
+                    { MessageId = messageId
+                      Sandbox = SandboxName.defaultName
+                      Backend = "host"
+                      Forwarded = []
+                      CredentialOwner = None
+                      Actor = PeerRef peerId }
+                  WorkSandboxStopped { MessageId = messageId; Sandbox = SandboxName.create "test" |> expect; Actor = ActorRef.Agent } ]
             for event in everyCase do
                 let env = { sampleEnvelope with Event = event }
                 let roundTripped =
@@ -292,7 +307,7 @@ let private repoTests =
                       Timestamp = DateTimeOffset(2026, 8, 8, 10, 0, 0, TimeSpan.Zero)
                       Event = event })
             let proj, _ = ConversationProjection.applyEvents None envelopes ConversationProjection.empty
-            Expect.equal (proj.Items |> List.map (fun i -> i.Kind)) [ ConversationItemKind.RepoNote; ConversationItemKind.RepoNote; ConversationItemKind.RepoNote ] "all notes"
+            Expect.equal (proj.Items |> List.map (fun i -> i.Kind)) [ ConversationItemKind.ActNote; ConversationItemKind.ActNote; ConversationItemKind.ActNote ] "all notes"
             Expect.equal (proj.Items |> List.map (fun i -> i.Body))
                 [ "added repo octo/hello (branch main)"; "switched octo/hello to branch fix/y"; "removed repo octo/hello" ]
                 "the notes read as sentences"

@@ -274,3 +274,34 @@ module RepoRef =
 
     /// Where the checkout lives under the session's repos directory.
     let relativePath (RepoRef (o, r)) : string = sprintf "%s/%s" o r
+
+/// The name of one of the session's WorkSandboxes (Plan 15, stage 2). A session used to
+/// have exactly one, so it needed no name; now the agent can ask for a `test` sandbox
+/// beside the `default` one and get the SAME sandbox back on the second ask — which is
+/// the whole point of naming them, and the property the declarative form will lean on
+/// when it folds a file into these commands at boot.
+///
+/// The charset is the intersection of everything a name has to survive: a Docker
+/// container/volume name component, a directory under the session's data dir, and a
+/// terminal's label. Lowercase alphanumerics plus `-`/`_`, starting with a letter or
+/// digit — narrow enough that no downstream consumer needs to escape it.
+type SandboxName = private SandboxName of string
+
+module SandboxName =
+
+    /// The sandbox a session has always had. Terminals opened without naming one land
+    /// here, so every pre-Plan-15 session behaves exactly as it did.
+    let defaultName = SandboxName "default"
+
+    let create (raw: string) : Result<SandboxName, string> =
+        let name = (defaultArg (Option.ofObj raw) "").Trim ()
+        let charOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '-' || c = '_'
+        let startOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+        if name = "" then Error "sandbox name cannot be empty"
+        elif name.Length > 40 then Error (sprintf "'%s' is too long for a sandbox name (40 characters)" name)
+        elif not (startOk name.[0]) then
+            Error (sprintf "'%s' is not a sandbox name (it must start with a lowercase letter or digit)" name)
+        elif name |> Seq.forall charOk then Ok (SandboxName name)
+        else Error (sprintf "'%s' is not a sandbox name (lowercase letters, digits, '-' and '_' only)" name)
+
+    let value (SandboxName name) = name

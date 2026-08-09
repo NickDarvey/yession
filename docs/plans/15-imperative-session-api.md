@@ -1,13 +1,14 @@
 # Plan 15 — The imperative session API: commands the agent runs, queries everyone reads
 
-> **Status: stage 1 shipped** — the query registry, its two projections (generated MCP
-> tools and a generated settings surface over one multiplexed SSE stream), and the repos
-> migration that retired the Repos panel's write actions. Stages 2 (named WorkSandboxes
-> and named credential forwarding) and 3 (approval gates for commands in general) follow.
-> Builds on Plan 14's repo manager and Plan 13's one-door terminals.
+> **Status: stages 1 and 2 shipped.** Stage 1: the query registry, its two projections
+> (generated MCP tools and a generated settings surface over one multiplexed SSE stream),
+> and the repos migration that retired the Repos panel's write actions. Stage 2: named
+> WorkSandboxes with ensure semantics, named credential forwarding, terminals bound to a
+> sandbox, and the `work_sandboxes` query. Stage 3 (approval gates for commands in
+> general) follows. Builds on Plan 14's repo manager and Plan 13's one-door terminals.
 >
-> Deviations taken while implementing stage 1 are in
-> [What stage 1 shipped](#what-stage-1-shipped) at the foot of this document.
+> Deviations are in [What stage 1 shipped](#what-stage-1-shipped) and
+> [What stage 2 shipped](#what-stage-2-shipped) at the foot of this document.
 
 Plan 14 shipped one repo manager with two interfaces: the agent's MCP verbs and a Repos
 panel that could drive every one of them. That is symmetric, and symmetry is the wrong
@@ -206,3 +207,35 @@ Deviations and concretions against the sections above:
   same-origin — which is the whole authentication story for a cookie-gated route.
 - **`ReposViewState` lost `Busy` and `Error` rather than keeping them unused.** The surface
   has no actions, so nothing can be in flight; the absence is the design.
+
+
+## What stage 2 shipped
+
+- **`execute_command` gained the sandbox, and that is what makes the feature real.** A
+  started sandbox nobody can run in is a listing. The tool's target became a
+  `CommandTarget` (`InTerminal id | InSandbox name`, `None` = the default sandbox's agent
+  terminal), and the Host keeps one agent terminal PER SANDBOX — a single cell would have
+  quietly run a command meant for `test` in whichever sandbox opened first.
+- **`ConversationItemKind.RepoNote` became `ActNote`.** The sandbox events fold into the
+  timeline for the repo notes' reason, and a kind per capability would have been a renderer
+  per capability. Mechanical rename; the markup hook is `data-act-note`.
+- **The refusal names both sides and the way out.** Same name with different forwarding
+  answers with what is running, what was asked for, and `stop_work_sandbox` — because the
+  alternative (recreating) kills whatever is inside, and a caller that is told only "no"
+  will try the same thing again.
+- **Forwarding lists are normalised** (trimmed, lowercased, deduped, sorted) before they
+  are compared, so `["GitHub","github"]` is the same ask as `["github"]` rather than a
+  configuration change nobody made.
+- **A credential the caller does not have refuses the start.** Coming up without it would
+  turn a legible "sign in first" into a `git push` failure much later, somewhere with less
+  context.
+- **`default` keeps its entry when stopped**, losing only its configuration: it is the
+  sandbox a terminal that names nothing lands in, so the NAME has to stay reachable. Every
+  other name leaves the registry entirely, which is what makes stop-then-start-differently
+  work.
+- **Each named sandbox gets its own workspace** (`<dataDir>/sandboxes/<name>/workspace`)
+  and its own backend object name; `default` keeps the path it always had. The repos
+  directory is shared by all of them, which is what it is for.
+- **`TerminalOpened.Sandbox` decodes as optional**, defaulting to `default`: a log written
+  before this stage has terminals that ran in the one sandbox the session had, so that is
+  not a guess.

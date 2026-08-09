@@ -91,6 +91,13 @@ type SessionEvent =
     | RepoAdded of RepoAdded
     | RepoRemoved of RepoRemoved
     | RepoBranchSwitched of RepoBranchSwitched
+    // Named WorkSandboxes (Plan 15, stage 2). A session used to have exactly one
+    // environment, whose lifecycle is the `Environment*` events above — those stay, and
+    // stay the record of what the SANDBOX did. These record what a PARTY asked for: an
+    // act, attributed, with its own MessageId so it reads in the timeline beside the repo
+    // notes it is a sibling of.
+    | WorkSandboxStarted of WorkSandboxStarted
+    | WorkSandboxStopped of WorkSandboxStopped
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -190,7 +197,13 @@ and TerminalOpened =
       /// decides nothing about how it behaves — it is attribution, for the audit.
       OpenedBy : ActorRef
       /// A human label, so a session with four terminals is navigable. Never unique.
-      Title : string }
+      Title : string
+      /// Which of the session's WorkSandboxes it runs in (Plan 15, stage 2). Named on the
+      /// OPEN event because it is fixed for the terminal's life, and because a replayed
+      /// log has to be able to bring the terminal back up in the same sandbox it was in.
+      /// A log written before named sandboxes decodes to `default`, which is where those
+      /// terminals were.
+      Sandbox : SandboxName }
 
 and TerminalClosed =
     { TerminalId : TerminalId
@@ -338,4 +351,27 @@ and RepoBranchSwitched =
       /// True when the switch created the branch (`-b`), false when it checked out an
       /// existing one — one event, because it is one act at the panel and one verb.
       Created : bool
+      Actor : ActorRef }
+
+and WorkSandboxStarted =
+    { MessageId : MessageId
+      Sandbox : SandboxName
+      /// Which backend it came up on, so the record says what confinement it actually
+      /// got rather than what the operator configured at some point.
+      Backend : string
+      /// The credential NAMES forwarded into it — never a value, and never a token
+      /// shape that could be mistaken for one. Forwarding is a fact about the sandbox
+      /// that outlives the turn that asked for it, so the log has to carry it; what the
+      /// credential IS belongs only in the sandbox's env.
+      Forwarded : string list
+      /// Whose credentials were forwarded. Distinct from `Actor` on purpose: for an
+      /// agent-issued start the AGENT is the acting party while the credentials are the
+      /// turn human's (Plan 08 — no borrowing, and the agent has no scope of its own).
+      /// `None` when nothing was forwarded, because then nobody's were.
+      CredentialOwner : ActorRef option
+      Actor : ActorRef }
+
+and WorkSandboxStopped =
+    { MessageId : MessageId
+      Sandbox : SandboxName
       Actor : ActorRef }

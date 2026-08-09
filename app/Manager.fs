@@ -7,6 +7,7 @@ module Yession.Host.Manager
 // listening on its own port); the OS-process split is an adapter concern for later
 // phases, and nothing in the authority contract depends on it. See docs/design.md §3.
 
+open System
 open Yession.Domain
 open Yession.SessionProcess
 
@@ -62,22 +63,42 @@ let createFull
                 // back to the Manager. The WorkSandbox composition is per session: no
                 // secret references in this in-process topology, so the policy is the
                 // spec's plain values under the host baseline.
-                let makeEnvironment =
+                // Named sandboxes (Plan 15) in this topology are all the same shape: the
+                // in-process Manager has no per-name workspace policy to vary, so a name
+                // only changes the environment id. `default` is what everything reaches.
+                let makeSandboxes =
                     makeSandbox
                     |> Option.map (fun make ->
                         let createSandbox = make request.SessionId
                         fun log ->
-                            SessionEnvironment.create
-                                log
-                                createSandbox
-                                (Sandboxes.preparePolicy
-                                    HostBackend
-                                    (fun name -> async { return Error (sprintf "no secrets channel for '%s'" (SecretName.value name)) })
-                                    None
-                                    None
-                                    EnvironmentSpec.defaults)
-                                (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
-                                (sprintf "env-%s" (SessionId.value request.SessionId)))
+                            let create (name: SandboxName) (extraEnv: Map<string, string>) =
+                                let prepare =
+                                    Sandboxes.preparePolicy
+                                        HostBackend
+                                        (fun secret -> async { return Error (sprintf "no secrets channel for '%s'" (SecretName.value secret)) })
+                                        None
+                                        None
+                                        EnvironmentSpec.defaults
+                                Ok (
+                                    SessionEnvironment.create
+                                        log
+                                        createSandbox
+                                        (fun () ->
+                                            async {
+                                                match! prepare () with
+                                                | Error e -> return Error e
+                                                | Ok policy -> return Ok { policy with Env = Sandboxes.mergeEnv policy.Env extraEnv }
+                                            })
+                                        (Sandboxes.summaryFor HostBackend EnvironmentSpec.defaults)
+                                        (sprintf "env-%s-%s" (SessionId.value request.SessionId) (SandboxName.value name)))
+                            match WorkSandboxes.create
+                                    { Backend = SandboxBackend.describe HostBackend
+                                      Credentials = []
+                                      Create = create
+                                      Log = log
+                                      Clock = fun () -> DateTimeOffset.UtcNow } with
+                            | Ok sandboxes -> sandboxes
+                            | Error e -> failwithf "work sandboxes: %s" e)
                 let baseLog = makeLog |> Option.map (fun make -> make request.SessionId)
                 let docStore = makeDocStore |> Option.map (fun make -> make request.SessionId)
                 // In-process sessions run without an HTTP auth gate (there is no OIDC
@@ -87,7 +108,7 @@ let createFull
                     // The in-process Manager path has no control RPC, so no notification
                     // channel — the reverse leg exists only across the OS-process boundary.
                     // No mount: an in-process session is served at its own origin root.
-                    Host.startFull (fun () -> runAgent) makeEnvironment None baseLog docStore None None None (fun _ _ -> ()) None None None request.SessionId None "" None false port
+                    Host.startFull (fun () -> runAgent) makeSandboxes None baseLog docStore None None None (fun _ _ -> ()) None None None request.SessionId None "" None false port
                 let bootstrapUri = sprintf "http://127.0.0.1:%d/" host.Port
                 let managed =
                     { SessionId = request.SessionId

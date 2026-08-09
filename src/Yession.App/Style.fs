@@ -512,8 +512,8 @@ module Style =
 
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
-    let repoNote = "max-w-[46rem] pl-[32px]"
-    let repoNoteText = caps + " text-ink-faint"
+    let actNote = "max-w-[46rem] pl-[32px]"
+    let actNoteText = caps + " text-ink-faint"
 
     /// Read-only rendered Markdown in the timeline (the mirror of the composer's live
     /// formatting). Preflight strips heading/list defaults, so each rendered element carries

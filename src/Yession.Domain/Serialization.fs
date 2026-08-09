@@ -39,6 +39,10 @@ module Codec =
         { Encode = QueueId.value >> Encode.string
           Decode = viaSmartCtor QueueId.create Decode.string }
 
+    let sandboxName : Codec<SandboxName> =
+        { Encode = SandboxName.value >> Encode.string
+          Decode = viaSmartCtor SandboxName.create Decode.string }
+
     let messageId : Codec<MessageId> =
         { Encode = MessageId.value >> Encode.string
           Decode = viaSmartCtor MessageId.create Decode.string }
@@ -363,12 +367,19 @@ module Codec =
                 Encode.object
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "openedBy", actor.Encode p.OpenedBy
-                      "title", Encode.string p.Title ]
+                      "title", Encode.string p.Title
+                      "sandbox", sandboxName.Encode p.Sandbox ]
           Decode =
             Decode.object (fun get ->
                 { TerminalOpened.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalOpened.OpenedBy = get.Required.Field "openedBy" actor.Decode
-                  TerminalOpened.Title = get.Required.Field "title" Decode.string }) }
+                  TerminalOpened.Title = get.Required.Field "title" Decode.string
+                  // OPTIONAL on the way in: a log written before named sandboxes has no
+                  // such field, and those terminals were in the one sandbox the session
+                  // had. Decoding them as `default` is not a guess — it is where they ran.
+                  TerminalOpened.Sandbox =
+                    get.Optional.Field "sandbox" sandboxName.Decode
+                    |> Option.defaultValue SandboxName.defaultName }) }
 
     let private terminalClosed : Codec<TerminalClosed> =
         { Encode =
@@ -573,6 +584,41 @@ module Codec =
                   RepoBranchSwitched.Created = get.Required.Field "created" Decode.bool
                   RepoBranchSwitched.Actor = get.Required.Field "actor" actor.Decode }) }
 
+    let private workSandboxStarted : Codec<WorkSandboxStarted> =
+        { Encode =
+            fun (p: WorkSandboxStarted) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "sandbox", sandboxName.Encode p.Sandbox
+                      "backend", Encode.string p.Backend
+                      // Names only. There is no branch of this codec that can carry a
+                      // credential VALUE, which is the point: the log is replicated to
+                      // every peer, and a shape that could hold a token eventually does.
+                      "forwarded", Encode.list (p.Forwarded |> List.map Encode.string)
+                      "credentialOwner", Encode.option actor.Encode p.CredentialOwner
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { WorkSandboxStarted.MessageId = get.Required.Field "messageId" messageId.Decode
+                  WorkSandboxStarted.Sandbox = get.Required.Field "sandbox" sandboxName.Decode
+                  WorkSandboxStarted.Backend = get.Required.Field "backend" Decode.string
+                  WorkSandboxStarted.Forwarded = get.Required.Field "forwarded" (Decode.list Decode.string)
+                  WorkSandboxStarted.CredentialOwner = get.Required.Field "credentialOwner" (Decode.option actor.Decode)
+                  WorkSandboxStarted.Actor = get.Required.Field "actor" actor.Decode }) }
+
+    let private workSandboxStopped : Codec<WorkSandboxStopped> =
+        { Encode =
+            fun (p: WorkSandboxStopped) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "sandbox", sandboxName.Encode p.Sandbox
+                      "actor", actor.Encode p.Actor ]
+          Decode =
+            Decode.object (fun get ->
+                { WorkSandboxStopped.MessageId = get.Required.Field "messageId" messageId.Decode
+                  WorkSandboxStopped.Sandbox = get.Required.Field "sandbox" sandboxName.Decode
+                  WorkSandboxStopped.Actor = get.Required.Field "actor" actor.Decode }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -648,7 +694,11 @@ module Codec =
                 | RepoRemoved p ->
                     Encode.object [ "type", Encode.string "repoRemoved"; "payload", repoRemoved.Encode p ]
                 | RepoBranchSwitched p ->
-                    Encode.object [ "type", Encode.string "repoBranchSwitched"; "payload", repoBranchSwitched.Encode p ])
+                    Encode.object [ "type", Encode.string "repoBranchSwitched"; "payload", repoBranchSwitched.Encode p ]
+                | WorkSandboxStarted p ->
+                    Encode.object [ "type", Encode.string "workSandboxStarted"; "payload", workSandboxStarted.Encode p ]
+                | WorkSandboxStopped p ->
+                    Encode.object [ "type", Encode.string "workSandboxStopped"; "payload", workSandboxStopped.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -690,6 +740,8 @@ module Codec =
                 | "repoAdded" -> Decode.field "payload" repoAdded.Decode |> Decode.map RepoAdded
                 | "repoRemoved" -> Decode.field "payload" repoRemoved.Decode |> Decode.map RepoRemoved
                 | "repoBranchSwitched" -> Decode.field "payload" repoBranchSwitched.Decode |> Decode.map RepoBranchSwitched
+                | "workSandboxStarted" -> Decode.field "payload" workSandboxStarted.Decode |> Decode.map WorkSandboxStarted
+                | "workSandboxStopped" -> Decode.field "payload" workSandboxStopped.Decode |> Decode.map WorkSandboxStopped
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

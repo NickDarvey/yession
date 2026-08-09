@@ -177,6 +177,62 @@ let tests =
                 do! host.Stop ()
             }
 
+        // The door into a NAMED sandbox (Plan 15, stage 2), end to end through the real
+        // Host. Starting a sandbox is only worth anything if something can run in it, and
+        // `execute_command` is the one door — so this is the test that makes named
+        // sandboxes a feature rather than a listing: a command targeted at `test` runs in
+        // the `test` sandbox's environment and NOT in `default`.
+        testCaseAsync "a command targeted at a named sandbox runs in that sandbox, not the default one" <|
+            async {
+                let spawnedIn = ResizeArray<string> ()
+                let environmentNamed (name: string) : SessionEnvironment.SessionEnvironment =
+                    { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+                      Spawn =
+                        fun _ onChunk ->
+                            async {
+                                spawnedIn.Add name
+                                onChunk (Stdout, "ran in " + name + "\n")
+                                return
+                                    Ok
+                                        { WriteStdin = ignore
+                                          CloseStdin = ignore
+                                          Kill = ignore
+                                          Exited = async { return SandboxExited 0 } }
+                            }
+                      SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
+                      Stop = fun () -> async { return () }
+                      CurrentRef = fun () -> Some name }
+                let makeSandboxes log =
+                    WorkSandboxes.create
+                        { Backend = "scripted"
+                          Credentials = []
+                          Create = fun name _ -> Ok (environmentNamed (SandboxName.value name))
+                          Log = log
+                          Clock = fun () -> System.DateTimeOffset (2026, 1, 1, 0, 0, 0, System.TimeSpan.Zero) }
+                    |> expect
+                let! host = Host.startWithEnvironment None (Some makeSandboxes) None (sid ()) 0
+
+                let caller : WorkSandboxes.SandboxCaller = { Actor = ActorRef.Agent; Credential = ActorRef.Agent }
+                let test = SandboxName.create "test" |> expect
+                let! started = host.Sandboxes.Ensure caller test []
+                Expect.isTrue (Result.isOk started) "the sandbox starts"
+
+                match! host.TerminalCommands.Execute (Some (InSandbox test)) "echo hi" with
+                | Error e -> failwithf "the command did not run: %s" e
+                | Ok outcome ->
+                    Expect.equal outcome.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran"
+                    Expect.isTrue (outcome.OutputTail.Contains "ran in test") "and it ran in the named sandbox"
+                Expect.equal (List.ofSeq spawnedIn) [ "test" ] "nothing was spawned in default"
+
+                // And the terminal it opened records which sandbox it belongs to, so a
+                // replayed log brings it back up in the same one rather than in default.
+                let! page = host.Log.Read None 200
+                match page.Events |> List.choose (fun e -> match e.Event with SessionEvent.TerminalOpened t -> Some t | _ -> None) with
+                | [ opened ] -> Expect.equal opened.Sandbox test "the terminal is recorded as belonging to the named sandbox"
+                | other -> failwithf "expected exactly one terminal to have opened, got %A" other
+                do! host.Stop ()
+            }
+
         // Terminals (Plan 13), end to end through the real Host: the command a peer types
         // in the composer, the `OpenTerminal` command frame, the drain, the block events,
         // and the transcript records broadcast back as `Terminal` frames. The sandbox is
@@ -200,7 +256,7 @@ let tests =
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
                       CurrentRef = fun () -> Some "scripted" }
-                let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
+                let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 let! b = connectInMemoryClient host "bob" "Bob"
 
@@ -283,7 +339,7 @@ let tests =
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
                       CurrentRef = fun () -> Some "scripted" }
-                let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
+                let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 // No terminal is open, so the FIRST call opens the agent's own — titled with
                 // what it is for, and in `AutoRun`, which is what keeps the agent's autonomy
                 // exactly what it was before the tool changed.
@@ -294,7 +350,7 @@ let tests =
                     Expect.isTrue (first.OutputTail.Contains "ran<first>") "and its real output came back"
                     // Conditioned on what the first one printed — the whole point of chaining.
                     let next = if first.OutputTail.Contains "ran<first>" then "second" else "wrong"
-                    match! host.TerminalCommands.Execute (Some first.Terminal) next with
+                    match! host.TerminalCommands.Execute (Some (InTerminal first.Terminal)) next with
                     | Error reason -> failwith reason
                     | Ok second ->
                         Expect.equal second.Status (TerminalCommandRan (CommandSucceeded 0)) "the second ran too"
@@ -326,7 +382,7 @@ let tests =
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
                       CurrentRef = fun () -> Some "scripted" }
-                let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
+                let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 // A terminal ADA opened keeps its own mode — the asymmetry that makes this
                 // useful: the agent's own scratch terminal is auto, a human's is gated by the
@@ -336,7 +392,7 @@ let tests =
                 let terminal =
                     (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
                 // ApproveAgent is the default, so this is the out-of-the-box case.
-                let! outcome = host.TerminalCommands.Execute (Some terminal) "rm -rf build"
+                let! outcome = host.TerminalCommands.Execute (Some (InTerminal terminal)) "rm -rf build"
                 match outcome with
                 | Error reason -> failwith reason
                 | Ok outcome ->
@@ -378,7 +434,7 @@ let tests =
                       SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
                       Stop = fun () -> async { return () }
                       CurrentRef = fun () -> Some "scripted" }
-                let! host = Host.startWithEnvironment None (Some (fun _ -> environment)) None (sid ()) 0
+                let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 a.Connection.OpenTerminal "build"
                 do! a.Runner.WaitFor (fun m -> not (List.isEmpty (TerminalProjection.openTerminals m.Terminals)))
@@ -390,7 +446,7 @@ let tests =
                 // queue, awaiting her. Started in the background because it WAITS: that is the
                 // whole change, and the point of this test is that an approval arriving inside
                 // the grace is answered in the same call rather than yielding a handle.
-                let! running = Async.StartChild (host.TerminalCommands.Execute (Some terminal) "rm -rf build")
+                let! running = Async.StartChild (host.TerminalCommands.Execute (Some (InTerminal terminal)) "rm -rf build")
                 do! a.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalQueue terminal m)))
                 let entry = ClientModel.terminalQueue terminal (a.Runner.Model ()) |> List.head
                 Expect.isTrue (ClientModel.awaitsApproval entry (a.Runner.Model ())) "and Ada sees it waiting"

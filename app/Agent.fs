@@ -36,9 +36,9 @@ type private RunOutcome =
       tools: [
         sdk.tool(
           'execute_command',
-          'Run a shell command in one of this session\'s terminals, where the people in the session can see it, edit it, and — depending on the terminal — approve it before it runs. This is the only way to run anything. It waits for the result and returns the exit code and output; if it is waiting on a person, or the terminal is busy, or the command is still going, it says so and returns a handle for read_terminal_block instead of hanging. Read what it returns: every answer states which of those happened.',
-          { command: z.string().describe('the shell command line to run, e.g. "npm test -- --watch=false"') },
-          async (args) => ({ content: [{ type: 'text', text: await $3(args.command) }] })
+          'Run a shell command in one of this session\'s terminals, where the people in the session can see it, edit it, and — depending on the terminal — approve it before it runs. This is the only way to run anything. Pass `sandbox` to run in a named work sandbox (start_work_sandbox creates one); omit it for the default sandbox, which is where everything runs unless you say otherwise. It waits for the result and returns the exit code and output; if it is waiting on a person, or the terminal is busy, or the command is still going, it says so and returns a handle for read_terminal_block instead of hanging. Read what it returns: every answer states which of those happened.',
+          { command: z.string().describe('the shell command line to run, e.g. "npm test -- --watch=false"'), sandbox: z.string().optional().describe('the work sandbox to run in, e.g. "test"; omit for the default one') },
+          async (args) => ({ content: [{ type: 'text', text: await $3(args.command, args.sandbox || '') }] })
         ),
         sdk.tool(
           'read_terminal_block',
@@ -100,6 +100,18 @@ type private RunOutcome =
           { repo: z.string().describe('owner/name') },
           async (args) => ({ content: [{ type: 'text', text: await $17(args.repo) }] })
         ),
+        sdk.tool(
+          'start_work_sandbox',
+          'Make sure a named work sandbox exists for this session, and get it back. Asking twice for the same name with the same forwarding returns the one already running and changes nothing — safe to call every time. Asking for the same name with DIFFERENT forwarding is refused rather than silently recreated, because recreating kills whatever is running inside it: stop_work_sandbox first. `forward` names credentials to put inside the sandbox (currently "github", which is what lets git push work from a terminal there); it uses the credentials of the person whose turn this is, and everyone in the session sees which were forwarded and whose.',
+          { name: z.string().describe('the sandbox name, e.g. "default" or "test"'), forward: z.array(z.string()).optional().describe('credential names to forward, e.g. ["github"]') },
+          async (args) => ({ content: [{ type: 'text', text: await $18(args.name, args.forward || []) }] })
+        ),
+        sdk.tool(
+          'stop_work_sandbox',
+          'Stop a named work sandbox, killing anything running in it. The way to change what a sandbox forwards: stop it, then start it again.',
+          { name: z.string().describe('the sandbox name') },
+          async (args) => ({ content: [{ type: 'text', text: await $19(args.name) }] })
+        ),
         // The session's QUERIES (Plan 15), generated from the registry rather than
         // written out one by one: declaring a query is what puts it in front of the
         // agent, and in front of the humans, with no third place to keep in step.
@@ -130,7 +142,7 @@ type private RunOutcome =
         // own it left the read-only built-ins reachable (a session could list the host
         // filesystem). It stays so our tools run without a permission round-trip.
         tools: [],
-        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__read_terminal_block', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__add_repo', 'mcp__yession__switch_branch', 'mcp__yession__fetch_repo', 'mcp__yession__repo_status', 'mcp__yession__repo_log', 'mcp__yession__repo_diff', ...$12.map(q => 'mcp__yession__' + q.name)],
+        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__read_terminal_block', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__add_repo', 'mcp__yession__switch_branch', 'mcp__yession__fetch_repo', 'mcp__yession__repo_status', 'mcp__yession__repo_log', 'mcp__yession__repo_diff', 'mcp__yession__start_work_sandbox', 'mcp__yession__stop_work_sandbox', ...$12.map(q => 'mcp__yession__' + q.name)],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
         env: $1,
@@ -174,7 +186,7 @@ let private runQuery
     (prompts: {| system: string; prompt: string |})
     (agentEnv: obj)
     (claudePath: string)
-    (executeCommand: string -> JS.Promise<string>)
+    (executeCommand: string -> string -> JS.Promise<string>)
     (readTerminalBlock: string -> JS.Promise<string>)
     (onChunk: string -> unit)
     (registerAbort: (unit -> unit) -> unit)
@@ -191,6 +203,8 @@ let private runQuery
     (repoStatus: string -> JS.Promise<string>)
     (repoLog: string -> JS.Promise<string>)
     (repoDiff: string -> JS.Promise<string>)
+    (startWorkSandbox: string -> string array -> JS.Promise<string>)
+    (stopWorkSandbox: string -> JS.Promise<string>)
     : JS.Promise<RunOutcome> =
     jsNative
 
@@ -315,13 +329,22 @@ let private renderOutcome (outcome: TerminalCommandOutcome) : string =
         | Some reason -> sprintf "REFUSED by %s in %s: %s. It did not run — do not try to run it another way." who where reason
         | None -> sprintf "REFUSED by %s in %s. It did not run — do not try to run it another way." who where
 
-/// The `execute_command` tool body (Plan 13, stage 3b): the agent's ONE execution path.
-let private executeFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
-    fun command ->
+/// The `execute_command` tool body (Plan 13, stage 3b): the agent's ONE execution path,
+/// and — since Plan 15, stage 2 — the only door into a NAMED sandbox as well as the
+/// default one. An empty sandbox argument means the default, which is what the tool's
+/// optional parameter degrades to.
+let private executeFor (capabilities: AgentCapabilities) : string -> string -> JS.Promise<string> =
+    fun command sandbox ->
         async {
-            match! capabilities.ExecuteCommand None command with
-            | Ok outcome -> return renderOutcome outcome
-            | Error reason -> return sprintf "could not run the command: %s" reason
+            let target =
+                if sandbox = "" then Ok None
+                else SandboxName.create sandbox |> Result.map (InSandbox >> Some)
+            match target with
+            | Error e -> return sprintf "not a sandbox name: %s" e
+            | Ok target ->
+                match! capabilities.ExecuteCommand target command with
+                | Ok outcome -> return renderOutcome outcome
+                | Error reason -> return sprintf "could not run the command: %s" reason
         }
         |> Async.StartAsPromise
 
@@ -448,6 +471,34 @@ let private inspectRepoFor (inspect: AgentCapabilities -> InspectRepo) (capabili
                 | Error e -> return sprintf "could not inspect the repo: %s" e
             })
 
+/// The named-WorkSandbox tool bodies (Plan 15, stage 2). Both parse the raw name at this
+/// boundary, so the capability behind them only ever sees a validated `SandboxName`.
+let private withSandbox (raw: string) (inner: SandboxName -> Async<string>) : JS.Promise<string> =
+    async {
+        match SandboxName.create raw with
+        | Error e -> return sprintf "not a sandbox name: %s" e
+        | Ok name -> return! inner name
+    }
+    |> Async.StartAsPromise
+
+let private startWorkSandboxFor (capabilities: AgentCapabilities) : string -> string array -> JS.Promise<string> =
+    fun raw forward ->
+        withSandbox raw (fun name ->
+            async {
+                match! capabilities.StartWorkSandbox name (List.ofArray forward) with
+                | Ok said -> return said
+                | Error e -> return sprintf "could not start the sandbox: %s" e
+            })
+
+let private stopWorkSandboxFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+    fun raw ->
+        withSandbox raw (fun name ->
+            async {
+                match! capabilities.StopWorkSandbox name with
+                | Ok said -> return said
+                | Error e -> return sprintf "could not stop the sandbox: %s" e
+            })
+
 /// The Claude Agent SDK–backed `RunAgent`, parameterized by the turn's credential:
 /// `None` = the ambient credential variables pass through (the documented last resort
 /// — how CI's LiveAgent tier feeds the agent); `Some (envVar, value)` = the spawned
@@ -487,6 +538,8 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (inspectRepoFor (fun c -> c.RepoStatus) capabilities)
                     (inspectRepoFor (fun c -> c.RepoLog) capabilities)
                     (inspectRepoFor (fun c -> c.RepoDiff) capabilities)
+                    (startWorkSandboxFor capabilities)
+                    (stopWorkSandboxFor capabilities)
                 |> Interop.awaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens

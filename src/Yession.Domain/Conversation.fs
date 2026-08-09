@@ -21,7 +21,11 @@ type ConversationItemStatus =
 [<RequireQualifiedAccess>]
 type ConversationItemKind =
     | Message
-    | RepoNote
+    /// Something a party DID, rather than said: a repo added, a sandbox started. Named
+    /// for the category rather than for repos (Plan 15) because every command the agent
+    /// gains lands here — the timeline is how a human sees what was done on their behalf,
+    /// and a kind per capability would be a renderer per capability.
+    | ActNote
 
 type ConversationItem =
     { MessageId : MessageId
@@ -115,7 +119,7 @@ module ConversationProjection =
                           Author = r.Actor
                           Body = sprintf "added repo %s (branch %s)" (RepoRef.value r.Repo) r.Branch
                           Status = Complete
-                          Kind = ConversationItemKind.RepoNote
+                          Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset } ] }
         | SessionEvent.RepoRemoved r ->
             { proj with
@@ -125,7 +129,7 @@ module ConversationProjection =
                           Author = r.Actor
                           Body = sprintf "removed repo %s" (RepoRef.value r.Repo)
                           Status = Complete
-                          Kind = ConversationItemKind.RepoNote
+                          Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset } ] }
         | SessionEvent.RepoBranchSwitched r ->
             { proj with
@@ -137,7 +141,38 @@ module ConversationProjection =
                             if r.Created then sprintf "created branch %s in %s" r.Branch (RepoRef.value r.Repo)
                             else sprintf "switched %s to branch %s" (RepoRef.value r.Repo) r.Branch
                           Status = Complete
-                          Kind = ConversationItemKind.RepoNote
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset } ] }
+        // Named WorkSandboxes (Plan 15, stage 2) fold in for the repo notes' reason and
+        // one more: forwarding a credential into a sandbox is the most consequential thing
+        // a command here does, and the timeline is where the person whose credential it is
+        // finds out. The line names WHAT was forwarded and WHOSE — never a value; the
+        // event cannot carry one.
+        | SessionEvent.WorkSandboxStarted s ->
+            let forwarded =
+                match s.Forwarded, s.CredentialOwner with
+                | [], _ -> ""
+                | names, Some owner ->
+                    sprintf ", forwarding %s from %s" (String.concat ", " names) (ActorRef.token owner)
+                | names, None -> sprintf ", forwarding %s" (String.concat ", " names)
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = s.MessageId
+                          Author = s.Actor
+                          Body = sprintf "started sandbox %s (%s)%s" (SandboxName.value s.Sandbox) s.Backend forwarded
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset } ] }
+        | SessionEvent.WorkSandboxStopped s ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = s.MessageId
+                          Author = s.Actor
+                          Body = sprintf "stopped sandbox %s" (SandboxName.value s.Sandbox)
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset } ] }
         | AgentMessageStarted a ->
             { Items =

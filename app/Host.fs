@@ -39,8 +39,11 @@ type SessionHost =
       /// The session's Yjs document. The Session Process owns it; peers hold replicas
       /// synced over `State` frames.
       Doc : Y.Doc
-      /// The session's lazily-started environment (Step 12).
+      /// The session's `default` WorkSandbox (Step 12), the one every session has had.
       Environment : SessionEnvironment.SessionEnvironment
+      /// Every WorkSandbox the session has, by name (Plan 15, stage 2). The commands that
+      /// start and stop them are the agent's; this is where they land.
+      Sandboxes : WorkSandboxes.WorkSandboxes
       /// The session's terminals (Plan 13) — opening one starts the environment.
       Terminals : SessionTerminals.SessionTerminals
       /// The agent's terminal capabilities (Plan 13, stage 3b), exposed so a test can drive
@@ -64,16 +67,16 @@ type SessionHost =
 /// between peers through the doc. The Process is the single consumer of the shared
 /// message queue: when the agent is idle it drains the queue into `MessageSent` events
 /// and — when `runAgent` is given — starts one coalesced turn per batch (Phase 3).
-/// When `makeEnvironment` is given (the session-owned WorkSandbox composition over the
-/// sandbox seam), the session gets a lazily-started environment (Step 12) wired to the
-/// log this host creates. When `docStore` is given (Step 19), the persisted doc is
+/// When `makeSandboxes` is given (the session's WorkSandbox registry over the sandbox
+/// seam), the session gets named, lazily-started environments (Step 12, named in Plan 15)
+/// wired to the log this host creates. When `docStore` is given (Step 19), the persisted doc is
 /// replayed at boot — unsent queue entries and drafts survive restarts — and every
 /// subsequent update is durably appended. Resolves once the server is listening.
 let startFull
     // A THUNK, read at every drain (Plan 08): agent availability is dynamic — a
     // credential connected mid-session enables turns without a relaunch.
     (runAgent: unit -> RunAgent option)
-    (makeEnvironment: (EventLog<SessionEvent> -> SessionEnvironment.SessionEnvironment) option)
+    (makeSandboxes: (EventLog<SessionEvent> -> WorkSandboxes.WorkSandboxes) option)
     // Secrets (Plan 06): the Manager-granted, session-scoped secrets surface
     // (write/list/delete — never read). None = turns see the `none` denials.
     (secretsCapabilities: ControlClient.SessionSecretsCapabilities option)
@@ -222,12 +225,15 @@ let startFull
             |> List.fold (fun proj e -> TerminalProjection.applyEvent proj e.Event) TerminalProjection.empty
         terminalProjection <- replayedTerminals
 
-        // The session's environment: the session-owned WorkSandbox, lazily created on
-        // first need; absent a composition, needs are recorded as unavailable.
-        let environment =
-            match makeEnvironment with
+        // The session's WorkSandboxes (Plan 15, stage 2): a registry keyed by name, each
+        // entry lazily created on first need. `default` is the one every session has had,
+        // so a Host composed without sandboxes still answers every question — its default
+        // environment records needs as unavailable, exactly as before.
+        let sandboxes =
+            match makeSandboxes with
             | Some make -> make log
-            | None -> SessionEnvironment.unavailable
+            | None -> WorkSandboxes.unavailable
+        let environment = sandboxes.EnvironmentFor SandboxName.defaultName
 
         let mintTurnId () =
             match AgentTurnId.create (string (Guid.NewGuid ())) with
@@ -263,7 +269,7 @@ let startFull
         let terminals =
             SessionTerminals.create
                 log
-                environment
+                sandboxes.EnvironmentFor
                 transcripts.Open
                 Emulator.openEmulator
                 SessionTerminals.TerminalShell.posix
@@ -286,9 +292,13 @@ let startFull
         // people can see it and then WAITS — bounded twice over, once for a person and once
         // for a process — so the agent gets its answer back without a turn ever hanging on
         // somebody pressing Approve.
-        let agentTerminalId : TerminalId option ref = ref None
+        // One agent terminal PER SANDBOX (Plan 15, stage 2). Keyed rather than single,
+        // because `execute_command` is the only door into a sandbox and a session now has
+        // several: one shared cell would have quietly run a command meant for `test` in
+        // whichever sandbox happened to be first.
+        let agentTerminalIds : Map<string, TerminalId> ref = ref Map.empty
 
-        /// The session's agent terminal, opened on first use.
+        /// The session's agent terminal in one sandbox, opened on first use.
         ///
         /// Its title is the command that needed it, which is what the retired
         /// `ensure_environment`'s `reason` argument becomes — the strip says "npm test" rather
@@ -299,16 +309,22 @@ let startFull
         /// into an approval prompt — a large change to autonomy smuggled in under a refactor.
         /// What changes is that the gate becomes REAL: setting `ApproveAgent` on a terminal a
         /// human opened now stops the agent, because there is no second door.
-        let openAgentTerminal (reason: string) : Async<Result<TerminalId, string>> =
+        let openAgentTerminal (sandbox: SandboxName) (reason: string) : Async<Result<TerminalId, string>> =
             async {
-                match agentTerminalId.Value with
+                let key = SandboxName.value sandbox
+                match Map.tryFind key agentTerminalIds.Value with
                 | Some id when terminals.IsOpen id -> return Ok id
                 | _ ->
-                    let title = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
-                    match! terminals.Open ActorRef.Agent title with
+                    let label = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
+                    // The sandbox is in the title when it is not the default one: four
+                    // terminals in a strip are navigable only if each says where it is.
+                    let title =
+                        if sandbox = SandboxName.defaultName then label
+                        else sprintf "[%s] %s" key label
+                    match! terminals.Open ActorRef.Agent title sandbox with
                     | Error reason -> return Error reason
                     | Ok id ->
-                        agentTerminalId.Value <- Some id
+                        agentTerminalIds.Value <- Map.add key id agentTerminalIds.Value
                         SyncedStateSync.setTerminalMode doc id AutoRun
                         return Ok id
             }
@@ -356,7 +372,13 @@ let startFull
               // SessionMain, so a Host started without it declares nothing rather than
               // declaring queries it cannot answer.
               Queries = AgentCapabilities.none.Queries
-              ReadQuery = AgentCapabilities.none.ReadQuery }
+              ReadQuery = AgentCapabilities.none.ReadQuery
+              // The sandbox commands (Plan 15, stage 2) are denials HERE and rebound per
+              // turn by SessionMain, for the repo verbs' reason: the credential a
+              // forwarding start resolves belongs to the TURN ACTOR, and only the
+              // dispatcher knows who that is.
+              StartWorkSandbox = AgentCapabilities.none.StartWorkSandbox
+              StopWorkSandbox = AgentCapabilities.none.StopWorkSandbox }
 
         // The queue drain and turn scheduler (Phase 3) — the real machinery lives in
         // `Scheduler` (shared with the property harness); the Host wires it to this
@@ -513,7 +535,11 @@ let startFull
                   OnCommand =
                     SessionCommands.handle
                         requestInterrupt
-                        terminals.Open
+                        // A peer's "open a terminal" lands in `default`. Choosing a
+                        // sandbox is a COMMAND, and commands are the agent's (Plan 15) —
+                        // a human who wants a terminal in the `test` sandbox asks for one,
+                        // and sees the act-line for it.
+                        (fun actor title -> terminals.Open actor title SandboxName.defaultName)
                         terminals.Close
                         terminals.Take
                         terminals.Release
@@ -655,6 +681,7 @@ let startFull
               Log = log
               Doc = doc
               Environment = environment
+              Sandboxes = sandboxes
               Terminals = terminals
               TerminalCommands = terminalCommands
               WaitForNextSessionEnd = waitForNextSessionEnd
@@ -667,7 +694,7 @@ let startFull
                         mcpTools |> Option.iter (fun s -> s.Stop ())
                         // Sandbox lifetime = session lifetime: take the WorkSandbox (and
                         // anything still running in it) down with the session.
-                        do! environment.Stop ()
+                        do! sandboxes.StopAll ()
                         server.close ignore
                         // Drain every accepted peer connection: Stop resolves only once
                         // libdatachannel has reported each one closed, so a caller may
@@ -681,7 +708,7 @@ let startFull
 /// mint peer tokens from the host handle.
 let startWithEnvironment
     (runAgent: RunAgent option)
-    (makeEnvironment: (EventLog<SessionEvent> -> SessionEnvironment.SessionEnvironment) option)
+    (makeSandboxes: (EventLog<SessionEvent> -> WorkSandboxes.WorkSandboxes) option)
     (baseLog: EventLog<SessionEvent> option)
     (sessionId: SessionId)
     (port: int)
@@ -689,7 +716,7 @@ let startWithEnvironment
     // No mount: these helpers serve an unfronted, origin-root session. No transcript store
     // either — terminals fall back to the in-memory one, which is the right default for a
     // host with no data directory.
-    startFull (fun () -> runAgent) makeEnvironment None baseLog None None None None (fun _ _ -> ()) None None None sessionId None "" None false port
+    startFull (fun () -> runAgent) makeSandboxes None baseLog None None None None (fun _ _ -> ()) None None None sessionId None "" None false port
 
 /// `startWithEnvironment` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

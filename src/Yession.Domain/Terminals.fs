@@ -106,6 +106,10 @@ type TerminalView =
     { TerminalId : TerminalId
       Title : string
       OpenedBy : ActorRef
+      /// Which of the session's WorkSandboxes this terminal runs in (Plan 15, stage 2).
+      /// Fixed at open, because a terminal IS a shell process inside one sandbox — moving
+      /// it would mean killing it, which is a close and an open, and those already exist.
+      Sandbox : SandboxName
       /// A closed terminal keeps its blocks: the audit outlives the process.
       IsOpen : bool
       /// Why it closed, when it has.
@@ -152,6 +156,7 @@ module TerminalProjection =
                     @ [ { TerminalId = e.TerminalId
                           Title = e.Title
                           OpenedBy = e.OpenedBy
+                          Sandbox = e.Sandbox
                           IsOpen = true
                           ClosedReason = None
                           Lease = None
