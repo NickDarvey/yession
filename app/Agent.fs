@@ -71,12 +71,6 @@ type private RunOutcome =
           async (args) => ({ content: [{ type: 'text', text: await $11(args.repo) }] })
         ),
         sdk.tool(
-          'list_repos',
-          'List this session\'s repos with each checkout\'s current branch and whether it has uncommitted changes.',
-          {},
-          async () => ({ content: [{ type: 'text', text: await $12() }] })
-        ),
-        sdk.tool(
           'switch_branch',
           'Switch a repo\'s checkout to a branch (optionally creating it). Local only — never touches the remote. Everyone in the session sees the switch in the timeline.',
           { repo: z.string().describe('owner/name'), branch: z.string().describe('the branch to switch to'), create: z.boolean().optional().describe('create the branch (like switch -c)') },
@@ -105,7 +99,20 @@ type private RunOutcome =
           'The uncommitted diff of a repo checkout (capped; use a terminal for the full thing).',
           { repo: z.string().describe('owner/name') },
           async (args) => ({ content: [{ type: 'text', text: await $17(args.repo) }] })
-        )
+        ),
+        // The session's QUERIES (Plan 15), generated from the registry rather than
+        // written out one by one: declaring a query is what puts it in front of the
+        // agent, and in front of the humans, with no third place to keep in step.
+        // `readOnlyHint` is the MCP spec's own marker — the same annotation that will
+        // identify a third-party server's queries — and it is what makes a tool a query
+        // rather than a command.
+        ...$12.map(q => sdk.tool(
+          q.name,
+          q.description,
+          {},
+          async () => ({ content: [{ type: 'text', text: await q.read() }] }),
+          { annotations: { readOnlyHint: true, title: q.title } }
+        ))
       ]
     })
     const q = sdk.query({
@@ -123,7 +130,7 @@ type private RunOutcome =
         // own it left the read-only built-ins reachable (a session could list the host
         // filesystem). It stays so our tools run without a permission round-trip.
         tools: [],
-        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__read_terminal_block', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__add_repo', 'mcp__yession__list_repos', 'mcp__yession__switch_branch', 'mcp__yession__fetch_repo', 'mcp__yession__repo_status', 'mcp__yession__repo_log', 'mcp__yession__repo_diff'],
+        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__read_terminal_block', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__add_repo', 'mcp__yession__switch_branch', 'mcp__yession__fetch_repo', 'mcp__yession__repo_status', 'mcp__yession__repo_log', 'mcp__yession__repo_diff', ...$12.map(q => 'mcp__yession__' + q.name)],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
         env: $1,
@@ -176,7 +183,9 @@ let private runQuery
     (deleteSecret: string -> JS.Promise<string>)
     (claudeSpawner: obj)
     (addRepo: string -> JS.Promise<string>)
-    (listRepos: unit -> JS.Promise<string>)
+    /// The registry's queries as tool descriptors — `$12`, where `list_repos` used to be,
+    /// which is not a coincidence: the query surface is what replaced it.
+    (queries: obj array)
     (switchBranch: string -> string -> bool -> JS.Promise<string>)
     (fetchRepo: string -> JS.Promise<string>)
     (repoStatus: string -> JS.Promise<string>)
@@ -390,15 +399,27 @@ let private addRepoFor (capabilities: AgentCapabilities) : string -> JS.Promise<
                 | Error e -> return sprintf "could not add the repo: %s" e
             })
 
-let private listReposFor (capabilities: AgentCapabilities) : unit -> JS.Promise<string> =
-    fun () ->
-        async {
-            match! capabilities.ListRepos () with
-            | Error e -> return sprintf "could not list repos: %s" e
-            | Ok [] -> return "no repos in this session — add_repo brings one in"
-            | Ok listed -> return listed |> List.map RepoListing.describe |> String.concat "\n"
-        }
-        |> Async.StartAsPromise
+/// The session's queries as SDK tool descriptors (Plan 15). One per registered query, in
+/// registration order, each answering with the same text the settings surface renders as
+/// a table — the model and the humans are looking at one value, not two renderings that
+/// drift.
+let private queryToolsFor (capabilities: AgentCapabilities) : obj array =
+    capabilities.Queries
+    |> List.map (fun def ->
+        box
+            {| name = QueryName.value def.Name
+               title = def.Title
+               description = QueryDef.toolDescription def
+               read =
+                 fun () ->
+                     async {
+                         match! capabilities.ReadQuery def.Name with
+                         | Ok value -> return QueryValue.describe def.Shape value
+                         | Error e ->
+                             return sprintf "could not read %s: %s" (QueryName.value def.Name) e
+                     }
+                     |> Async.StartAsPromise |})
+    |> Array.ofList
 
 let private switchBranchFor (capabilities: AgentCapabilities) : string -> string -> bool -> JS.Promise<string> =
     fun raw branch create ->
@@ -460,7 +481,7 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (deleteSecretFor capabilities)
                     (Sandboxes.AgentSandbox.claudeSpawnerFor (agentBackend ()) ambient home env)
                     (addRepoFor capabilities)
-                    (listReposFor capabilities)
+                    (queryToolsFor capabilities)
                     (switchBranchFor capabilities)
                     (fetchRepoFor capabilities)
                     (inspectRepoFor (fun c -> c.RepoStatus) capabilities)

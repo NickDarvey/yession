@@ -117,10 +117,6 @@ type ReadTerminalBlock = QueueId -> Async<Result<TerminalCommandOutcome, string>
 /// WorkSandbox from the moment it lands.
 type AddRepo = RepoRef -> Async<Result<RepoListing, string>>
 
-/// The session's repos as the filesystem reports them — branch and dirty state per
-/// checkout, which is also how resume drift is told.
-type ListRepos = unit -> Async<Result<RepoListing list, string>>
-
 /// Switch a repo's checkout to a branch, optionally creating it. Local ref movement
 /// only — never touches the remote.
 type SwitchRepoBranch = RepoRef -> string -> bool -> Async<Result<RepoListing, string>>
@@ -146,6 +142,12 @@ type ListSessionSecrets = unit -> Async<Result<SecretMetadata list, string>>
 /// Delete one of the session's secrets; false = it did not exist.
 type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 
+/// Answer one of the session's registered queries (Plan 15). The agent reaches the SAME
+/// registry the humans' settings surface streams from — that is the whole point of a
+/// query being a declaration rather than a tool body: one declaration, two audiences, no
+/// chance of the two being told different things.
+type ReadQuery = QueryName -> Async<Result<QueryValue, string>>
+
 /// The typed capabilities an agent turn may use. No raw Docker, no handles, no session
 /// ids — everything is already scoped by the Session Process and, beneath it, the
 /// Session Manager.
@@ -166,12 +168,18 @@ type AgentCapabilities =
       // The repo verbs (Plan 14): read-only bootstrap — clone and orient. Commit/push
       // stay behind ExecuteCommand, which is what keeps the one-door invariant intact.
       AddRepo : AddRepo
-      ListRepos : ListRepos
       SwitchRepoBranch : SwitchRepoBranch
       FetchRepo : FetchRepo
       RepoStatus : InspectRepo
       RepoLog : InspectRepo
-      RepoDiff : InspectRepo }
+      RepoDiff : InspectRepo
+      /// The session's read-only queries (Plan 15), declared once and surfaced to the
+      /// agent as generated MCP tools. Data rather than a thunk: the runner needs the
+      /// declarations to BUILD the tools, before any of them is called. `list_repos` used
+      /// to sit above as its own capability and is now the `repos` query — one place, and
+      /// the humans see the same answer without asking.
+      Queries : QueryDef list
+      ReadQuery : ReadQuery }
 
 module AgentCapabilities =
 
@@ -183,12 +191,13 @@ module AgentCapabilities =
           ListSecrets = fun () -> async { return Error "no secrets capability" }
           DeleteSecret = fun _ -> async { return Error "no secrets capability" }
           AddRepo = fun _ -> async { return Error "no repos capability" }
-          ListRepos = fun () -> async { return Error "no repos capability" }
           SwitchRepoBranch = fun _ _ _ -> async { return Error "no repos capability" }
           FetchRepo = fun _ -> async { return Error "no repos capability" }
           RepoStatus = fun _ -> async { return Error "no repos capability" }
           RepoLog = fun _ -> async { return Error "no repos capability" }
-          RepoDiff = fun _ -> async { return Error "no repos capability" } }
+          RepoDiff = fun _ -> async { return Error "no repos capability" }
+          Queries = []
+          ReadQuery = fun _ -> async { return Error "no query capability" } }
 
 /// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
 /// Session Process owns the signal; the runner observes it — poll `IsAborted` at

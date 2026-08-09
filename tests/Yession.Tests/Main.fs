@@ -28,6 +28,11 @@ let all =
         Tag.needs "Idle reaping" [] (fun () -> Reaper.tests)
         Tag.needs "Secrets" [] (fun () -> Secrets.tests)
         Tag.needs "Connections" [] (fun () -> Connections.tests)
+        Tag.needs "Queries" [] (fun () -> Queries.tests)
+        // The route is the same registry over real HTTP — SSE has no meaningful in-memory
+        // stand-in, and what it must prove (the door, and one connection carrying the
+        // burst and every later change) is exactly what crosses the wire.
+        Tag.needs "Query stream routes" [ Tag.Ports ] (fun () -> Queries.portsTests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
         Tag.needs "Terminals" [] (fun () -> Terminals.tests)

@@ -311,6 +311,26 @@ Items are roughly ordered by how much they matter.
     applies; the filesystem and egress boundaries do not.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
+- **The session's imperative API is split, and only half of it is built**
+  ([Plan 15](plans/15-imperative-session-api.md)): commands mutate and belong to the
+  agent alone; queries read and are declared once, reaching the agent as generated MCP
+  tools (`readOnlyHint`) and the humans as a generated settings surface fed by one
+  multiplexed SSE stream. Stage 1 shipped, which retired the Repos panel's add/remove/
+  switch controls and the `/repos*` routes. Remaining, deliberate:
+  - **Every session member reads every query.** There is no per-query authorization —
+    the same stance the timeline already takes, where every member reads every
+    attributed act-line. A query that should not be session-wide has nowhere to hide
+    yet.
+  - **No command is gated.** Plan 13's approval gate still lives inside
+    `execute_command` and nowhere else; a general `Auto | RequiresHuman` property for
+    every command is Plan 15's last stage and is not built.
+  - **Named WorkSandboxes and credential forwarding are not built** (Plan 15 stage 2),
+    so the Plan 14 gap above — no forwarded credential for `git push` in a terminal —
+    still stands.
+  - **A third-party MCP server's read-only tools do not reach the registry.** The
+    identification convention is the spec's own annotation, deliberately, so nothing
+    yession-specific is in the way; the client machinery and a JSON-Schema-subset
+    renderer are simply not written.
 - **Per-user agent credentials landed** ([Plan 08](plans/08-connections-and-claude-auth.md)):
   a human signs into their Claude account from the session's Connections panel — "this
   session only" (`SessionScope`) or "all my sessions" (their user/peer scope) — the
