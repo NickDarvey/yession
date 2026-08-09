@@ -116,20 +116,163 @@ the pack is built from the same projection).
 - Query `work_sandboxes` — Rows: name, backend, state, forwarding, started-by, started-at
   — read from process truth, the way `list_repos` reads the filesystem's answer.
 
-## Stage 3 — approval gates, as a property of commands in general
+## Stage 3 — one approval gate, of which the terminal's is a case
 
 Plan 14 deliberately gated nothing; Plan 13 gated `execute_command` alone, inside the
-terminal. Neither generalizes. This stage makes the gate a property every command has and
-most decline to use:
+terminal. A gate for commands in general is not a second mechanism beside that one — it is
+the same mechanism with the terminal-shaped parts taken out. The evidence that the
+generalization is real rather than forced: `TerminalApprovalMode` needs **no new case** to
+serve both, and both sides already hand the agent the same handle type (`QueueId`).
 
-- `Gate = Auto | RequiresHuman`, default `Auto` — today's behavior for every existing
-  command, unchanged.
-- A gated call parks: a `CommandPending` event renders in the timeline with approve/deny
-  (the queued-command surface Plan 13 already built), and the MCP call yields until a
-  human resolves it. Denial comes back to the model as a legible tool error, for the same
-  reason Plan 13's refusals do: a command that vanishes silently gets retried another way.
-- Configured by `YESSION_GATED_COMMANDS` (empty by default) until `yession.yaml` takes it
-  over.
+### What this stage corrects in its own earlier draft
+
+The first draft of this section said `Gate = Auto | RequiresHuman`, a `CommandPending`
+**event**, an MCP call that "yields until a human resolves it", and `YESSION_GATED_COMMANDS`
+as the configuration. Three of those four contradict Plan 13, which is shipped and right:
+
+| draft | Plan 13, shipped | which holds |
+| --- | --- | --- |
+| pending is an event | pending is SYNCED state (`TerminalQueue`); only outcomes are events | Plan 13. A proposal is editable, mergeable and withdrawable before it resolves, and an append-only log cannot hold a value with those three properties. |
+| the call blocks until resolved | bounded wait, then a handle and a NAMED status | Plan 13. An unbounded wait ties a turn to a sleeping human, and `TerminalCommandAwaitingApproval` exists precisely so a silent pause is not read as failure. |
+| an env var configures it | a synced `ApprovalMode` register per subject, live-editable, re-deciding every waiting entry | Plan 13. The env var survives as the register's boot SEED, which is also the seam `yession.yaml` takes over. |
+
+### The shared vocabulary
+
+**One mode, unchanged.** `TerminalApprovalMode` becomes `ApprovalMode`; the cases
+(`AutoRun | ApproveAgent | ApproveAll`) and `requiresApproval mode author` are untouched.
+
+**One subject** — what a gate is *about*, and the key the mode is stored under:
+
+```fsharp
+type GateSubject =
+    | ForTerminal of TerminalId
+    | ForCommand of string          // the MCP tool name
+
+module GateSubject =
+    /// The default is per KIND, which is how today's behaviour survives on both sides:
+    /// a terminal is reviewed, a command is not.
+    let defaultMode = function ForTerminal _ -> ApproveAgent | ForCommand _ -> AutoRun
+```
+
+`TerminalModes : Map<TerminalId, ApprovalMode>` becomes `Gates : Map<GateSubject, ApprovalMode>` —
+one map, one default rule, one control. For a `ForCommand` subject, `ApproveAgent` and
+`ApproveAll` currently collapse (stage 1 made every command agent-only, so there is no other
+author to distinguish). The three-case type stays anyway: a `yession.yaml`-authored call has a
+different author, and that is the whole reason the distinction exists.
+
+**One pending entry.** `TerminalQueued` already IS this, minus two fields:
+
+```fsharp
+type PendingPayload =
+    /// A shell command LINE, its text in a `Y.Text` root — editable in place, which IS
+    /// the approval UX Plan 13 built.
+    | CommandLine
+    /// A structured call: tool name plus its rendered arguments. Read-only for now; see
+    /// Deferred.
+    | CommandCall of tool: string * summary: string
+
+type PendingAct =
+    { QueueId : QueueId
+      Subject : GateSubject
+      Author : ActorRef
+      Order : float
+      Payload : PendingPayload
+      ApprovedBy : PeerId option
+      RejectedBy : PeerId option
+      RejectedReason : string option }
+```
+
+`TerminalQueue : Map<QueueId, TerminalQueued>` becomes `Pending : Map<QueueId, PendingAct>`.
+
+The doc roots are renamed with it — `terminalQueue` → `pending`, `terminalModes` → `gates` —
+and a doc written before that is moved over by a **boot migration** (`migrateGateRoots`, run
+where `removeEmptyDrafts` runs, when no peer is connected). Not the optional-field compat
+`TerminalOpened.Sandbox` uses, and the difference is the point: a decoder that reads both
+shapes is two live locations for one fact, which is the spare CLAUDE.md forbids. What forces
+a migration rather than a bare rename is narrower and worth stating — dropping the old
+`terminalModes` on the floor would put a terminal somebody set to `ApproveAll` back on the
+default, LESS gated than what they asked for, silently.
+
+**One handle.** `execute_command` already answers with `Handle : QueueId`; a gated command
+answers with the same, so `read_terminal_block` becomes `check_pending : QueueId -> ...`
+serving both. The agent learns ONE protocol — ran, or awaiting-with-a-handle, or
+refused-by-someone-for-a-reason — instead of one per capability.
+
+**One combinator**, applied where capabilities are composed (`Host.fs`) rather than at the
+MCP emit, so the gate holds for every caller and `Agent.fs` stays a renderer:
+
+```fsharp
+type GateOutcome<'a> =
+    | Ran of 'a
+    | Awaiting of QueueId
+    | Refused of by: ActorRef * reason: string option
+
+Gates.run : Gates -> GateSubject -> ActorRef -> summary: string
+          -> (unit -> Async<Result<'a, string>>) -> Async<GateOutcome<'a>>
+```
+
+### What stays different, and why that is honest rather than lazy
+
+- **The drain.** A terminal keeps its serial scheduler, because a shell has one working
+  directory and one stdin. `Gates.run` is that scheduler with the serialization removed:
+  write the pending entry, watch it, act when it resolves. The shared kernel is the pending
+  register and the resolution watcher; the queue's total order is not shared, which is why
+  `Order` and the reorder controls stay meaningful only for terminal subjects.
+- **Editability.** A command line is characters and can be fixed in place before approval.
+  Structured arguments are typed, and editing them needs a form per command — the
+  JSON-Schema-subset renderer this plan already deferred once. So a `CommandCall` card offers
+  approve and reject and nothing else, and "edit a structured proposal" is named in Deferred
+  rather than half-built.
+- **Approving is not a command.** A human toggling a gate mode, approving, or rejecting
+  mutates SYNCED state, which is collaborative by design (drafts, queue, title, modes) — it
+  does not append an event and it is not a command in the sense stage 1 made agent-only. The
+  asymmetry holds: commands append events; verdicts are what a human is *for*.
+
+### The record
+
+- **Refusal** gets its own event, `CommandRefused { MessageId; Subject; Command; Author;
+  RejectedBy; Reason }`, folded into the timeline as an `ActNote` ("nick rejected
+  `add_repo octo/hello` — wrong org"). This mirrors `TerminalCommandRejected` → `BlockRejected`
+  for its reason: a refusal that simply vanishes is indistinguishable from a bug, from both a
+  human's side and the model's.
+- **Approval** rides the command's own event: `ApprovedBy : ActorRef option` on each act event,
+  exactly as `TerminalBlockStarted` already carries it. The alternative — a standalone
+  `CommandApproved` event, and no per-command work at all — was rejected because it detaches
+  the approver from the thing approved and spends two events on one act.
+
+### The surface
+
+One card, extracted from today's `terminalQueue` body: subject chip, author, status token,
+body (an editable input for `CommandLine`, a rendered `<code>` for `CommandCall`), then the
+same verdict row. Two mount points, from the one component:
+
+- the **chat column**, below the timeline and above the composer — the slot queued messages
+  already occupy — showing every pending act, terminal ones included, with the chip on. This
+  is what brings terminal approval into the conversation, and it costs no new surface.
+- the **terminal panel**, filtered to that terminal, chip off, reorder on.
+
+It does not go INSIDE `TimelineProjection`: that is a fold over events, and a pending act is
+not one. Pending is the tail, ordered by `Order`; acts enter the timeline when they resolve,
+as a block chip or an act-line, which is what already happens.
+
+Two things the card has to get right against the WCAG floor: verdict buttons need accessible
+names that disambiguate across many cards (`aria-label="Approve add_repo octo/hello"`), and
+resolving one REMOVES it — the stranded-focus case CLAUDE.md names — so the card must hand
+focus on.
+
+### Sub-stages
+
+- **3a** — rename and widen: `ApprovalMode`, `GateSubject`, `Pending`, `Gates`, and the boot
+  migration. No behaviour change; the whole point is that the diff is a rename. The one shape
+  that is not a rename is the terminal drain's plan, which now carries `(TerminalId *
+  PendingAct)` pairs: a `PendingAct` names a `GateSubject`, so a plan of bare acts would make
+  every consumer re-answer "which terminal" with a default or a `failwith` — a lie about a
+  value the plan's own filter already proved. Command acts wait in the same map and the drain
+  skips them: no shell, no order to hold, and their own gate resolves them.
+- **3b** — `Gates.run`, the `check_pending` unification, `CommandRefused` and `ApprovedBy`,
+  and `YESSION_GATED_COMMANDS` seeding the register.
+- **3c** — the one card, both mounts, and the mode control generalized from the terminal's
+  existing `<select>`.
 
 ## Stated risks
 
@@ -147,15 +290,22 @@ most decline to use:
   DSL is the only thing in the way; a JSON-Schema-subset renderer is the missing piece.
 - MCP resource subscriptions for the agent side of live updates.
 - Per-query authorization (today every signed-in session member reads every query).
+- Editing a structured proposal before approving it. A `CommandCall` card is approve-or-reject;
+  making its arguments editable needs the same JSON-Schema-subset renderer the external-server
+  item above is waiting on, and a half-built form is worse than a legible refusal.
 
 ## Verification
 
 - `check` (cheap): shape → description emission; codec round-trips; the registry's
-  invalidation; `SandboxName` validation; the ensure-diff decision; the gate state machine;
-  SSR of the generated section for each shape (and that the repos buttons are gone).
-- `check Ports`: `/queries` and `/queries/<name>` behind the cookie; the multiplexed
-  stream delivering a snapshot then an invalidation frame; a gated command parking and
-  resuming across an approval.
+  invalidation; `SandboxName` validation; the ensure-diff decision; SSR of the generated
+  section for each shape (and that the repos buttons are gone). For the gate: the mode
+  decision over both subject kinds, the per-kind default, the `PendingAct` codec round-trip
+  INCLUDING an entry written before this stage, and the refusal's act-line.
+- `check Ports`: `/queries` behind the cookie; the multiplexed stream delivering a snapshot
+  then an invalidation frame; a gated command parking and resuming across an approval, and
+  the same for a refusal reaching the model as an error.
+- `check Browser`: the one card rendered at both mount points, and the verdict controls
+  reachable and named at each.
 - `check Srt`: a forwarded credential reaches the named sandbox's env and nothing else;
   same-name idempotence; the config-diff refusal.
 - `verify` on master stays the release gate; `lint` first.

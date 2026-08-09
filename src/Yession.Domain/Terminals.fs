@@ -10,48 +10,9 @@ namespace Yession.Domain
 /// (`Transcript.fs`); a block records the transcript range it produced, and a renderer
 /// joins the two. The split is the whole design: facts fold, bytes stream.
 
-/// Who must approve a command before it runs. A synced register per terminal (collaborative
-/// state, so changing it is visible to everyone immediately), read by the Session Process's
-/// drain — which is the only thing that can act on it.
-type TerminalApprovalMode =
-    /// Anything queued runs. The terminal a person opened for themselves.
-    | AutoRun
-    /// A human's command runs; the agent's waits for one. The default, and the reason the
-    /// composer looks like the message composer: reviewing what the agent is about to run
-    /// is the same act as reading what it is about to say.
-    | ApproveAgent
-    /// Everything waits for an explicit approval, including a human's own.
-    | ApproveAll
-
-module TerminalApprovalMode =
-
-    let describe =
-        function
-        | AutoRun -> "auto"
-        | ApproveAgent -> "approve-agent"
-        | ApproveAll -> "approve-all"
-
-    let parse (raw: string) : TerminalApprovalMode option =
-        match raw with
-        | "auto" -> Some AutoRun
-        | "approve-agent" -> Some ApproveAgent
-        | "approve-all" -> Some ApproveAll
-        | _ -> None
-
-    /// Whether a command written by `author` needs an approval under this mode. Pure, and
-    /// the single place the policy is stated — the drain asks it, and so does the UI that
-    /// decides whether to show an approve button, so the two cannot disagree.
-    let requiresApproval (mode: TerminalApprovalMode) (author: ActorRef) : bool =
-        match mode with
-        | AutoRun -> false
-        | ApproveAll -> true
-        | ApproveAgent ->
-            match author with
-            | Agent -> true
-            // A human's command, or the Process's own: no gate. `System`/`SessionProcess`
-            // commands are not agent-authored, and gating them would deadlock a drain
-            // waiting for a human to approve the runtime's own housekeeping.
-            | UserRef _ | PeerRef _ | SessionProcess | System -> false
+// The approval mode a terminal runs under is `ApprovalMode` (Gates.fs) keyed by
+// `ForTerminal`: one policy type, shared with every other gated act, because nothing about
+// waiting for a human to say yes is terminal-shaped.
 
 /// A terminal's screen size in character cells (Plan 13, stage 2b).
 ///

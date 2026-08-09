@@ -132,11 +132,12 @@ let private withLiveTerminal
     }
 
 /// A queue entry for a terminal, as the drain would hand one over.
-let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : TerminalQueued =
+let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : PendingAct =
     { QueueId = QueueId.create n |> expect
-      Terminal = terminal
+      Subject = ForTerminal terminal
       Author = author
       Order = 1.0
+      Payload = CommandLine
       ApprovedBy = None
       RejectedBy = None
       RejectedReason = None }
@@ -164,7 +165,7 @@ let private integrationLostTests =
                     // A genuinely long-running command must NOT trip the detector — the `C`
                     // mark comes when the shell STARTS a command, so runtime is irrelevant.
                     // Run it in the background so the block does not hold this test open.
-                    do! terminals.RunBlock (queueEntry id ada "1") "sleep 5 &" ignore
+                    do! terminals.RunBlock id (queueEntry id ada "1") "sleep 5 &" ignore
                     Expect.isEmpty (terminals.Lost ()) "a slow command marks like any other"
 
                     // Now replace the instrumented shell while the pty stays open. `Exited`
@@ -191,7 +192,7 @@ let private integrationLostTests =
                         | Ok () ->
                             // A command written into the shell that is there now produces no
                             // `C`, because nothing instrumented it.
-                            let running = terminals.RunBlock (queueEntry id ada "2") "echo after-exec" ignore
+                            let running = terminals.RunBlock id (queueEntry id ada "2") "echo after-exec" ignore
                             Async.StartImmediate running
                             let! detected = until 8000 (fun () -> not (Set.isEmpty (terminals.Lost ())))
                             Expect.isTrue detected "the missing `C` is what gives it away"
@@ -255,7 +256,7 @@ let private liveModeTests =
                         match! terminals.Release id ada with
                         | Error e -> failwith e
                         | Ok () ->
-                            do! terminals.RunBlock (queueEntry id ada "1") "echo drained" ignore
+                            do! terminals.RunBlock id (queueEntry id ada "1") "echo drained" ignore
                             Expect.equal
                                 (records
                                  |> Seq.filter (fun r -> r.Kind = TranscriptInput)
@@ -297,6 +298,7 @@ let private liveModeTests =
                     // who wrote it.
                     do!
                         terminals.RunBlock
+                            id
                             (queueEntry id ada "1")
                             "printf '\\033[?1049h'; sleep 0.4; printf '\\033[?1049l'"
                             ignore
@@ -581,8 +583,8 @@ let tests =
             withLiveTerminal "cd" (fun terminals id records _ _ _ ->
                 async {
                     let ada = PeerRef (PeerId.create "ada" |> expect)
-                    do! terminals.RunBlock (queueEntry id ada "1") "cd /tmp" ignore
-                    do! terminals.RunBlock (queueEntry id ada "2") "pwd" ignore
+                    do! terminals.RunBlock id (queueEntry id ada "1") "cd /tmp" ignore
+                    do! terminals.RunBlock id (queueEntry id ada "2") "pwd" ignore
                     let printed = records |> Seq.map (fun r -> r.Data) |> String.concat ""
                     Expect.isTrue (printed.Contains "/tmp")
                         (sprintf "the second block saw the first block's directory, got: %s" printed)

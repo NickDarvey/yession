@@ -51,20 +51,43 @@ type TerminalDraft =
       /// the message queue.
       QueueId  : QueueId }
 
-/// A command waiting to run in a terminal. Collaborative until the drain consumes it: any
-/// peer may edit the text (the `Y.Text` merges), reorder, delete, or approve it. That IS
-/// the approval UX — reading what is about to run, fixing it in place, and letting it go.
-type TerminalQueued =
+/// What a pending act IS, which is the one thing that differs between the kinds (Plan 15,
+/// stage 3). Everything else about waiting for a human — who proposed it, who said yes,
+/// who said no and why — is the same, and lives on the entry rather than in here.
+type PendingPayload =
+    /// A shell command LINE, whose text is a `Y.Text` root keyed by
+    /// `BodyKey.terminalQueued`. Editable in place by any peer, which IS the approval UX
+    /// Plan 13 built: the thing you approve is a thing you can fix first.
+    | CommandLine
+    /// A structured call: the MCP tool name, and its arguments rendered for a human to
+    /// read. Approve-or-reject only — editing typed arguments needs a form per command,
+    /// and a half-built form is worse than a legible refusal (Plan 15, Deferred).
+    | CommandCall of tool: string * summary: string
+
+/// An act waiting for a verdict. Collaborative until whatever carries it out consumes it:
+/// any peer may reorder, delete, approve or reject it, and edit its text where it has
+/// text. That IS the approval UX — reading what is about to happen, fixing it in place,
+/// and letting it go.
+///
+/// A terminal command is one case of this, not the thing itself (Plan 15, stage 3): the
+/// only terminal-shaped parts are the serial drain that consumes it and the editable
+/// command line, and neither is stored here.
+type PendingAct =
     { QueueId  : QueueId
-      Terminal : TerminalId
-      /// Who wrote the command. Decides whether the terminal's mode demands an approval;
+      /// What the gate is about — which terminal, or which command.
+      Subject  : GateSubject
+      /// Who proposed the act. Decides whether the subject's mode demands an approval;
       /// never changed by an edit, because "who asked for this" is not editable.
       Author   : ActorRef
-      /// A fractional index within this terminal's queue — one register write to reorder.
+      /// A fractional index within its subject's queue — one register write to reorder.
+      /// Meaningful where something drains serially (a terminal has one stdin); harmless
+      /// where nothing does.
       Order    : float
+      /// What is being proposed.
+      Payload  : PendingPayload
       /// The peer who approved it, if one has. Whether an approval is REQUIRED is not
-      /// stored: it is computed from the terminal's mode and `Author` at drain time
-      /// (`TerminalApprovalMode.requiresApproval`), so changing the mode re-decides every
+      /// stored: it is computed from the subject's mode and `Author` at the moment of
+      /// acting (`ApprovalMode.requiresApproval`), so changing the mode re-decides every
       /// waiting entry instead of leaving stale verdicts behind.
       ApprovedBy : PeerId option
       /// The peer who refused it, if one has. A register beside `ApprovedBy` rather than a
@@ -79,6 +102,21 @@ type TerminalQueued =
       /// Why it was refused, when the peer said. Optional because "no" is a complete
       /// answer; the reason is what makes it a useful one.
       RejectedReason : string option }
+
+module PendingAct =
+
+    /// The terminal this act runs in, when it runs in one. `None` for a structured
+    /// command, which has no terminal and does not want one.
+    let terminal (act: PendingAct) : TerminalId option =
+        match act.Subject with
+        | ForTerminal id -> Some id
+        | ForCommand _ -> None
+
+    /// Whether a verdict has been given either way. The entry stays visible until whatever
+    /// carries it out consumes it, so "resolved" is a question about the registers rather
+    /// than about the entry's existence.
+    let isResolved (act: PendingAct) : bool =
+        Option.isSome act.ApprovedBy || Option.isSome act.RejectedBy
 
 /// The name of the top-level `Y.XmlFragment` root that holds a draft/queue body. Stable across
 /// peers so every replica's `BodyRegistry` and editor bind to the same fragment (root types
@@ -109,15 +147,15 @@ type SyncedSessionState =
       /// Terminal composer slots, keyed by (terminal, author) — one per person per
       /// terminal, structurally, exactly as `Drafts` caps a person at one message draft.
       TerminalDrafts : Map<TerminalId * PeerId, TerminalDraft>
-      /// Commands queued across every terminal. One flat map rather than a map per
-      /// terminal: a queue entry names its terminal, and a flat keyed map is what makes
-      /// concurrent creation safe (different keys never conflict) regardless of which
-      /// terminal each peer was looking at.
-      TerminalQueue : Map<QueueId, TerminalQueued>
-      /// Per-terminal approval mode. An absent entry is `ApproveAgent` — the default is
-      /// the absence, so a terminal nobody has configured carries no register restating
-      /// what the default already says.
-      TerminalModes : Map<TerminalId, TerminalApprovalMode>
+      /// Every act waiting on a verdict, across every subject. One flat map rather than a
+      /// map per terminal or per command: an entry names its own subject, and a flat keyed
+      /// map is what makes concurrent creation safe (different keys never conflict)
+      /// regardless of which surface each peer was looking at.
+      Pending : Map<QueueId, PendingAct>
+      /// The approval mode per subject. An absent entry is `GateSubject.defaultMode` — the
+      /// default is the absence, so a subject nobody has configured carries no register
+      /// restating what the default already says.
+      Gates : Map<GateSubject, ApprovalMode>
       /// Each terminal's size, as a synced register (Plan 13, stage 2b). Synced rather than
       /// per-viewer because a pty has ONE size and every peer is looking at the same screen:
       /// resizing to the smallest viewer is tmux's worst inheritance, so a viewer with less
@@ -134,13 +172,18 @@ module SyncedSessionState =
           Title = Ylmish.Text.empty
           SharedBrief = None
           TerminalDrafts = Map.empty
-          TerminalQueue = Map.empty
-          TerminalModes = Map.empty
+          Pending = Map.empty
+          Gates = Map.empty
           TerminalSizes = Map.empty }
 
-    /// A terminal's approval mode, defaulting where none is set.
-    let modeOf (terminal: TerminalId) (state: SyncedSessionState) : TerminalApprovalMode =
-        state.TerminalModes |> Map.tryFind terminal |> Option.defaultValue ApproveAgent
+    /// A subject's approval mode, defaulting where none is set.
+    let gateOf (subject: GateSubject) (state: SyncedSessionState) : ApprovalMode =
+        state.Gates |> Map.tryFind subject |> Option.defaultValue (GateSubject.defaultMode subject)
+
+    /// A terminal's approval mode. The `ForTerminal` case of `gateOf`, named because the
+    /// terminal surface asks for it constantly.
+    let modeOf (terminal: TerminalId) (state: SyncedSessionState) : ApprovalMode =
+        gateOf (ForTerminal terminal) state
 
     /// A terminal's size, defaulting to 80x24 — the size every terminal has ever defaulted
     /// to, and the one the transcript header records when a terminal opens.
@@ -204,25 +247,25 @@ module QueueOrder =
 module TerminalQueueOrder =
 
     /// One terminal's entries in consumption order.
-    let sortedFor (terminal: TerminalId) (queue: Map<QueueId, TerminalQueued>) : TerminalQueued list =
+    let sortedFor (terminal: TerminalId) (queue: Map<QueueId, PendingAct>) : PendingAct list =
         queue
         |> Map.toList
         |> List.map snd
-        |> List.filter (fun e -> e.Terminal = terminal)
+        |> List.filter (fun e -> e.Subject = ForTerminal terminal)
         |> List.sortBy (fun e -> e.Order, QueueId.value e.QueueId)
 
     /// The order value for a new entry appended at the tail of a terminal's queue.
-    let nextFor (terminal: TerminalId) (queue: Map<QueueId, TerminalQueued>) : float =
+    let nextFor (terminal: TerminalId) (queue: Map<QueueId, PendingAct>) : float =
         match sortedFor terminal queue with
         | [] -> 1.0
         | entries -> (List.last entries).Order + 1.0
 
     /// The order value that moves `id` one position earlier within its own terminal.
-    let moveUp (queue: Map<QueueId, TerminalQueued>) (id: QueueId) : float option =
-        match Map.tryFind id queue with
+    let moveUp (queue: Map<QueueId, PendingAct>) (id: QueueId) : float option =
+        match Map.tryFind id queue |> Option.bind PendingAct.terminal with
         | None -> None
-        | Some entry ->
-            let entries = sortedFor entry.Terminal queue
+        | Some terminal ->
+            let entries = sortedFor terminal queue
             match entries |> List.tryFindIndex (fun e -> e.QueueId = id) with
             | Some i when i > 0 ->
                 let above = entries.[i - 1].Order
@@ -231,11 +274,11 @@ module TerminalQueueOrder =
             | _ -> None
 
     /// The order value that moves `id` one position later within its own terminal.
-    let moveDown (queue: Map<QueueId, TerminalQueued>) (id: QueueId) : float option =
-        match Map.tryFind id queue with
+    let moveDown (queue: Map<QueueId, PendingAct>) (id: QueueId) : float option =
+        match Map.tryFind id queue |> Option.bind PendingAct.terminal with
         | None -> None
-        | Some entry ->
-            let entries = sortedFor entry.Terminal queue
+        | Some terminal ->
+            let entries = sortedFor terminal queue
             match entries |> List.tryFindIndex (fun e -> e.QueueId = id) with
             | Some i when i < entries.Length - 1 ->
                 let below = entries.[i + 1].Order

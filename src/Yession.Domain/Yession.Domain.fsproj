@@ -28,8 +28,10 @@
     <!-- The read half of the imperative session API (Plan 15). Depends on nothing but
          System: a query is a declaration, and what it declares about is somebody else's. -->
     <Compile Include="Queries.fs" />
-    <!-- Before SessionState: the synced terminal state carries the approval mode this
-         declares, so the policy type precedes the collaborative state that holds it. -->
+    <!-- Before SessionState: the synced state carries the approval mode and the subject
+         this declares, so the policy types precede the collaborative state that holds
+         them. Before Terminals.fs too, because a terminal's mode is one case of it. -->
+    <Compile Include="Gates.fs" />
     <Compile Include="Terminals.fs" />
     <Compile Include="TerminalMarks.fs" />
     <!-- After both projections it merges: the chat as a person reads it, said and run
