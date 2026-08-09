@@ -853,21 +853,38 @@ module SessionTerminals =
         /// synchronous step, and `Serialize`'s empty-write barrier resolves only once
         /// everything queued BEFORE it has been applied. So the screen this returns is
         /// exactly lines `< seq` — never a byte that arrived while we waited.
-        let markKeyframe (id: TerminalId) : Async<int> =
-            async {
-                match live.TryGetValue (TerminalId.value id) with
-                | false, _ -> return 0
-                | true, terminal ->
-                    let seq = terminal.Transcript.NextSeq ()
-                    let! screen = terminal.Emulator.Serialize ()
-                    let size =
-                        match appliedSize.TryGetValue (TerminalId.value id) with
-                        | true, applied -> applied
-                        | _ -> TerminalSize.default'
-                    terminal.Transcript.Keyframe
-                        { Seq = seq; Cols = size.Cols; Rows = size.Rows; Screen = screen }
-                    return seq
-            }
+        /// The transcript position a range starts at, with the keyframe for it captured on
+        /// the way past.
+        ///
+        /// The seq is read and the emulator's write barrier QUEUED synchronously — that is
+        /// what pairs the screen with `seq`, since the barrier resolves over everything fed
+        /// before it and nothing after. The WRITE finishes off the caller's path, and that
+        /// is not an optimisation: `runBlock` calls this between the drain consuming a queue
+        /// entry and `TerminalBlockStarted` recording the block, and an await anywhere in
+        /// that stretch is a window in which a waiting caller sees an entry that is gone and
+        /// a block that does not exist yet — and is told its command was removed before it
+        /// ran. Awaiting it later instead only moves the delay onto the spawn, which is
+        /// equally observable.
+        ///
+        /// Nothing downstream needs the keyframe durable before the block starts. A keyframe
+        /// that never landed would cost a ranged replay its exactness, which the replay
+        /// already states and degrades to.
+        let markKeyframe (id: TerminalId) : int =
+            match live.TryGetValue (TerminalId.value id) with
+            | false, _ -> 0
+            | true, terminal ->
+                let seq = terminal.Transcript.NextSeq ()
+                let size =
+                    match appliedSize.TryGetValue (TerminalId.value id) with
+                    | true, applied -> applied
+                    | _ -> TerminalSize.default'
+                Async.StartImmediate (
+                    async {
+                        let! screen = terminal.Emulator.Serialize ()
+                        terminal.Transcript.Keyframe
+                            { Seq = seq; Cols = size.Cols; Rows = size.Rows; Screen = screen }
+                    })
+                seq
 
         /// Who a lease event is attributed to. A take and a steal are the acts of whoever took
         /// it; a voluntary release is the holder's; a lease ended because its holder vanished
@@ -912,8 +929,7 @@ module SessionTerminals =
                     | _ -> None
                 match TerminalFlip.propose altScreen holder autoHeld author with
                 | FlipToLive by ->
-                    let! seq = markKeyframe id
-                    do! applyLease (TerminalLeases.take id by true (clock ()) seq leases)
+                    do! applyLease (TerminalLeases.take id by true (clock ()) (markKeyframe id) leases)
                 | FlipToBlock -> do! applyLease (TerminalLeases.autoRelease id (seqNow id) leases)
                 | FlipNothing -> return ()
             }
@@ -1127,7 +1143,7 @@ module SessionTerminals =
                     // on the screen. The alternative — starting the range at the `C` mark —
                     // cannot be reconciled with appending the anchor first, because `C` does
                     // not exist until after the write.
-                    let! fromSeq = markKeyframe entry.Terminal
+                    let fromSeq = markKeyframe entry.Terminal
                     // Durable BEFORE the process starts: the block event is the
                     // exactly-once anchor, so a crash between here and the spawn leaves a
                     // block that never completed — visible and explicable — rather than a
@@ -1290,8 +1306,7 @@ module SessionTerminals =
                 | true, terminal when Option.isNone terminal.Shell ->
                     return Error "this terminal has no interactive shell"
                 | true, _ ->
-                    let! seq = markKeyframe id
-                    do! applyLease (TerminalLeases.take id by false (clock ()) seq leases)
+                    do! applyLease (TerminalLeases.take id by false (clock ()) (markKeyframe id) leases)
                     return Ok ()
             }
 

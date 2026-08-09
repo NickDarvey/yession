@@ -1489,6 +1489,23 @@ let private recordingTranscripts () =
             let created = ResizeArray<TranscriptKeyframe> ()
             keyframes.[key] <- created
             created
+    // A keyframe is written OFF the block's path (the Process must not await the emulator
+    // between consuming a queue entry and recording the block), so a test that read them the
+    // instant `RunBlock` returned would be racing the emulator's own write barrier. Waiting
+    // on the WRITE itself is what makes that deterministic — no clock, no sleep, no ordering
+    // luck: the latch resolves when the thing under test has happened.
+    let waiters = ResizeArray<(TerminalId * int) * (unit -> unit)> ()
+    let settle () =
+        let ready =
+            waiters
+            |> Seq.filter (fun ((id, count), _) -> (keyframesFor id).Count >= count)
+            |> List.ofSeq
+        for w in ready do waiters.Remove w |> ignore
+        for (_, resume) in ready do resume ()
+    let awaitKeyframes (id: TerminalId) (count: int) : Async<unit> =
+        Async.FromContinuations (fun (cont, _, _) ->
+            if (keyframesFor id).Count >= count then cont ()
+            else waiters.Add ((id, count), cont))
     let linesFor (id: TerminalId) =
         let key = TerminalId.value id
         match lines.TryGetValue key with
@@ -1507,10 +1524,14 @@ let private recordingTranscripts () =
                     held.Add (TranscriptRecordLine record)
                     seq
               NextSeq = fun () -> held.Count
-              Keyframe = fun keyframe -> (keyframesFor id).Add keyframe }
+              Keyframe =
+                fun keyframe ->
+                    (keyframesFor id).Add keyframe
+                    settle () }
     openTranscript,
     (fun (id: TerminalId) -> linesFor id |> List.ofSeq),
-    (fun (id: TerminalId) -> keyframesFor id |> List.ofSeq)
+    (fun (id: TerminalId) -> keyframesFor id |> List.ofSeq),
+    awaitKeyframes
 
 let private mintFrom (ids: string list) =
     let remaining = ResizeArray<string> ids
@@ -1553,7 +1574,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1571,7 +1592,7 @@ let private managerTests =
                 let log = newLog ()
                 let environment, spawned =
                     scriptedEnvironment (fun _ -> [ Stdout, "hello\n"; Stderr, "warn\n" ], 0)
-                let openTranscript, readTranscript, _ = recordingTranscripts ()
+                let openTranscript, readTranscript, _, _ = recordingTranscripts ()
                 let terminals, records = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1621,7 +1642,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stderr, "no such file\n" ], 2)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1640,12 +1661,15 @@ let private managerTests =
                 // exactly what this has to carry.
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "\u001b[31mred\r\n" ], 0)
-                let openTranscript, _, readKeyframes = recordingTranscripts ()
+                let openTranscript, _, readKeyframes, awaitKeyframes = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock (entry "a1" id (PeerRef ada) 1.0 None) "first" ignore
                 do! terminals.RunBlock (entry "a2" id (PeerRef ada) 2.0 None) "second" ignore
+                // Both blocks have run; wait for both keyframes to be WRITTEN before reading
+                // them, since the Process deliberately does not hold a block up for one.
+                do! awaitKeyframes id 2
 
                 let! events = eventsOf log
                 let starts =
@@ -1667,7 +1691,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1685,7 +1709,7 @@ let private managerTests =
                 // Comfortably past the 4 MiB per-block cap.
                 let flood = String.replicate 200 (String.replicate 40000 "y")
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, flood ], 0)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1704,7 +1728,7 @@ let private managerTests =
                 // session. Closing them is what keeps the projection describing reality.
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript [ terminalA; terminalB ]
                 Expect.isTrue (terminals.IsOpen terminalA) "before boot reconciliation it still reads as open"
                 do! terminals.ReconcileAtBoot ()
@@ -1719,7 +1743,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1741,7 +1765,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "ok\n" ], 0)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1764,7 +1788,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1797,7 +1821,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
