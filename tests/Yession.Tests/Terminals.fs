@@ -51,19 +51,29 @@ let private eventsOf (log: EventLog<SessionEvent>) =
     }
 
 // --- Writing the doc as a remote peer would -------------------------------------------------
-// Approving a command is a CLIENT-side CRDT write (`ApproveTerminalQueuedMsg` through the
+// Approving a command is a CLIENT-side CRDT write (`ApprovePendingMsg` through the
 // Ylmish binding), so a test driving the Session Process's own doc has to make that write
 // the way a peer's merged update would arrive. These are the only Yjs calls in this file,
 // and they exist so no production API has to grow a setter that only a test would call.
 
-[<Fable.Core.Emit("(() => { const e = $0.getMap('terminalQueue').get($1); if (e) e.set($2, $3) })()")>]
+[<Fable.Core.Emit("(() => { const e = $0.getMap('pending').get($1); if (e) e.set($2, $3) })()")>]
 let private setQueuedField (doc: Y.Doc) (id: string) (field: string) (value: obj) : unit = Fable.Core.Util.jsNative
 
-[<Fable.Core.Emit("(() => { const m = $0.getMap('terminalModes'); const e = new $2.Map(); m.set($1, e); e.set('mode', $3) })()")>]
+[<Fable.Core.Emit("(() => { const m = $0.getMap('gates'); const e = new $2.Map(); m.set($1, e); e.set('mode', $3) })()")>]
 let private setModeRaw (doc: Y.Doc) (id: string) (yjs: obj) (mode: string) : unit = Fable.Core.Util.jsNative
 
 [<Fable.Core.Import("*", "yjs")>]
 let private yjsModule : obj = Fable.Core.Util.jsNative
+
+// A doc as it was written before Plan 15 stage 3: the old roots, the old field names. There
+// is no production writer for this shape any more — that is the point — so the only way to
+// test the migration is to write it the way the build that is being migrated FROM did.
+
+[<Fable.Core.Emit("(() => { const q = $0.getMap('terminalQueue'); const e = new $1.Map(); q.set($2, e); e.set('terminal', $3); e.set('author', $4); e.set('order', $5); e.set('approvedBy', '') })()")>]
+let private legacyEnqueueInDoc (doc: Y.Doc) (yjs: obj) (id: string) (terminal: string) (author: string) (order: float) : unit = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("(() => { const m = $0.getMap('terminalModes'); const e = new $1.Map(); m.set($2, e); e.set('mode', $3) })()")>]
+let private legacyModeInDoc (doc: Y.Doc) (yjs: obj) (terminal: string) (mode: string) : unit = Fable.Core.Util.jsNative
 
 /// A peer's approval, landing in this doc.
 let private approveInDoc (doc: Y.Doc) (id: QueueId) (approver: PeerId) : unit =
@@ -75,37 +85,79 @@ let private setQueuedFieldInDoc (doc: Y.Doc) (id: QueueId) (field: string) (valu
 
 /// A terminal's mode register, set to a raw string.
 let private setModeInDoc (doc: Y.Doc) (terminal: TerminalId) (mode: string) : unit =
-    setModeRaw doc (TerminalId.value terminal) yjsModule mode
+    setModeRaw doc (GateSubject.describe (ForTerminal terminal)) yjsModule mode
 
 // --- The approval policy -----------------------------------------------------------------
 
 let private approvalTests =
     testList "Approval policy" [
         testCase "the default mode gates the agent and nobody else" <| fun () ->
-            Expect.isTrue (TerminalApprovalMode.requiresApproval ApproveAgent ActorRef.Agent) "the agent is gated"
-            Expect.isFalse (TerminalApprovalMode.requiresApproval ApproveAgent (PeerRef ada)) "a peer is not"
+            Expect.isTrue (ApprovalMode.requiresApproval ApproveAgent ActorRef.Agent) "the agent is gated"
+            Expect.isFalse (ApprovalMode.requiresApproval ApproveAgent (PeerRef ada)) "a peer is not"
             Expect.isFalse
-                (TerminalApprovalMode.requiresApproval ApproveAgent ActorRef.SessionProcess)
+                (ApprovalMode.requiresApproval ApproveAgent ActorRef.SessionProcess)
                 "the Process's own commands are not gated — a gate there deadlocks on housekeeping"
 
         testCase "approve-all gates everyone; auto gates nobody" <| fun () ->
             for author in [ ActorRef.Agent; PeerRef ada; ActorRef.SessionProcess ] do
-                Expect.isTrue (TerminalApprovalMode.requiresApproval ApproveAll author) "approve-all gates everything"
-                Expect.isFalse (TerminalApprovalMode.requiresApproval AutoRun author) "auto gates nothing"
+                Expect.isTrue (ApprovalMode.requiresApproval ApproveAll author) "approve-all gates everything"
+                Expect.isFalse (ApprovalMode.requiresApproval AutoRun author) "auto gates nothing"
 
         testCase "an absent mode register reads as the default, never as no gate" <| fun () ->
             // The safe direction: a terminal nobody configured must still hold the agent.
             let mode = SyncedSessionState.modeOf terminalA SyncedSessionState.empty
             Expect.equal mode ApproveAgent "an unconfigured terminal is approve-agent"
+
+        // --- The subject the mode is keyed by (Plan 15, stage 3) ---------------------------
+
+        testCase "the default is per subject KIND, which is how both sides keep today's behaviour" <| fun () ->
+            Expect.equal
+                (GateSubject.defaultMode (ForTerminal terminalA))
+                ApproveAgent
+                "a terminal is reviewed unless somebody says otherwise"
+            Expect.equal
+                (GateSubject.defaultMode (ForCommand "add_repo"))
+                AutoRun
+                "a command is not reviewed until somebody says so"
+            Expect.equal
+                (SyncedSessionState.gateOf (ForCommand "add_repo") SyncedSessionState.empty)
+                AutoRun
+                "and an unconfigured session reads that default rather than a stored register"
+
+        testCase "a configured gate outranks the default, for either kind" <| fun () ->
+            let state =
+                { SyncedSessionState.empty with
+                    Gates =
+                        Map.ofList [ ForTerminal terminalA, AutoRun; ForCommand "add_repo", ApproveAgent ] }
+            Expect.equal (SyncedSessionState.gateOf (ForTerminal terminalA) state) AutoRun "the terminal was opened out"
+            Expect.equal
+                (SyncedSessionState.gateOf (ForCommand "add_repo") state)
+                ApproveAgent
+                "and the command was gated in"
+            Expect.equal
+                (SyncedSessionState.gateOf (ForCommand "start_work_sandbox") state)
+                AutoRun
+                "a sibling command is untouched — a gate is per subject, never per kind"
+
+        testCase "a subject round-trips through its wire form, and a junk one is refused" <| fun () ->
+            for subject in [ ForTerminal terminalA; ForCommand "add_repo" ] do
+                Expect.equal
+                    (GateSubject.parse (GateSubject.describe subject))
+                    (Some subject)
+                    (sprintf "%A survives the doc key it is stored under" subject)
+            Expect.equal (GateSubject.parse "terminal:") None "a terminal with no id is not a subject"
+            Expect.equal (GateSubject.parse "command:") None "nor is a command with no name"
+            Expect.equal (GateSubject.parse "add_repo") None "and an unprefixed key names nothing"
     ]
 
 // --- The drain's decision ------------------------------------------------------------------
 
 let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order: float) (approved: PeerId option) =
     { QueueId = queue id
-      Terminal = terminal
+      Subject = ForTerminal terminal
       Author = author
       Order = order
+      Payload = CommandLine
       ApprovedBy = approved
       RejectedBy = None
       RejectedReason = None }
@@ -113,11 +165,11 @@ let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order:
 /// The same entry, refused. Kept beside `entry` so a test says which of the two verdicts
 /// it is exercising rather than threading a `None` through every call that is not about
 /// rejection.
-let private rejected (e: TerminalQueued) (by: PeerId) (reason: string option) =
+let private rejected (e: PendingAct) (by: PeerId) (reason: string option) =
     { e with RejectedBy = Some by; RejectedReason = reason }
 
 let private queueOf entries =
-    entries |> List.map (fun (e: TerminalQueued) -> e.QueueId, e) |> Map.ofList
+    entries |> List.map (fun (e: PendingAct) -> e.QueueId, e) |> Map.ofList
 
 let private allOpen (_: TerminalId) = true
 let private planWith consumed busy isOpen modeOf entries =
@@ -140,7 +192,7 @@ let private drainTests =
                       entry "a2" terminalA (PeerRef ada) 2.0 None
                       entry "b1" terminalB (PeerRef bob) 1.0 None ]
             Expect.equal
-                (plan.Ready |> List.map (fun e -> QueueId.value e.QueueId))
+                (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId))
                 [ "q-a1"; "q-b1" ]
                 "the head of each terminal runs; the second in a terminal waits its turn"
 
@@ -150,7 +202,7 @@ let private drainTests =
                     [ entry "a1" terminalA (PeerRef ada) 1.0 None
                       entry "b1" terminalB (PeerRef bob) 1.0 None ]
             Expect.equal
-                (plan.Ready |> List.map (fun e -> QueueId.value e.QueueId))
+                (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId))
                 [ "q-b1" ]
                 "a busy terminal runs nothing more; its sibling is unaffected"
 
@@ -167,7 +219,7 @@ let private drainTests =
             let plan =
                 planWith Set.empty Set.empty allOpen (fun _ -> ApproveAgent)
                     [ entry "a1" terminalA ActorRef.Agent 1.0 (Some ada) ]
-            Expect.equal (plan.Ready |> List.map (fun e -> QueueId.value e.QueueId)) [ "q-a1" ] "the approval releases it"
+            Expect.equal (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId)) [ "q-a1" ] "the approval releases it"
 
         testCase "a closed terminal runs nothing" <| fun () ->
             let plan =
@@ -183,7 +235,7 @@ let private drainTests =
                       entry "a2" terminalA (PeerRef ada) 2.0 None ]
             Expect.equal (plan.Removals |> List.map QueueId.value) [ "q-a1" ] "the consumed entry is removed"
             Expect.equal
-                (plan.Ready |> List.map (fun e -> QueueId.value e.QueueId))
+                (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId))
                 [ "q-a2" ]
                 "and the next one becomes the head"
 
@@ -478,7 +530,7 @@ let private rejectionTests =
                         [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 (Some ada)) bob (Some "no") ]
                 Expect.isEmpty plan.Ready (sprintf "nothing runs under %A" mode)
                 Expect.equal
-                    (plan.Rejections |> List.map (fun e -> QueueId.value e.QueueId))
+                    (plan.Rejections |> List.map (fun (_, e) -> QueueId.value e.QueueId))
                     [ "q-a1" ]
                     (sprintf "and the refusal is planned under %A" mode)
 
@@ -739,7 +791,7 @@ let private integrationTests =
             let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
             Expect.equal
                 ((planLost Set.empty Set.empty allOpen (fun _ -> AutoRun) entries).Ready
-                 |> List.map (fun e -> QueueId.value e.QueueId))
+                 |> List.map (fun (_, e) -> QueueId.value e.QueueId))
                 [ "q-a1" ]
                 "the command that was held runs once marking is back"
 
@@ -888,7 +940,7 @@ let private leaseGateTests =
         testCase "releasing the lease yields the entry Ready, unchanged" <| fun () ->
             let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
             let plan = planLeased Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) entries
-            Expect.equal (plan.Ready |> List.map (fun e -> QueueId.value e.QueueId)) [ "q-a1" ] "it runs on release"
+            Expect.equal (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId)) [ "q-a1" ] "it runs on release"
             Expect.equal
                 (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
                 None
@@ -1600,7 +1652,7 @@ let private managerTests =
                 let id = opened |> expect
                 let entry = entry "a1" id (PeerRef ada) 1.0 None
                 let mutable startedCalled = 0
-                do! terminals.RunBlock entry "echo hello" (fun () -> startedCalled <- startedCalled + 1)
+                do! terminals.RunBlock id entry "echo hello" (fun () -> startedCalled <- startedCalled + 1)
 
                 Expect.equal startedCalled 1 "the consumed callback fires exactly once, at the durable start"
                 Expect.equal
@@ -1648,7 +1700,7 @@ let private managerTests =
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
                 let id = opened |> expect
-                do! terminals.RunBlock (entry "a1" id (PeerRef ada) 1.0 None) "cat missing" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "cat missing" ignore
                 let! events = eventsOf log
                 let completedEvent =
                     events |> List.pick (function SessionEvent.TerminalBlockCompleted e -> Some e | _ -> None)
@@ -1667,8 +1719,8 @@ let private managerTests =
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
                 let id = opened |> expect
-                do! terminals.RunBlock (entry "a1" id (PeerRef ada) 1.0 None) "first" ignore
-                do! terminals.RunBlock (entry "a2" id (PeerRef ada) 2.0 None) "second" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "first" ignore
+                do! terminals.RunBlock id (entry "a2" id (PeerRef ada) 2.0 None) "second" ignore
                 // Both blocks have run; wait for both keyframes to be WRITTEN before reading
                 // them, since the Process deliberately does not hold a block up for one.
                 do! awaitKeyframes id 2
@@ -1697,7 +1749,7 @@ let private managerTests =
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
                 let id = opened |> expect
-                do! terminals.RunBlock (entry "a1" id ActorRef.Agent 1.0 (Some bob)) "rm -rf build" ignore
+                do! terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0 (Some bob)) "rm -rf build" ignore
                 let! events = eventsOf log
                 let startedEvent =
                     events |> List.pick (function SessionEvent.TerminalBlockStarted e -> Some e | _ -> None)
@@ -1715,7 +1767,7 @@ let private managerTests =
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
                 let id = opened |> expect
-                do! terminals.RunBlock (entry "a1" id (PeerRef ada) 1.0 None) "yes" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "yes" ignore
                 let! events = eventsOf log
                 let truncation =
                     events |> List.tryPick (function SessionEvent.TerminalTranscriptTruncated e -> Some e | _ -> None)
@@ -1750,7 +1802,7 @@ let private managerTests =
                 let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
                 let id = opened |> expect
                 let! _ = terminals.Close id "closed by a peer"
-                do! terminals.RunBlock (entry "a1" id (PeerRef ada) 1.0 None) "make" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "make" ignore
                 Expect.isEmpty (List.ofSeq spawned) "nothing is spawned"
                 let! events = eventsOf log
                 Expect.isEmpty
@@ -1783,7 +1835,7 @@ let private schedulerTests =
                     events |> List.pick (function SessionEvent.TerminalBlockStarted e -> Some e | _ -> None)
                 Expect.equal startedEvent.Command "echo ok" "the queued command ran"
                 let synced = syncedOf doc
-                Expect.isTrue (Map.isEmpty synced.TerminalQueue) "and its entry left the doc once consumed"
+                Expect.isTrue (Map.isEmpty synced.Pending) "and its entry left the doc once consumed"
             }
 
         testCaseAsync "the agent's command waits for a human under the default mode" <|
@@ -1801,15 +1853,15 @@ let private schedulerTests =
                 do! Async.Sleep 20
                 Expect.isEmpty (List.ofSeq spawned) "nothing ran"
                 let synced = syncedOf doc
-                Expect.equal (Map.count synced.TerminalQueue) 1 "the command is still queued, visible and editable"
+                Expect.equal (Map.count synced.Pending) 1 "the command is still queued, visible and editable"
 
                 // A peer approves it — a plain CRDT write, which is the entire mechanism.
-                let entry = synced.TerminalQueue |> Map.toList |> List.head |> snd
+                let entry = synced.Pending |> Map.toList |> List.head |> snd
                 let approved =
                     ClientModel.update
-                        (ApproveTerminalQueuedMsg (entry.QueueId, bob))
+                        (ApprovePendingMsg (entry.QueueId, bob))
                         { ClientModel.init { PeerId = bob; DisplayName = "Bob" } with Synced = synced }
-                let approvedEntry = approved.Synced.TerminalQueue |> Map.find entry.QueueId
+                let approvedEntry = approved.Synced.Pending |> Map.find entry.QueueId
                 Expect.equal approvedEntry.ApprovedBy (Some bob) "the approval is a register on the entry"
 
                 // Reflect the approval into the doc the scheduler reads, and drain again.
@@ -1835,7 +1887,7 @@ let private schedulerTests =
                 do! Async.Sleep 20
                 Expect.isEmpty (List.ofSeq spawned) "it does not run a second time"
                 let synced = syncedOf doc
-                Expect.isTrue (Map.isEmpty synced.TerminalQueue) "and the leftover is cleaned out of the doc"
+                Expect.isTrue (Map.isEmpty synced.Pending) "and the leftover is cleaned out of the doc"
             }
     ]
 
@@ -1847,8 +1899,9 @@ let private syncTests =
             let doc = Y.Doc.Create ()
             SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 3.0 "git status"
             let synced = syncedOf doc
-            let entry = synced.TerminalQueue |> Map.find (queue "a1")
-            Expect.equal entry.Terminal terminalA "the terminal"
+            let entry = synced.Pending |> Map.find (queue "a1")
+            Expect.equal entry.Subject (ForTerminal terminalA) "the subject names its terminal"
+            Expect.equal entry.Payload CommandLine "and its payload is an editable command line"
             Expect.equal entry.Author ActorRef.Agent "the author, as an actor rather than a peer"
             Expect.equal entry.Order 3.0 "the order"
             Expect.equal entry.ApprovedBy None "and never pre-approved"
@@ -1860,7 +1913,7 @@ let private syncTests =
             SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 1.0 "x"
             setQueuedFieldInDoc doc (queue "a1") "approvedBy" "   "
             let synced = syncedOf doc
-            Expect.equal (synced.TerminalQueue |> Map.find (queue "a1")).ApprovedBy None "blank is not an approval"
+            Expect.equal (synced.Pending |> Map.find (queue "a1")).ApprovedBy None "blank is not an approval"
 
         testCase "an unreadable mode reads as the default, not as no gate" <| fun () ->
             let doc = Y.Doc.Create ()
@@ -1872,6 +1925,40 @@ let private syncTests =
             let key = SyncedStateSync.TerminalDraftKey.make terminalA ada
             Expect.equal (SyncedStateSync.TerminalDraftKey.parse key) (Some (terminalA, ada)) "both come back"
             Expect.equal (SyncedStateSync.TerminalDraftKey.parse "no-separator") None "and a malformed key is skipped"
+
+        // --- The widened roots, and the docs written before them (Plan 15, stage 3) --------
+
+        testCase "a gate is stored per subject, for either kind" <| fun () ->
+            let doc = Y.Doc.Create ()
+            SyncedStateSync.setGate doc (ForTerminal terminalA) AutoRun
+            SyncedStateSync.setGate doc (ForCommand "add_repo") ApproveAgent
+            let synced = syncedOf doc
+            Expect.equal (SyncedSessionState.gateOf (ForTerminal terminalA) synced) AutoRun "the terminal's"
+            Expect.equal (SyncedSessionState.gateOf (ForCommand "add_repo") synced) ApproveAgent "and the command's"
+
+        testCase "a doc written before the widening keeps its pending commands and its modes" <| fun () ->
+            // The regression this exists to stop is silent and one-directional: a bare
+            // rename drops a terminal somebody set to `ApproveAll` back to the default,
+            // which is LESS gated than what they asked for.
+            let doc = Y.Doc.Create ()
+            legacyEnqueueInDoc doc yjsModule (QueueId.value (queue "a1")) (TerminalId.value terminalA) "agent" 3.0
+            legacyModeInDoc doc yjsModule (TerminalId.value terminalA) "approve-all"
+            Expect.equal (SyncedStateSync.migrateGateRoots doc) (1, 1) "one act and one gate moved"
+            let synced = syncedOf doc
+            let entry = synced.Pending |> Map.find (queue "a1")
+            Expect.equal entry.Subject (ForTerminal terminalA) "the entry names the terminal it named before"
+            Expect.equal entry.Payload CommandLine "as the only payload kind that existed then"
+            Expect.equal entry.Author ActorRef.Agent "with its author"
+            Expect.equal entry.Order 3.0 "and its place in the queue"
+            Expect.equal (SyncedSessionState.modeOf terminalA synced) ApproveAll "the stricter mode survives"
+            // Exactly one live location afterwards, never two that can disagree.
+            Expect.equal (SyncedStateSync.migrateGateRoots doc) (0, 0) "and a migrated doc has nothing left to move"
+
+        testCase "migrating a doc that was never legacy does nothing" <| fun () ->
+            let doc = Y.Doc.Create ()
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 1.0 "git status"
+            Expect.equal (SyncedStateSync.migrateGateRoots doc) (0, 0) "no legacy roots, no work"
+            Expect.equal (Map.count (syncedOf doc).Pending) 1 "and the entry it did have is untouched"
     ]
 
 

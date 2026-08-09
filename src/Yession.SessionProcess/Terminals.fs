@@ -138,13 +138,16 @@ module TerminalQueueDrain =
         | NotWaiting
 
     type TerminalDrainPlan =
-        { /// The entries to start now — at most one per terminal, in terminal order.
-          Ready : TerminalQueued list
+        { /// The entries to start now — at most one per terminal, in terminal order. Paired
+          /// with the terminal they resolved to (Plan 15, stage 3): a `PendingAct` names a
+          /// `GateSubject`, and re-asking which terminal downstream would mean answering,
+          /// with a default or a `failwith`, a question this plan already settled.
+          Ready : (TerminalId * PendingAct) list
           /// Entries a peer has refused: appended as `TerminalCommandRejected`, then
           /// removed. Separate from `Removals` because they are opposite facts — a removal
           /// is repair for something that already happened, a rejection is a decision that
           /// has not been recorded yet.
-          Rejections : TerminalQueued list
+          Rejections : (TerminalId * PendingAct) list
           /// Doc keys to remove without running: entries a `TerminalBlockStarted` already
           /// names (a crash between the append and the removal), repaired rather than run
           /// a second time.
@@ -157,16 +160,16 @@ module TerminalQueueDrain =
     /// or leased terminal is irrelevant to it, and someone can clear a bad queue while a
     /// colleague is inside vim); then one block at a time; then the lease; then approval.
     let private gate
-        (alreadyConsumed: TerminalQueued -> bool)
+        (alreadyConsumed: PendingAct -> bool)
         (rejected: Set<string>)
         (busy: Set<string>)
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
-        (modeOf: TerminalApprovalMode)
-        (queue: Map<QueueId, TerminalQueued>)
+        (modeOf: ApprovalMode)
+        (queue: Map<QueueId, PendingAct>)
         (terminal: TerminalId)
-        : Choice<TerminalQueued, TerminalHold> =
+        : Choice<TerminalId * PendingAct, TerminalHold> =
         // The head is the first entry this drain has not already consumed. A refused entry is
         // not skipped over: it is still the head and it stops the queue exactly as an
         // unapproved one does, until the drain removes it. Running the entry behind it first
@@ -187,9 +190,9 @@ module TerminalQueueDrain =
             // know when it started or finished. Holding is the honest answer — draining into
             // an unmarked shell would produce blocks that never close.
             elif Set.contains (TerminalId.value terminal) lost then Choice2Of2 AwaitingIntegration
-            elif TerminalApprovalMode.requiresApproval modeOf entry.Author && Option.isNone entry.ApprovedBy then
+            elif ApprovalMode.requiresApproval modeOf entry.Author && Option.isNone entry.ApprovedBy then
                 Choice2Of2 AwaitingApproval
-            else Choice1Of2 entry
+            else Choice1Of2 (terminal, entry)
 
     /// Why a terminal's head is not running — `None` when it IS about to run. Pure, and asked
     /// by the agent's tool and the composer alike so neither invents its own answer.
@@ -199,11 +202,11 @@ module TerminalQueueDrain =
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
-        (modeOf: TerminalId -> TerminalApprovalMode)
-        (queue: Map<QueueId, TerminalQueued>)
+        (modeOf: TerminalId -> ApprovalMode)
+        (queue: Map<QueueId, PendingAct>)
         (terminal: TerminalId)
         : TerminalHold option =
-        let alreadyConsumed (entry: TerminalQueued) = Set.contains (QueueId.value entry.QueueId) consumed
+        let alreadyConsumed (entry: PendingAct) = Set.contains (QueueId.value entry.QueueId) consumed
         let rejected =
             queue
             |> Map.toList
@@ -225,16 +228,19 @@ module TerminalQueueDrain =
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
-        (modeOf: TerminalId -> TerminalApprovalMode)
-        (queue: Map<QueueId, TerminalQueued>)
+        (modeOf: TerminalId -> ApprovalMode)
+        (queue: Map<QueueId, PendingAct>)
         : TerminalDrainPlan =
 
-        let alreadyConsumed (entry: TerminalQueued) = Set.contains (QueueId.value entry.QueueId) consumed
+        let alreadyConsumed (entry: PendingAct) = Set.contains (QueueId.value entry.QueueId) consumed
 
+        // Only the acts that name a terminal. A command act waits in the same map (Plan 15,
+        // stage 3) and is nothing to do with this drain: it has no shell, no order to hold,
+        // and its own gate resolves it.
         let terminals =
             queue
             |> Map.toList
-            |> List.map (fun (_, entry) -> entry.Terminal)
+            |> List.choose (fun (_, entry) -> PendingAct.terminal entry)
             |> List.distinct
             |> List.sortBy TerminalId.value
 
@@ -247,21 +253,27 @@ module TerminalQueueDrain =
             |> Map.toList
             |> List.map snd
             |> List.filter (fun entry -> Option.isSome entry.RejectedBy && not (alreadyConsumed entry))
-            |> List.sortBy (fun entry -> QueueId.value entry.QueueId)
+            |> List.choose (fun entry -> PendingAct.terminal entry |> Option.map (fun t -> t, entry))
+            |> List.sortBy (fun (_, entry) -> QueueId.value entry.QueueId)
 
         let rejected =
-            rejections |> List.map (fun entry -> QueueId.value entry.QueueId) |> Set.ofList
+            rejections |> List.map (fun (_, entry) -> QueueId.value entry.QueueId) |> Set.ofList
 
         let ready =
             terminals
             |> List.choose (fun terminal ->
                 match gate alreadyConsumed rejected busy leased lost isOpen (modeOf terminal) queue terminal with
-                | Choice1Of2 entry -> Some entry
+                | Choice1Of2 resolved -> Some resolved
                 | Choice2Of2 _ -> None)
 
         { Ready = ready
           Rejections = rejections
-          Removals = queue |> Map.toList |> List.map snd |> List.filter alreadyConsumed |> List.map (fun e -> e.QueueId) }
+          Removals =
+            queue
+            |> Map.toList
+            |> List.map snd
+            |> List.filter (fun e -> Option.isSome (PendingAct.terminal e) && alreadyConsumed e)
+            |> List.map (fun e -> e.QueueId) }
 
     /// The consumed-set contribution of one event: a terminal drain dedups against every
     /// `TerminalBlockStarted` that names a queue entry — anchored in the log, never in the
@@ -629,7 +641,7 @@ module SessionTerminals =
           /// start event is written — that is the moment the queue entry has been consumed
           /// and its doc key may be removed, which is why it is a callback and not
           /// something the caller can do before or after the whole run.
-          RunBlock : TerminalQueued -> string -> (unit -> unit) -> Async<unit>
+          RunBlock : TerminalId -> PendingAct -> string -> (unit -> unit) -> Async<unit>
           /// Record a peer's refusal of a queued command, minting the `BlockId` that names
           /// it. `onRecorded` fires once the event is durable — the moment the entry has
           /// been consumed and its doc key may go, exactly as `RunBlock`'s `onStarted`
@@ -638,7 +650,7 @@ module SessionTerminals =
           /// Needs no terminal: refusing a command touches no process, so it works on a
           /// terminal that is busy, leased (stage 2e) or closed. Someone can clear a bad
           /// queue while a colleague is inside vim.
-          Reject : TerminalQueued -> string -> (unit -> unit) -> Async<unit>
+          Reject : TerminalId -> PendingAct -> string -> (unit -> unit) -> Async<unit>
           /// Take the terminal's stdin (Plan 13, stage 2e), stealing it from whoever holds it.
           /// Refused only when there is nothing to hold: a terminal that is not open, or a
           /// degraded one with no persistent shell to type into.
@@ -702,8 +714,8 @@ module SessionTerminals =
     let unavailable : SessionTerminals =
         { Open = fun _ _ _ -> async { return Error "this session has no environment" }
           Close = fun _ _ -> async { return Error "this session has no terminals" }
-          RunBlock = fun _ _ _ -> async { return () }
-          Reject = fun _ _ _ -> async { return () }
+          RunBlock = fun _ _ _ _ -> async { return () }
+          Reject = fun _ _ _ _ -> async { return () }
           Take = fun _ _ -> async { return Error "this session has no terminals" }
           Release = fun _ _ -> async { return Error "this session has no terminals" }
           PeerGone = fun _ -> async { return () }
@@ -1144,9 +1156,9 @@ module SessionTerminals =
                     return Ok ()
             }
 
-        let runBlock (entry: TerminalQueued) (command: string) (onStarted: unit -> unit) : Async<unit> =
+        let runBlock (terminalId: TerminalId) (entry: PendingAct) (command: string) (onStarted: unit -> unit) : Async<unit> =
             async {
-                let key = TerminalId.value entry.Terminal
+                let key = TerminalId.value terminalId
                 match live.TryGetValue key with
                 | false, _ ->
                     // The terminal closed between the plan and the run. The entry stays in
@@ -1166,7 +1178,7 @@ module SessionTerminals =
                     // on the screen. The alternative — starting the range at the `C` mark —
                     // cannot be reconciled with appending the anchor first, because `C` does
                     // not exist until after the write.
-                    let fromSeq = markKeyframe entry.Terminal
+                    let fromSeq = markKeyframe terminalId
                     // Durable BEFORE the process starts: the block event is the
                     // exactly-once anchor, so a crash between here and the spawn leaves a
                     // block that never completed — visible and explicable — rather than a
@@ -1175,7 +1187,7 @@ module SessionTerminals =
                         appendAs
                             entry.Author
                             (SessionEvent.TerminalBlockStarted
-                                { TerminalId = entry.Terminal
+                                { TerminalId = terminalId
                                   BlockId = blockId
                                   QueueId = Some entry.QueueId
                                   Author = entry.Author
@@ -1190,7 +1202,7 @@ module SessionTerminals =
                     // The command line is echoed into the transcript as INPUT, so a replay
                     // shows what was typed as well as what came back — the same reason
                     // asciinema records `"i"` events at all.
-                    emit entry.Terminal terminal TranscriptInput (command + "\n")
+                    emit terminalId terminal TranscriptInput (command + "\n")
 
                     let mutable written = 0
                     let mutable dropped = 0
@@ -1232,7 +1244,7 @@ module SessionTerminals =
                                             do!
                                                 append
                                                     (SessionEvent.TerminalIntegrationLost
-                                                        { TerminalId = entry.Terminal; BlockId = Some blockId })
+                                                        { TerminalId = terminalId; BlockId = Some blockId })
                                             reDrain ()
                                     })
                                 let! code = complete
@@ -1249,9 +1261,9 @@ module SessionTerminals =
                                         dropped <- dropped + (text.Length - kept.Length)
                                         written <- written + kept.Length
                                         let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
-                                        emit entry.Terminal terminal kind kept
+                                        emit terminalId terminal kind kept
                                 let! spawned =
-                                    (environmentOf entry.Terminal).Spawn
+                                    (environmentOf terminalId).Spawn
                                         { Executable = shell.Executable
                                           Arguments = shell.Arguments @ [ command ]
                                           Env = Map.empty
@@ -1269,11 +1281,11 @@ module SessionTerminals =
                         do!
                             append
                                 (SessionEvent.TerminalTranscriptTruncated
-                                    { TerminalId = entry.Terminal; BlockId = Some blockId; DroppedBytes = dropped })
+                                    { TerminalId = terminalId; BlockId = Some blockId; DroppedBytes = dropped })
                     do!
                         append
                             (SessionEvent.TerminalBlockCompleted
-                                { TerminalId = entry.Terminal
+                                { TerminalId = terminalId
                                   BlockId = blockId
                                   Result = result
                                   ToSeq = transcript.NextSeq () })
@@ -1401,7 +1413,7 @@ module SessionTerminals =
                     appliedSize.[key] <- size
                 | _ -> ()
 
-        let reject (entry: TerminalQueued) (command: string) (onRecorded: unit -> unit) : Async<unit> =
+        let reject (terminalId: TerminalId) (entry: PendingAct) (command: string) (onRecorded: unit -> unit) : Async<unit> =
             async {
                 match entry.RejectedBy with
                 | None -> return ()
@@ -1412,7 +1424,7 @@ module SessionTerminals =
                         appendAs
                             (PeerRef by)
                             (SessionEvent.TerminalCommandRejected
-                                { TerminalId = entry.Terminal
+                                { TerminalId = terminalId
                                   QueueId = entry.QueueId
                                   BlockId = mintBlockId ()
                                   Author = entry.Author
@@ -1521,7 +1533,7 @@ module TerminalScheduler =
             for terminal, size in Map.toList synced.TerminalSizes do
                 terminals.ApplySize terminal size
 
-            if Map.isEmpty synced.TerminalQueue then () else
+            if Map.isEmpty synced.Pending then () else
 
                 let plan =
                     TerminalQueueDrain.plan
@@ -1531,27 +1543,28 @@ module TerminalScheduler =
                         (terminals.Lost ())
                         terminals.IsOpen
                         (fun terminal -> SyncedSessionState.modeOf terminal synced)
-                        synced.TerminalQueue
+                        synced.Pending
                 // Leftovers first: a crash between the start append and the doc removal
                 // leaves an entry that is already a block, and repairing it is free.
-                SyncedStateSync.removeTerminalQueued doc plan.Removals
+                SyncedStateSync.removePending doc plan.Removals
                 // Refusals next, and before anything runs: they are what a person decided,
                 // and they free the head of a queue that a `Ready` entry may be sitting
                 // behind. Same snapshot-then-consume shape as a command that runs.
-                for entry in plan.Rejections do
+                for terminal, entry in plan.Rejections do
                     let command = SyncedStateSync.terminalQueuedText doc entry.QueueId
                     consumed <- Set.add (QueueId.value entry.QueueId) consumed
                     Async.StartImmediate (
                         async {
                             do!
                                 terminals.Reject
+                                    terminal
                                     entry
                                     command
-                                    (fun () -> SyncedStateSync.removeTerminalQueued doc [ entry.QueueId ])
+                                    (fun () -> SyncedStateSync.removePending doc [ entry.QueueId ])
                             // The head may now be a different entry, and it may be ready.
                             drain ()
                         })
-                for entry in plan.Ready do
+                for terminal, entry in plan.Ready do
                     // Snapshot the command from THIS replica at the instant it is
                     // consumed, exactly as the message drain snapshots a body: what runs
                     // is what the queue said when it was taken, and later edits to a
@@ -1562,9 +1575,10 @@ module TerminalScheduler =
                         async {
                             do!
                                 terminals.RunBlock
+                                    terminal
                                     entry
                                     command
-                                    (fun () -> SyncedStateSync.removeTerminalQueued doc [ entry.QueueId ])
+                                    (fun () -> SyncedStateSync.removePending doc [ entry.QueueId ])
                             // The terminal is free again: whatever queued behind this
                             // command starts now.
                             drain ()
@@ -1582,7 +1596,7 @@ module TerminalScheduler =
                         (terminals.Lost ())
                         terminals.IsOpen
                         (fun t -> SyncedSessionState.modeOf t synced)
-                        synced.TerminalQueue
+                        synced.Pending
                         terminal
                 Async.StartImmediate (terminals.ReclaimIdle holdOf)
 
@@ -1687,11 +1701,11 @@ module TerminalCommands =
             | Ok synced ->
                 let consumed = consumed ()
                 let head =
-                    TerminalQueueOrder.sortedFor terminal synced.TerminalQueue
+                    TerminalQueueOrder.sortedFor terminal synced.Pending
                     |> List.filter (fun e -> not (Set.contains (QueueId.value e.QueueId) consumed))
                     |> List.tryHead
                 { Block = block
-                  InQueue = Map.containsKey handle synced.TerminalQueue
+                  InQueue = Map.containsKey handle synced.Pending
                   IsHead = (head |> Option.map (fun e -> e.QueueId)) = Some handle
                   Hold =
                     TerminalQueueDrain.holdOf
@@ -1701,7 +1715,7 @@ module TerminalCommands =
                         (terminals.Lost ())
                         terminals.IsOpen
                         (fun t -> SyncedSessionState.modeOf t synced)
-                        synced.TerminalQueue
+                        synced.Pending
                         terminal }
 
         let outcomeOf (terminal: TerminalId) (handle: QueueId) (status: TerminalCommandStatus) =
@@ -1772,7 +1786,7 @@ module TerminalCommands =
                             handle
                             terminal
                             ActorRef.Agent
-                            (TerminalQueueOrder.nextFor terminal synced.TerminalQueue)
+                            (TerminalQueueOrder.nextFor terminal synced.Pending)
                             command
                         return! awaitOutcome terminal handle (now ()) None
             }
@@ -1786,7 +1800,7 @@ module TerminalCommands =
                     | Some (terminal, _) -> Some terminal
                     | None ->
                         match syncedOf () with
-                        | Ok synced -> synced.TerminalQueue |> Map.tryFind handle |> Option.map (fun e -> e.Terminal)
+                        | Ok synced -> synced.Pending |> Map.tryFind handle |> Option.bind PendingAct.terminal
                         | Error _ -> None
                 match terminal with
                 | None -> return Error "no such command"

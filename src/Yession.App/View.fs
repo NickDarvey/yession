@@ -1077,11 +1077,11 @@ module View =
                 if awaiting then
                     html $"""
                         <button type="button" class="{Style.btnPrimary}" data-terminal-approve="{QueueId.value id}"
-                                @click={Ev(fun _ -> dispatch (ApproveTerminalQueuedMsg (id, model.Peer.PeerId)))}>Approve</button>"""
+                                @click={Ev(fun _ -> dispatch (ApprovePendingMsg (id, model.Peer.PeerId)))}>Approve</button>"""
                 elif Option.isSome entry.ApprovedBy then
                     html $"""
                         <button type="button" class="{Style.btn}" data-terminal-unapprove="{QueueId.value id}"
-                                @click={Ev(fun _ -> dispatch (UnapproveTerminalQueuedMsg id))}>Hold</button>"""
+                                @click={Ev(fun _ -> dispatch (UnapprovePendingMsg id))}>Hold</button>"""
                 else Lit.nothing
             // Reject sits beside approve wherever a verdict is possible, and it is offered
             // on every entry rather than only awaiting ones: under AutoRun nothing is ever
@@ -1091,7 +1091,7 @@ module View =
             let reject =
                 html $"""
                     <button type="button" class="{Style.btn}" data-terminal-reject="{QueueId.value id}"
-                            @click={Ev(fun _ -> dispatch (RejectTerminalQueuedMsg (id, model.Peer.PeerId, None)))}>Reject</button>"""
+                            @click={Ev(fun _ -> dispatch (RejectPendingMsg (id, model.Peer.PeerId, None)))}>Reject</button>"""
             html $"""
                 <article class="{if awaiting then Style.terminalQueuedAwaiting else Style.terminalQueuedReady}"
                          data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
@@ -1106,9 +1106,9 @@ module View =
                     <div class="ml-auto flex items-center gap-2">
                       {reject}
                       {approval}
-                      <button type="button" class="{Style.btnIcon}" aria-label="Move up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.TerminalQueue id with Some o -> dispatch (ReorderTerminalQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
-                      <button type="button" class="{Style.btnIcon}" aria-label="Move down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.TerminalQueue id with Some o -> dispatch (ReorderTerminalQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
-                      <button type="button" class="{Style.btnIconDanger}" aria-label="Delete" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteTerminalQueuedMsg id))}>{Icon.close}</button>
+                      <button type="button" class="{Style.btnIcon}" aria-label="Move up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                      <button type="button" class="{Style.btnIcon}" aria-label="Move down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                      <button type="button" class="{Style.btnIconDanger}" aria-label="Delete" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>
                     </div>
                   </div>
                 </article>""")
@@ -1254,8 +1254,8 @@ module View =
               {lostBanner}
               <div class="{Style.sideRow}">
                 <label class="{Style.label}" for="terminal-mode">approval</label>
-                <select id="terminal-mode" class="{Style.field} w-auto" data-terminal-mode="{TerminalApprovalMode.describe mode}"
-                        @change={EvVal(fun v -> match TerminalApprovalMode.parse v with Some m -> dispatch (SetTerminalModeMsg (terminal, m)) | None -> ())}>
+                <select id="terminal-mode" class="{Style.field} w-auto" data-terminal-mode="{ApprovalMode.describe mode}"
+                        @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetTerminalModeMsg (terminal, m)) | None -> ())}>
                   <option value="approve-agent" ?selected={mode = ApproveAgent}>the agent's commands</option>
                   <option value="approve-all" ?selected={mode = ApproveAll}>every command</option>
                   <option value="auto" ?selected={mode = AutoRun}>nothing — run them</option>

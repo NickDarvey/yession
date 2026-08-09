@@ -52,17 +52,18 @@ let private representativeModel : ClientModel =
           // holds, so the panel must render it as waiting rather than as ready.
           TerminalDrafts =
             Map.ofList [ (terminalId, ada), { Terminal = terminalId; Author = ada; QueueId = terminalDraftQueueId } ]
-          TerminalQueue =
+          Pending =
             Map.ofList
                 [ terminalQueueId,
                   { QueueId = terminalQueueId
-                    Terminal = terminalId
+                    Subject = ForTerminal terminalId
                     Author = ActorRef.Agent
                     Order = 1.0
+                    Payload = CommandLine
                     ApprovedBy = None
                     RejectedBy = None
                     RejectedReason = None } ]
-          TerminalModes = Map.empty
+          Gates = Map.empty
           TerminalSizes = Map.empty }
       Conversation =
         { Items =
@@ -223,8 +224,8 @@ let private lostIntegrationModel : ClientModel =
     { representativeModel with
         Synced =
             { representativeModel.Synced with
-                TerminalQueue =
-                    representativeModel.Synced.TerminalQueue
+                Pending =
+                    representativeModel.Synced.Pending
                     |> Map.map (fun _ entry -> { entry with Author = PeerRef ada }) }
         Terminals =
             { Terminals =
@@ -347,8 +348,8 @@ let private uiChecklistTests =
                 { leasedTerminalModel with
                     Synced =
                         { leasedTerminalModel.Synced with
-                            TerminalQueue =
-                                leasedTerminalModel.Synced.TerminalQueue
+                            Pending =
+                                leasedTerminalModel.Synced.Pending
                                 |> Map.map (fun _ entry -> { entry with Author = PeerRef ada }) } }
             let html = Support.render model
             Expect.isTrue

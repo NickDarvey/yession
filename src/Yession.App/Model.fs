@@ -450,20 +450,20 @@ type ClientMsg =
     | DiscardTerminalDraftMsg of TerminalId * PeerId
     /// Approve a queued command, by the peer approving it. The drain runs it on the next
     /// pass; until then it is still editable, which is the point.
-    | ApproveTerminalQueuedMsg of QueueId * PeerId
+    | ApprovePendingMsg of QueueId * PeerId
     /// Withdraw an approval — the mirror of granting one, so a mis-click is undoable for
     /// as long as the command has not been consumed.
-    | UnapproveTerminalQueuedMsg of QueueId
+    | UnapprovePendingMsg of QueueId
     /// Refuse a queued command, by the peer refusing it. Not a deletion: the drain observes
     /// the refusal, records who said no and why, and only then removes the entry — so the
     /// log that captures every yes captures the noes too.
-    | RejectTerminalQueuedMsg of QueueId * PeerId * reason: string option
+    | RejectPendingMsg of QueueId * PeerId * reason: string option
     /// Delete a queued command. Until consumed, deletion wins.
-    | DeleteTerminalQueuedMsg of QueueId
+    | DeletePendingMsg of QueueId
     /// Reorder a queued command within its terminal: one fractional-index register write.
-    | ReorderTerminalQueuedMsg of QueueId * order: float
+    | ReorderPendingMsg of QueueId * order: float
     /// Set a terminal's approval mode.
-    | SetTerminalModeMsg of TerminalId * TerminalApprovalMode
+    | SetTerminalModeMsg of TerminalId * ApprovalMode
 
 module ClientModel =
 
@@ -770,8 +770,8 @@ module ClientModel =
         model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
 
     /// A terminal's queued commands in run order.
-    let terminalQueue (terminal: TerminalId) (model: ClientModel) : TerminalQueued list =
-        TerminalQueueOrder.sortedFor terminal model.Synced.TerminalQueue
+    let terminalQueue (terminal: TerminalId) (model: ClientModel) : PendingAct list =
+        TerminalQueueOrder.sortedFor terminal model.Synced.Pending
 
     /// The composer slots published in a terminal, in stable order — every peer mid-command
     /// there, the local peer included.
@@ -782,20 +782,22 @@ module ClientModel =
         |> List.map (fun ((_, author), _) -> author)
         |> List.sortBy PeerId.value
 
-    /// Whether a queued command is waiting on an approval it has not got — the one question
-    /// the queue's UI asks, answered by the same function the drain asks
-    /// (`TerminalApprovalMode.requiresApproval`), so a badge can never disagree with what
-    /// the Session Process will actually do.
-    let awaitsApproval (entry: TerminalQueued) (model: ClientModel) : bool =
-        TerminalApprovalMode.requiresApproval (SyncedSessionState.modeOf entry.Terminal model.Synced) entry.Author
+    /// Whether a pending act is waiting on an approval it has not got — the one question
+    /// the card asks, answered by the same function the drain and the command gate ask
+    /// (`ApprovalMode.requiresApproval`), so a badge can never disagree with what
+    /// the Session Process will actually do. Keyed by SUBJECT, so it answers for a command
+    /// act exactly as it does for a terminal's (Plan 15, stage 3).
+    let awaitsApproval (entry: PendingAct) (model: ClientModel) : bool =
+        ApprovalMode.requiresApproval (SyncedSessionState.gateOf entry.Subject model.Synced) entry.Author
         && Option.isNone entry.ApprovedBy
 
     /// Whether a queued command is held because a peer is typing in its terminal (Plan 13,
     /// stage 2e) rather than because it needs an approval. Reported apart because they resolve
     /// differently — one when a person makes a decision, the other when a person finishes a
     /// task — and a queue that said only *pending* would leave both looking like a stall.
-    let awaitsTerminal (entry: TerminalQueued) (model: ClientModel) : bool =
-        TerminalProjection.tryFind entry.Terminal model.Terminals
+    let awaitsTerminal (entry: PendingAct) (model: ClientModel) : bool =
+        PendingAct.terminal entry
+        |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals)
         |> Option.bind (fun view -> view.Lease)
         |> Option.isSome
 
@@ -803,8 +805,9 @@ module ClientModel =
     /// (Plan 13, stage 2f) rather than because a peer is typing there. Apart again for the
     /// same reason: they resolve differently — one when a person finishes, this one when
     /// somebody repairs the terminal.
-    let awaitsIntegration (entry: TerminalQueued) (model: ClientModel) : bool =
-        TerminalProjection.tryFind entry.Terminal model.Terminals
+    let awaitsIntegration (entry: PendingAct) (model: ClientModel) : bool =
+        PendingAct.terminal entry
+        |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals)
         |> Option.map (fun view -> view.IntegrationLost)
         |> Option.defaultValue false
 
@@ -845,7 +848,7 @@ module ClientModel =
         match field with
         | TerminalDraftBody (terminal, _) -> Some terminal
         | TerminalQueuedBody queueId ->
-            model.Synced.TerminalQueue |> Map.tryFind queueId |> Option.map (fun entry -> entry.Terminal)
+            model.Synced.Pending |> Map.tryFind queueId |> Option.bind PendingAct.terminal
         | Title | DraftBody _ | QueueBody _ -> None
 
     /// Who is in a given terminal right now — whether writing a new command or editing a
@@ -1136,15 +1139,16 @@ module ClientModel =
             // the same transaction (`App.connect`'s SendTerminalDraft) — shared types
             // cannot be re-parented.
             match Map.tryFind (terminal, author) model.Synced.TerminalDrafts with
-            | Some draft when not (Map.containsKey draft.QueueId model.Synced.TerminalQueue) ->
+            | Some draft when not (Map.containsKey draft.QueueId model.Synced.Pending) ->
                 let entry =
                     { QueueId = draft.QueueId
-                      Terminal = terminal
+                      Subject = ForTerminal terminal
                       // The author is the PEER who wrote it. Attribution to a verified user
                       // happens at the durable append, where the Session Process knows the
                       // binding — the doc only ever knows connections.
                       Author = PeerRef author
-                      Order = TerminalQueueOrder.nextFor terminal model.Synced.TerminalQueue
+                      Order = TerminalQueueOrder.nextFor terminal model.Synced.Pending
+                      Payload = CommandLine
                       ApprovedBy = None
                       RejectedBy = None
                       RejectedReason = None }
@@ -1152,50 +1156,50 @@ module ClientModel =
                 |> withSynced
                     { model.Synced with
                         TerminalDrafts = Map.remove (terminal, author) model.Synced.TerminalDrafts
-                        TerminalQueue = Map.add draft.QueueId entry model.Synced.TerminalQueue }
+                        Pending = Map.add draft.QueueId entry model.Synced.Pending }
             | _ -> model
         | DiscardTerminalDraftMsg (terminal, author) ->
             model
             |> withSynced
                 { model.Synced with TerminalDrafts = Map.remove (terminal, author) model.Synced.TerminalDrafts }
-        | ApproveTerminalQueuedMsg (queueId, approver) ->
-            match Map.tryFind queueId model.Synced.TerminalQueue with
+        | ApprovePendingMsg (queueId, approver) ->
+            match Map.tryFind queueId model.Synced.Pending with
             | Some entry ->
                 model
                 |> withSynced
                     { model.Synced with
-                        TerminalQueue =
-                            Map.add queueId { entry with ApprovedBy = Some approver } model.Synced.TerminalQueue }
+                        Pending =
+                            Map.add queueId { entry with ApprovedBy = Some approver } model.Synced.Pending }
             | None -> model
-        | UnapproveTerminalQueuedMsg queueId ->
-            match Map.tryFind queueId model.Synced.TerminalQueue with
+        | UnapprovePendingMsg queueId ->
+            match Map.tryFind queueId model.Synced.Pending with
             | Some entry ->
                 model
                 |> withSynced
                     { model.Synced with
-                        TerminalQueue = Map.add queueId { entry with ApprovedBy = None } model.Synced.TerminalQueue }
+                        Pending = Map.add queueId { entry with ApprovedBy = None } model.Synced.Pending }
             | None -> model
-        | RejectTerminalQueuedMsg (queueId, rejector, reason) ->
-            match Map.tryFind queueId model.Synced.TerminalQueue with
+        | RejectPendingMsg (queueId, rejector, reason) ->
+            match Map.tryFind queueId model.Synced.Pending with
             | Some entry ->
                 model
                 |> withSynced
                     { model.Synced with
-                        TerminalQueue =
+                        Pending =
                             Map.add
                                 queueId
                                 { entry with RejectedBy = Some rejector; RejectedReason = reason }
-                                model.Synced.TerminalQueue }
+                                model.Synced.Pending }
             | None -> model
-        | DeleteTerminalQueuedMsg queueId ->
-            model |> withSynced { model.Synced with TerminalQueue = Map.remove queueId model.Synced.TerminalQueue }
-        | ReorderTerminalQueuedMsg (queueId, order) ->
-            match Map.tryFind queueId model.Synced.TerminalQueue with
+        | DeletePendingMsg queueId ->
+            model |> withSynced { model.Synced with Pending = Map.remove queueId model.Synced.Pending }
+        | ReorderPendingMsg (queueId, order) ->
+            match Map.tryFind queueId model.Synced.Pending with
             | Some entry ->
                 model
                 |> withSynced
                     { model.Synced with
-                        TerminalQueue = Map.add queueId { entry with Order = order } model.Synced.TerminalQueue }
+                        Pending = Map.add queueId { entry with Order = order } model.Synced.Pending }
             | None -> model
         | SetTerminalModeMsg (terminal, mode) ->
-            model |> withSynced { model.Synced with TerminalModes = Map.add terminal mode model.Synced.TerminalModes }
+            model |> withSynced { model.Synced with Gates = Map.add (ForTerminal terminal) mode model.Synced.Gates }

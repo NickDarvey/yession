@@ -310,7 +310,7 @@ let tests =
                     (TerminalText.read a.Texts (BodyKey.terminalDraft terminal a.Hello.PeerId))
                     ""
                     "the composer clears on send"
-                Expect.isTrue (Map.isEmpty (a.Runner.Model ()).Synced.TerminalQueue) "and the entry was consumed"
+                Expect.isTrue (Map.isEmpty (a.Runner.Model ()).Synced.Pending) "and the entry was consumed"
                 do! host.Stop ()
             }
 
@@ -405,7 +405,7 @@ let tests =
                     do! a.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalQueue terminal m)))
                     let entry = ClientModel.terminalQueue terminal (a.Runner.Model ()) |> List.head
                     Expect.equal entry.QueueId outcome.Handle "the handle IS the queue entry a human is looking at"
-                    a.Runner.Dispatch (user (ApproveTerminalQueuedMsg (entry.QueueId, a.Hello.PeerId)))
+                    a.Runner.Dispatch (user (ApprovePendingMsg (entry.QueueId, a.Hello.PeerId)))
                     match! host.TerminalCommands.Read outcome.Handle with
                     | Error reason -> failwith reason
                     | Ok resumed ->
@@ -453,7 +453,7 @@ let tests =
                 Expect.equal spawns.Value 0 "nothing has run"
 
                 // Approving is a plain CRDT write from the client — no command, no round trip.
-                a.Runner.Dispatch (user (ApproveTerminalQueuedMsg (entry.QueueId, a.Hello.PeerId)))
+                a.Runner.Dispatch (user (ApprovePendingMsg (entry.QueueId, a.Hello.PeerId)))
                 let ran (m: ClientModel) =
                     match TerminalProjection.tryFind terminal m.Terminals with
                     | Some view -> view.Blocks |> List.exists (fun b -> b.Command = "rm -rf build")

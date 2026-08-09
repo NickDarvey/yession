@@ -134,6 +134,17 @@ let startFull
             eprintfn "[session %s] dropped %d empty draft slot(s) at boot"
                 (SessionId.value sessionId) (List.length dropped)
 
+        // A doc written before Plan 15 stage 3 keeps its pending commands and terminal modes
+        // under the old roots. Move them onto the widened ones here, for the same reason the
+        // sweep above runs here: no peer is connected yet. Skipping it would silently drop a
+        // terminal somebody set to `ApproveAll` back to the default — LESS gated than what
+        // they asked for, which is the one direction this must not fail in.
+        match SyncedStateSync.migrateGateRoots doc with
+        | 0, 0 -> ()
+        | acts, gates ->
+            eprintfn "[session %s] migrated %d pending act(s) and %d gate(s) at boot"
+                (SessionId.value sessionId) acts gates
+
         // Connected peers' channels, for state relay; keyed per connection.
         let mutable connections : Map<int, FrameChannel<string>> = Map.empty
         let mutable nextConnectionId = 0
@@ -325,7 +336,7 @@ let startFull
                     | Error reason -> return Error reason
                     | Ok id ->
                         agentTerminalIds.Value <- Map.add key id agentTerminalIds.Value
-                        SyncedStateSync.setTerminalMode doc id AutoRun
+                        SyncedStateSync.setGate doc (ForTerminal id) AutoRun
                         return Ok id
             }
 
@@ -434,7 +445,7 @@ let startFull
             // wrong, and reaping the session would kill the build.
             || not (Set.isEmpty (terminals.Busy ()))
             || (match SyncedStateSync.ofDoc doc with
-                | Ok synced -> not (Map.isEmpty synced.Queue) || not (Map.isEmpty synced.TerminalQueue)
+                | Ok synced -> not (Map.isEmpty synced.Queue) || not (Map.isEmpty synced.Pending)
                 | // A doc that will not decode is a session in trouble, and stopping it
                   // out from under its owner is the wrong response to that. Hold it busy
                   // and let something that understands the failure deal with it.
