@@ -174,6 +174,68 @@ module TerminalFeed =
         |> List.map (fun r -> r.Data)
         |> String.concat ""
 
+/// One thing the side pane can show (Plan 14, stage 2).
+///
+/// The pane stops being "the terminal panel" and becomes a tab strip over three kinds of
+/// thing. That is a genuine model change rather than a rename: the selection used to be a
+/// `TerminalId option`, and a block's read-only view is not a terminal — one terminal can
+/// contribute a hundred tabs.
+type PaneTab =
+    /// A terminal itself: its composer while it is open, its recording once it is closed.
+    /// Every terminal the session has ever had is always in the strip, so these are never
+    /// "opened" and never closed — they are the strip's furniture.
+    | TerminalTab of TerminalId
+    /// One block, read-only: the command and what it printed. Opened by tapping its chip in
+    /// the chat, and closeable.
+    | BlockTab of TerminalId * BlockId
+    /// One stretch of live mode. Opened from its chat item, and closeable.
+    | StretchTab of TerminalStretch
+
+module PaneTab =
+
+    /// A tab's identity, and the value its DOM hook carries. Prefixed per kind because a
+    /// block id and a terminal id are drawn from the same alphabet and a collision would
+    /// silently select the wrong tab.
+    let key =
+        function
+        | TerminalTab id -> "terminal:" + TerminalId.value id
+        | BlockTab (id, blockId) -> "block:" + TerminalId.value id + ":" + BlockId.value blockId
+        | StretchTab stretch -> "stretch:" + TerminalStretch.key stretch
+
+    /// Which terminal this tab is about — what the strip groups by and what a replay reads.
+    let terminal =
+        function
+        | TerminalTab id -> id
+        | BlockTab (id, _) -> id
+        | StretchTab stretch -> stretch.TerminalId
+
+    /// Whether this tab is one a person opened and can close. Terminal tabs are not: the
+    /// strip lists every terminal the session has, and a "close" on one of those already
+    /// means something else entirely (closing the terminal).
+    let isClosable =
+        function
+        | TerminalTab _ -> false
+        | BlockTab _ | StretchTab _ -> true
+
+/// What a pane tab's player should be handed (Plan 14, stage 4) — a whole recording, or a
+/// range of one, plus the things the stock player already knows how to do with it.
+type PaneReplay =
+    { /// The `.cast` text, ready to mount.
+      Cast : string
+      /// Chapter marks, in the recording's own clock: one per block, labelled with its
+      /// command. A whole-terminal recording becomes navigable by what ran in it.
+      Markers : (float * string) list
+      /// Where to start playing — how "play whole terminal" from a chip lands on that block
+      /// in full context, without slicing anything.
+      StartAt : float option
+      /// The time whose frame becomes the still shown before anyone presses play.
+      Poster : float option
+      /// Set when this cast is a LIVE terminal watched from behind its edge (Plan 14,
+      /// stage 7): it ends where the rewind pinned it, not where the terminal is, so
+      /// playing past its end means the reader has caught up — the mount answers by
+      /// jumping back to live rather than stopping on a stale frame.
+      BehindLive : TerminalId option }
+
 type ClientModel =
     { Peer          : PeerState
       Connection    : ConnectionState
@@ -200,6 +262,11 @@ type ClientModel =
       EphemeralStorage : bool
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
+      /// The terminal half of the chat (Plan 14, stage 1): block chips and lease-stretch
+      /// items, with the offset each is anchored at. Merged with `Conversation` at render
+      /// time by `TimelineProjection.items` — a view-level fold, so the projection that
+      /// builds the agent's context is untouched.
+      Timeline      : TimelineProjection
       EventConsumer : EventConsumerState
       Agent         : AgentViewState
       /// Other peers' live carets+selections, keyed by peer. Cleared when a peer moves its
@@ -220,9 +287,40 @@ type ClientModel =
       /// because it arrives on a different leg: facts fold from the event log, bytes
       /// stream from the transcript.
       TerminalFeeds : Map<TerminalId, TerminalFeed>
-      /// Which terminal the panel is showing. `None` = the first open one, resolved by
-      /// `selectedTerminal`.
-      TerminalChoice : TerminalId option
+      /// Keyframes this client has fetched, keyed by terminal and the transcript line each
+      /// paints (Plan 14, stage 3). One per range this client has opened, not one per block
+      /// the session ever ran: they are fetched on demand, and a range is only opened by
+      /// somebody choosing to read it.
+      TerminalKeyframes : Map<TerminalId * int, TranscriptKeyframe>
+      /// The live SCREEN of each terminal, as this client has composed it (Plan 14, stage
+      /// 6): the serialized output of an emulator fed the Process's snapshot and every
+      /// record since.
+      ///
+      /// A screen, not a stream — a terminal in live mode is running a program that moves
+      /// the cursor, and what it DISPLAYS is a projection of what it emitted. The transcript
+      /// stays the record; this is the view.
+      TerminalScreens : Map<TerminalId, string>
+      /// The read-only tabs this client opened from the chat, oldest first (Plan 14, stage
+      /// 2). Terminal tabs are NOT here: every terminal the session has is always in the
+      /// strip, and these are the ones a person added by tapping a chip.
+      ///
+      /// LOCAL to this client, never synced. Opening a recording to read it must not move
+      /// anyone else's screen — that is reading, not collaborating. Presence still shows who
+      /// is IN a terminal, because that is about the shared thing.
+      PaneTabs      : PaneTab list
+      /// Which tab the pane is showing. `None` = the first open terminal, resolved by
+      /// `selectedPane`.
+      PaneChoice    : PaneTab option
+      /// Where a whole-terminal recording should start playing, when a chip stepped out to
+      /// it (Plan 14, stage 4). The transcript line, turned into a time by the records the
+      /// client has — a "play whole terminal" from a block chip lands on that block, in the
+      /// context around it, which is the question the sliced view cannot answer.
+      PaneStartAt   : (TerminalId * int) option
+      /// A live terminal this client has REWOUND, and the transcript length it was rewound
+      /// at (Plan 14, stage 7). While set, the pane plays what has been recorded so far
+      /// instead of showing the live screen — the terminal keeps running and its records
+      /// keep arriving, exactly as a broadcast keeps going while you watch it behind.
+      PaneRewound   : (TerminalId * int) option
       /// Whether the terminals panel is open. View state, never synced: two people in one
       /// session may reasonably want different columns on screen.
       TerminalsOpen : bool
@@ -313,8 +411,33 @@ type ClientMsg =
     | TerminalReadThroughMsg of TerminalId * seq: int
     /// The transcript's header, from the chunk that carried line 0 (Plan 13, stage 3e).
     | TerminalHeaderMsg of TerminalId * TranscriptHeader
-    /// Show this terminal in the panel.
+    /// A keyframe arrived for a terminal (Plan 14, stage 3): the screen a ranged replay
+    /// starts from. Fetched when a tab needs one, never streamed — a keyframe is read by
+    /// somebody opening a recording, not by everybody watching one grow.
+    | TerminalKeyframeMsg of TerminalId * TranscriptKeyframe
+    /// The live screen, recomposed (Plan 14, stage 6). Dispatched by the platform half,
+    /// which owns the emulator: a screen is a projection an emulator maintains, and the
+    /// reducer is pure.
+    | TerminalScreenMsg of TerminalId * screen: string
+    /// Show this terminal in the pane.
     | SelectTerminalMsg of TerminalId
+    /// Bring an already-open tab forward (Plan 14, stage 2).
+    | SelectPaneTabMsg of PaneTab
+    /// Open a read-only tab from the chat — a block's view or a stretch's replay — and show
+    /// it. Idempotent on the tab's key.
+    | OpenPaneTabMsg of PaneTab
+    /// Close one. Only tabs a person opened can be closed; a terminal's own tab is the
+    /// strip's furniture, and "close" on one of those already means closing the terminal.
+    | ClosePaneTabMsg of PaneTab
+    /// Step out from a block's sliced view to the terminal's WHOLE recording, landing on
+    /// that block (Plan 14, stage 4). Two paths on purpose: the slice answers "what did this
+    /// command print", the whole answers "what was going on around it".
+    | PlayWholeTerminalMsg of TerminalId * fromSeq: int
+    /// Rewind a LIVE terminal (Plan 14, stage 7): play what it has recorded so far, from a
+    /// transcript length pinned now, while the terminal keeps running.
+    | RewindTerminalMsg of TerminalId
+    /// Catch back up: drop the rewind and show the live screen again.
+    | JumpToLiveMsg of TerminalId
     /// Open or close the terminals column.
     | ToggleTerminalsMsg
     /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
@@ -362,6 +485,7 @@ module ClientModel =
           EphemeralStorage = false
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
+          Timeline = TimelineProjection.empty
           EventConsumer =
             { LastProcessedOffset = None
               LatestKnownOffset = None
@@ -376,7 +500,12 @@ module ClientModel =
           Environment = EnvironmentNotStarted
           Terminals = TerminalProjection.empty
           TerminalFeeds = Map.empty
-          TerminalChoice = None
+          TerminalKeyframes = Map.empty
+          TerminalScreens = Map.empty
+          PaneTabs = []
+          PaneChoice = None
+          PaneStartAt = None
+          PaneRewound = None
           TerminalsOpen = false
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
@@ -438,21 +567,203 @@ module ClientModel =
         |> List.filter (fun (_, presence) -> presence.Focus.Field = DraftBody peer)
         |> List.map (fun (editor, presence) -> editor, presence.DisplayName)
 
-    /// Which terminal the panel shows: the stored choice while it is still open, else the
-    /// first open one. Resolved rather than stored, for the same reason `composerTarget`
-    /// is: a choice that outlives what it pointed at is a blank pane nobody asked for.
-    /// Which terminal the panel shows. A CHOICE may name any terminal this client knows,
-    /// closed ones included (Plan 13, stage 3e): a closed terminal is where the recording is
-    /// read, so a selection that silently fell back to a live terminal the moment the shell
-    /// closed would put the audit out of reach exactly when it starts to matter. The DEFAULT
-    /// is still the first open one, because opening the panel should land somewhere you can
-    /// type. A choice naming a terminal that is not in the projection at all is stale and
-    /// falls back the same way.
+    /// The tab strip, in the order it renders: every terminal the session has ever had,
+    /// then the read-only tabs this client opened from the chat.
+    ///
+    /// Closed terminals stay in the strip (Plan 13, stage 3e) — a closed terminal is where
+    /// its recording is read, so dropping it the moment its shell exits would put the audit
+    /// out of reach exactly when it starts to matter.
+    let paneTabs (model: ClientModel) : PaneTab list =
+        (model.Terminals.Terminals |> List.map (fun t -> TerminalTab t.TerminalId)) @ model.PaneTabs
+
+    /// Which tab the pane shows: the stored choice while it is still in the strip, else the
+    /// first OPEN terminal. Resolved rather than stored, for the same reason `composerTarget`
+    /// is: a choice that outlives what it pointed at is a blank pane nobody asked for. The
+    /// default lands somewhere you can type.
+    let selectedPane (model: ClientModel) : PaneTab option =
+        let known = paneTabs model |> List.map PaneTab.key
+        match model.PaneChoice with
+        | Some chosen when List.contains (PaneTab.key chosen) known -> Some chosen
+        | _ ->
+            TerminalProjection.openTerminals model.Terminals
+            |> List.map (fun t -> TerminalTab t.TerminalId)
+            |> List.tryHead
+
+    /// Which terminal the pane is about — the selected tab's, whichever kind it is. A block
+    /// tab and a stretch tab still belong to a terminal, which is what the composer, the
+    /// presence marks and the transcript reads are keyed by.
     let selectedTerminal (model: ClientModel) : TerminalId option =
-        let known = model.Terminals.Terminals |> List.map (fun t -> t.TerminalId)
-        match model.TerminalChoice with
-        | Some chosen when List.contains chosen known -> Some chosen
-        | _ -> TerminalProjection.openTerminals model.Terminals |> List.map (fun t -> t.TerminalId) |> List.tryHead
+        selectedPane model |> Option.map PaneTab.terminal
+
+    /// The transcript length this client's rewind pinned, while the terminal is still LIVE
+    /// (Plan 14, stage 7). Resolved rather than read raw, for the same reason `selectedPane`
+    /// is: a pin that outlives its live edge — the terminal closed while somebody sat behind
+    /// it — is not a rewind any more, it is simply the recording, and the closed-terminal
+    /// replay already shows that in full.
+    let rewoundTo (terminal: TerminalId) (model: ClientModel) : int option =
+        model.PaneRewound
+        |> Option.filter (fun (id, _) -> id = terminal)
+        |> Option.filter (fun _ ->
+            TerminalProjection.tryFind terminal model.Terminals
+            |> Option.map (fun view -> view.IsOpen)
+            |> Option.defaultValue false)
+        |> Option.map snd
+
+    /// The `.cast` for one range of a terminal's recording — a block's output, or a stretch
+    /// of live mode — from the records and the keyframe this client has (Plan 14, stage 3).
+    ///
+    /// `None` when the header has not arrived: the header is transcript line 0, so a client
+    /// that has not read the first chunk cannot say how big the screen is, and a recording
+    /// under a guessed geometry rewraps every line in it.
+    ///
+    /// A MISSING keyframe is not `None`. The range still rebases and still plays; it is then
+    /// the naive slice, approximately right for command output and wrong wherever the screen
+    /// carried state in. Refusing to play a recording we do have would be the worse answer,
+    /// and the surface says which one it is showing.
+    let private rangedCastFrom
+        (header: TranscriptHeader)
+        (feed: TerminalFeed)
+        (model: ClientModel)
+        (terminal: TerminalId)
+        (fromSeq: int)
+        (toSeq: int)
+        : string =
+        TranscriptReplay.range
+            header
+            (Map.tryFind (terminal, fromSeq) model.TerminalKeyframes)
+            fromSeq
+            toSeq
+            (feed.Records |> Map.toList)
+
+    let rangedCast (terminal: TerminalId) (fromSeq: int) (toSeq: int) (model: ClientModel) : string option =
+        let feed = model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
+        feed.Header |> Option.map (fun header -> rangedCastFrom header feed model terminal fromSeq toSeq)
+
+    /// What a tab's player should be handed (Plan 14, stage 4).
+    ///
+    /// Assembled here rather than in the browser entry because every part of it is a
+    /// function of the model, and a value the cheap tier can assert on is worth more than
+    /// one only a real player can.
+    let paneReplay (tab: PaneTab) (model: ClientModel) : PaneReplay option =
+        let feed = model.TerminalFeeds |> Map.tryFind (PaneTab.terminal tab) |> Option.defaultValue TerminalFeed.empty
+        /// The recording's own clock at a transcript line — what a marker, a poster and a
+        /// start position are all measured in. `None` for a line this client has not read.
+        let timeOf (seq: int) = feed.Records |> Map.tryFind seq |> Option.map (fun r -> r.At)
+        match feed.Header with
+        // The header is transcript line 0; without it the geometry is a guess, and a
+        // recording replayed under the wrong one rewraps every line in it.
+        | None -> None
+        | Some header ->
+            match tab with
+            | BlockTab (terminal, blockId) ->
+                TerminalProjection.tryFind terminal model.Terminals
+                |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+                // A block's range is only a RANGE once it has an end. While it runs, its
+                // recording grows on every record, and a player rebuilt on each one would
+                // thrash through a streaming build; a refused command never ran at all. Both
+                // are cases the surface reports rather than plays.
+                |> Option.bind (fun block -> block.ToSeq |> Option.map (fun toSeq -> block, toSeq))
+                |> Option.filter (fun (block, _) -> match block.Status with BlockRejected _ -> false | _ -> true)
+                |> Option.map (fun (block, toSeq) ->
+                    { Cast = rangedCastFrom header feed model terminal block.FromSeq toSeq
+                      // One command is one chapter; there is nothing to mark.
+                      Markers = []
+                      StartAt = None
+                      Poster = None
+                      BehindLive = None })
+            | StretchTab stretch ->
+                match stretch.Range with
+                // Nothing to replay, and the surface says so rather than mounting a player
+                // over an empty recording — which is indistinguishable from a quiet session.
+                | None -> None
+                | Some (fromSeq, toSeq) ->
+                    let origin = timeOf fromSeq |> Option.defaultValue 0.0
+                    Some
+                        { Cast = rangedCastFrom header feed model stretch.TerminalId fromSeq toSeq
+                          Markers = []
+                          StartAt = None
+                          // A still of the FINAL screen, so the item has a face before anyone
+                          // presses play. It costs nothing extra: the player builds it by
+                          // replaying internally to that time.
+                          Poster = timeOf (toSeq - 1) |> Option.map (fun at -> at - origin)
+                          BehindLive = None }
+            | TerminalTab terminal ->
+                // A REWOUND live terminal plays what it has recorded so far, up to the
+                // length pinned when the rewind began. Everything else about it is the
+                // whole-terminal recording, which is the point: rewinding live TV and
+                // replaying a finished session are the same mechanism with a moving end.
+                let pin = rewoundTo terminal model
+                let markers =
+                    TerminalProjection.tryFind terminal model.Terminals
+                    |> Option.map (fun view ->
+                        view.Blocks
+                        |> List.choose (fun block ->
+                            // A block whose first line this client has not read has no time
+                            // to mark, and a marker at a guessed one would point at the
+                            // wrong command.
+                            timeOf block.FromSeq |> Option.map (fun at -> at, block.Command)))
+                    |> Option.defaultValue []
+                let records =
+                    match pin with
+                    | Some length -> feed.Records |> Map.toList |> List.filter (fun (seq, _) -> seq < length)
+                    | None -> feed.Records |> Map.toList
+                // A rewind lands AT the pinned edge, not at the recording's start: "rewind"
+                // on an hour-old terminal must not mean "restart from the beginning". The
+                // still is the screen as it stood at the pin — visually the live screen the
+                // reader just left — and the scrub bar is how they go back from there.
+                let pinnedEdge =
+                    pin |> Option.bind (fun _ -> records |> List.tryLast |> Option.map (fun (_, r) -> r.At))
+                Some
+                    { Cast = TranscriptReplay.cast header records
+                      Markers = markers
+                      StartAt =
+                        match pinnedEdge with
+                        | Some at -> Some at
+                        | None ->
+                            model.PaneStartAt
+                            |> Option.filter (fun (id, _) -> id = terminal)
+                            |> Option.bind (fun (_, seq) -> timeOf seq)
+                      Poster = pinnedEdge
+                      BehindLive = pin |> Option.map (fun _ -> terminal) }
+
+    /// The keyframe a tab's replay needs and this client does not have (Plan 14, stage 4).
+    ///
+    /// Fetched on demand rather than streamed: a keyframe is read by somebody opening a
+    /// recording, not by everybody watching one grow, and there is one per block in a
+    /// session that may have run thousands.
+    let missingKeyframe (tab: PaneTab) (model: ClientModel) : (TerminalId * int) option =
+        let wanted =
+            match tab with
+            | BlockTab (terminal, blockId) ->
+                TerminalProjection.tryFind terminal model.Terminals
+                |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+                // A refused command has an empty range and never ran, so there is no screen
+                // it started from and nothing to fetch.
+                |> Option.filter (fun block -> block.Status <> BlockRunning && (match block.Status with BlockRejected _ -> false | _ -> true))
+                |> Option.map (fun block -> terminal, block.FromSeq)
+            | StretchTab stretch -> stretch.Range |> Option.map (fun (fromSeq, _) -> stretch.TerminalId, fromSeq)
+            // A whole recording starts at the start; the header is its keyframe.
+            | TerminalTab _ -> None
+        wanted |> Option.filter (fun key -> not (Map.containsKey key model.TerminalKeyframes))
+
+    /// Whether this client is watching a terminal behind its live edge (Plan 14, stage 7).
+    let isRewound (terminal: TerminalId) (model: ClientModel) : bool =
+        rewoundTo terminal model |> Option.isSome
+
+    /// How much recording has accrued past this client's pin, in the recording's own clock
+    /// (seconds). `None` when not rewound; `Some 0.0` while nothing new has arrived. What
+    /// lets the surface say HOW FAR behind the reader is, which a bare "behind live" cannot.
+    let behindLive (terminal: TerminalId) (model: ClientModel) : float option =
+        rewoundTo terminal model
+        |> Option.map (fun pin ->
+            let feed = model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
+            let latestBefore limit =
+                feed.Records |> Map.fold (fun acc seq r -> if seq < limit then max acc r.At else acc) 0.0
+            max 0.0 (latestBefore System.Int32.MaxValue - latestBefore pin))
+
+    /// The live screen of a terminal, when this client has composed one.
+    let terminalScreen (terminal: TerminalId) (model: ClientModel) : string option =
+        model.TerminalScreens |> Map.tryFind terminal
 
     /// A terminal's feed, empty when nothing has arrived for it yet.
     let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
@@ -613,9 +924,17 @@ module ClientModel =
                             Map.add joined.PeerId joined.DisplayName roster
                         | _ -> roster)
                     model.Peers
+            // The terminal half of the chat, gated on the same offset as the conversation —
+            // one page, two folds, merged only at render.
+            let timeline, _ =
+                TimelineProjection.applyEvents
+                    model.EventConsumer.LastProcessedOffset
+                    page.Events
+                    model.Timeline
             let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
             { model with
                 Conversation = conversation
+                Timeline = timeline
                 Agent = agent
                 Environment = environment
                 Terminals = terminals
@@ -750,8 +1069,50 @@ module ClientModel =
                         terminal
                         { feed with ReadThrough = max feed.ReadThrough seq; KnownLength = max feed.KnownLength seq }
                         model.TerminalFeeds }
+        | TerminalKeyframeMsg (terminal, keyframe) ->
+            { model with TerminalKeyframes = Map.add (terminal, keyframe.Seq) keyframe model.TerminalKeyframes }
+        | TerminalScreenMsg (terminal, screen) ->
+            { model with TerminalScreens = Map.add terminal screen model.TerminalScreens }
         | SelectTerminalMsg terminal ->
-            { model with TerminalChoice = Some terminal; TerminalsOpen = true }
+            { model with PaneChoice = Some (TerminalTab terminal); PaneStartAt = None; PaneRewound = None; TerminalsOpen = true }
+        | SelectPaneTabMsg tab ->
+            // The start hint belongs to the step-out that set it, so choosing anything else
+            // drops it — a recording that opened halfway through because of a chip somebody
+            // tapped ten minutes ago would be a surprise with no cause on screen.
+            { model with PaneChoice = Some tab; PaneStartAt = None; PaneRewound = None; TerminalsOpen = true }
+        | RewindTerminalMsg terminal ->
+            // The length is pinned NOW rather than followed. A recording that grew under a
+            // reader would move the scrub bar out from under them, which is the one thing
+            // rewinding exists to avoid.
+            let length = (model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty).KnownLength
+            { model with
+                PaneChoice = Some (TerminalTab terminal)
+                PaneRewound = Some (terminal, length)
+                PaneStartAt = None
+                TerminalsOpen = true }
+        | JumpToLiveMsg terminal ->
+            { model with PaneRewound = None; PaneChoice = Some (TerminalTab terminal); TerminalsOpen = true }
+        | PlayWholeTerminalMsg (terminal, fromSeq) ->
+            { model with
+                PaneChoice = Some (TerminalTab terminal)
+                PaneStartAt = Some (terminal, fromSeq)
+                TerminalsOpen = true }
+        | OpenPaneTabMsg tab ->
+            // Idempotent on the tab's key: tapping the same chip twice brings its tab
+            // forward rather than opening a second one that says exactly the same thing.
+            let already = model.PaneTabs |> List.exists (fun t -> PaneTab.key t = PaneTab.key tab)
+            { model with
+                PaneTabs = if already then model.PaneTabs else model.PaneTabs @ [ tab ]
+                PaneChoice = Some tab
+                PaneStartAt = None
+                PaneRewound = None
+                TerminalsOpen = true }
+        | ClosePaneTabMsg tab ->
+            // The selection falls back through `selectedPane` — a choice naming a tab that
+            // is no longer in the strip resolves to the first open terminal, which is the
+            // same rule a closed terminal already relies on. Clearing it here as well would
+            // be a second mechanism for one fact.
+            { model with PaneTabs = model.PaneTabs |> List.filter (fun t -> PaneTab.key t <> PaneTab.key tab) }
         | ToggleTerminalsMsg ->
             { model with TerminalsOpen = not model.TerminalsOpen }
         | EnsureTerminalDraftMsg (terminal, author, queueId) ->

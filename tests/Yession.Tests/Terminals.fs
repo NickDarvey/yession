@@ -584,22 +584,22 @@ let private at0 = System.DateTimeOffset (2026, 8, 7, 0, 0, 0, System.TimeSpan.Ze
 let private leaseTests =
     testList "Terminal leases" [
         testCase "taking an unheld terminal writes one event; re-taking it writes none" <| fun () ->
-            let events, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
+            let events, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
             Expect.equal (List.length events) 1 "one take"
             Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef ada)) "ada holds it"
             // Not a steal from yourself. A client re-sending the frame must not fill the log.
-            let again, _ = TerminalLeases.take terminalA (PeerRef ada) false at0 leases
+            let again, _ = TerminalLeases.take terminalA (PeerRef ada) false at0 0 leases
             Expect.isEmpty again "re-taking your own lease records nothing"
 
         testCase "a steal ENDS the old lease before it starts the new one" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
-            let events, leases = TerminalLeases.take terminalA (PeerRef bob) false at0 held
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
+            let events, leases = TerminalLeases.take terminalA (PeerRef bob) false at0 7 held
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
-                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) }
-                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob } ]
-                "the release names who took it, and comes first"
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob); ToSeq = 7 }
+                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob; FromSeq = 7 } ]
+                "the release names who took it, and comes first; the two stretches abut at one seq"
             Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef bob)) "bob holds it now"
             // Folded in that order, a reader never sees two holders — and never none.
             let proj = fold [ opened terminalA "build"; yield! events ]
@@ -609,26 +609,26 @@ let private leaseTests =
                 "the projection agrees"
 
         testCase "only the holder can release; a non-holder's release is not an event" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
-            let events, leases = TerminalLeases.release terminalA (PeerRef bob) held
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
+            let events, leases = TerminalLeases.release terminalA (PeerRef bob) 9 held
             Expect.isEmpty events "bob cannot release ada's lease"
             Expect.equal (TerminalLeases.holderOf terminalA leases) (Some (PeerRef ada)) "and ada still holds it"
-            let events, leases = TerminalLeases.release terminalA (PeerRef ada) held
+            let events, leases = TerminalLeases.release terminalA (PeerRef ada) 9 held
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
-                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased } ]
-                "the holder's release is recorded as one"
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased; ToSeq = 9 } ]
+                "the holder's release is recorded as one, and bounds the stretch it ends"
             Expect.isEmpty (TerminalLeases.held leases) "and the terminal is free"
 
         testCase "a dropped peer's leases end, and only that peer's" <| fun () ->
-            let _, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
-            let _, leases = TerminalLeases.take terminalB (PeerRef bob) false at0 leases
-            let events, leases = TerminalLeases.peerGone ada leases
+            let _, leases = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
+            let _, leases = TerminalLeases.take terminalB (PeerRef bob) false at0 0 leases
+            let events, leases = TerminalLeases.peerGone ada (fun _ -> 4) leases
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
-                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseHolderGone } ]
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseHolderGone; ToSeq = 4 } ]
                 "the reason says nobody decided anything"
             Expect.equal (TerminalLeases.held leases) (Set.singleton (TerminalId.value terminalB)) "bob's is untouched"
 
@@ -638,9 +638,9 @@ let private leaseTests =
             let proj =
                 fold
                     [ opened terminalA "build"
-                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob }
+                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef bob; FromSeq = 0 }
                       SessionEvent.TerminalLeaseReleased
-                        { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) } ]
+                        { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob); ToSeq = 0 } ]
             Expect.equal
                 (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
                 (Some (PeerRef bob))
@@ -650,7 +650,7 @@ let private leaseTests =
             let proj =
                 fold
                     [ opened terminalA "build"
-                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada }
+                      SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada; FromSeq = 0 }
                       SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" } ]
             Expect.equal
                 (TerminalProjection.tryFind terminalA proj |> Option.bind (fun t -> t.Lease))
@@ -659,7 +659,7 @@ let private leaseTests =
     ]
 
 let private retentionTests =
-    testList "Transcript retention (Plan 13, stage 3d)" [
+    testList "Transcript retention (Plan 13, stage 3d; Plan 14, stage 0)" [
         testCase "output is kept up to the cap, then dropped — never renumbered away" <| fun () ->
             // A line index IS a sequence number, so nothing may ever be removed from the front
             // or the middle: that would renumber every block range in the log and every cached
@@ -680,34 +680,29 @@ let private retentionTests =
             let admission = TranscriptRetention.admit (TranscriptRetention.outputCap - 3) "abcde"
             Expect.equal admission { Keep = "abc"; Dropped = 2 } "three kept, two dropped"
 
-        testCase "a closed terminal's transcript is forgotten WHOLE, and the gap is stated" <| fun () ->
-            let store = Yession.Host.TranscriptStore.inMemory ()
-            let id = terminalA
-            let transcript = store.Open id { Width = 80; Height = 24; Timestamp = 0L }
-            transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "hello" } |> ignore
-            transcript.Append { At = 0.1; Kind = TranscriptOutput; Data = "world" } |> ignore
-            Expect.equal (store.Forget id) (Some 10) "it reports what the record lost"
-            // A request for it is now a 404, which `ReadChunk` already distinguishes from an
-            // empty chunk — and that is consistent with `immutable`, which promises a chunk's
-            // BYTES never change, not that a chunk exists for ever.
-            Expect.equal (store.ReadChunk id 0) None "the chunk route reports it gone, not empty"
-            Expect.isEmpty (store.ReadRange id 0 None) "and there is nothing left to read"
-            Expect.equal (store.Forget id) None "forgetting it twice says nothing twice"
-
-        testCase "the FILE-backed store forgets a transcript by deleting it" <| fun () ->
-            // The in-memory store above shares the contract but not the `unlinkSync`, and it
-            // is the file that retention is actually about.
+        testCase "closing a terminal takes nothing away from its recording" <| fun () ->
+            // Plan 14, stage 0: a recording lives as long as its session does. There is no
+            // age at which a closed terminal's transcript is deleted, because the chat now
+            // carries a permanent, tappable item for every block — and a chip whose recording
+            // a timer deleted underneath it is a dead end rather than an audit trail.
             let dir = sprintf "tests/Yession.Tests/out/.data/retention-%s" (string (System.Guid.NewGuid ()))
             let store = Yession.Host.TranscriptStore.openStore dir
             let transcript = store.Open terminalA { Width = 80; Height = 24; Timestamp = 0L }
-            transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "kept-then-gone" } |> ignore
-            Expect.isSome (store.ReadChunk terminalA 0) "it is there to begin with"
-            Expect.equal (store.Forget terminalA) (Some 14) "and reports what the record lost"
-            Expect.equal (store.ReadChunk terminalA 0) None "the file is gone, so the chunk 404s"
-            // Reopening after a forget starts a clean transcript rather than resurrecting the
-            // old handle — the file descriptor went with the file.
-            let reopened = store.Open terminalA { Width = 80; Height = 24; Timestamp = 0L }
-            Expect.equal (reopened.NextSeq ()) 1 "a fresh transcript, with its header at line 0"
+            transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "still here" } |> ignore
+            let proj = fold [ opened terminalA "build"; SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" } ]
+            Expect.equal
+                (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.IsOpen))
+                (Some false)
+                "the terminal is closed"
+            Expect.isSome (store.ReadChunk terminalA 0) "and its recording is still served"
+            Expect.equal
+                (store.ReadRange terminalA 0 None |> List.map (fun r -> r.Data))
+                [ "still here" ]
+                "with every record it held"
+            Expect.equal
+                (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.DroppedBytes))
+                (Some 0)
+                "and nothing counted as lost"
 
         testCase "the stated gap is the SAME event the live cap writes" <| fun () ->
             // One mechanism for "the transcript did not keep this", not two. The projection
@@ -823,17 +818,17 @@ let private idleLeaseTests =
                 "typing stops while you watch a build; that is not abandoning the terminal"
 
         testCase "a reclaim ends the lease under its own reason" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
-            let events, leases = TerminalLeases.reclaimIdle terminalA held
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
+            let events, leases = TerminalLeases.reclaimIdle terminalA 5 held
             Expect.equal
                 events
                 [ SessionEvent.TerminalLeaseReleased
-                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle } ]
+                    { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle; ToSeq = 5 } ]
                 "not `LeaseReleased` — the holder decided nothing, they stopped"
             Expect.isEmpty (TerminalLeases.held leases) "and the terminal is free"
 
         testCase "typing resets the clock; a non-holder's keystroke does not" <| fun () ->
-            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 TerminalLeases.empty
+            let _, held = TerminalLeases.take terminalA (PeerRef ada) false at0 0 TerminalLeases.empty
             let later = at0.AddMinutes 4.0
             let touched = TerminalLeases.touch terminalA (PeerRef ada) later held
             Expect.equal
@@ -1245,6 +1240,31 @@ let private transcriptTests =
             Expect.isTrue ((TranscriptChunk.cacheControl true).Contains "immutable") "a full chunk caches hard"
             Expect.equal (TranscriptChunk.cacheControl false) "no-store" "the growing tail never does"
 
+        testCase "keyframes live in a SIDECAR, and survive the process that wrote them" <| fun () ->
+            // Plan 14, stage 3. Never in the `.cast`: Plan 13 bought a standard, replayable
+            // format on purpose, and a private record type inside it spends that — so the
+            // transcript a stranger's player reads must be byte-identical with or without
+            // keyframes beside it.
+            let dir = sprintf "tests/Yession.Tests/out/.data/keyframes-%s" (string (System.Guid.NewGuid ()))
+            let store = Yession.Host.TranscriptStore.openStore dir
+            let transcript = store.Open terminalA { Width = 80; Height = 24; Timestamp = 0L }
+            transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = "before\r\n" } |> ignore
+            transcript.Keyframe { Seq = 2; Cols = 100; Rows = 30; Screen = "SCREEN" }
+            transcript.Append { At = 0.1; Kind = TranscriptOutput; Data = "after\r\n" } |> ignore
+
+            let cast = readFileSync nodeFs (sprintf "%s/%s.cast" dir (TerminalId.value terminalA))
+            Expect.isFalse (cast.Contains "SCREEN") "the recording is exactly what the terminal printed"
+
+            // Read back through a SECOND store over the same directory — the restart case,
+            // and the only one that shows the sidecar is a file rather than a field.
+            let reopened = Yession.Host.TranscriptStore.openStore dir
+            Expect.equal
+                (reopened.ReadKeyframe terminalA 2)
+                (Some { Seq = 2; Cols = 100; Rows = 30; Screen = "SCREEN" })
+                "the keyframe outlives the handle that wrote it"
+            Expect.isNone (reopened.ReadKeyframe terminalA 1) "and a line with no keyframe says so"
+            Expect.isNone (reopened.ReadKeyframe terminalB 2) "as does a terminal with no sidecar at all"
+
         testCase "records encode as asciicast v2, so any player can read a transcript" <| fun () ->
             let header = Codec.toString Codec.transcriptLine (TranscriptHeaderLine { Width = 80; Height = 24; Timestamp = 1754092800L })
             Expect.isTrue (header.Contains "\"version\":2") "the header declares version 2"
@@ -1299,10 +1319,11 @@ let private transcriptTests =
                 (readFileSync nodeFs (sprintf "%s/%s.cast" dir (TerminalId.value terminalA)))
                 "the rebuilt cast is the file"
 
-        // Retention (stage 3d) deletes a closed terminal's recording, and the client's
-        // records go with it. A cast of nothing must still be a VALID asciicast — a header
-        // and no frames — rather than an empty file the player reports as broken, because
-        // "this terminal printed nothing that is still kept" is a thing the surface says.
+        // A terminal can hold no records the client has: one that printed nothing, or one
+        // whose output the cap (stage 3d) refused before a single chunk arrived. A cast of
+        // nothing must still be a VALID asciicast — a header and no frames — rather than an
+        // empty file the player reports as broken, because "this terminal printed nothing
+        // that is still kept" is a thing the surface says.
         testCase "a recording with no records left is still a valid cast" <| fun () ->
             let cast = TranscriptReplay.cast { Width = 80; Height = 24; Timestamp = 0L } []
             let lines = cast.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
@@ -1332,17 +1353,17 @@ let private codecTests =
                   completed terminalA "1" CommandTimedOut 9
                   SessionEvent.TerminalTranscriptTruncated
                       { TerminalId = terminalA; BlockId = None; DroppedBytes = 17 }
-                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada }
+                  SessionEvent.TerminalLeaseTaken { TerminalId = terminalA; By = PeerRef ada; FromSeq = 0 }
                   // All three endings, because the reason is the whole value of the event: a
                   // release, a steal and a dropped connection read differently in a log.
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased }
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseReleased; ToSeq = 0 }
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob) }
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseStolen (PeerRef bob); ToSeq = 0 }
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = ActorRef.Agent; Reason = LeaseHolderGone }
+                      { TerminalId = terminalA; Was = ActorRef.Agent; Reason = LeaseHolderGone; ToSeq = 0 }
                   SessionEvent.TerminalLeaseReleased
-                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle }
+                      { TerminalId = terminalA; Was = PeerRef ada; Reason = LeaseIdle; ToSeq = 0 }
                   SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = Some (block "1") }
                   SessionEvent.TerminalIntegrationLost { TerminalId = terminalA; BlockId = None }
                   SessionEvent.TerminalIntegrationRestored { TerminalId = terminalA } ]
@@ -1455,9 +1476,36 @@ let private scriptedEnvironment (script: string -> (OutputStream * string) list 
           CurrentRef = fun () -> Some "scripted" }
     environment, spawned
 
-/// An in-memory transcript, and a reader for what it holds.
+/// An in-memory transcript, a reader for what it holds, and a reader for the keyframes the
+/// Session Process recorded beside it (Plan 14, stage 3).
 let private recordingTranscripts () =
     let lines = Collections.Generic.Dictionary<string, ResizeArray<TranscriptLine>> ()
+    let keyframes = Collections.Generic.Dictionary<string, ResizeArray<TranscriptKeyframe>> ()
+    let keyframesFor (id: TerminalId) =
+        let key = TerminalId.value id
+        match keyframes.TryGetValue key with
+        | true, existing -> existing
+        | _ ->
+            let created = ResizeArray<TranscriptKeyframe> ()
+            keyframes.[key] <- created
+            created
+    // A keyframe is written OFF the block's path (the Process must not await the emulator
+    // between consuming a queue entry and recording the block), so a test that read them the
+    // instant `RunBlock` returned would be racing the emulator's own write barrier. Waiting
+    // on the WRITE itself is what makes that deterministic — no clock, no sleep, no ordering
+    // luck: the latch resolves when the thing under test has happened.
+    let waiters = ResizeArray<(TerminalId * int) * (unit -> unit)> ()
+    let settle () =
+        let ready =
+            waiters
+            |> Seq.filter (fun ((id, count), _) -> (keyframesFor id).Count >= count)
+            |> List.ofSeq
+        for w in ready do waiters.Remove w |> ignore
+        for (_, resume) in ready do resume ()
+    let awaitKeyframes (id: TerminalId) (count: int) : Async<unit> =
+        Async.FromContinuations (fun (cont, _, _) ->
+            if (keyframesFor id).Count >= count then cont ()
+            else waiters.Add ((id, count), cont))
     let linesFor (id: TerminalId) =
         let key = TerminalId.value id
         match lines.TryGetValue key with
@@ -1475,8 +1523,15 @@ let private recordingTranscripts () =
                     let seq = held.Count
                     held.Add (TranscriptRecordLine record)
                     seq
-              NextSeq = fun () -> held.Count }
-    openTranscript, (fun (id: TerminalId) -> linesFor id |> List.ofSeq)
+              NextSeq = fun () -> held.Count
+              Keyframe =
+                fun keyframe ->
+                    (keyframesFor id).Add keyframe
+                    settle () }
+    openTranscript,
+    (fun (id: TerminalId) -> linesFor id |> List.ofSeq),
+    (fun (id: TerminalId) -> keyframesFor id |> List.ofSeq),
+    awaitKeyframes
 
 let private mintFrom (ids: string list) =
     let remaining = ResizeArray<string> ids
@@ -1519,7 +1574,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1537,7 +1592,7 @@ let private managerTests =
                 let log = newLog ()
                 let environment, spawned =
                     scriptedEnvironment (fun _ -> [ Stdout, "hello\n"; Stderr, "warn\n" ], 0)
-                let openTranscript, readTranscript = recordingTranscripts ()
+                let openTranscript, readTranscript, _, _ = recordingTranscripts ()
                 let terminals, records = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1587,7 +1642,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stderr, "no such file\n" ], 2)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1598,11 +1653,45 @@ let private managerTests =
                 Expect.equal completedEvent.Result (CommandFailed 2) "the exit code is the result"
             }
 
+        testCaseAsync "a keyframe is recorded at the block's first line, and paints the screen before it" <|
+            async {
+                // Plan 14, stage 3. The keyframe is written at range STARTS and nowhere
+                // else, because those are the only positions a ranged replay ever asks for.
+                // A block that runs after another has a screen it inherited, and that is
+                // exactly what this has to carry.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "\u001b[31mred\r\n" ], 0)
+                let openTranscript, _, readKeyframes, awaitKeyframes = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript []
+                let! opened = terminals.Open (PeerRef ada) "build"
+                let id = opened |> expect
+                do! terminals.RunBlock (entry "a1" id (PeerRef ada) 1.0 None) "first" ignore
+                do! terminals.RunBlock (entry "a2" id (PeerRef ada) 2.0 None) "second" ignore
+                // Both blocks have run; wait for both keyframes to be WRITTEN before reading
+                // them, since the Process deliberately does not hold a block up for one.
+                do! awaitKeyframes id 2
+
+                let! events = eventsOf log
+                let starts =
+                    events |> List.choose (function SessionEvent.TerminalBlockStarted e -> Some e.FromSeq | _ -> None)
+                let keyframes = readKeyframes id
+                Expect.equal (keyframes |> List.map (fun k -> k.Seq)) starts "one keyframe per block, at its first line"
+                // The second block inherited a screen the first one drew, and the keyframe
+                // carries it — which is the whole reason a slice into a fresh VT is wrong.
+                match List.tryItem 1 keyframes with
+                | Some second -> Expect.isTrue (second.Screen.Contains "red") "the screen the second block started from"
+                | None -> failwith "the second block recorded no keyframe"
+                Expect.equal
+                    (keyframes |> List.map (fun k -> k.Cols, k.Rows))
+                    (keyframes |> List.map (fun _ -> TerminalSize.default'.Cols, TerminalSize.default'.Rows))
+                    "each one carries the geometry the range actually ran under"
+            }
+
         testCaseAsync "an approval is recorded on the block, so the audit says who let it run" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1620,7 +1709,7 @@ let private managerTests =
                 // Comfortably past the 4 MiB per-block cap.
                 let flood = String.replicate 200 (String.replicate 40000 "y")
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, flood ], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1639,7 +1728,7 @@ let private managerTests =
                 // session. Closing them is what keeps the projection describing reality.
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript [ terminalA; terminalB ]
                 Expect.isTrue (terminals.IsOpen terminalA) "before boot reconciliation it still reads as open"
                 do! terminals.ReconcileAtBoot ()
@@ -1654,7 +1743,7 @@ let private managerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1676,7 +1765,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "ok\n" ], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1699,7 +1788,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect
@@ -1732,7 +1821,7 @@ let private schedulerTests =
             async {
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _ = recordingTranscripts ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
                 let! opened = terminals.Open (PeerRef ada) "build"
                 let id = opened |> expect

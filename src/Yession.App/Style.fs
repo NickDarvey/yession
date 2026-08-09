@@ -489,6 +489,27 @@ module Style =
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 
+    /// Terminal work in the chat (Plan 14, stage 1): one line, subtler than a message, and a
+    /// real `<button>` — so it is keyboard-operable and focus-ringed by construction rather
+    /// than by a handler bolted onto a div.
+    ///
+    /// It sits on the message grid's CONTENT column (`20px` avatar + `12px` gutter) so a run
+    /// of chips between two messages lines up with the prose rather than drifting under the
+    /// avatars. The palette stays `text-ink-dim`/`text-ink-faint` — chips are the busiest
+    /// thing the chat will carry, and they must read as texture next to what people said.
+    let chatChip =
+        cls [ "w-full max-w-[46rem] bg-transparent cursor-pointer text-left"
+              "flex items-baseline gap-2 pl-[32px] py-0.5"
+              "text-ink-dim hover:text-ink transition-colors duration-150 ease-out"
+              focusRing ]
+    /// Who ran it — the same caps voice a message's author line wears, one step fainter.
+    let chatChipWho = caps + " text-ink-faint shrink-0"
+    /// The command itself: mono, truncated to one line. A chip that wrapped to three would
+    /// stop being a chip.
+    let chatChipCommand = "font-mono text-code-sm text-ink-dim truncate min-w-0 flex-1"
+    /// A stretch item's sentence — prose, not mono: nothing was typed that we recorded.
+    let chatChipText = "font-light text-small text-ink-dim truncate min-w-0 flex-1"
+
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
     let repoNote = "max-w-[46rem] pl-[32px]"
@@ -653,18 +674,24 @@ module Style =
     // timeline: reading something and then having it slide out from under you is the thing
     // this shell does not do.
 
-    /// The terminals column. Mirrors `sidebar`'s geometry (a fixed column on desktop that
-    /// animates shut, an off-canvas drawer on mobile) reflected to the right edge.
+    /// The pane. Mirrors `sidebar`'s geometry (a fixed column on desktop that animates shut,
+    /// an off-canvas column on mobile) reflected to the right edge.
+    ///
+    /// On a phone it takes the WHOLE width (Plan 14, stage 5). The columns collapse to one
+    /// and opening a tab switches that column to the pane, keeping the tab strip — so the
+    /// chat is a back-swipe away rather than an overlay to dismiss, and desktop and phone
+    /// stay the same mental model. The old 92vw left a sliver of chat showing beside it,
+    /// which reads as a dialog: something you get rid of rather than somewhere you are.
     let terminalPanel =
         "relative w-term shrink-0 bg-panel h-full overflow-hidden z-40 flex flex-col " + Stroke.dividerLeft + " "
         + "md:transition-[width] md:duration-200 md:ease-out "
         + "md:[.term-closed_&]:w-0 md:[.term-closed_&]:border-l-0 "
-        + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-[min(var(--spacing-term),92vw)] "
+        + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-full max-md:border-l-0 "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out "
         + "max-md:[.term-closed_&]:translate-x-[101%] motion-reduce:transition-none"
 
     /// Held at the column's full width so nothing reflows while the column animates shut.
-    let terminalPane = "absolute inset-0 w-term max-md:w-[min(var(--spacing-term),92vw)] flex flex-col"
+    let terminalPane = "absolute inset-0 w-term max-md:w-full flex flex-col"
 
     /// The column's head, on the same 88px band as the sidebar and the main header.
     let terminalHead = "h-band shrink-0 flex items-end justify-between gap-2 px-5 pb-5 " + Stroke.dividerBottom
@@ -684,6 +711,24 @@ module Style =
     /// the strip rather than only from inside it.
     let terminalTabPeers = "inline-flex items-center gap-0.5 ml-1.5 align-[1px]"
 
+    /// A tab a person opened from the chat (Plan 14, stage 2): the tab itself plus its own
+    /// close control. A group rather than one control, because a `<button>` inside a
+    /// `<button>` is not markup — and the two do different things.
+    let paneTabGroup = "inline-flex items-stretch shrink-0"
+    /// The close control, sized to the tab band beside it.
+    let paneTabClose =
+        cls [ "bg-transparent cursor-pointer px-1.5 grid place-items-center transition-colors"
+              Stroke.clear; "text-ink-faint hover:text-err"; focusRing ]
+
+    /// The pane's body — whatever the selected tab shows. It takes the column's remaining
+    /// height so the thing inside it scrolls rather than the column.
+    let paneBody = "flex-1 min-h-0 flex flex-col"
+    /// A read-only tab's body: the same scrolling region the block history uses, so a block
+    /// read from the chat looks exactly like the block read in its terminal.
+    let paneReadonly = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
+    /// A stretch tab's facts, above whatever renders its recording.
+    let paneFacts = "shrink-0 flex flex-col gap-1 px-3 py-3 " + Stroke.dividerBottom
+
     /// The scrolling block history.
     let terminalBlocks = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
 
@@ -701,6 +746,14 @@ module Style =
     /// The truncation notice: a stated gap in the record, in the error voice because a
     /// missing audit trail is not a neutral fact.
     let terminalTruncated = caps + " px-3 py-2 text-err"
+
+    /// The live screen (Plan 14, stage 6). Monospaced, preformatted, and scrollable in both
+    /// axes — a terminal's lines are as wide as the program made them, and wrapping them
+    /// would redraw a screen the program laid out. The focus ring matters more here than
+    /// anywhere: this is the one surface whose whole purpose is having the keyboard.
+    let terminalScreen =
+        cls [ "flex-1 min-h-0 overflow-auto px-3 py-2 font-mono text-code-sm leading-4"
+              "whitespace-pre text-ink bg-bg"; focusRing ]
 
     /// The composer area beneath the blocks.
     let terminalComposer = "shrink-0 flex flex-col gap-2 px-3 py-3 " + Stroke.dividerTop

@@ -72,7 +72,12 @@ module AgentTurn =
                           Author = trigger.Author
                           Body = trigger.Body
                           Status = Complete
-                          Kind = ConversationItemKind.Message }
+                          Kind = ConversationItemKind.Message
+                          // Synthesized from the trigger rather than folded, so it has no
+                          // offset of its own. Nothing here sorts — the agent's context is
+                          // built in the projection's order, and this stands in for an item
+                          // that projection has not caught up to yet.
+                          Offset = EventOffset.zero }
                 let context =
                     { SessionId = sessionId
                       Conversation = conversation

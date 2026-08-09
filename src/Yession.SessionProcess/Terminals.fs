@@ -17,7 +17,11 @@ type Transcript =
       /// `FromSeq`/`ToSeq`, and in the HTTP chunk a client fetches.
       Append : TranscriptRecord -> int
       /// The line index the next append will use — i.e. how long the transcript is.
-      NextSeq : unit -> int }
+      NextSeq : unit -> int
+      /// Record the screen as it stood immediately before a given line (Plan 14, stage 3),
+      /// into the terminal's keyframe sidecar. Written at every range START and nowhere
+      /// else, because those are the only positions a ranged replay ever asks for.
+      Keyframe : TranscriptKeyframe -> unit }
 
 /// Open (or reopen) a terminal's transcript. The header is written once, when the file is
 /// created; reopening an existing transcript appends to it, because a transcript outlives
@@ -446,7 +450,11 @@ module TerminalLeases =
     ///
     /// Re-taking a lease you already hold writes nothing. It is not a steal from yourself, and
     /// a log that said so would be noise the second time a client sent the frame.
-    let take (id: TerminalId) (by: ActorRef) (auto: bool) (at: DateTimeOffset) (leases: Leases) : SessionEvent list * Leases =
+    /// `seq` is the terminal's transcript position at this instant — where the new stretch
+    /// begins, and where the stolen one ends (Plan 14, stage 1). One number for both, because
+    /// a steal is one moment: the ranges of the two stretches must abut exactly, or a replay
+    /// of one would show bytes that belong to the other.
+    let take (id: TerminalId) (by: ActorRef) (auto: bool) (at: DateTimeOffset) (seq: int) (leases: Leases) : SessionEvent list * Leases =
         let key = TerminalId.value id
         match Map.tryFind key leases with
         | Some lease when lease.Holder = by -> [], leases
@@ -455,18 +463,19 @@ module TerminalLeases =
                 match previous with
                 | Some lease ->
                     [ SessionEvent.TerminalLeaseReleased
-                        { TerminalId = id; Was = lease.Holder; Reason = LeaseStolen by } ]
+                        { TerminalId = id; Was = lease.Holder; Reason = LeaseStolen by; ToSeq = seq } ]
                 | None -> []
-            ending @ [ SessionEvent.TerminalLeaseTaken { TerminalId = id; By = by } ],
+            ending @ [ SessionEvent.TerminalLeaseTaken { TerminalId = id; By = by; FromSeq = seq } ],
             Map.add key { Holder = by; Auto = auto; LastInput = at } leases
 
     /// Hand the terminal back. Only the holder can: releasing someone else's lease is a steal
     /// wearing a polite word, and a steal is `take`, which says so on the record.
-    let release (id: TerminalId) (by: ActorRef) (leases: Leases) : SessionEvent list * Leases =
+    let release (id: TerminalId) (by: ActorRef) (seq: int) (leases: Leases) : SessionEvent list * Leases =
         let key = TerminalId.value id
         match Map.tryFind key leases with
         | Some lease when lease.Holder = by ->
-            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = lease.Holder; Reason = LeaseReleased } ],
+            [ SessionEvent.TerminalLeaseReleased
+                { TerminalId = id; Was = lease.Holder; Reason = LeaseReleased; ToSeq = seq } ],
             Map.remove key leases
         | _ -> [], leases
 
@@ -474,27 +483,31 @@ module TerminalLeases =
     /// as an ordinary release, because from outside the process that is what it is — the holder
     /// is done with the terminal — and a fourth reason for "the program they were in exited"
     /// would distinguish something no reader of the log is asking.
-    let autoRelease (id: TerminalId) (leases: Leases) : SessionEvent list * Leases =
+    let autoRelease (id: TerminalId) (seq: int) (leases: Leases) : SessionEvent list * Leases =
         match Map.tryFind (TerminalId.value id) leases with
         | Some lease when lease.Auto ->
-            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = lease.Holder; Reason = LeaseReleased } ],
+            [ SessionEvent.TerminalLeaseReleased
+                { TerminalId = id; Was = lease.Holder; Reason = LeaseReleased; ToSeq = seq } ],
             Map.remove (TerminalId.value id) leases
         | _ -> [], leases
 
     /// The idle timeout's reclaim (Plan 13, stage 3c). Its own reason, because "the holder is
     /// still here and stopped" is a third answer to the question a reader asks afterwards, and
     /// recording it as `LeaseReleased` would say they decided something they did not.
-    let reclaimIdle (id: TerminalId) (leases: Leases) : SessionEvent list * Leases =
+    let reclaimIdle (id: TerminalId) (seq: int) (leases: Leases) : SessionEvent list * Leases =
         match Map.tryFind (TerminalId.value id) leases with
         | Some lease ->
-            [ SessionEvent.TerminalLeaseReleased { TerminalId = id; Was = lease.Holder; Reason = LeaseIdle } ],
+            [ SessionEvent.TerminalLeaseReleased
+                { TerminalId = id; Was = lease.Holder; Reason = LeaseIdle; ToSeq = seq } ],
             Map.remove (TerminalId.value id) leases
         | None -> [], leases
 
     /// A peer's connection dropped: every lease it held ends. Without this a crashed tab
     /// leaves the composer reading "nick is using this terminal" for ever, with the queue held
     /// behind a peer who cannot release it — a deadlock wearing a status message's face.
-    let peerGone (peer: PeerId) (leases: Leases) : SessionEvent list * Leases =
+    /// `seqOf` rather than a seq: this ends leases across SEVERAL terminals at once, and each
+    /// one's stretch ends at its own transcript position.
+    let peerGone (peer: PeerId) (seqOf: TerminalId -> int) (leases: Leases) : SessionEvent list * Leases =
         let mine =
             leases
             |> Map.toList
@@ -507,7 +520,7 @@ module TerminalLeases =
                 | Ok id ->
                     Some (
                         SessionEvent.TerminalLeaseReleased
-                            { TerminalId = id; Was = lease.Holder; Reason = LeaseHolderGone })
+                            { TerminalId = id; Was = lease.Holder; Reason = LeaseHolderGone; ToSeq = seqOf id })
                 | Error _ -> None)
         events, mine |> List.fold (fun acc (key, _) -> Map.remove key acc) leases
 
@@ -820,6 +833,59 @@ module SessionTerminals =
             | TranscriptInput | TranscriptResize -> ()
             onRecord id seq record
 
+        /// Where this terminal's transcript stands right now — the bound a lease event is
+        /// stamped with (Plan 14, stage 1).
+        ///
+        /// A lease only ever exists on a LIVE terminal: `closeTerminal` drops it from the map
+        /// without an event, so there is no path from a closed terminal to a lease transition.
+        /// The other branch is therefore unreachable, and 0 is the only answer that cannot
+        /// lie — it makes the stretch's range empty rather than pointing it at bytes.
+        let seqNow (id: TerminalId) : int =
+            match live.TryGetValue (TerminalId.value id) with
+            | true, terminal -> terminal.Transcript.NextSeq ()
+            | _ -> 0
+
+        /// Capture the screen at this terminal's current transcript position, and return
+        /// that position (Plan 14, stage 3).
+        ///
+        /// The seq is read FIRST and the serialize started in the same tick, which is what
+        /// makes the pairing exact: `emit` appends the record and feeds the emulator in one
+        /// synchronous step, and `Serialize`'s empty-write barrier resolves only once
+        /// everything queued BEFORE it has been applied. So the screen this returns is
+        /// exactly lines `< seq` — never a byte that arrived while we waited.
+        /// The transcript position a range starts at, with the keyframe for it captured on
+        /// the way past.
+        ///
+        /// The seq is read and the emulator's write barrier QUEUED synchronously — that is
+        /// what pairs the screen with `seq`, since the barrier resolves over everything fed
+        /// before it and nothing after. The WRITE finishes off the caller's path, and that
+        /// is not an optimisation: `runBlock` calls this between the drain consuming a queue
+        /// entry and `TerminalBlockStarted` recording the block, and an await anywhere in
+        /// that stretch is a window in which a waiting caller sees an entry that is gone and
+        /// a block that does not exist yet — and is told its command was removed before it
+        /// ran. Awaiting it later instead only moves the delay onto the spawn, which is
+        /// equally observable.
+        ///
+        /// Nothing downstream needs the keyframe durable before the block starts. A keyframe
+        /// that never landed would cost a ranged replay its exactness, which the replay
+        /// already states and degrades to.
+        let markKeyframe (id: TerminalId) : int =
+            match live.TryGetValue (TerminalId.value id) with
+            | false, _ -> 0
+            | true, terminal ->
+                let seq = terminal.Transcript.NextSeq ()
+                let size =
+                    match appliedSize.TryGetValue (TerminalId.value id) with
+                    | true, applied -> applied
+                    | _ -> TerminalSize.default'
+                Async.StartImmediate (
+                    async {
+                        let! screen = terminal.Emulator.Serialize ()
+                        terminal.Transcript.Keyframe
+                            { Seq = seq; Cols = size.Cols; Rows = size.Rows; Screen = screen }
+                    })
+                seq
+
         /// Who a lease event is attributed to. A take and a steal are the acts of whoever took
         /// it; a voluntary release is the holder's; a lease ended because its holder vanished
         /// is nobody's but the Process's, which is the honest reading of `LeaseHolderGone`.
@@ -862,8 +928,9 @@ module SessionTerminals =
                     | true, actor -> Some actor
                     | _ -> None
                 match TerminalFlip.propose altScreen holder autoHeld author with
-                | FlipToLive by -> do! applyLease (TerminalLeases.take id by true (clock ()) leases)
-                | FlipToBlock -> do! applyLease (TerminalLeases.autoRelease id leases)
+                | FlipToLive by ->
+                    do! applyLease (TerminalLeases.take id by true (clock ()) (markKeyframe id) leases)
+                | FlipToBlock -> do! applyLease (TerminalLeases.autoRelease id (seqNow id) leases)
                 | FlipNothing -> return ()
             }
 
@@ -1076,7 +1143,7 @@ module SessionTerminals =
                     // on the screen. The alternative — starting the range at the `C` mark —
                     // cannot be reconciled with appending the anchor first, because `C` does
                     // not exist until after the write.
-                    let fromSeq = transcript.NextSeq ()
+                    let fromSeq = markKeyframe entry.Terminal
                     // Durable BEFORE the process starts: the block event is the
                     // exactly-once anchor, so a crash between here and the spawn leaves a
                     // block that never completed — visible and explicable — rather than a
@@ -1206,7 +1273,7 @@ module SessionTerminals =
                 for id, idleFor in candidates do
                     let blockRunning = Set.contains (TerminalId.value id) busy
                     if TerminalLeaseIdle.shouldReclaim idleFor blockRunning (holdOf id) then
-                        do! applyLease (TerminalLeases.reclaimIdle id leases)
+                        do! applyLease (TerminalLeases.reclaimIdle id (seqNow id) leases)
             }
 
         /// Type the instrumentation into the shell that is there NOW, and report whether it
@@ -1239,7 +1306,7 @@ module SessionTerminals =
                 | true, terminal when Option.isNone terminal.Shell ->
                     return Error "this terminal has no interactive shell"
                 | true, _ ->
-                    do! applyLease (TerminalLeases.take id by false (clock ()) leases)
+                    do! applyLease (TerminalLeases.take id by false (clock ()) (markKeyframe id) leases)
                     return Ok ()
             }
 
@@ -1247,13 +1314,13 @@ module SessionTerminals =
             async {
                 match TerminalLeases.holderOf id leases with
                 | Some holder when holder = by ->
-                    do! applyLease (TerminalLeases.release id by leases)
+                    do! applyLease (TerminalLeases.release id by (seqNow id) leases)
                     return Ok ()
                 | Some _ -> return Error "another peer holds this terminal"
                 | None -> return Error "this terminal is not held"
             }
 
-        let peerGone (peer: PeerId) : Async<unit> = applyLease (TerminalLeases.peerGone peer leases)
+        let peerGone (peer: PeerId) : Async<unit> = applyLease (TerminalLeases.peerGone peer seqNow leases)
 
         /// The pty of a terminal this actor is entitled to type into, if any.
         let heldPty (id: TerminalId) (by: ActorRef) : PtyHandle option =

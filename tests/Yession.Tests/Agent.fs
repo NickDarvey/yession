@@ -64,7 +64,8 @@ let private triggerItem : ConversationItem =
       Author = PeerRef ada
       Body = "hi agent"
       Status = Complete
-      Kind = ConversationItemKind.Message }
+      Kind = ConversationItemKind.Message
+      Offset = EventOffset.zero }
 
 let private envelope (offset: int64) (event: SessionEvent) : EventEnvelope<SessionEvent> =
     { EventId = EventId.fresh ()

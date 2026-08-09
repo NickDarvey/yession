@@ -70,13 +70,21 @@ let private representativeModel : ClientModel =
                 Author = PeerRef ada
                 Body = "ship it"
                 Status = Complete
-                Kind = ConversationItemKind.Message }
+                Kind = ConversationItemKind.Message
+                Offset = EventOffset.create 1L |> expect }
               { MessageId = MessageId.create "msg-agent" |> expect
                 Author = ActorRef.Agent
                 Body = "Sounds go"
                 Status = Streaming
-                Kind = ConversationItemKind.Message } ]
+                Kind = ConversationItemKind.Message
+                Offset = EventOffset.create 4L |> expect } ]
           ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ] }
+      // The terminal half of the chat (Plan 14): the fixture's one block, anchored between
+      // the two messages — so the checklist renders a chip in the middle of the conversation
+      // rather than only at the end, which is the ordering the merge exists for.
+      Timeline =
+        { TimelineProjection.empty with
+            TerminalItems = [ TimelineBlock (EventOffset.create 2L |> expect, terminalId, blockId) ] }
       EventConsumer =
         { LastProcessedOffset = Some (EventOffset.create 5L |> expect)
           LatestKnownOffset = Some (EventOffset.create 7L |> expect)
@@ -122,7 +130,12 @@ let private representativeModel : ClientModel =
                 KnownLength = 2
                 ReadThrough = 2
                 Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
-      TerminalChoice = None
+      TerminalKeyframes = Map.empty
+      TerminalScreens = Map.empty
+      PaneTabs = []
+      PaneChoice = None
+      PaneStartAt = None
+      PaneRewound = None
       TerminalsOpen = true
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
@@ -189,7 +202,18 @@ let private leasedTerminalModel : ClientModel =
         Terminals =
             { Terminals =
                 representativeModel.Terminals.Terminals
-                |> List.map (fun t -> { t with Lease = Some (PeerRef bob) }) } }
+                |> List.map (fun t -> { t with Lease = Some (PeerRef bob) }) }
+        // The screen this client composed from the Process's snapshot and the records since
+        // (Plan 14, stage 6). Coloured, so the render exercises the ANSI path.
+        TerminalScreens = Map.ofList [ terminalId, "\u001b[32mvim ~/notes\u001b[0m" ] }
+
+/// The same terminal, held by THIS peer: the one copy of the screen that takes keystrokes.
+let private heldTerminalModel : ClientModel =
+    { leasedTerminalModel with
+        Terminals =
+            { Terminals =
+                leasedTerminalModel.Terminals.Terminals
+                |> List.map (fun t -> { t with Lease = Some (PeerRef ada) }) } }
 
 /// The same session with the terminal's shell no longer marking (Plan 13, stage 2f). The
 /// queued command is a PEER's, so it needs no approval — otherwise the approval hold would
@@ -215,10 +239,11 @@ let private closedTerminalModel : ClientModel =
             { Terminals =
                 representativeModel.Terminals.Terminals
                 |> List.map (fun t -> { t with IsOpen = false; ClosedReason = Some "closed by a peer" }) }
-        TerminalChoice = Some terminalId }
+        PaneChoice = Some (TerminalTab terminalId) }
 
-/// …and after retention has deleted its recording (stage 3d): the blocks survive in the
-/// projection, the transcript does not, and the byte count is the only trace of what it held.
+/// …and after the per-terminal output cap ate its recording (stage 3d): the blocks survive
+/// in the projection, the transcript does not, and the byte count is the only trace of what
+/// it held.
 let private forgottenTerminalModel : ClientModel =
     { closedTerminalModel with
         Terminals =
@@ -278,6 +303,11 @@ let private uiChecklistTests =
                   "approve button", Dom.attr Dom.Hooks.terminalApprove "queue-ui-term"
                   "terminal composer input", Dom.attr Dom.Hooks.terminalInput "term-draft:term-ui:ada"
                   "terminal approval mode", Dom.attr Dom.Hooks.terminalMode "approve-agent"
+                  // Terminal work in the CHAT (Plan 14): the block that ran has a chip where
+                  // it ran, carrying who ran it and how it went — and no output, which is the
+                  // whole reason it is a chip.
+                  "block chip in the chat", Dom.attr Dom.Hooks.chatBlock "block-ui"
+                  "chip carries the block's status", Dom.attr Dom.Hooks.chatBlockStatus Dom.Text.blockOk
                   // Settings + agent presence (Plan 08 pass): the model has no agent, so
                   // the sidebar row says absent, the prompt strip renders with its
                   // connect call-to-action, and the drawer holds the Claude panel.
@@ -346,7 +376,7 @@ let private uiChecklistTests =
                 [ "a closed terminal has a tab of its own",
                   Dom.attr Dom.Hooks.terminalClosedTab (TerminalId.value terminalId)
                   "and the mount the player attaches to",
-                  Dom.attr Dom.Hooks.terminalReplay (TerminalId.value terminalId)
+                  Dom.attr Dom.Hooks.paneReplay (PaneTab.key (TerminalTab terminalId))
                   // The blocks are still the other half of the read: what ran, beside how it
                   // behaved.
                   "the commands it ran are still listed", Dom.attr Dom.Hooks.terminalBlock "block-ui" ] do
@@ -360,7 +390,83 @@ let private uiChecklistTests =
                 (html.Contains (Dom.attr "data-terminal-close" (TerminalId.value terminalId)))
                 "and no offer to close what is already closed"
 
-        testCase "a recording retention deleted is a STATED gap, not an empty player" <| fun () ->
+        testCase "terminal work sits in the chat WHERE it happened, not at the end" <| fun () ->
+            // Plan 14, stage 1. The fixture's block is anchored at offset 2, between the two
+            // messages at 1 and 4 — so the merge has to put it there. Appending it after
+            // everything said would be the thing the offset exists to prevent.
+            let html = Support.render representativeModel
+            let indexOf (needle: string) = html.IndexOf needle
+            let said = indexOf (Dom.attr Dom.Hooks.messageId "msg-1")
+            let ran = indexOf (Dom.attr Dom.Hooks.chatBlock "block-ui")
+            let answered = indexOf (Dom.attr Dom.Hooks.messageId "msg-agent")
+            Expect.isTrue (said >= 0 && ran >= 0 && answered >= 0) "all three render"
+            Expect.isTrue (said < ran && ran < answered) "said, ran, answered — in log order"
+
+        testCase "a chip is one line: who ran what, and how it went — never the output" <| fun () ->
+            // Output inline would make the chat noisiest exactly when it is busiest, and
+            // would put everything a command printed one glance from everyone in the session
+            // rather than one tap. The panel is where output lives.
+            let html = Support.render representativeModel
+            let chat =
+                let start = html.IndexOf Dom.Hooks.conversation
+                html.Substring (start, html.IndexOf ("</section>", start) - start)
+            Expect.isTrue (chat.Contains (Dom.attr Dom.Hooks.chatBlock "block-ui")) "the chip is there"
+            Expect.isTrue (chat.Contains "ls -la") "with the command it ran"
+            Expect.isFalse (chat.Contains Dom.Hooks.terminalOutput) "and nothing it printed"
+            // The panel is where output lives, and it still does.
+            Expect.isTrue (html.Contains Dom.Hooks.terminalOutput) "the terminal panel is unchanged"
+
+        testCase "a concluded lease stretch is its own item, and says how it ended" <| fun () ->
+            let stretchModel =
+                { representativeModel with
+                    Timeline =
+                        { representativeModel.Timeline with
+                            TerminalItems =
+                                representativeModel.Timeline.TerminalItems
+                                @ [ TimelineStretch
+                                        { Offset = EventOffset.create 3L |> expect
+                                          TerminalId = terminalId
+                                          Title = "build"
+                                          Holder = PeerRef bob
+                                          End = LeaseStolen (PeerRef ada)
+                                          Range = Some (2, 40)
+                                          StartedAt = DateTimeOffset (2026, 8, 8, 0, 0, 0, TimeSpan.Zero)
+                                          EndedAt = DateTimeOffset (2026, 8, 8, 0, 2, 0, TimeSpan.Zero) } ] } }
+            let html = Support.render stretchModel
+            let required =
+                [ "the stretch item", Dom.attr Dom.Hooks.chatStretch "term-ui@3"
+                  // Four endings, four answers: "did they finish, get taken over, drop out,
+                  // or wander off?" is not one question.
+                  "how it ended", Dom.attr Dom.Hooks.chatStretchEnd Dom.Text.stretchStolen
+                  "who held it", "bob"
+                  "where", "build"
+                  "for how long", "2m 0s" ]
+            for label, marker in required do
+                Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+
+        testCase "live mode shows the SCREEN, and every peer sees the same one" <| fun () ->
+            // Plan 14, stage 6. A program is running here, and what it displays is a
+            // projection of what it emitted — the block history is block mode's view of a
+            // terminal, and it comes back the moment the lease does.
+            let watching = Support.render leasedTerminalModel
+            Expect.isTrue
+                (watching.Contains (Dom.attr Dom.Hooks.terminalScreen (TerminalId.value terminalId)))
+                "the screen renders for a peer who is only watching"
+            Expect.isTrue (watching.Contains "vim ~/notes") "with what the program drew"
+            // ANSI through the same theme tokens a block's output uses — a raw ANSI colour
+            // would not clear the contrast floor on this ground.
+            Expect.isTrue (watching.Contains "text-term-green") "coloured by the theme, not by the escape"
+            Expect.isFalse
+                (watching.Contains (Dom.attr Dom.Hooks.terminalBlock (BlockId.value blockId)))
+                "and the block history gives way to it"
+            // Watching is not a lesser mode; it is the ordinary one. What the holder gets in
+            // addition is the keyboard.
+            Expect.isFalse (watching.Contains "role=\"application\"") "a watcher's screen takes no keystrokes"
+            let held = Support.render heldTerminalModel
+            Expect.isTrue (held.Contains "role=\"application\"") "the holder's does"
+            Expect.isTrue (held.Contains "tabindex=\"0\"") "and it is a Tab stop, so a keyboard can reach it"
+
+        testCase "a recording the cap ate is a STATED gap, not an empty player" <| fun () ->
             // The one place stage 3d's behaviour reaches the surface. An empty player is
             // indistinguishable from a terminal that printed nothing, and the whole reason
             // the drop is recorded is that a hole in an audit trail must be a stated fact.
@@ -369,7 +475,7 @@ let private uiChecklistTests =
                 (html.Contains (Dom.attr Dom.Hooks.terminalReplayGone (TerminalId.value terminalId)))
                 "the gap is named"
             Expect.isFalse
-                (html.Contains (Dom.attr Dom.Hooks.terminalReplay (TerminalId.value terminalId)))
+                (html.Contains (Dom.attr Dom.Hooks.paneReplay (PaneTab.key (TerminalTab terminalId))))
                 "and no player is mounted over nothing"
 
         testCase "the random peer display name is human-readable" <| fun () ->
@@ -430,7 +536,8 @@ let private uiChecklistTests =
                   Author = PeerRef ada
                   Body = "# Heading one\n\nText with **bold** and `code`.\n\n- item one\n- item two"
                   Status = Complete
-                  Kind = ConversationItemKind.Message }
+                  Kind = ConversationItemKind.Message
+                  Offset = EventOffset.create 1L |> expect }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ richItem ] } }
@@ -459,7 +566,8 @@ let private uiChecklistTests =
                   Author = PeerRef ada
                   Body = "added repo octo/hello (branch main)"
                   Status = Complete
-                  Kind = ConversationItemKind.RepoNote }
+                  Kind = ConversationItemKind.RepoNote
+                  Offset = EventOffset.create 1L |> expect }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }

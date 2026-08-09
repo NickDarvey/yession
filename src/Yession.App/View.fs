@@ -85,7 +85,30 @@ type ViewActions =
       ReleaseTerminal : TerminalId -> unit
       /// Type the shell instrumentation in again after the terminal stopped marking (Plan 13,
       /// stage 2f). Any peer may — it repairs rather than takes.
-      RearmTerminal : TerminalId -> unit }
+      RearmTerminal : TerminalId -> unit
+      /// Send keystrokes to a terminal this peer holds (Plan 14, stage 6). Imperative
+      /// because it is a frame, and deliberately not acknowledged: a keystroke that needed a
+      /// reply would make typing a round trip. The Session Process checks the lease, which
+      /// is the only place it CAN be checked — a client that believes it holds one may be
+      /// looking at a steal it has not seen yet.
+      TypeIntoTerminal : TerminalId -> string -> unit
+      /// Report the holder's viewport size, so the pty and the program inside it agree about
+      /// the screen (Plan 14, stage 6).
+      ResizeTerminal : TerminalId -> int -> int -> unit
+      /// Move focus into the side pane after a chip opened a tab there (Plan 14, stage 2).
+      /// Imperative because it is a focus move: the model says which tab is showing, and the
+      /// browser has to wait for the render that put it on screen. A chip that opened a pane
+      /// and left focus behind it is the failure the WCAG floor names.
+      FocusPane : unit -> unit
+      /// Return focus to the chat item that opened a tab, once that tab is closed. Takes the
+      /// tab's key, which is the only thing the chip and the tab share — the browser turns it
+      /// back into a selector. Without this, closing a tab strands focus on a control that
+      /// has just been removed from the document.
+      FocusChat : string -> unit
+      /// Hand focus to whichever DVR control replaced the one just pressed (Plan 14,
+      /// stage 7): Rewind and Jump-to-live each remove the other from the document, so the
+      /// press that swaps them would otherwise strand focus on a control that has gone.
+      FocusDvr : TerminalId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -110,7 +133,12 @@ module ViewActions =
           SendTerminalDraft = fun _ _ -> ()
           TakeTerminal = ignore
           ReleaseTerminal = ignore
-          RearmTerminal = ignore }
+          RearmTerminal = ignore
+          TypeIntoTerminal = fun _ _ -> ()
+          ResizeTerminal = fun _ _ _ -> ()
+          FocusPane = ignore
+          FocusChat = ignore
+          FocusDvr = ignore }
 
 module View =
 
@@ -642,6 +670,47 @@ module View =
     [<Fable.Core.Emit("($0 && $0.target && typeof $0.target.selectionStart === 'number') ? [$0.target.selectionStart, $0.target.selectionEnd] : null")>]
     let private selectionOf (e: obj) : (int * int) option = Fable.Core.Util.jsNative
 
+    /// The bytes a keydown means to a pty (Plan 14, stage 6).
+    ///
+    /// A keyboard event is not a byte stream, and the translation is the whole of what a
+    /// terminal front end does with keys: printable characters go as themselves, Ctrl-<key>
+    /// as the control code, and the keys with no character at all (arrows, Home, the
+    /// function block) as the escape sequences a program is waiting for. `null` means a key
+    /// that sends nothing — a bare modifier, or a shortcut the browser owns.
+    ///
+    /// `preventDefault` on everything that IS sent, because otherwise the browser also acts
+    /// on it: Tab would leave the terminal mid-session, and Backspace used to navigate.
+    [<Fable.Core.Emit("""(() => {
+  const ev = $0
+  if (ev.metaKey || ev.altKey) return null
+  const k = ev.key
+  const send = d => { ev.preventDefault(); return d }
+  if (ev.ctrlKey) {
+    if (k.length === 1) {
+      const c = k.toUpperCase().charCodeAt(0)
+      if (c >= 64 && c <= 95) return send(String.fromCharCode(c - 64))
+    }
+    return null
+  }
+  switch (k) {
+    case 'Enter': return send('\r')
+    case 'Backspace': return send('\x7f')
+    case 'Tab': return send('\t')
+    case 'Escape': return send('\x1b')
+    case 'ArrowUp': return send('\x1b[A')
+    case 'ArrowDown': return send('\x1b[B')
+    case 'ArrowRight': return send('\x1b[C')
+    case 'ArrowLeft': return send('\x1b[D')
+    case 'Home': return send('\x1b[H')
+    case 'End': return send('\x1b[F')
+    case 'PageUp': return send('\x1b[5~')
+    case 'PageDown': return send('\x1b[6~')
+    case 'Delete': return send('\x1b[3~')
+  }
+  return k.length === 1 ? send(k) : null
+})()""")>]
+    let private keystrokeOf (e: obj) : string option = Fable.Core.Util.jsNative
+
     /// One collaborator's title caret+selection marker: a selection highlight span and a caret
     /// bar with a name label. The browser positions all three by measurement after render (from
     /// the peer's relative positions, decoded against the title `Y.Text`); colour is fixed here.
@@ -707,43 +776,6 @@ module View =
                 {terminalsReopen dispatch model}
               </div>
             </header>"""
-
-    /// A repo note is something someone DID, not said — one quiet line, actor-attributed,
-    /// no avatar and no rich body (Plan 14).
-    let private repoNoteItem (item: ConversationItem) : TemplateResult =
-        html $"""
-            <article class="{Style.repoNote}" data-message-id="{MessageId.value item.MessageId}" data-repo-note data-message-author="{authorLabel item.Author}">
-              <span class="{Style.repoNoteText}">{authorLabel item.Author} {item.Body}</span>
-            </article>"""
-
-    let private messageItem (item: ConversationItem) : TemplateResult =
-        let isAgent = (item.Author = ActorRef.Agent)
-        let whoClass = if isAgent then Style.whoAgent else Style.who
-        let statusInner =
-            match item.Status with
-            | Complete -> Lit.nothing
-            | Streaming -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>streaming</span>"""
-            | ConversationItemStatus.Failed -> html $"""<span class="{Style.statusErr}">failed</span>"""
-            | ConversationItemStatus.Interrupted -> html $"""<span class="{Style.statusFaint}">interrupted</span>"""
-        let bodyClass, caret =
-            match item.Status with
-            | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
-            | _ -> Style.messageBody, Lit.nothing
-        html $"""
-            <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
-              <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
-              <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
-              <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
-            </article>"""
-
-    let private conversation (projection: ConversationProjection) : TemplateResult =
-        let items =
-            projection.Items
-            |> List.map (fun item ->
-                match item.Kind with
-                | ConversationItemKind.RepoNote -> repoNoteItem item
-                | ConversationItemKind.Message -> messageItem item)
-        html $"""<section class="{Style.timeline}" data-conversation>{items}</section>"""
 
     let private agentStrip (actions: ViewActions) (agent: AgentViewState) : TemplateResult =
         match agent.ActiveTurn with
@@ -889,6 +921,110 @@ module View =
         // is the whole reason a refusal mints a block at all.
         | BlockRejected (by, _) -> html $"""<span class="{Style.statusErr}">rejected by {authorLabel by}</span>"""
 
+    let private stretchEndLabel =
+        function
+        | LeaseReleased -> Dom.Text.stretchReleased
+        | LeaseStolen _ -> Dom.Text.stretchStolen
+        | LeaseHolderGone -> Dom.Text.stretchGone
+        | LeaseIdle -> Dom.Text.stretchIdle
+
+    /// How a stretch ended, said the way a reader asks it.
+    let private stretchEnding =
+        function
+        | LeaseReleased -> html $"""<span class="{Style.statusFaint}">handed back</span>"""
+        | LeaseStolen by -> html $"""<span class="{Style.statusFaint}">taken over by {authorLabel by}</span>"""
+        | LeaseHolderGone -> html $"""<span class="{Style.statusFaint}">holder left</span>"""
+        | LeaseIdle -> html $"""<span class="{Style.statusFaint}">went idle</span>"""
+
+    /// A stretch's length, in the coarsest unit that still says something. Sub-second is not
+    /// a session someone had; it is a lease that bounced.
+    let private durationText (span: System.TimeSpan) : string =
+        let seconds = int (round span.TotalSeconds)
+        if seconds >= 3600 then sprintf "%dh %dm" (seconds / 3600) ((seconds % 3600) / 60)
+        elif seconds >= 60 then sprintf "%dm %ds" (seconds / 60) (seconds % 60)
+        else sprintf "%ds" seconds
+
+    /// The chat: what was said and what was run, in the order it happened (Plan 14, stage 1).
+    ///
+    /// Terminal items are resolved against `TerminalProjection` at render time rather than
+    /// copied into the timeline, which is what makes a running chip mutate in place as its
+    /// block finishes — the timeline holds where it goes, the projection holds what it says.
+    let private chat (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        // A repo note is something someone DID, not said — one quiet line, actor-attributed,
+        // no avatar and no rich body (Plan 14, repos). It rides the same timeline slot a
+        // message does (both are `ConversationItem`s at an offset); `Kind` is what tells the
+        // two apart at render time.
+        let repoNoteItem (item: ConversationItem) =
+            html $"""
+                <article class="{Style.repoNote}" data-message-id="{MessageId.value item.MessageId}" data-repo-note data-message-author="{authorLabel item.Author}">
+                  <span class="{Style.repoNoteText}">{authorLabel item.Author} {item.Body}</span>
+                </article>"""
+        let messageItem (item: ConversationItem) =
+            let isAgent = (item.Author = ActorRef.Agent)
+            let whoClass = if isAgent then Style.whoAgent else Style.who
+            let statusInner =
+                match item.Status with
+                | Complete -> Lit.nothing
+                | Streaming -> html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>streaming</span>"""
+                | ConversationItemStatus.Failed -> html $"""<span class="{Style.statusErr}">failed</span>"""
+                | ConversationItemStatus.Interrupted -> html $"""<span class="{Style.statusFaint}">interrupted</span>"""
+            let bodyClass, caret =
+                match item.Status with
+                | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
+                | _ -> Style.messageBody, Lit.nothing
+            html $"""
+                <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
+                  <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
+                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorLabel item.Author}</span>{statusInner}</div>
+                  <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
+                </article>"""
+        let message (item: ConversationItem) =
+            match item.Kind with
+            | ConversationItemKind.RepoNote -> repoNoteItem item
+            | ConversationItemKind.Message -> messageItem item
+        // One line: who ran what, and how it went. No output — a tail inline would make the
+        // chat noisiest exactly when it is busiest, and would put everything a command
+        // printed one glance from anyone in the session rather than one tap.
+        let blockChip (terminalId: TerminalId) (blockId: BlockId) =
+            let found =
+                TerminalProjection.tryFind terminalId model.Terminals
+                |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+            match found with
+            // Both folds read the same page, so a chip without its block is a page boundary,
+            // not a bug: the next page brings it. Rendering nothing beats rendering a stub.
+            | None -> Lit.nothing
+            | Some block ->
+                html $"""
+                    <button type="button" class="{Style.chatChip}"
+                            data-chat-block="{BlockId.value blockId}"
+                            data-chat-block-status="{terminalBlockStatusLabel block.Status}"
+                            data-terminal-id="{TerminalId.value terminalId}"
+                            @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
+                      <span class="{Style.chatChipWho}">{authorLabel block.Author}</span>
+                      <span class="{Style.terminalPrompt}">$</span>
+                      <code class="{Style.chatChipCommand}">{block.Command}</code>
+                      <span class="shrink-0">{terminalBlockStatus block.Status}</span>
+                    </button>"""
+        let stretchItem (stretch: TerminalStretch) =
+            let length = durationText (TerminalStretch.duration stretch)
+            html $"""
+                <button type="button" class="{Style.chatChip}"
+                        data-chat-stretch="{TerminalStretch.key stretch}"
+                        data-chat-stretch-end="{stretchEndLabel stretch.End}"
+                        data-terminal-id="{TerminalId.value stretch.TerminalId}"
+                        @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (StretchTab stretch)); actions.FocusPane ())}>
+                  <span class="{Style.chatChipWho}">{authorLabel stretch.Holder}</span>
+                  <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
+                  <span class="shrink-0">{stretchEnding stretch.End}</span>
+                </button>"""
+        let items =
+            TimelineProjection.items model.Conversation model.Timeline
+            |> List.map (function
+                | TimelineMessage item -> message item
+                | TimelineBlock (_, terminalId, blockId) -> blockChip terminalId blockId
+                | TimelineStretch stretch -> stretchItem stretch)
+        html $"""<section class="{Style.timeline}" data-conversation>{items}</section>"""
+
     /// One block: the command that ran, then everything it printed.
     let private terminalBlockView (feed: TerminalFeed) (block: TerminalBlock) : TemplateResult =
         // A running block's output runs to whatever has arrived; a finished one is bounded
@@ -1003,6 +1139,42 @@ module View =
               <div class="ml-auto flex items-center gap-2">{control}</div>
             </div>"""
 
+    /// The live screen of a terminal in live mode (Plan 14, stage 6).
+    ///
+    /// A SCREEN, not a stream: the program running here moves the cursor, and what it
+    /// displays is a projection of what it emitted. The platform half keeps an emulator —
+    /// the same one the Session Process uses, so the two screens cannot disagree — and hands
+    /// this its serialization; here it is rendered through the same ANSI spans a block's
+    /// output uses.
+    ///
+    /// The holder's copy takes keystrokes. Everyone else's is the identical screen, live and
+    /// read-only, which is the whole point of a shared terminal: watching is not a lesser
+    /// mode, it is the ordinary one.
+    let private terminalScreenView (actions: ViewActions) (model: ClientModel) (terminal: TerminalId) (holder: ActorRef) : TemplateResult =
+        let mine = ActorRef.PeerRef model.Peer.PeerId
+        let screen = ClientModel.terminalScreen terminal model |> Option.defaultValue ""
+        let id = TerminalId.value terminal
+        let body =
+            if screen = "" then
+                html $"""<div class="{Style.terminalOutputEmpty}">Waiting for this terminal's screen…</div>"""
+            else html $"""{ansiText screen}"""
+        if holder = mine then
+            // `tabindex="0"` and a keydown handler rather than a text input: what is being
+            // typed here is not a value, it is a byte stream, and an input would fight the
+            // program on the other end over what the "value" is. The accessible name says
+            // what it is and who has it.
+            html $"""
+                <div class="{Style.terminalScreen}" data-terminal-screen="{id}"
+                     role="application" tabindex="0" aria-label="Live terminal, you are typing here"
+                     @keydown={Ev(fun e ->
+                                     match keystrokeOf e with
+                                     | Some data -> actions.TypeIntoTerminal terminal data
+                                     | None -> ())}>{body}</div>"""
+        else
+            html $"""
+                <div class="{Style.terminalScreen}" data-terminal-screen="{id}"
+                     role="region" aria-live="off" aria-label="Live terminal, {authorLabel holder} is typing">{body}</div>"""
+
     /// The terminal composer: your command line, and everyone else's as they type them.
     let private terminalComposer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult =
         let mine = model.Peer.PeerId
@@ -1104,10 +1276,10 @@ module View =
     /// immutable chunk cache the rest of the history does.
     let private terminalReplay (model: ClientModel) (view: TerminalView) : TemplateResult =
         let feed = ClientModel.terminalFeed view.TerminalId model
-        // Retention (stage 3d) deletes a closed terminal's transcript whole once it is old
-        // enough, and its chunks then 404. Saying so is the point: an empty player would be
-        // indistinguishable from a terminal that printed nothing, and the whole reason the
-        // drop is recorded is that a gap in an audit trail must be a stated fact.
+        // The per-terminal output cap (stage 3d) can eat a whole recording. Saying so is the
+        // point: an empty player would be indistinguishable from a terminal that printed
+        // nothing, and the whole reason the drop is recorded is that a gap in an audit trail
+        // must be a stated fact.
         let gone = Map.isEmpty feed.Records && view.DroppedBytes > 0
         let closedFor =
             match view.ClosedReason with
@@ -1118,7 +1290,7 @@ module View =
                 <section class="{Style.terminalComposer}" data-terminal-replay-gone="{TerminalId.value view.TerminalId}">
                   <div class="{Style.terminalQueuedRow}">
                     <span class="{Style.statusFaint}">{closedFor}</span>
-                    <span class="{Style.small}">This terminal's recording has passed its retention window and was deleted. The commands it ran are above; what they printed is no longer kept.</span>
+                    <span class="{Style.small}">This terminal printed more than its recording keeps. The commands it ran are above; what they printed is no longer kept.</span>
                   </div>
                 </section>"""
         else
@@ -1129,19 +1301,141 @@ module View =
                     <span class="{Style.small}">A recording of everything this terminal printed.</span>
                   </div>
                   <div class="{Style.terminalBlocks}" role="region" aria-label="Terminal recording"
-                       data-terminal-replay="{TerminalId.value view.TerminalId}"></div>
+                       data-pane-replay="{PaneTab.key (TerminalTab view.TerminalId)}"></div>
                 </section>"""
 
-    /// The terminals column: the conversation's mirror on the right.
+    /// Arrow-key movement inside the pane's tablist — the half of the ARIA tabs pattern a
+    /// plain row of buttons does not give you. Declaring `role="tablist"` and leaving
+    /// Left/Right dead would be a worse lie than not declaring it.
+    ///
+    /// Moves FOCUS only; selection follows the Enter/Space the button already handles. That
+    /// is ARIA's "manual activation" variant, and it is the right one here: walking the
+    /// strip must not mount and unmount a player under the reader on every keypress.
+    [<Fable.Core.Emit("""(() => {
+  const key = $0.key
+  if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return
+  const tabs = Array.from($0.currentTarget.querySelectorAll('[role="tab"]'))
+  if (tabs.length === 0) return
+  const here = tabs.indexOf(document.activeElement)
+  const next =
+    key === 'Home' ? 0
+    : key === 'End' ? tabs.length - 1
+    : here < 0 ? 0
+    : (here + (key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length
+  tabs[next].focus()
+  $0.preventDefault()
+})()""")>]
+    let private moveTabFocus (e: obj) : unit = Fable.Core.Util.jsNative
+
+    /// One block's read-only view, as a tab opened from its chip shows it: the command, and
+    /// everything it printed, from the chunks this client already has.
+    ///
+    /// The very same renderer the terminal's own history uses — a block read from the chat
+    /// must not be a second rendering of a block, free to drift from the first.
+    let private paneBlockView (dispatch: ClientMsg -> unit) (model: ClientModel) (terminalId: TerminalId) (blockId: BlockId) : TemplateResult =
+        let found =
+            TerminalProjection.tryFind terminalId model.Terminals
+            |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+        match found with
+        | None ->
+            html $"""
+                <div class="{Style.paneReadonly}" data-pane-block="{BlockId.value blockId}">
+                  <div class="{Style.terminalOutputEmpty}">This command is not in the record this client has read.</div>
+                </div>"""
+        | Some block ->
+            // The step-out, offered only where there is a whole recording to step out INTO.
+            // A live terminal's recording is still being written, and rewinding one of those
+            // is the DVR — a different mechanism, and not this one pretending.
+            let isClosed =
+                TerminalProjection.tryFind terminalId model.Terminals
+                |> Option.map (fun v -> not v.IsOpen)
+                |> Option.defaultValue false
+            let stepOut =
+                if not isClosed then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.btn}" data-pane-play-whole="{BlockId.value blockId}"
+                                @click={Ev(fun _ -> dispatch (PlayWholeTerminalMsg (terminalId, block.FromSeq)))}>Play whole terminal</button>"""
+            let body =
+                match block.Status with
+                // A refused command printed nothing because it never ran, and a player over
+                // nothing is indistinguishable from a quiet one. The reason is the thing the
+                // next reader actually wants.
+                | BlockRejected (by, reason) ->
+                    let text = reason |> Option.defaultValue "did not run"
+                    html $"""<div class="{Style.terminalOutputEmpty}">rejected by {authorLabel by} — {text}</div>"""
+                // A recording that is still being written has no end to replay to, and a
+                // player rebuilt on every record would thrash through a streaming build.
+                // The terminal's own tab is where you watch this happen.
+                | BlockRunning ->
+                    html $"""<div class="{Style.terminalOutputEmpty}">Still running — the recording is ready when it finishes.</div>"""
+                | BlockFinished _ ->
+                    html $"""
+                        <div class="{Style.paneReadonly}" role="region" aria-label="Command output"
+                             data-pane-replay="{PaneTab.key (BlockTab (terminalId, blockId))}"></div>"""
+            html $"""
+                <section class="{Style.paneBody}" data-pane-block="{BlockId.value blockId}">
+                  <div class="{Style.terminalBlockCommand}">
+                    <span class="{Style.terminalPrompt}">$</span>
+                    <code class="{Style.terminalCommandText}">{block.Command}</code>
+                    <span class="ml-auto shrink-0">{terminalBlockStatus block.Status}</span>
+                  </div>
+                  {body}
+                  <div class="{Style.paneFacts}">{stepOut}</div>
+                </section>"""
+
+    /// A stretch's facts: who held the terminal, for how long, and how it ended. The
+    /// recording itself mounts beneath this (Plan 14, stage 4); these are the parts that
+    /// come from the event log and therefore render at any scroll depth without a transcript.
+    let private paneStretchView (stretch: TerminalStretch) : TemplateResult =
+        let length = durationText (TerminalStretch.duration stretch)
+        let recording =
+            match stretch.Range with
+            | Some (fromSeq, toSeq) ->
+                html $"""<span class="{Style.small}">{toSeq - fromSeq} recorded lines, from {fromSeq} to {toSeq}.</span>"""
+            // Stated, not blank: a stretch with no recorded bounds is a gap in the record,
+            // and an empty player would be indistinguishable from a quiet session.
+            | None ->
+                html $"""<span class="{Style.small}">No range was recorded for this session, so there is nothing to play back.</span>"""
+        let player =
+            match stretch.Range with
+            | Some _ ->
+                html $"""
+                    <div class="{Style.paneReadonly}" role="region" aria-label="Session recording"
+                         data-pane-replay="{PaneTab.key (StretchTab stretch)}"></div>"""
+            | None -> Lit.nothing
+        html $"""
+            <section class="{Style.paneBody}">
+              <div class="{Style.paneFacts}" data-pane-stretch="{TerminalStretch.key stretch}">
+                <div class="{Style.terminalQueuedRow}">
+                  <span class="{Style.chatChipWho}">{authorLabel stretch.Holder}</span>
+                  <span class="{Style.small}">typed in {stretch.Title} for {length}</span>
+                  <span class="ml-auto shrink-0">{stretchEnding stretch.End}</span>
+                </div>
+                {recording}
+              </div>
+              {player}
+            </section>"""
+
+    /// The side pane: a tab strip over three kinds of thing — a terminal, a block's
+    /// read-only view, and a stretch's replay (Plan 14, stage 2).
+    ///
+    /// Every terminal the session has ever had is furniture in the strip; the read-only tabs
+    /// are the ones this client opened by tapping a chip, and only those can be closed.
     let private terminals (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
-        let openTerminals = TerminalProjection.openTerminals model.Terminals
-        // Closed terminals are reachable too (Plan 13, stage 3e). Without this the audit
-        // outlives the process in the DATA and not on the screen: a closed terminal's blocks
-        // are in the projection and nothing renders them.
-        let closedTerminals = model.Terminals.Terminals |> List.filter (fun t -> not t.IsOpen)
-        let selected = ClientModel.selectedTerminal model
-        let tab (view: TerminalView) =
-            let isSelected = selected = Some view.TerminalId
+        let tabs = ClientModel.paneTabs model
+        let selected = ClientModel.selectedPane model
+        let isOn (tab: PaneTab) =
+            match selected with
+            | Some chosen -> PaneTab.key chosen = PaneTab.key tab
+            | None -> false
+        let terminalTabButton (view: TerminalView) =
+            let on = isOn (TerminalTab view.TerminalId)
+            let key = PaneTab.key (TerminalTab view.TerminalId)
+            let id = TerminalId.value view.TerminalId
+            let selectedAttr = if on then "true" else "false"
+            let tabIndex = if on then "0" else "-1"
+            let klass = if on then Style.terminalTabActive else Style.terminalTab
             // Who is in THIS terminal, on its tab — the same presence the roster reports, put
             // where you would look for it. Without it, a collaborator typing a command in a
             // terminal you are not showing is visible nowhere in this column.
@@ -1151,23 +1445,127 @@ module View =
                     html $"""
                         <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer peer}"
                               title="{name}" data-terminal-tab-peer="{PeerId.value peer}"></span>""")
-            html $"""
-                <button type="button" class="{if isSelected then Style.terminalTabActive else Style.terminalTab}"
-                        data-terminal-tab="{TerminalId.value view.TerminalId}" aria-pressed="{if isSelected then "true" else "false"}"
-                        @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
-        // Rendered after the open ones and marked apart, because they behave differently:
-        // there is nothing to run in a closed terminal, only something to read.
-        let closedTabs =
-            closedTerminals
-            |> List.map (fun view ->
-                let isSelected = selected = Some view.TerminalId
+            // Two literal spellings of one button, because lit-html cannot inject an
+            // attribute NAME through a hole — and the open/closed hooks must stay apart:
+            // there is nothing to run in a closed terminal, only something to read.
+            if view.IsOpen then
                 html $"""
-                    <button type="button" class="{if isSelected then Style.terminalTabActive else Style.terminalTab}"
-                            data-terminal-closed-tab="{TerminalId.value view.TerminalId}"
-                            aria-pressed="{if isSelected then "true" else "false"}"
-                            @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.small}"> · closed</span></button>""")
+                    <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-tab="{id}"
+                            aria-selected="{selectedAttr}" tabindex="{tabIndex}"
+                            @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+            else
+                html $"""
+                    <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-closed-tab="{id}"
+                            aria-selected="{selectedAttr}" tabindex="{tabIndex}"
+                            @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+        let openedTabButton (tab: PaneTab) =
+            let on = isOn tab
+            let label =
+                match tab with
+                | TerminalTab id -> TerminalId.value id
+                | BlockTab (terminalId, blockId) ->
+                    TerminalProjection.tryFind terminalId model.Terminals
+                    |> Option.bind (fun v -> v.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+                    |> Option.map (fun b -> b.Command)
+                    |> Option.defaultValue (BlockId.value blockId)
+                | StretchTab stretch -> sprintf "%s · %s" (authorLabel stretch.Holder) stretch.Title
+            html $"""
+                <span class="{Style.paneTabGroup}">
+                  <button type="button" role="tab" class="{if on then Style.terminalTabActive else Style.terminalTab}"
+                          data-pane-tab="{PaneTab.key tab}"
+                          aria-selected="{if on then "true" else "false"}" tabindex="{if on then "0" else "-1"}"
+                          @click={Ev(fun _ -> dispatch (SelectPaneTabMsg tab))}>{label}</button>
+                  <button type="button" class="{Style.paneTabClose}" data-pane-tab-close="{PaneTab.key tab}"
+                          aria-label="Close this view of {label}"
+                          @click={Ev(fun _ -> dispatch (ClosePaneTabMsg tab); actions.FocusChat (PaneTab.key tab))}>{Icon.close}</button>
+                </span>"""
+        let tabButton (tab: PaneTab) =
+            match tab with
+            | TerminalTab id ->
+                match TerminalProjection.tryFind id model.Terminals with
+                | Some view -> terminalTabButton view
+                | None -> Lit.nothing
+            | BlockTab _ | StretchTab _ -> openedTabButton tab
+        let terminalBody (view: TerminalView) =
+            let feed = ClientModel.terminalFeed view.TerminalId model
+            let truncated =
+                if view.DroppedBytes > 0 then
+                    html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{view.DroppedBytes} bytes of output were not recorded</div>"""
+                else Lit.nothing
+            let blocks =
+                if List.isEmpty view.Blocks then
+                    [ html $"""<div class="{Style.terminalOutputEmpty}">Nothing has run here yet.</div>""" ]
+                else view.Blocks |> List.map (terminalBlockView feed)
+            // The DVR (Plan 14, stage 7): step back through what this terminal has recorded
+            // so far while it keeps running, and catch back up. Offered on any LIVE terminal
+            // — the mechanism does not care which mode it is in, and both are one growing
+            // byte stream — but only once something IS recorded: a DVR with nothing behind
+            // it is a control with nothing to do. Each press hands focus to the control
+            // that replaces the pressed one, which leaves the document.
+            let rewound = ClientModel.isRewound view.TerminalId model
+            let dvr =
+                if not view.IsOpen then Lit.nothing
+                elif rewound then
+                    // Say HOW FAR behind, in the recording's clock, as it grows — a reader
+                    // parked behind live deserves to know the edge is moving away.
+                    let behind =
+                        match ClientModel.behindLive view.TerminalId model with
+                        | Some seconds when seconds >= 1.0 ->
+                            sprintf "behind live — %s" (durationText (System.TimeSpan.FromSeconds seconds))
+                        | _ -> "behind live"
+                    html $"""
+                        <div class="{Style.terminalQueuedRow}">
+                          <span class="{Style.statusFaint}" data-terminal-behind="{TerminalId.value view.TerminalId}">{behind}</span>
+                          <button type="button" class="{Style.cls [ Style.btnPrimary; "ml-auto" ]}"
+                                  data-terminal-live="{TerminalId.value view.TerminalId}"
+                                  @click={Ev(fun _ -> dispatch (JumpToLiveMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Jump to live</button>
+                        </div>"""
+                elif feed.KnownLength > 0 then
+                    html $"""
+                        <div class="{Style.terminalQueuedRow}">
+                          <button type="button" class="{Style.cls [ Style.btn; "ml-auto" ]}"
+                                  data-terminal-rewind="{TerminalId.value view.TerminalId}"
+                                  @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Rewind</button>
+                        </div>"""
+                else Lit.nothing
+            // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
+            // program is running here and what it displays is not a list of commands and
+            // their output — the blocks are block mode's view of a terminal, and they come
+            // back the moment the lease does. The transcript keeps both either way.
+            let above =
+                if rewound then
+                    // Behind the live edge: the recording, played. The same mount and the
+                    // same cast a finished terminal's replay uses, which is exactly what
+                    // "rewound like live TV, through the same mechanism" has to mean.
+                    html $"""
+                        {dvr}
+                        <div class="{Style.paneReadonly}" role="region" aria-label="Terminal recording, behind live"
+                             data-pane-replay="{PaneTab.key (TerminalTab view.TerminalId)}"></div>"""
+                else
+                    match view.Lease with
+                    | Some holder ->
+                        html $"""
+                            <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
+                              {truncated}
+                            </div>
+                            {dvr}
+                            {terminalScreenView actions model view.TerminalId holder}"""
+                    | None ->
+                        html $"""
+                            <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
+                              {truncated}
+                              {blocks}
+                            </div>
+                            {dvr}"""
+            html $"""
+                {above}
+                {if not view.IsOpen then terminalReplay model view
+                 // Behind the live edge there is nothing to type into and nothing to queue
+                 // against what you are watching: the way back is "jump to live", above.
+                 elif rewound then Lit.nothing
+                 else terminalComposer actions dispatch model view.TerminalId}"""
         let body =
-            match selected |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals) with
+            match selected with
             | None ->
                 html $"""
                     <div class="{Style.terminalEmpty}">
@@ -1175,43 +1573,52 @@ module View =
                       <button type="button" class="{Style.btnPrimary}" data-terminal-new
                               @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
                     </div>"""
-            | Some view ->
-                let feed = ClientModel.terminalFeed view.TerminalId model
-                let truncated =
-                    if view.DroppedBytes > 0 then
-                        html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{view.DroppedBytes} bytes of output were not recorded</div>"""
-                    else Lit.nothing
-                let blocks =
-                    if List.isEmpty view.Blocks then
-                        [ html $"""<div class="{Style.terminalOutputEmpty}">Nothing has run here yet.</div>""" ]
-                    else view.Blocks |> List.map (terminalBlockView feed)
+            | Some tab ->
+                let inner =
+                    match tab with
+                    | TerminalTab id ->
+                        match TerminalProjection.tryFind id model.Terminals with
+                        | Some view -> terminalBody view
+                        | None -> Lit.nothing
+                    | BlockTab (terminalId, blockId) -> paneBlockView dispatch model terminalId blockId
+                    | StretchTab stretch -> paneStretchView stretch
+                // `tabindex="-1"` so the panel can take focus programmatically when a chip
+                // opens it, without becoming a Tab stop of its own. A DOM swap that leaves
+                // focus on the control that vanished is the failure this exists to avoid.
                 html $"""
-                    <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
-                      {truncated}
-                      {blocks}
-                    </div>
-                    {if view.IsOpen then terminalComposer actions dispatch model view.TerminalId
-                     else terminalReplay model view}"""
+                    <div class="{Style.paneBody}" role="tabpanel" tabindex="-1"
+                         data-pane-panel="{PaneTab.key tab}">
+                      {inner}
+                    </div>"""
         // Offered only for a terminal that is actually open: a "close" on a closed one either
         // does nothing or reports an error, and both are worse than not being there.
         let closeSelected =
-            match selected |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals) with
-            | Some view when view.IsOpen ->
-                html $"""
-                    <button type="button" class="{Style.cls [ Style.terminalTab; "ml-auto" ]}" data-terminal-close="{TerminalId.value view.TerminalId}"
-                            aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>close</button>"""
+            match selected with
+            | Some (TerminalTab id) ->
+                match TerminalProjection.tryFind id model.Terminals with
+                | Some view when view.IsOpen ->
+                    html $"""
+                        <button type="button" class="{Style.cls [ Style.terminalTab; "ml-auto" ]}" data-terminal-close="{TerminalId.value view.TerminalId}"
+                                aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>close</button>"""
+                | _ -> Lit.nothing
             | _ -> Lit.nothing
         html $"""
             <aside class="{Style.terminalPanel}" data-terminal-panel>
               <div class="{Style.terminalPane}">
                 <div class="{Style.terminalHead}">
                   <span class="{Style.settingsTitle}">terminals</span>
-                  <button type="button" class="{Style.navChevronForward}" aria-label="Hide terminals"
-                          data-terminal-toggle="hide" @click={Ev(fun _ -> dispatch ToggleTerminalsMsg)}>{Icon.right}</button>
+                  <button type="button" class="{Style.navChevronForward}" aria-label="Back to the chat"
+                          data-terminal-toggle="hide"
+                          @click={Ev(fun _ ->
+                                        dispatch ToggleTerminalsMsg
+                                        // On a phone this control IS the way back, and it is
+                                        // about to leave the screen — so focus goes where the
+                                        // reader came from, exactly as closing a tab does.
+                                        selected |> Option.iter (PaneTab.key >> actions.FocusChat))}>{Icon.right}</button>
                 </div>
-                <div class="{Style.terminalTabs}">
-                  {openTerminals |> List.map tab}
-                  {closedTabs}
+                <div class="{Style.terminalTabs}" role="tablist" aria-label="Terminals and recordings"
+                     @keydown={Ev(fun e -> moveTabFocus e)}>
+                  {tabs |> List.map tabButton}
                   <button type="button" class="{Style.terminalTabNew}" data-terminal-new
                           @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
                   {closeSelected}
@@ -1227,7 +1634,7 @@ module View =
             <div class="{Style.mainColumn}">
               {header actions dispatch model}
               {degradedBanner model}
-              {conversation model.Conversation}
+              {chat actions dispatch model}
               {agentStrip actions model.Agent}
               {queue dispatch model.Synced}
               {drafts actions dispatch model}

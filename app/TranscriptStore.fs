@@ -42,10 +42,6 @@ let private openAppend (path: string) : int = openSyncAppend (box fs) path
 let private writeAndSync (fd: int) (text: string) : unit = writeSyncFsync (box fs) fd text
 let private mkdirSync (path: string) : unit = mkdirRecursive (box fs) path
 
-[<Emit("$0.unlinkSync($1)")>]
-let private unlinkFile (fs: obj) (path: string) : unit = jsNative
-let private unlinkSync (path: string) : unit = unlinkFile (box fs) path
-
 /// Everything the Session Process and its HTTP surface need from transcript storage.
 type TranscriptStore =
     { /// Open (or reopen) one terminal's transcript.
@@ -61,14 +57,15 @@ type TranscriptStore =
       /// serves a context pack, and one unreadable record must not cost the agent
       /// every other block's output.
       ReadRange : ReadTranscript
-      /// Delete a terminal's transcript WHOLE, returning the characters of output it held —
-      /// `None` when there was nothing to delete (Plan 13, stage 3d).
-      ///
-      /// Whole, because a line index is a sequence number: removing lines from the front or
-      /// the middle would renumber every block range in the event log and every cached chunk.
-      /// Deleting the file renumbers nothing, and a request for it is then a 404 — which is
-      /// what `ReadChunk` already distinguishes from an empty chunk.
-      Forget : TerminalId -> int option }
+      /// Record the screen as it stands immediately before the next transcript line
+      /// (Plan 14, stage 3). Written at every range START — each block's `FromSeq`, each
+      /// lease stretch's — because those are the only positions a ranged replay ever asks
+      /// for. Writing one at every range END too would be keyframes nothing reads.
+      AppendKeyframe : TerminalId -> TranscriptKeyframe -> unit
+      /// The keyframe for exactly this line, if one was written. `None` for a recording
+      /// made before keyframes existed, which is a degradation the ranged replay states
+      /// rather than a failure.
+      ReadKeyframe : TerminalId -> int -> TranscriptKeyframe option }
 
 /// Decode the records in `[fromSeq, toSeq)` of a transcript's lines. `None` as the end
 /// means "whatever it has now", which is what a still-running block has. The header sits
@@ -93,6 +90,7 @@ let private recordsIn (fromSeq: int) (toSeq: int option) (lines: string list) : 
 /// only thing missing is the part that outlives the process.
 let inMemory () : TranscriptStore =
     let files = Collections.Generic.Dictionary<string, ResizeArray<string>> ()
+    let keyframes = Collections.Generic.Dictionary<string, ResizeArray<TranscriptKeyframe>> ()
 
     let linesFor (id: TerminalId) =
         let key = TerminalId.value id
@@ -103,6 +101,12 @@ let inMemory () : TranscriptStore =
             files.[key] <- lines
             lines
 
+    let appendKeyframe (id: TerminalId) (keyframe: TranscriptKeyframe) =
+        let key = TerminalId.value id
+        let existing = match keyframes.TryGetValue key with | true, k -> k | _ -> ResizeArray<TranscriptKeyframe> ()
+        existing.Add keyframe
+        keyframes.[key] <- existing
+
     { Open =
         fun id header ->
             let lines = linesFor id
@@ -112,7 +116,8 @@ let inMemory () : TranscriptStore =
                     let seq = lines.Count
                     lines.Add (Codec.toString Codec.transcriptLine (TranscriptRecordLine record))
                     seq
-              NextSeq = fun () -> lines.Count }
+              NextSeq = fun () -> lines.Count
+              Keyframe = appendKeyframe id }
       ReadChunk =
         fun id index ->
             match files.TryGetValue (TerminalId.value id) with
@@ -128,19 +133,12 @@ let inMemory () : TranscriptStore =
             match files.TryGetValue (TerminalId.value id) with
             | false, _ -> []
             | true, lines -> lines |> List.ofSeq |> recordsIn fromSeq toSeq
-      Forget =
-        fun id ->
-            match files.TryGetValue (TerminalId.value id) with
+      AppendKeyframe = appendKeyframe
+      ReadKeyframe =
+        fun id seq ->
+            match keyframes.TryGetValue (TerminalId.value id) with
             | false, _ -> None
-            | true, lines ->
-                let held =
-                    lines
-                    |> Seq.sumBy (fun line ->
-                        match Codec.fromString Codec.transcriptLine line with
-                        | Ok (TranscriptRecordLine r) -> r.Data.Length
-                        | _ -> 0)
-                files.Remove (TerminalId.value id) |> ignore
-                Some held }
+            | true, all -> all |> Seq.tryFind (fun k -> k.Seq = seq) }
 
 /// A transcript store backed by `<directory>/<terminal>.cast` files.
 ///
@@ -151,6 +149,7 @@ let openStore (directory: string) : TranscriptStore =
     mkdirSync directory
 
     let pathOf (id: TerminalId) = sprintf "%s/%s.cast" directory (TerminalId.value id)
+    let keyPathOf (id: TerminalId) = sprintf "%s/%s.keys.jsonl" directory (TerminalId.value id)
 
     /// The whole lines of a transcript file, and whether the file had to be repaired.
     /// A file not ending in a newline has a torn final append — a write that was never
@@ -168,6 +167,21 @@ let openStore (directory: string) : TranscriptStore =
             else lines, false
 
     let handles = Collections.Generic.Dictionary<string, int * int ref> ()
+    let keyHandles = Collections.Generic.Dictionary<string, int> ()
+
+    /// Its own file, never the `.cast`: Plan 13 bought a standard, replayable format on
+    /// purpose, and a private record type inside it spends that. Same write-then-fsync
+    /// discipline as the transcript — a keyframe a crash lost would silently downgrade a
+    /// ranged replay to the naive slice.
+    let appendKeyframe (id: TerminalId) (keyframe: TranscriptKeyframe) =
+        let fd =
+            match keyHandles.TryGetValue (TerminalId.value id) with
+            | true, existing -> existing
+            | _ ->
+                let fd = openAppend (keyPathOf id)
+                keyHandles.[TerminalId.value id] <- fd
+                fd
+        writeAndSync fd (Codec.toString Codec.transcriptKeyframe keyframe + "\n")
 
     let openTranscript : OpenTranscript =
         fun id header ->
@@ -200,7 +214,8 @@ let openStore (directory: string) : TranscriptStore =
                     writeAndSync fd (Codec.toString Codec.transcriptLine (TranscriptRecordLine record) + "\n")
                     count.Value <- seq + 1
                     seq
-              NextSeq = fun () -> count.Value }
+              NextSeq = fun () -> count.Value
+              Keyframe = appendKeyframe id }
 
     { Open = openTranscript
       ReadChunk =
@@ -219,23 +234,15 @@ let openStore (directory: string) : TranscriptStore =
             else
                 let lines, _ = readLines path
                 lines |> recordsIn fromSeq toSeq
-      Forget =
-        fun id ->
-            let path = pathOf id
+      AppendKeyframe = appendKeyframe
+      ReadKeyframe =
+        fun id seq ->
+            let path = keyPathOf id
             if not (existsSync path) then None
             else
-                // Measured before the delete, so the truncation event can say how much the
-                // record lost rather than merely that it lost something.
-                let held =
-                    readLines path
-                    |> fst
-                    |> List.sumBy (fun line ->
-                        match Codec.fromString Codec.transcriptLine line with
-                        | Ok (TranscriptRecordLine r) -> r.Data.Length
-                        | _ -> 0)
-                // A live terminal is still being written and must never be forgotten from
-                // under its own file descriptor; the caller only offers closed ones, and this
-                // drops the handle so a reopen starts clean if one ever comes.
-                handles.Remove (TerminalId.value id) |> ignore
-                unlinkSync path
-                Some held }
+                readLines path
+                |> fst
+                |> List.tryPick (fun line ->
+                    match Codec.fromString Codec.transcriptKeyframe line with
+                    | Ok k when k.Seq = seq -> Some k
+                    | _ -> None) }

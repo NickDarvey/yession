@@ -154,9 +154,56 @@ module Dom =
         /// The replay of a CLOSED terminal (Plan 13, stage 3e): the mount the player attaches
         /// to, the tab that reaches a closed terminal at all, and the banner shown instead
         /// when retention has deleted the recording.
-        let terminalReplay = "data-terminal-replay"
         let terminalClosedTab = "data-terminal-closed-tab"
         let terminalReplayGone = "data-terminal-replay-gone"
+        /// Terminal work in the CHAT (Plan 14, stage 1). A chip per block, anchored where the
+        /// command started; an item per lease stretch, anchored where it concluded. Both are
+        /// buttons — tapping one opens the terminal read-only — so both are keyboard-operable
+        /// by construction rather than by a handler bolted onto a div.
+        ///
+        /// The block chip's VALUE is the block id and the stretch item's is its terminal plus
+        /// the transcript line it began at, which is the only handle a stretch has: leases are
+        /// not minted with ids, and one terminal can have many stretches.
+        let chatBlock = "data-chat-block"
+        let chatBlockStatus = "data-chat-block-status"
+        let chatStretch = "data-chat-stretch"
+        let chatStretchEnd = "data-chat-stretch-end"
+        /// The pane's tab strip (Plan 14, stage 2). One hook for every tab whatever it shows
+        /// — a terminal, a block's read-only view, a stretch's replay — because they are one
+        /// tablist and a test asserting keyboard order should not have to know which is which.
+        /// Its value is `PaneTab.key`.
+        let paneTab = "data-pane-tab"
+        /// The close control on a tab a person opened. Terminal tabs have none: the strip
+        /// lists every terminal the session has, and "close" there already means something
+        /// else (`terminalClose`).
+        let paneTabClose = "data-pane-tab-close"
+        /// The pane's body, carrying the key of whatever it is showing.
+        let panePanel = "data-pane-panel"
+        /// A block's read-only view: its command line and everything it printed.
+        let paneBlock = "data-pane-block"
+        /// Where a player mounts (Plan 13, stage 3e; Plan 14, stage 4). ONE hook for all
+        /// three kinds of recording — a whole terminal, a block's range, a stretch's — with
+        /// the tab's key as its value, because they differ in what they play rather than in
+        /// how they are mounted. Two hooks would be two mount paths to keep correct.
+        let paneReplay = "data-pane-replay"
+        /// A stretch's facts, above its recording.
+        let paneStretch = "data-pane-stretch"
+        /// The step-out from a block's sliced view to the whole terminal's recording.
+        let panePlayWhole = "data-pane-play-whole"
+        /// The live screen of a terminal in live mode (Plan 14, stage 6). Its value is the
+        /// terminal's id; the holder's copy is the one that takes keystrokes, and every other
+        /// peer's is the same screen read-only.
+        let terminalScreen = "data-terminal-screen"
+        /// The DVR (Plan 14, stage 7): step back through what a LIVE terminal has recorded
+        /// so far, and catch back up to its edge. Offered on any live terminal, whichever
+        /// mode it is in — both are one growing byte stream, and a rule that offered it for
+        /// an interactive session and not for a running build would be a special case to
+        /// explain rather than a feature.
+        let terminalRewind = "data-terminal-rewind"
+        let terminalLive = "data-terminal-live"
+        /// How far behind live the rewound reader is, growing as the terminal keeps
+        /// printing under them.
+        let terminalBehind = "data-terminal-behind"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
@@ -225,6 +272,13 @@ module Dom =
         let blockOk = "ok"
         let blockFailed = "failed"
         let blockRejected = "rejected"
+        /// How a lease stretch ended, on its chat item (Plan 14, stage 1). Four tokens rather
+        /// than one, because the question a reader asks afterwards — "did nick finish, get
+        /// taken over, drop out, or just wander off?" — has four different answers.
+        let stretchReleased = "released"
+        let stretchStolen = "stolen"
+        let stretchGone = "holder-gone"
+        let stretchIdle = "idle"
         /// A queued command whose terminal's mode demands an approval it has not got.
         let queuedAwaitingApproval = "awaiting-approval"
         /// A queued command that will run as soon as the terminal is free.

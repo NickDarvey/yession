@@ -652,6 +652,10 @@ let private runCheckOnce (requested: string list) =
         // as root — mid-test-run, and only ever workable on a CI image.
         Directory.CreateDirectory (Path.Combine (repoRoot, "tests/browser/out")) |> ignore
         exec esbuild [ "app/out/browser/EditorHarness.js"; "--bundle"; "--format=esm"; "--outfile=tests/browser/out/harness.js" ]
+        // The harness renders the REAL shell (Plan 14), so it needs the real stylesheet:
+        // without it every Tailwind class is inert, and any layout the browser tier measures
+        // there — a phone viewport most of all — is a layout nobody will ever get.
+        exec tailwind [ "-i"; "app/tailwind.css"; "-o"; "tests/browser/out/app.css" ]
         progress "running the browser suite (.NET CLR)"
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 

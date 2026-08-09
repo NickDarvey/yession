@@ -45,17 +45,29 @@ and [<AllowNullLiteral>] private Buffer =
 type [<AllowNullLiteral>] private SerializeAddon =
     abstract serialize : unit -> string
 
-// DEFAULT imports, not named ones, and that is forced by how the packages ship rather than
-// a preference. `@xterm/headless`'s `main` is a CommonJS bundle and it declares no
+// The two packages ship differently, and this module is bundled for BOTH platforms — Node
+// for the Session Process, and esbuild-for-the-browser since the client composes a live
+// screen with the same emulator (Plan 14, stage 6). So each import has to be the form that
+// resolves under both, and they are not the same form.
+//
+// `@xterm/headless` is a DEFAULT import: its `main` is a CommonJS bundle and it declares no
 // `exports` map, so Node resolves an ESM `import` to that CJS file and offers only the
 // default — a named `import { Terminal }` fails at load with "does not provide an export
-// named 'Terminal'". Its `module` field does point at ESM, but at `lib/xterm.mjs`: the
-// BROWSER build, which is not what a headless emulator wants and which Node ignores anyway.
+// named 'Terminal'". Its `module` field names `lib/xterm.mjs` (the browser build), which is
+// not shipped in the package, so a bundler falls back to the same CJS main.
 [<ImportDefault("@xterm/headless")>]
 let private headless : obj = jsNative
 
-[<ImportDefault("@xterm/addon-serialize")>]
-let private serializeModule : obj = jsNative
+// `@xterm/addon-serialize` is a NAMED import, and the difference cost a red release job.
+// It ships BOTH `main` (CJS) and `module` (`lib/addon-serialize.mjs`, which exists and
+// exports `SerializeAddon` by name and nothing by default). Node resolves the CJS and its
+// interop invents a default, so `ImportDefault` worked here for as long as this file was
+// Node-only; esbuild prefers `module` for the browser, where that default does not exist —
+// "No matching export ... for import default", and only when bundling the real client
+// entry, which no test tier short of `stage` does. The named export is present in both
+// builds, so this is the one spelling that resolves everywhere.
+[<ImportMember("@xterm/addon-serialize")>]
+let private SerializeAddon : obj = jsNative
 
 /// `new Terminal({ cols, rows, allowProposedApi: true, scrollback })`.
 ///
@@ -66,8 +78,8 @@ let private serializeModule : obj = jsNative
 [<Emit("new $0.Terminal({ cols: $1, rows: $2, allowProposedApi: true, scrollback: $3 })")>]
 let private newTerminal (m: obj) (cols: int) (rows: int) (scrollback: int) : Term = jsNative
 
-[<Emit("new $0.SerializeAddon()")>]
-let private newSerializeAddon (m: obj) : SerializeAddon = jsNative
+[<Emit("new $0()")>]
+let private newSerializeAddon (ctor: obj) : SerializeAddon = jsNative
 
 /// Lines of scrollback the Process keeps per terminal. A snapshot travels in one frame, so
 /// this is a frame-size decision as much as a memory one.
@@ -79,7 +91,7 @@ let private scrollback = 1000
 let openEmulator : OpenEmulator =
     fun cols rows ->
         let term = newTerminal headless cols rows scrollback
-        let serializer = newSerializeAddon serializeModule
+        let serializer = newSerializeAddon SerializeAddon
         term.loadAddon (box serializer)
         { Write = fun data -> term.write (data, ignore)
           // Empty write as a BARRIER. xterm parses writes asynchronously and in order, so a

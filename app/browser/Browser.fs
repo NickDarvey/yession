@@ -210,15 +210,6 @@ let private catchUpQuietMs = 500
 })()""")>]
 let private toggleNav () : unit = jsNative
 
-/// The terminals column's open state (Plan 13), as a class on the shell root — the same
-/// mechanism the sidebar uses, so a Lit re-render never fights the CSS transition.
-///
-/// It differs from the nav in one way that matters: it is driven FROM the model, because
-/// the app opens this column itself (selecting a terminal opens it). So this is a `set`,
-/// not a `toggle` — the model holds the bit, and this reflects it.
-[<Emit("document.documentElement.classList.toggle('term-closed', !$0)")>]
-let private setTerminalsOpen (isOpen: bool) : unit = jsNative
-
 // Settings is the sidebar column's other FACE (Style.settingsPane), not a drawer over the
 // conversation — so opening it has to bring that column on screen, and `nav-alt` means the
 // opposite thing on each side of the breakpoint: uncollapse on desktop, slide the drawer in on
@@ -285,17 +276,6 @@ let private hostReadOnly (el: obj) : bool = jsNative
 
 [<Emit("Array.from(document.querySelectorAll('[data-terminal-input]'))")>]
 let private terminalInputs () : obj[] = jsNative
-
-// --- The replay of a closed terminal (Plan 13, stage 3e) -------------------------------
-// The view renders an empty `<div data-terminal-replay="<id>">`; the player is attached here,
-// because a `.cast` is a whole artefact rather than a value to bind and the player owns its
-// own DOM once mounted.
-
-[<Emit("Array.from(document.querySelectorAll('[data-terminal-replay]'))")>]
-let private replayMounts () : obj[] = jsNative
-
-[<Emit("$0.getAttribute('data-terminal-replay')")>]
-let private replayMountId (el: obj) : string = jsNative
 
 [<Emit("$0.childElementCount > 0")>]
 let private isMounted (el: obj) : bool = jsNative
@@ -683,37 +663,59 @@ let private start () =
                         |> ignore
                     setInputValue el (TerminalText.read texts key)
 
-        /// Attach a player to any replay mount that has not got one, and dispose the players
-        /// whose mount has gone.
-        ///
-        /// Keyed on the mount being EMPTY rather than on a model flag: the view re-renders for
-        /// reasons that have nothing to do with this terminal, and re-mounting a player on
-        /// every render would restart the recording under whoever was watching it.
-        let replays = System.Collections.Generic.Dictionary<string, Replay.Mounted> ()
+        /// Fetch the keyframes the open tabs need, once each (Plan 14, stage 4). A keyframe
+        /// is immutable at a position that never moves, so the browser cache serves the
+        /// second read — this set only stops a burst of identical in-flight requests while
+        /// the first one is still out.
+        let keyframesAsked = System.Collections.Generic.HashSet<string> ()
 
-        let syncReplays () =
-            let live = System.Collections.Generic.HashSet<string> ()
-            for el in replayMounts () do
-                let id = replayMountId el
-                if not (isNull (box id)) && id <> "" then
-                    live.Add id |> ignore
-                    if not (isMounted el) then
-                        match TerminalId.create id with
-                        | Error _ -> ()
-                        | Ok terminalId ->
-                            let feed = ClientModel.terminalFeed terminalId latestModel
-                            match feed.Header with
-                            // No header means chunk 0 has not arrived, so there is nothing to
-                            // replay YET — the next fetch re-renders and this runs again.
-                            | None -> ()
-                            | Some header ->
-                                let cast =
-                                    TranscriptReplay.cast header (feed.Records |> Map.toList)
-                                replays.[id] <- Replay.mount (unbox el) cast
-            // A player whose mount is gone keeps a worker alive; take it down with the node.
-            for stale in replays.Keys |> Seq.filter (fun k -> not (live.Contains k)) |> Seq.toList do
-                replays.[stale].Dispose ()
-                replays.Remove stale |> ignore
+        let syncKeyframes (model: ClientModel) =
+            for tab in ClientModel.paneTabs model do
+                match ClientModel.missingKeyframe tab model with
+                | None -> ()
+                | Some (terminal, seq) ->
+                    let key = sprintf "%s@%d" (TerminalId.value terminal) seq
+                    if keyframesAsked.Add key then
+                        Async.StartImmediate (
+                            async {
+                                let url = SessionRoute.relative (TerminalKeyframe (TerminalId.value terminal, seq))
+                                match! httpGet url with
+                                // A keyframe that does not answer is not a failure: the range
+                                // still rebases and still plays, as the naive slice. Asking
+                                // again on every render would be a spin with nothing to gain.
+                                | Error _ -> ()
+                                | Ok body ->
+                                    match Codec.fromString Codec.transcriptKeyframe body with
+                                    | Ok keyframe -> dispatchRef (TerminalKeyframeMsg (terminal, keyframe))
+                                    | Error _ -> ()
+                            })
+
+        let replays = PaneReplays.create (fun msg -> dispatchRef msg)
+
+        /// The live screens (Plan 14, stage 6): one emulator per terminal this client has a
+        /// snapshot for, folded forward from the records the model already holds.
+        let screens = Screens.create (fun msg -> dispatchRef msg)
+
+        /// The size each terminal's viewport was last reported at, so a re-render does not
+        /// re-send a size nothing changed — a resize is a signal to the program on the other
+        /// end, and repeating it makes a full-screen program redraw for no reason.
+        let reportedSize = System.Collections.Generic.Dictionary<string, int * int> ()
+
+        /// Tell the Session Process how big the holder's screen is. Only the HOLDER: the pty
+        /// has one size and every peer is looking at the same screen, so a viewer with a
+        /// narrower pane must scroll rather than reshape everyone else's terminal.
+        let syncScreenSize (model: ClientModel) =
+            let mine = ActorRef.PeerRef model.Peer.PeerId
+            for terminal in TerminalProjection.openTerminals model.Terminals do
+                if terminal.Lease = Some mine then
+                    let key = TerminalId.value terminal.TerminalId
+                    match Screens.measure key with
+                    | None -> ()
+                    | Some (cols, rows) ->
+                        let last = match reportedSize.TryGetValue key with | true, v -> Some v | _ -> None
+                        if last <> Some (cols, rows) then
+                            reportedSize.[key] <- (cols, rows)
+                            connectionRef |> Option.iter (fun c -> c.ResizeTerminal terminal.TerminalId cols rows)
 
         // The publication rule, one subscription per open terminal. Started when a terminal
         // appears and stopped when it goes, so a closed terminal's rule cannot republish a
@@ -1016,6 +1018,10 @@ let private start () =
               TakeTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.TakeTerminal id)
               ReleaseTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.ReleaseTerminal id)
               RearmTerminal = fun id -> connectionRef |> Option.iter (fun c -> c.RearmTerminal id)
+              TypeIntoTerminal =
+                fun id data -> connectionRef |> Option.iter (fun c -> c.TypeIntoTerminal id data)
+              ResizeTerminal =
+                fun id cols rows -> connectionRef |> Option.iter (fun c -> c.ResizeTerminal id cols rows)
               SendTerminalDraft =
                 fun terminal author -> connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
               ReopenSession =
@@ -1035,7 +1041,10 @@ let private start () =
                     match latestModel.Manager, latestModel.Session with
                     | Some origin, Some sessionId ->
                         navigateTo (sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId))
-                    | _ -> () }
+                    | _ -> ()
+              FocusPane = PaneShell.toPane
+              FocusChat = PaneShell.toChatItem
+              FocusDvr = fun id -> PaneShell.toDvrControl (TerminalId.value id) }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.
@@ -1056,12 +1065,18 @@ let private start () =
             // measured against the just-rendered input.
             syncRichBodies ()
             syncTerminalInputs ()
-            syncReplays ()
+            syncKeyframes model
+            replays.Sync model
+            // The live screens, and the size the holder's viewport actually is. Both AFTER
+            // the render: one folds records into an emulator whose serialization the next
+            // render draws, the other measures a box that has to exist first.
+            screens.Sync model
+            syncScreenSize model
             // The terminals column's open state is a class on the shell root, like the
             // sidebar's — presentation, so a re-render never fights it — but driven FROM the
             // model, because unlike the sidebar this column's visibility is something the app
             // itself changes (selecting a terminal opens it).
-            setTerminalsOpen model.TerminalsOpen
+            PaneShell.setOpen model.TerminalsOpen
             // Keep a slot rule running for every open terminal: a person may be mid-command
             // in more than one, and each slot follows its own command line.
             syncTerminalSlots model
@@ -1134,6 +1149,10 @@ let private start () =
                 { App.ConnectOptions.defaults with
                     FetchEvents = Some feed
                     FetchTranscripts = Some transcripts
+                    // A terminal's screen seeds this client's emulator. The transcript stays
+                    // the record; this is the view, and a peer that arrives mid-session gets
+                    // one frame instead of every byte the terminal ever printed.
+                    OnTerminalSnapshot = fun id seq screen -> screens.Snapshot id seq screen
                     // The model is the read position (see `ConnectOptions.ReadPosition`):
                     // `latestModel` is kept current by `setState`, so a fold rolled back by
                     // a racing doc update is visibly behind and gets re-read.

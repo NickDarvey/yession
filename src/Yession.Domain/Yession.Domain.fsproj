@@ -32,6 +32,9 @@
          declares, so the policy type precedes the collaborative state that holds it. -->
     <Compile Include="Terminals.fs" />
     <Compile Include="TerminalMarks.fs" />
+    <!-- After both projections it merges: the chat as a person reads it, said and run
+         interleaved by offset (Plan 14). A view-level merge, never a third fold. -->
+    <Compile Include="Timeline.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="SessionState.fs" />
     <Compile Include="RichText.fs" />

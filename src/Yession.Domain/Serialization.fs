@@ -451,14 +451,29 @@ module Codec =
             Decode.object (fun get ->
                 { TerminalIntegrationRestored.TerminalId = get.Required.Field "terminalId" terminalId.Decode }) }
 
+    /// The transcript bound a lease event carries (Plan 14, stage 1).
+    ///
+    /// OPTIONAL on the way in, alone among the terminal payloads' value fields, because a log
+    /// written before this existed is a log a running session still has to replay — and the
+    /// store fails loudly on anything it cannot decode. Absent reads as 0, so a stretch from
+    /// before the range was recorded has `ToSeq <= FromSeq`: an EMPTY range, which every reader
+    /// already treats as "nothing to replay" (it is what a rejected block carries). A default
+    /// that guessed a real range instead would replay the wrong bytes and look right.
+    let private leaseSeq (get: Decode.IGetters) (field: string) : int =
+        get.Optional.Field field Decode.int |> Option.defaultValue 0
+
     let private terminalLeaseTaken : Codec<TerminalLeaseTaken> =
         { Encode =
             fun (p: TerminalLeaseTaken) ->
-                Encode.object [ "terminalId", terminalId.Encode p.TerminalId; "by", actor.Encode p.By ]
+                Encode.object
+                    [ "terminalId", terminalId.Encode p.TerminalId
+                      "by", actor.Encode p.By
+                      "fromSeq", Encode.int p.FromSeq ]
           Decode =
             Decode.object (fun get ->
                 { TerminalLeaseTaken.TerminalId = get.Required.Field "terminalId" terminalId.Decode
-                  TerminalLeaseTaken.By = get.Required.Field "by" actor.Decode }) }
+                  TerminalLeaseTaken.By = get.Required.Field "by" actor.Decode
+                  TerminalLeaseTaken.FromSeq = leaseSeq get "fromSeq" }) }
 
     let private terminalLeaseReleased : Codec<TerminalLeaseReleased> =
         { Encode =
@@ -466,12 +481,14 @@ module Codec =
                 Encode.object
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "was", actor.Encode p.Was
-                      "reason", leaseEnd.Encode p.Reason ]
+                      "reason", leaseEnd.Encode p.Reason
+                      "toSeq", Encode.int p.ToSeq ]
           Decode =
             Decode.object (fun get ->
                 { TerminalLeaseReleased.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalLeaseReleased.Was = get.Required.Field "was" actor.Decode
-                  TerminalLeaseReleased.Reason = get.Required.Field "reason" leaseEnd.Decode }) }
+                  TerminalLeaseReleased.Reason = get.Required.Field "reason" leaseEnd.Decode
+                  TerminalLeaseReleased.ToSeq = leaseSeq get "toSeq" }) }
 
     let private terminalCommandRejected : Codec<TerminalCommandRejected> =
         { Encode =
@@ -767,6 +784,24 @@ module Codec =
             |> Decode.andThen (function
                 | TranscriptRecordLine r -> Decode.succeed r
                 | TranscriptHeaderLine _ -> Decode.fail "expected a transcript record, found the header") }
+
+    /// One keyframe line in a terminal's `.keys.jsonl` sidecar (Plan 14, stage 3). This one
+    /// IS this file's usual object shape rather than asciinema's, and deliberately so: it is
+    /// ours, it is not in the `.cast`, and nothing outside Yession has to read it.
+    let transcriptKeyframe : Codec<TranscriptKeyframe> =
+        { Encode =
+            fun (k: TranscriptKeyframe) ->
+                Encode.object
+                    [ "seq", Encode.int k.Seq
+                      "cols", Encode.int k.Cols
+                      "rows", Encode.int k.Rows
+                      "screen", Encode.string k.Screen ]
+          Decode =
+            Decode.object (fun get ->
+                { Seq = get.Required.Field "seq" Decode.int
+                  Cols = get.Required.Field "cols" Decode.int
+                  Rows = get.Required.Field "rows" Decode.int
+                  Screen = get.Required.Field "screen" Decode.string }) }
 
     let private terminalFrame : Codec<TerminalFrame> =
         { Encode =
@@ -1217,3 +1252,47 @@ module TranscriptReplay =
                 |> List.map (fun (_, record) ->
                     Codec.toString Codec.transcriptLine (TranscriptRecordLine record)))
         String.concat "\n" lines + "\n"
+
+    /// The `.cast` text for the half-open transcript range `[fromSeq, toSeq)` — one block's
+    /// output, or one stretch of live mode — as a standalone recording the stock player
+    /// renders unmodified.
+    ///
+    /// Three things happen here, and the first two are the ones a naive slice gets wrong:
+    ///
+    ///   * **The keyframe is painted first**, as a synthesized output record at `t = 0`, so
+    ///     the range starts from the screen it actually started from rather than from a
+    ///     blank VT. Its size overrides the header's, because the header records the size
+    ///     the terminal OPENED at and a resize before the range changed it.
+    ///   * **Times are rebased** to the range's first record, because asciicast times are
+    ///     relative to the start of the file — without this a block forty minutes in makes
+    ///     the player idle for forty minutes before its first frame.
+    ///   * Records outside the range are dropped, and INPUT records are kept: what someone
+    ///     typed is part of a stretch of live mode, and a pty echoes it anyway.
+    ///
+    /// With no keyframe (a recording written before they existed) the range still rebases
+    /// and still plays; it is the naive slice, approximately right for command output and
+    /// wrong wherever the screen carried state in. That is the honest degradation — the
+    /// alternative is refusing to play a recording we do have.
+    let range
+        (header: TranscriptHeader)
+        (keyframe: TranscriptKeyframe option)
+        (fromSeq: int)
+        (toSeq: int)
+        (records: (int * TranscriptRecord) list)
+        : string =
+        let inRange =
+            records
+            |> List.filter (fun (seq, _) -> seq >= fromSeq && seq < toSeq)
+            |> List.sortBy fst
+        let origin = inRange |> List.tryHead |> Option.map (fun (_, r) -> r.At) |> Option.defaultValue 0.0
+        let header =
+            match keyframe with
+            | Some k -> { header with Width = k.Cols; Height = k.Rows }
+            | None -> header
+        let painted =
+            match keyframe with
+            | Some k when k.Screen <> "" -> [ 0, { At = 0.0; Kind = TranscriptOutput; Data = k.Screen } ]
+            | _ -> []
+        let rebased =
+            inRange |> List.map (fun (seq, record) -> seq + 1, { record with At = record.At - origin })
+        cast header (painted @ rebased)

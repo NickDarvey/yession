@@ -28,7 +28,16 @@ type ConversationItem =
       Author    : ActorRef
       Body      : string
       Status    : ConversationItemStatus
-      Kind      : ConversationItemKind }
+      Kind      : ConversationItemKind
+      /// The offset of the event that CREATED this item — the message that was sent, or the
+      /// agent message that started (Plan 14, stage 1). Deltas and completions move the body
+      /// and the status; they never move the item, so a streaming answer holds its place in
+      /// the order exactly as a running command's chip does.
+      ///
+      /// Carried so the view can interleave this with terminal work in one timeline. Both are
+      /// folds of the SAME ordered log, which makes merging them a sort rather than a clock
+      /// reconciliation — and this field is the only thing that was missing.
+      Offset    : EventOffset }
 
 type ConversationProjection =
     { Items : ConversationItem list
@@ -58,7 +67,8 @@ module ConversationProjection =
                           Author = m.Author
                           Body = m.Body
                           Status = Complete
-                          Kind = ConversationItemKind.Message } ] }
+                          Kind = ConversationItemKind.Message
+                          Offset = envelope.Offset } ] }
         | AgentTurnStarted _ -> proj   // lifecycle; the item appears at AgentMessageStarted
         | AgentContextBuilt _ -> proj  // lifecycle
         // Environment lifecycle (Step 12) is session state, not conversation content.
@@ -73,9 +83,15 @@ module ConversationProjection =
         | CommandStarted _
         | CommandOutputReceived _
         | CommandCompleted _ -> proj
-        // Terminals (Plan 13) project into `TerminalProjection`. A command someone ran is
-        // not something someone said: it belongs beside its output, in the terminal it ran
-        // in, not interleaved with the conversation.
+        // Terminals (Plan 13) project into `TerminalProjection`, and STILL do not fold here
+        // (Plan 14, stage 1). This projection is what builds the agent's context, and the
+        // agent already receives block outcomes through `TerminalDigest` — folding them in
+        // here would double-feed the model and silently change what every turn reads.
+        //
+        // What Plan 14 reverses is the SCREEN, not the fold: a command someone ran does
+        // appear in the chat now, interleaved by offset in `TimelineProjection`, which is a
+        // view-level merge of this projection with the terminal one. The consequence is
+        // deliberate and stated there — the human's chat and the agent's chat diverge.
         | SessionEvent.TerminalOpened _
         | SessionEvent.TerminalClosed _
         | SessionEvent.TerminalBlockStarted _
@@ -99,7 +115,8 @@ module ConversationProjection =
                           Author = r.Actor
                           Body = sprintf "added repo %s (branch %s)" (RepoRef.value r.Repo) r.Branch
                           Status = Complete
-                          Kind = ConversationItemKind.RepoNote } ] }
+                          Kind = ConversationItemKind.RepoNote
+                          Offset = envelope.Offset } ] }
         | SessionEvent.RepoRemoved r ->
             { proj with
                 Items =
@@ -108,7 +125,8 @@ module ConversationProjection =
                           Author = r.Actor
                           Body = sprintf "removed repo %s" (RepoRef.value r.Repo)
                           Status = Complete
-                          Kind = ConversationItemKind.RepoNote } ] }
+                          Kind = ConversationItemKind.RepoNote
+                          Offset = envelope.Offset } ] }
         | SessionEvent.RepoBranchSwitched r ->
             { proj with
                 Items =
@@ -119,7 +137,8 @@ module ConversationProjection =
                             if r.Created then sprintf "created branch %s in %s" r.Branch (RepoRef.value r.Repo)
                             else sprintf "switched %s to branch %s" (RepoRef.value r.Repo) r.Branch
                           Status = Complete
-                          Kind = ConversationItemKind.RepoNote } ] }
+                          Kind = ConversationItemKind.RepoNote
+                          Offset = envelope.Offset } ] }
         | AgentMessageStarted a ->
             { Items =
                 proj.Items
@@ -127,7 +146,8 @@ module ConversationProjection =
                       Author = ActorRef.Agent
                       Body = ""
                       Status = Streaming
-                      Kind = ConversationItemKind.Message } ]
+                      Kind = ConversationItemKind.Message
+                      Offset = envelope.Offset } ]
               ActiveAgentMessages = Map.add a.AgentTurnId a.MessageId proj.ActiveAgentMessages }
         | AgentMessageDelta a ->
             { proj with
@@ -171,7 +191,8 @@ module ConversationProjection =
                               Author = ActorRef.Agent
                               Body = a.Reason
                               Status = Failed
-                              Kind = ConversationItemKind.Message } ] }
+                              Kind = ConversationItemKind.Message
+                              Offset = envelope.Offset } ] }
 
     /// Fold ordered event envelopes into a conversation projection.
     ///

@@ -409,6 +409,10 @@ let private serveStatic (root: string) (port: int) : HttpListener =
                     ctx.Response.ContentType <-
                         if path.EndsWith ".js" then "text/javascript"
                         elif path.EndsWith ".html" then "text/html"
+                        // A stylesheet served as `application/octet-stream` is ignored by
+                        // the browser, silently — which makes every layout measured on this
+                        // page a fiction, and looks exactly like CSS that does not work.
+                        elif path.EndsWith ".css" then "text/css"
                         else "application/octet-stream"
                     ctx.Response.OutputStream.Write (bytes, 0, bytes.Length)
                 else ctx.Response.StatusCode <- 404
@@ -576,6 +580,10 @@ let editorTests =
                 // …with the transport controls that ARE the audit-read affordance: a replay
                 // you cannot pause or seek is a video of a terminal, not a record of one.
                 let! _ = await (page.WaitForSelectorAsync "#replay .ap-control-bar")
+                // …and the chapter marks (Plan 14, stage 4), which are what make a
+                // whole-terminal recording navigable by what ran in it. Asserted here
+                // because a marker option the player silently ignored would leave every
+                // DOM-free test green and the chapters absent.
 
                 // Then play it, and wait for the recording's own output to appear on the
                 // screen. This is the assertion that spans the whole stage: bytes the Session
@@ -586,6 +594,263 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         "document.querySelector('#replay').textContent.includes('total 0')")
+
+                // …and the chapter marks (Plan 14, stage 4), which are what make a
+                // whole-terminal recording navigable by what ran in it. Asserted after play
+                // rather than before, because the recording's metadata — its duration, and
+                // therefore where a marker sits on the bar — is not known until it loads.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelectorAll('#replay .ap-marker').length === 1")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+
+        // Terminal work in the chat, and the pane's tabs (Plan 14, stages 1-2). Host-free,
+        // like the editor and the replay beside it: what needs a real browser here is not the
+        // Session Process but the DOM swaps — where FOCUS goes when a chip in the chat opens
+        // a tab in the pane, and whether the tab strip is a tablist the arrow keys walk.
+        // Neither is visible to a rendered string, and both are the WCAG floor rather than a
+        // nicety: a chip that opens a pane and leaves focus behind, or a close that strands
+        // focus on a control it just removed, is exactly the failure the floor names.
+        testCaseAsync "a chat chip opens a pane tab that plays, the strip walks, and closing hands focus back" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 4)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 4)))
+
+                // The chip the harness model's one block puts in the chat.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-block]")
+                do! awaitU (page.ClickAsync "#shell [data-chat-block]")
+
+                // A tab opened, showing that block.
+                let showingBlock =
+                    """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel')?.startsWith('block:') === true"""
+                let! _ = await (page.WaitForFunctionAsync showingBlock)
+
+                // Focus followed it into the pane. Asserted BEFORE anything is played,
+                // because pressing play is itself a focus move.
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
+
+                // The strip is a real tablist: an arrow key walks it. MANUAL activation, so
+                // walking does not swap the panel under the reader per keypress.
+                do! awaitU (page.FocusAsync "#shell [data-pane-tab^='block:']")
+                do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-pane-tab')?.startsWith('terminal:') === true""")
+                let! _ = await (page.WaitForFunctionAsync showingBlock)
+
+                // The block's recording is PLAYED, not printed: the real player, over the
+                // ranged cast the model built, inside the tab the chip opened. A stream
+                // renderer would show a cursor-moving program as garbage, which is the whole
+                // reason the transcript was written as asciicast.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay] .ap-overlay-start")
+                do! awaitU (page.ClickAsync "#shell [data-pane-replay] .ap-overlay-start")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-block]')?.textContent.includes('total 0') === true""")
+
+                // Closing the tab hands focus back to the chip that opened it, rather than
+                // stranding it on a control that has just left the document.
+                do! awaitU (page.ClickAsync "#shell [data-pane-tab-close]")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-pane-block]')""")
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+        // The phone (Plan 14, stage 5). Headless Chromium clamps its WINDOW to ~500px, which
+        // is why a naive narrow screenshot lies; Playwright's viewport is a real CDP device
+        // metrics override, so 390 here is 390. The two things this asserts are the two the
+        // plan is about: the pane takes the whole column rather than sitting over the chat
+        // as a dismissible overlay, and nothing overflows sideways — an overflow a phone
+        // user cannot scroll away is a reachability bug, not a cosmetic one.
+        testCaseAsync "on a phone the pane IS the column, the strip stays, and the chat is one control away" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 5)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                // ViewportSize alone. `IsMobile` additionally asks Chromium to fit the
+                // layout to a device window, and measured here that lands at 648px rather
+                // than 390 — the very lie the ui-exploration skill warns about, arriving
+                // through a different door.
+                let! ctx =
+                    await (br.NewContextAsync (
+                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 390, Height = 844))))
+                let! page = await (ctx.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 5)))
+
+                // Ground truth first: the viewport really is the width we asked for.
+                let! width = await (page.EvaluateAsync<int> "() => window.innerWidth")
+                Expect.equal width 390 "a true phone viewport, not a clamped window"
+
+                // The pane starts off screen, as it does for a fresh client.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().left >= window.innerWidth - 1")
+
+                // A chip brings it on, and it takes the WHOLE column.
+                do! awaitU (page.ClickAsync "#shell [data-chat-block]")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """(() => {
+                             const r = document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect()
+                             return r.left <= 1 && Math.round(r.width) === window.innerWidth
+                           })()""")
+                // …with the tab strip retained, which is what keeps phone and desktop one
+                // mental model rather than two surfaces that happen to share a codebase.
+                let! _ = await (page.WaitForSelectorAsync "#shell [role='tablist'] [data-pane-tab]")
+
+                // Nothing overflows sideways.
+                let! overflows =
+                    await (page.EvaluateAsync<bool> "() => document.documentElement.scrollWidth > window.innerWidth + 1")
+                Expect.isFalse overflows "no horizontal overflow a phone user cannot scroll away"
+
+                // And the way back to the chat is a control, not a dismissal: it returns
+                // focus to the chip that opened the pane.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='hide']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().left >= window.innerWidth - 1")
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+        // The live viewport (Plan 14, stage 6). What only a browser can answer here is the
+        // KEYSTROKE TRANSLATION: a `KeyboardEvent` is not a byte stream, and turning one
+        // into what a pty expects — printable characters as themselves, Ctrl-<key> as the
+        // control code, the keys with no character at all as their escape sequences — is the
+        // whole of what a terminal front end does with a keyboard.
+        testCaseAsync "the holder types into the live screen, and the keys reach it as a pty expects" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 6)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 6)))
+
+                // The column starts shut, as it does for a fresh client.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                // The terminal the harness holds the lease on renders its screen, and the
+                // screen shows what the program drew.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
+                let screen = "#shell [data-terminal-screen='term-live']"
+                let! _ = await (page.WaitForSelectorAsync screen)
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        (sprintf "document.querySelector(%s).textContent.includes('vim ~/notes')" "\"#shell [data-terminal-screen='term-live']\""))
+
+                // It is a Tab stop, because its whole purpose is having the keyboard.
+                do! awaitU (page.FocusAsync screen)
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-screen') === 'term-live'""")
+
+                // The screen is composed by a REAL emulator in a real browser: the
+                // Session Process's snapshot seeds it, and the records the client already
+                // holds are folded on top. This is the only tier that runs xterm in the
+                // browser at all — and it exists because a browser-only module resolution
+                // failure in exactly this path reached a release job while the cheap tier
+                // and this one were both green.
+                // Seeded with something the assertion below does NOT look for: what is
+                // being proven is the FOLD — "earlier output" exists only in the transcript
+                // records, never in the screen the model was built with — so a client that
+                // rendered the snapshot and folded nothing would fail here.
+                do! awaitU (page.EvaluateAsync ("() => window.__snapshot('term-live', 0, 'session start\\r\\n')"))
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        (sprintf "document.querySelector(%s).textContent.includes('earlier output')" "\"#shell [data-terminal-screen='term-live']\""))
+
+                do! awaitU (page.Keyboard.TypeAsync "ls")
+                do! awaitU (page.Keyboard.PressAsync "ArrowUp")
+                do! awaitU (page.Keyboard.PressAsync "Control+c")
+                do! awaitU (page.Keyboard.PressAsync "Backspace")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! typed = await (page.EvaluateAsync<string> "() => window.__typed || ''")
+                Expect.equal typed "ls\u001b[A\u0003\u007f\r" "printable, escape, control code, delete, carriage return"
+
+                // Tab is SENT rather than moving focus out of the terminal mid-session, and
+                // the shift is that `preventDefault` fires for everything the terminal takes.
+                let! before = await (page.EvaluateAsync<string> "() => document.activeElement?.getAttribute('data-terminal-screen')")
+                do! awaitU (page.Keyboard.PressAsync "Tab")
+                let! after = await (page.EvaluateAsync<string> "() => document.activeElement?.getAttribute('data-terminal-screen')")
+                Expect.equal after before "Tab types a tab; it does not leave the terminal"
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+        // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
+        // terminal really mounts a player over what it has recorded so far — the same player
+        // and the same cast a finished terminal's replay uses, which is what "rewound like
+        // live TV, through the same mechanism" has to mean — that it lands ON the pinned
+        // edge rather than at the recording's start, that focus survives the control swap,
+        // and that playing off the pinned end catches the reader back up to live by itself.
+        testCaseAsync "a live terminal rewinds to its pinned edge, and playing off it catches back up" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 7)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 7)))
+
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
+
+                // Rewinding replaces the live screen with the recording, in a real player.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-rewind='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-terminal-screen='term-live']")""")
+
+                // The swap removed the pressed Rewind button from the document; focus must
+                // land on the control that replaced it, never on `body`.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-live') === 'term-live'""")
+
+                // It lands AT the pinned edge: the poster is the screen as it stood at the
+                // pin, shown before anyone presses play — not a blank player parked at 0:00.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-pane-replay='terminal:term-live']")?.textContent.includes('earlier output') === true""")
+
+                // Playing off the pinned end IS catching up: the player's `ended` drops the
+                // rewind by itself — live screen back, player down, focus handed to the
+                // Rewind control that replaced the pane's face.
+                do! awaitU (page.ClickAsync "#shell [data-pane-replay='terminal:term-live'] .ap-overlay-start")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.getAttribute('data-terminal-rewind') === 'term-live'""")
+
+                // And the way back works by hand too: rewind again, jump to live again.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-rewind='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-live='term-live']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()

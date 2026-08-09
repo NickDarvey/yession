@@ -202,7 +202,13 @@ and TerminalClosed =
 /// permission; what it needs is to be on the record, which is this.
 and TerminalLeaseTaken =
     { TerminalId : TerminalId
-      By : ActorRef }
+      By : ActorRef
+      /// The transcript line index at which this stretch of live mode begins (Plan 14,
+      /// stage 1). A block records the range it produced and a lease stretch did not, so
+      /// an interactive stretch had no replay bounds at all — and nothing can derive them
+      /// afterwards, because only the Process knows where the transcript stood when the
+      /// lease changed hands.
+      FromSeq : int }
 
 /// The terminal is back in block mode. Appended when the holder releases it, when a peer
 /// steals it (the previous holder's lease ends), and when the holder's CONNECTION drops —
@@ -212,7 +218,10 @@ and TerminalLeaseReleased =
       /// Who held it. Kept because the interesting question afterwards is whose keystrokes
       /// the bracketed transcript range belongs to, and an empty release cannot answer it.
       Was : ActorRef
-      Reason : TerminalLeaseEnd }
+      Reason : TerminalLeaseEnd
+      /// One past the last transcript line of the stretch that just ended — the other half
+      /// of the range `TerminalLeaseTaken.FromSeq` opened.
+      ToSeq : int }
 
 /// Why a lease ended. Distinguished because they read differently in a log: a release is a
 /// person finishing, a steal is another person taking over, a drop is nobody deciding
