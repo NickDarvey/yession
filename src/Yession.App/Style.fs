@@ -385,6 +385,20 @@ module Style =
     let personAvatar = "self-center"
     let commandCard = "flex flex-col gap-1 px-3 py-2 bg-surface"
 
+    /// The generated read surface (Plan 15). A query answers with rows, fields, or one
+    /// value, and these are the three renderings — defined ONCE here because they are
+    /// what every future query gets to look like, including the ones nobody has written.
+    ///
+    /// The table scrolls inside itself (`overflow-x-auto`): a sidebar is narrow, a row can
+    /// be wide, and a column that overflows its container is how a settings pane starts
+    /// scrolling sideways as a whole.
+    let queryTable = "w-full overflow-x-auto"
+    /// Column headings carry `ink-dim`, not `ink-faint`: they are 11px caps, which is
+    /// below the 24px/19px-bold threshold where 3:1 would do, so they need the 4.5:1 ratio
+    /// against `surface` that `ink-dim` gives (CLAUDE.md, UI baseline).
+    let queryHeadCell = caps + " text-ink-dim text-left font-normal pr-4 pb-1 whitespace-nowrap"
+    let queryCell = "font-light text-small leading-5 text-ink-dim pr-4 py-0.5 whitespace-nowrap"
+
     let mainColumn = "flex-1 flex flex-col min-w-0 h-full"
 
     let header =

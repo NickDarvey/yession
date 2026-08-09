@@ -130,14 +130,39 @@ let private representativeModel : ClientModel =
       GitHub =
         { Status = { SessionCredential = None; MineCredential = None }
           Flow = GitHubIdle }
-      Repos =
-        { Listings =
-            Some
-                [ { Repo = RepoRef.create "octo/hello" |> expect
-                    Branch = "main"
-                    Dirty = true } ]
-          Busy = false
-          Error = None } }
+      // The generated read surface (Plan 15), with all three shapes declared at once, so
+      // the acceptance render exercises the ONE renderer every future query goes through
+      // rather than the one shape today's queries happen to use.
+      Queries =
+        { Declared =
+            [ { Name = QueryName.create "repos" |> expect
+                Title = "repos"
+                Description = "the session's checkouts"
+                Shape =
+                  Rows
+                      [ QueryColumn.create "repo" "repo"
+                        QueryColumn.create "branch" "branch"
+                        QueryColumn.create "dirty" "uncommitted changes" ] }
+              { Name = QueryName.create "work_environment" |> expect
+                Title = "work environment"
+                Description = "where commands run"
+                Shape = Fields [ QueryColumn.create "backend" "backend"; QueryColumn.create "state" "state" ] }
+              // Declared but not yet answered: the surface must render a section for a
+              // query whose first value has not arrived, or a slow query is an empty gap
+              // rather than a thing that is loading.
+              { Name = QueryName.create "leases" |> expect
+                Title = "leases"
+                Description = "devices leased to this session"
+                Shape = Value } ]
+          Values =
+            Map.ofList
+                [ "repos",
+                  RowsOf
+                      [ [ "repo", CellText "octo/hello"
+                          "branch", CellText "main"
+                          "dirty", CellFlag true ] ]
+                  "work_environment",
+                  FieldsOf [ "backend", CellText "srt"; "state", CellText "running" ] ] } }
 
 /// The composer when a PEER is the one writing: their draft is what you are in, yours (if any)
 /// is a summary you can open, and "new message" is the way out of collaborating.
@@ -445,15 +470,37 @@ let private uiChecklistTests =
             let article = html.Substring (html.LastIndexOf ("<article", noteStart), 300)
             Expect.isFalse (article.Contains "data-message-body") "no message body — it is not something someone said"
 
-        // The Repos panel (Plan 14) states the shared-trust boundary where the act
-        // happens, and the representative model's dirty checkout is told, not hidden.
-        testCase "the repos panel lists the checkout, its dirty state, and the disclosure" <| fun () ->
+        // The generated read surface (Plan 15). One renderer draws every query, so this
+        // pins the RENDERER — a section per declared query, each shape drawn the way its
+        // shape says — rather than any particular query's panel. A query added later gets
+        // this behaviour without a line of view code, which is the property worth holding.
+        testCase "the read surface renders a section per declared query, in every shape" <| fun () ->
             let html = Support.render representativeModel
-            Expect.isTrue (html.Contains "data-repos-panel") "the panel renders"
-            Expect.isTrue (html.Contains "octo/hello") "the repo is listed"
-            Expect.isTrue (html.Contains "uncommitted changes") "dirty state is told"
-            Expect.isTrue (html.Contains "readable by everyone in this session") "the disclosure is stated where adding happens"
-            Expect.isTrue (html.Contains "data-repo-add-input") "the add input renders"
+            Expect.isTrue (html.Contains "data-query-panel=\"repos\"") "the rows query renders its section"
+            Expect.isTrue (html.Contains "data-query-panel=\"work_environment\"") "the fields query renders its section"
+            Expect.isTrue (html.Contains "data-query-panel=\"leases\"") "a query with no value yet still renders its section"
+            Expect.isTrue (html.Contains "octo/hello") "a row's cells render"
+            // The flag is rendered as a WORD, not a raw `true`: a human reads the answer
+            // to "uncommitted changes", and `true` is the wire's word for it, not theirs.
+            Expect.isTrue (html.Contains ">yes<") "a flag cell renders as a word"
+            Expect.isFalse (html.Contains ">true<") "the wire's boolean does not reach the page"
+            Expect.isTrue (html.Contains "data-query-pending") "an unanswered query says so rather than rendering nothing"
+
+        // The structure a table owes a screen reader (CLAUDE.md, UI baseline). Held in the
+        // renderer, so it is held for every query — the reason the surface is generated.
+        testCase "a rows query renders a real table with column headers" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isTrue (html.Contains "<table") "rows render as a table"
+            Expect.isTrue (html.Contains "scope=\"col\"") "columns carry a scope"
+            Expect.isTrue (html.Contains "uncommitted changes") "the column's human label is the heading, not its wire key"
+
+        // What Plan 15 RETIRED: the panel's write actions. A human asks the agent, so
+        // there is one authorization path and one place the act is recorded.
+        testCase "the read surface offers no way to mutate anything" <| fun () ->
+            let html = Support.render representativeModel
+            Expect.isFalse (html.Contains "data-repo-add-input") "the add input is gone"
+            Expect.isFalse (html.Contains "data-repo-remove") "the remove control is gone"
+            Expect.isFalse (html.Contains "data-repo-switch") "the branch switch is gone"
     ]
 
 // The offer to bring a stopped session back (Plan 11). It replaces the connection status

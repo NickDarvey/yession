@@ -335,8 +335,7 @@ let start
         | Some (Claude _)
         | Some GitHubStatus
         | Some (GitHub _)
-        | Some RepoList
-        | Some (Repo _)
+        | Some Queries
         | None -> handleWithExtraRoutes ()
 
     let server = createServer handler

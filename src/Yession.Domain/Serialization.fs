@@ -1068,6 +1068,119 @@ module Codec =
                 | "terminal" -> Decode.field "payload" terminalFrame.Decode |> Decode.map Terminal
                 | other -> Decode.fail (sprintf "Unknown session frame: %s" other)) }
 
+    // --- the query surface (Plan 15) ------------------------------------------------------
+    // The wire between the Session Process's query registry and the browser's generated
+    // read surface. Both a query's DECLARATION and its VALUE cross it: the declaration
+    // because the client renders a query it has never heard of, the value because that is
+    // the point. Shape and value are encoded separately rather than as one fused blob, so
+    // the section's markup exists before the first value arrives (`/queries` answers, the
+    // stream fills in) and so an invalidation frame carries only what changed.
+
+    let queryName : Codec<QueryName> =
+        { Encode = QueryName.value >> Encode.string
+          Decode = viaSmartCtor QueryName.create Decode.string }
+
+    let private queryColumn : Codec<QueryColumn> =
+        { Encode =
+            fun (c: QueryColumn) -> Encode.object [ "key", Encode.string c.Key; "label", Encode.string c.Label ]
+          Decode =
+            Decode.object (fun get ->
+                { Key = get.Required.Field "key" Decode.string
+                  Label = get.Required.Field "label" Decode.string }) }
+
+    let private queryShape : Codec<QueryShape> =
+        { Encode =
+            (fun shape ->
+                match shape with
+                | Value -> Encode.object [ "kind", Encode.string "value" ]
+                | Fields columns ->
+                    Encode.object [ "kind", Encode.string "fields"; "columns", Encode.list (columns |> List.map queryColumn.Encode) ]
+                | Rows columns ->
+                    Encode.object [ "kind", Encode.string "rows"; "columns", Encode.list (columns |> List.map queryColumn.Encode) ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "value" -> Decode.succeed Value
+                | "fields" -> Decode.field "columns" (Decode.list queryColumn.Decode) |> Decode.map Fields
+                | "rows" -> Decode.field "columns" (Decode.list queryColumn.Decode) |> Decode.map Rows
+                | other -> Decode.fail (sprintf "Unknown query shape: %s" other)) }
+
+    /// A cell rides as its NATIVE JSON type — a string, a bool, or null — rather than as a
+    /// tagged object. That keeps the payload readable to anything that consumes the stream
+    /// without this codec, and the three JSON types are exactly the three cases.
+    let private queryCell : Codec<QueryCell> =
+        { Encode =
+            (fun cell ->
+                match cell with
+                | CellText text -> Encode.string text
+                | CellFlag flag -> Encode.bool flag
+                | CellAbsent -> Encode.nil)
+          Decode =
+            Decode.oneOf
+                [ Decode.string |> Decode.map CellText
+                  Decode.bool |> Decode.map CellFlag
+                  Decode.nil CellAbsent ] }
+
+    let private queryRow : Codec<(string * QueryCell) list> =
+        { Encode = fun row -> Encode.object (row |> List.map (fun (key, cell) -> key, queryCell.Encode cell))
+          Decode = Decode.keyValuePairs queryCell.Decode }
+
+    let queryValue : Codec<QueryValue> =
+        { Encode =
+            (fun value ->
+                match value with
+                | ValueOf cell -> Encode.object [ "kind", Encode.string "value"; "value", queryCell.Encode cell ]
+                | FieldsOf fields -> Encode.object [ "kind", Encode.string "fields"; "fields", queryRow.Encode fields ]
+                | RowsOf rows ->
+                    Encode.object [ "kind", Encode.string "rows"; "rows", Encode.list (rows |> List.map queryRow.Encode) ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "value" -> Decode.field "value" queryCell.Decode |> Decode.map ValueOf
+                | "fields" -> Decode.field "fields" queryRow.Decode |> Decode.map FieldsOf
+                | "rows" -> Decode.field "rows" (Decode.list queryRow.Decode) |> Decode.map RowsOf
+                | other -> Decode.fail (sprintf "Unknown query value: %s" other)) }
+
+    let queryDef : Codec<QueryDef> =
+        { Encode =
+            (fun (def: QueryDef) ->
+                Encode.object
+                    [ "name", queryName.Encode def.Name
+                      "title", Encode.string def.Title
+                      "description", Encode.string def.Description
+                      "shape", queryShape.Encode def.Shape ])
+          Decode =
+            Decode.object (fun get ->
+                { Name = get.Required.Field "name" queryName.Decode
+                  Title = get.Required.Field "title" Decode.string
+                  Description = get.Required.Field "description" Decode.string
+                  Shape = get.Required.Field "shape" queryShape.Decode }) }
+
+    /// One frame of the multiplexed query stream. Tagged like `sessionFrame` for the same
+    /// reason: one connection carries every query there will ever be, and a client folds
+    /// each frame by name into a map.
+    let queryFrame : Codec<QueryFrame> =
+        { Encode =
+            (fun frame ->
+                match frame with
+                | QueriesDeclared defs ->
+                    Encode.object [ "tag", Encode.string "queries"; "queries", Encode.list (defs |> List.map queryDef.Encode) ]
+                | QueryValued (name, value) ->
+                    Encode.object
+                        [ "tag", Encode.string "value"
+                          "name", queryName.Encode name
+                          "value", queryValue.Encode value ])
+          Decode =
+            Decode.field "tag" Decode.string
+            |> Decode.andThen (function
+                | "queries" -> Decode.field "queries" (Decode.list queryDef.Decode) |> Decode.map QueriesDeclared
+                | "value" ->
+                    Decode.map2
+                        (fun name value -> QueryValued (name, value))
+                        (Decode.field "name" queryName.Decode)
+                        (Decode.field "value" queryValue.Decode)
+                | other -> Decode.fail (sprintf "Unknown query frame: %s" other)) }
+
     /// Serialize a value to a compact JSON string.
     let toString (codec: Codec<'a>) (value: 'a) : string =
         codec.Encode value |> Encode.toString 0

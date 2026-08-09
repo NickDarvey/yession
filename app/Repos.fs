@@ -1,8 +1,14 @@
 module Yession.Host.Repos
 
-// The session's repo manager (Plan 14): ONE function with two interfaces — the agent's
-// MCP verbs and the settings panel both land here, every mutation appends the same
-// events, and the conversation timeline is their shared record.
+// The session's repo manager (Plan 14, resurfaced by Plan 15): the agent's MCP verbs
+// land here, every mutation appends an attributed event, and the conversation timeline
+// is the record everyone reads.
+//
+// Plan 14 gave this a second, symmetric interface — a panel that could drive every verb.
+// Plan 15 retired that half: a human who wants a repo added asks the agent, so there is
+// one authorization path, one set of inputs to validate, and one place the act is
+// recorded. What the panel is left with is the LISTING, which is now the `repos` query
+// at the foot of this file.
 //
 // Git itself runs through the sandbox seam under the AGENT backend (`host` is the
 // explicitly lax choice; `srt` confines each spawn to the repos directory and the
@@ -331,134 +337,46 @@ let create (config: ReposConfig) : Result<ReposService, string> =
 let agentCaller (turnActor: ActorRef) : RepoCaller =
     { Actor = ActorRef.Agent; Credential = turnActor }
 
-// --- the browser-facing /repos* routes (Plan 14) -----------------------------------------
-// The human interface over the SAME service the agent's verbs drive — cookie-gated like
-// the connection panels, composed into `Signalling.start` extra routes beside them. At
-// the panel the acting party and the credential owner are the same person.
+// --- the `repos` query (Plan 15) ----------------------------------------------------------
+// What was the Repos PANEL is now a registered query, and the panel's three write actions
+// are gone: a human who wants a repo added asks the agent, and the mutation lands in the
+// timeline attributed. What survives is exactly the half worth keeping — the listing,
+// which is the FILESYSTEM's answer, so it can never disagree with `git status`.
 
-open Fable.Core.JsInterop
-open Yession.App
-open Yession.Host.Interop
+let queryName : QueryName =
+    match QueryName.create "repos" with
+    | Ok name -> name
+    | Error e -> failwithf "repos query name: %s" e
 
-#if FABLE_COMPILER
-open Thoth.Json
-#else
-open Thoth.Json.Net
-#endif
+let private queryDef : QueryDef =
+    { Name = queryName
+      Title = "repos"
+      Description =
+        "The repos checked out in this session, each with the branch it is on and whether \
+         it has uncommitted changes. Read from the checkouts themselves, so it always agrees \
+         with git."
+      Shape =
+        Rows
+            [ QueryColumn.create "repo" "repo"
+              QueryColumn.create "branch" "branch"
+              QueryColumn.create "dirty" "uncommitted changes" ] }
 
-type private RepoRequestBody =
-    { Repo : string
-      Branch : string option
-      Create : bool
-      PeerId : string option }
-
-let private bodyDecoder : Decoder<RepoRequestBody> =
-    Decode.object (fun get ->
-        { Repo = get.Optional.Field "repo" Decode.string |> Option.defaultValue ""
-          Branch = get.Optional.Field "branch" Decode.string
-          Create = get.Optional.Field "create" Decode.bool |> Option.defaultValue false
-          PeerId = get.Optional.Field "peerId" Decode.string })
-
-let private readBody (req: IncomingMessage) (cont: string -> unit) =
-    let mutable acc = ""
-    req.on ("data", fun chunk -> acc <- acc + bufferToString chunk) |> ignore
-    req.on ("end", fun _ -> cont acc) |> ignore
-
-let private respondJson (res: ServerResponse) (status: int) (json: string) =
-    res.writeHead (status, createObj [ "content-type", box "application/json"; "cache-control", box "no-store" ]) |> ignore
-    res.``end`` json
-
-let private respondText (res: ServerResponse) (status: int) (text: string) =
-    res.writeHead (status, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
-    res.``end`` text
-
-let private listingsJson (listings: RepoListing list) : string =
-    listings
-    |> List.map (fun l ->
-        Encode.object
-            [ "repo", Encode.string (RepoRef.value l.Repo)
-              "branch", Encode.string l.Branch
-              "dirty", Encode.bool l.Dirty ])
-    |> Encode.list
-    |> Encode.toString 0
-
-/// The acting human behind a panel request: the cookie's Manager-verified user, or —
-/// for unattributed access — the browser's self-asserted peer (the same trust rule as
-/// the connection panels: the Manager's policy is the authority behind any credential
-/// that self-assertion goes on to resolve).
-let private actorOf (identity: CookieIdentity) (peerIdRaw: string option) : Result<ActorRef, string> =
-    match identity.Attribution with
-    | AttributedUser user -> Ok (UserRef user)
-    | UnattributedAccess ->
-        match peerIdRaw with
-        | Some raw -> PeerId.create raw |> Result.map PeerRef
-        | None -> Error "peer id required for an unattributed repo action"
-
-/// Build the /repos* route handler over a started service.
-let routes
-    (auth: SessionAuth.Auth)
-    (service: ReposService)
-    (mount: string)
-    : IncomingMessage -> ServerResponse -> bool =
-    fun req res ->
-        let routeOf () = SessionRoute.parseUnder mount req.``method`` (req.url.Split('?').[0])
-        match routeOf () with
-        | Some RepoList
-        | Some (Repo _) ->
-            match auth.IdentityOf req with
-            | None -> respondText res 401 "unauthorized"
-            | Some identity ->
-                let handle (body: RepoRequestBody) : unit =
-                    match actorOf identity body.PeerId with
-                    | Error e -> respondText res 400 e
-                    | Ok actor ->
-                        let caller : RepoCaller = { Actor = actor; Credential = actor }
-                        let respondListing (outcome: Result<RepoListing, string>) =
-                            match outcome with
-                            | Ok listing -> respondJson res 200 (listingsJson [ listing ])
-                            | Error e -> respondText res 400 e
-                        Async.StartImmediate (
-                            async {
-                                match routeOf () with
-                                | Some RepoList ->
-                                    match! service.ListRepos () with
-                                    | Ok listings -> respondJson res 200 (listingsJson listings)
-                                    | Error e -> respondText res 502 e
-                                | Some (Repo action) ->
-                                    match RepoRef.create body.Repo with
-                                    | Error e -> respondText res 400 e
-                                    | Ok repo ->
-                                        match action with
-                                        | RepoPanelAction.Add ->
-                                            let! outcome = service.AddRepo caller repo
-                                            respondListing outcome
-                                        | RepoPanelAction.Remove ->
-                                            match! service.RemoveRepo caller repo with
-                                            | Ok () -> respondJson res 200 """{"ok":true}"""
-                                            | Error e -> respondText res 400 e
-                                        | RepoPanelAction.Switch ->
-                                            match body.Branch with
-                                            | None -> respondText res 400 "missing branch"
-                                            | Some branch ->
-                                                let! outcome = service.SwitchBranch caller repo branch body.Create
-                                                respondListing outcome
-                                // Unreachable: this handler only runs for the two cases above.
-                                | Some _
-                                | None -> respondText res 404 "not found"
-                            })
-                match req.``method`` with
-                | "GET" ->
-                    handle
-                        { Repo = ""
-                          Branch = None
-                          Create = false
-                          PeerId = Interop.queryParamOf req.url "peer_id" }
-                | _ ->
-                    readBody req (fun raw ->
-                        match Decode.fromString bodyDecoder (if raw.Trim () = "" then "{}" else raw) with
-                        | Ok body -> handle body
-                        | Error e -> respondText res 400 (sprintf "malformed request: %s" e))
-            true
-        // Not this handler's path: the composing server falls through (to its 404).
-        | Some _
-        | None -> false
+/// Register the listing as a query. The service keeps its typed `ListRepos` — the query
+/// is a projection of it, not a replacement — so the shape lives beside the thing it
+/// describes rather than in the composition root.
+let query (service: ReposService) : Queries.QueryRegistration =
+    { Def = queryDef
+      Read =
+        fun () ->
+            async {
+                match! service.ListRepos () with
+                | Error e -> return Error e
+                | Ok listings ->
+                    return
+                        Ok (RowsOf (
+                            listings
+                            |> List.map (fun listing ->
+                                [ "repo", CellText (RepoRef.value listing.Repo)
+                                  "branch", CellText listing.Branch
+                                  "dirty", CellFlag listing.Dirty ])))
+            } }

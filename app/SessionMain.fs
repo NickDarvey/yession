@@ -253,10 +253,16 @@ let mutable private connectionStatus : Map<SecretId, ConnectionKind> = Map.empty
 let private connectionsClient =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.connections url secret)
 
-// The repo manager (Plan 14): one service, two interfaces (the agent's verbs and the
-// settings panel). Constructed once the event log exists (inside the boot async), so a
+// The repo manager (Plan 14): the agent's verbs, and — since Plan 15 — the `repos`
+// query. Constructed once the event log exists (inside the boot async), so a
 // module-level cell carries it to the per-turn dispatcher.
 let mutable private reposService : Repos.ReposService option = None
+
+// The query registry (Plan 15): every read-only view this session declares, surfaced to
+// the agent as generated MCP tools and to the browser as one multiplexed SSE stream.
+// Built beside the service that owns each query, for the same reason and in the same
+// place.
+let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 
 /// The acting party's GitHub token for a repo network verb: the session's explicit
 /// credential first, then the named actor's own, then the ambient `GITHUB_TOKEN` (the
@@ -277,15 +283,27 @@ let private resolveGitHubToken (credentialActor: ActorRef) : Async<string option
 
 /// The turn's repo capabilities: the service bound to the agent as acting party and
 /// the TURN ACTOR as credential owner. Denials when the service could not start.
+///
+/// Every mutating verb also INVALIDATES the `repos` query on the way out, which is what
+/// puts the change on the humans' screen without anyone refreshing: a command is the only
+/// thing that can change a query's answer, so a command is the only thing that has to say
+/// it did. Nothing polls.
 let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
     match reposService with
     | None -> capabilities
     | Some service ->
         let caller = Repos.agentCaller turnActor
+        let andPublish (outcome: Async<Result<'a, string>>) : Async<Result<'a, string>> =
+            async {
+                let! result = outcome
+                match result with
+                | Ok _ -> queryRegistry.Invalidate Repos.queryName
+                | Error _ -> ()
+                return result
+            }
         { capabilities with
-            AddRepo = service.AddRepo caller
-            ListRepos = service.ListRepos
-            SwitchRepoBranch = service.SwitchBranch caller
+            AddRepo = service.AddRepo caller >> andPublish
+            SwitchRepoBranch = fun repo branch create -> andPublish (service.SwitchBranch caller repo branch create)
             FetchRepo = service.FetchRepo caller
             RepoStatus = service.RepoStatus
             RepoLog = service.RepoLog
@@ -299,8 +317,14 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
     fun context capabilities signal onChunk ->
         async {
             // The repo verbs are rebound to THIS turn's actor here (Plan 14): the acting
-            // party on the events is the agent, the credential is the turn human's.
+            // party on the events is the agent, the credential is the turn human's. The
+            // query surface is bound in the same place for a duller reason — the registry
+            // is built in the boot async, and this is where a turn first sees it.
             let capabilities = repoCapabilitiesFor context.CurrentMessage.Author capabilities
+            let capabilities =
+                { capabilities with
+                    Queries = queryRegistry.Definitions
+                    ReadQuery = queryRegistry.Read }
             // A dispatch-level failure streams its reason as the message body first:
             // the turn's item is already open (AgentMessageStarted precedes the
             // runner), so this is what makes the reason VISIBLE in the timeline.
@@ -381,6 +405,19 @@ Async.StartImmediate (
                       Log = log } with
             | Ok service -> reposService <- Some service
             | Error e -> failwithf "repos: %s" e
+        // The query registry (Plan 15): every read-only view this session declares, in
+        // one place. A capability that could not start declares nothing rather than
+        // declaring a query that always errors — an empty settings surface says "this
+        // session has no repos capability" more honestly than a section that only ever
+        // shows a failure.
+        do
+            let registrations =
+                [ match reposService with
+                  | Some service -> Repos.query service
+                  | None -> () ]
+            match Queries.create registrations with
+            | Ok registry -> queryRegistry <- registry
+            | Error e -> failwithf "queries: %s" e
         let docStore = DocStore.openStore (sprintf "%s/doc.jsonl" dataDir)
         // The connection-status stream (Plan 08): each frame replaces the whole cache
         // (snapshot semantics), flipping the agent gate and the /claude status as
@@ -421,14 +458,15 @@ Async.StartImmediate (
                             (fun target -> Map.tryFind target connectionStatus)
                             sessionMount)
                 | _ -> None
-            // The Repos panel (Plan 14): the human interface over the same service the
-            // agent's verbs drive. Needs only a login surface — the service itself is
-            // always there.
-            let repoRoutes =
-                match auth, reposService with
-                | Some a, Some service -> Some (Repos.routes a service sessionMount)
-                | _ -> None
-            [ claudeRoutes; githubRoutes; repoRoutes ]
+            // The read surface (Plan 15): one SSE stream carrying every registered query.
+            // This replaced the Repos panel's `/repos*` routes — the listing became a
+            // query and the write actions were retired, so a human asks the agent and
+            // watches the timeline instead of driving a second interface.
+            let queryRoutes =
+                match auth with
+                | Some a -> Some (Queries.routes a queryRegistry sessionMount)
+                | None -> None
+            [ claudeRoutes; githubRoutes; queryRoutes ]
             |> List.choose id
             |> function
                | [] -> None

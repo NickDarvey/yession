@@ -4,6 +4,13 @@
 > the repos vocabulary and both-sandbox visibility, the repo manager with the agent's
 > verbs, and the panel + timeline rendering. Deviations taken while implementing are in
 > [What shipped](#what-shipped) at the foot of this document.
+>
+> **Superseded in part by [Plan 15](15-imperative-session-api.md):** the Repos PANEL's
+> write actions (add, remove, switch branch) and the `/repos*` routes behind them are
+> gone. Mutating is a command, and commands belong to the agent — a human asks, and the
+> act-line lands in the timeline exactly as it already did. The panel's listing survives
+> as the `repos` query on the generated read surface. Everything else below — the verbs,
+> the confinement, the credential handling, the directory — is unchanged.
 
 The agent needs repos to work on, and the WorkSandbox will eventually be configured *from*
 a repo (`.yession.yml`, a devcontainer, a CLAUDE.md) — a chicken-and-egg the runtime could
