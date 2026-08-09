@@ -355,9 +355,46 @@ let startFull
                 (fun () -> DateTimeOffset.UtcNow)
                 subscribeToChanges
 
+        // The approval gate for structured commands (Plan 15, stage 3b): the terminal drain
+        // with the serial scheduler taken out. It parks an act in the same `Pending` map the
+        // terminal queue lives in, reads the same `ApprovalMode` register, and hands back the
+        // same `QueueId` — which is what lets ONE `check_pending` serve both.
+        let commandGate =
+            CommandGates.create
+                doc
+                (fun () -> SyncedStateSync.ofDoc doc)
+                (fun actor event ->
+                    async {
+                        let! _ = log.Append actor event
+                        return ()
+                    })
+                (fun () ->
+                    match QueueId.create (string (Guid.NewGuid ())) with
+                    | Ok id -> id
+                    | Error e -> failwithf "queue id invariant violated: %s" e)
+                mintMessageId
+                (fun () -> DateTimeOffset.UtcNow)
+                subscribeToChanges
+
+        // A handle names a REQUEST without saying which kind it is, so the join lives here
+        // and the agent learns one verb. The gate is asked first because it answers from an
+        // in-memory table and the terminal side walks the projection.
+        let checkPending (handle: QueueId) : Async<Result<PendingOutcome, string>> =
+            async {
+                if commandGate.Knows handle then
+                    match! commandGate.Read handle with
+                    | Ok outcome -> return Ok (PendingCommand outcome)
+                    | Error reason -> return Error reason
+                else
+                    match! terminalCommands.Read handle with
+                    | Ok outcome -> return Ok (PendingTerminal outcome)
+                    | Error reason -> return Error reason
+            }
+
         let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
             { ExecuteCommand = terminalCommands.Execute
-              ReadTerminalBlock = terminalCommands.Read
+              CheckPending = checkPending
+              RunGated = commandGate.Run
               SetSecret =
                 match secretsCapabilities with
                 | Some secrets -> secrets.SetSecret
@@ -522,6 +559,24 @@ let startFull
         // reads the projection — and before the terminal drain, which must not try to run a
         // command in a terminal that is gone.
         do! terminals.ReconcileAtBoot ()
+
+        // A parked COMMAND belongs to the continuation that proposed it, and that died with
+        // the previous process (Plan 15, stage 3b). A terminal command survives here because
+        // the doc holds its whole payload; a structured call's does not, so leaving the card
+        // up would put an approve button on everyone's screen that can never do anything.
+        // Refuse them, visibly and with the reason — the agent can simply ask again.
+        let! stranded =
+            CommandGates.sweepAtBoot
+                doc
+                (fun actor event ->
+                    async {
+                        let! _ = log.Append actor event
+                        return ()
+                    })
+                mintMessageId
+        if stranded > 0 then
+            eprintfn "[session %s] refused %d command(s) left waiting by the previous process"
+                (SessionId.value sessionId) stranded
 
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the

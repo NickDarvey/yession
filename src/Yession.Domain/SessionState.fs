@@ -118,6 +118,19 @@ module PendingAct =
     let isResolved (act: PendingAct) : bool =
         Option.isSome act.ApprovedBy || Option.isSome act.RejectedBy
 
+    /// The order value for a new act appended at the tail of its subject's queue. One
+    /// function for both kinds: only a terminal drains serially, but an order that is
+    /// unique and ascending within a subject is what keeps the CARD LIST stable for
+    /// everybody, and a list nobody drains still has to stop reshuffling itself.
+    let nextOrder (subject: GateSubject) (pending: Map<QueueId, PendingAct>) : float =
+        pending
+        |> Map.toList
+        |> List.map snd
+        |> List.filter (fun act -> act.Subject = subject)
+        |> function
+            | [] -> 1.0
+            | acts -> (acts |> List.map (fun act -> act.Order) |> List.max) + 1.0
+
 /// The name of the top-level `Y.XmlFragment` root that holds a draft/queue body. Stable across
 /// peers so every replica's `BodyRegistry` and editor bind to the same fragment (root types
 /// merge by name, so there is no creation race).
@@ -254,11 +267,10 @@ module TerminalQueueOrder =
         |> List.filter (fun e -> e.Subject = ForTerminal terminal)
         |> List.sortBy (fun e -> e.Order, QueueId.value e.QueueId)
 
-    /// The order value for a new entry appended at the tail of a terminal's queue.
+    /// The order value for a new entry appended at the tail of a terminal's queue. The
+    /// `ForTerminal` case of `PendingAct.nextOrder`, named because the composer asks for it.
     let nextFor (terminal: TerminalId) (queue: Map<QueueId, PendingAct>) : float =
-        match sortedFor terminal queue with
-        | [] -> 1.0
-        | entries -> (List.last entries).Order + 1.0
+        PendingAct.nextOrder (ForTerminal terminal) queue
 
     /// The order value that moves `id` one position earlier within its own terminal.
     let moveUp (queue: Map<QueueId, PendingAct>) (id: QueueId) : float option =

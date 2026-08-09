@@ -114,7 +114,10 @@ type ReposConfig =
 /// its own). At the panel the two are the same person.
 type RepoCaller =
     { Actor : ActorRef
-      Credential : ActorRef }
+      Credential : ActorRef
+      /// Who approved this act at its gate, when a gate required one (Plan 15, stage 3).
+      /// `None` is the ordinary case: almost nothing is gated, and nobody had to.
+      ApprovedBy : ActorRef option }
 
 /// The Process-side repo manager. Caller-taking members append the acting party onto
 /// the event; the read-only inspectors take none because they record nothing.
@@ -245,7 +248,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                         match! listingOf repo with
                         | Error e -> return Error e
                         | Ok listing ->
-                            do! append caller.Actor (SessionEvent.RepoAdded { MessageId = mintMessageId (); Repo = repo; Branch = listing.Branch; Actor = caller.Actor })
+                            do! append caller.Actor (SessionEvent.RepoAdded { MessageId = mintMessageId (); Repo = repo; Branch = listing.Branch; Actor = caller.Actor; ApprovedBy = caller.ApprovedBy })
                             return Ok listing
             }
 
@@ -288,7 +291,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                             match! listingOf repo with
                             | Error e -> return Error e
                             | Ok listing ->
-                                do! append caller.Actor (SessionEvent.RepoBranchSwitched { MessageId = mintMessageId (); Repo = repo; Branch = listing.Branch; Created = create; Actor = caller.Actor })
+                                do! append caller.Actor (SessionEvent.RepoBranchSwitched { MessageId = mintMessageId (); Repo = repo; Branch = listing.Branch; Created = create; Actor = caller.Actor; ApprovedBy = caller.ApprovedBy })
                                 return Ok listing
                 })
 
@@ -318,7 +321,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
             requirePresent repo (fun () ->
                 async {
                     rmRecursive fs (pathOf repo)
-                    do! append caller.Actor (SessionEvent.RepoRemoved { MessageId = mintMessageId (); Repo = repo; Actor = caller.Actor })
+                    do! append caller.Actor (SessionEvent.RepoRemoved { MessageId = mintMessageId (); Repo = repo; Actor = caller.Actor; ApprovedBy = caller.ApprovedBy })
                     return Ok ()
                 })
 
@@ -334,8 +337,8 @@ let create (config: ReposConfig) : Result<ReposService, string> =
 /// The agent-facing capability set for one turn: events attribute the AGENT (it is
 /// the acting party), the token is the TURN HUMAN's (Plan 08 — no borrowing across
 /// actors, and the agent has no scope of its own).
-let agentCaller (turnActor: ActorRef) : RepoCaller =
-    { Actor = ActorRef.Agent; Credential = turnActor }
+let agentCaller (turnActor: ActorRef) (approvedBy: ActorRef option) : RepoCaller =
+    { Actor = ActorRef.Agent; Credential = turnActor; ApprovedBy = approvedBy }
 
 // --- the `repos` query (Plan 15) ----------------------------------------------------------
 // What was the Repos PANEL is now a registered query, and the panel's three write actions

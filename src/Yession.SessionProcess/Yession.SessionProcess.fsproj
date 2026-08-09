@@ -11,6 +11,9 @@
     <Compile Include="Environment.fs" />
     <!-- After Environment: a terminal runs its blocks through the session's WorkSandbox. -->
     <Compile Include="Terminals.fs" />
+    <!-- After Terminals: the command gate waits on the same signal the terminal wait does
+         (`TerminalCommands.nextWake`), which is the point — one wait mechanism. -->
+    <Compile Include="CommandGates.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="Scheduler.fs" />

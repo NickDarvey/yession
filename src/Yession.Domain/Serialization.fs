@@ -546,13 +546,18 @@ module Codec =
                     [ "messageId", messageId.Encode p.MessageId
                       "repo", repoRef.Encode p.Repo
                       "branch", Encode.string p.Branch
-                      "actor", actor.Encode p.Actor ]
+                      "actor", actor.Encode p.Actor
+                      "approvedBy", Encode.option actor.Encode p.ApprovedBy ]
           Decode =
             Decode.object (fun get ->
                 { RepoAdded.MessageId = get.Required.Field "messageId" messageId.Decode
                   RepoAdded.Repo = get.Required.Field "repo" repoRef.Decode
                   RepoAdded.Branch = get.Required.Field "branch" Decode.string
-                  RepoAdded.Actor = get.Required.Field "actor" actor.Decode }) }
+                  RepoAdded.Actor = get.Required.Field "actor" actor.Decode
+                  // Optional on the way in: a log written before the gate existed has no
+                  // such field, and "nobody had to approve it" is exactly what it meant.
+                  RepoAdded.ApprovedBy =
+                    get.Optional.Field "approvedBy" (Decode.option actor.Decode) |> Option.flatten }) }
 
     let private repoRemoved : Codec<RepoRemoved> =
         { Encode =
@@ -560,12 +565,15 @@ module Codec =
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
                       "repo", repoRef.Encode p.Repo
-                      "actor", actor.Encode p.Actor ]
+                      "actor", actor.Encode p.Actor
+                      "approvedBy", Encode.option actor.Encode p.ApprovedBy ]
           Decode =
             Decode.object (fun get ->
                 { RepoRemoved.MessageId = get.Required.Field "messageId" messageId.Decode
                   RepoRemoved.Repo = get.Required.Field "repo" repoRef.Decode
-                  RepoRemoved.Actor = get.Required.Field "actor" actor.Decode }) }
+                  RepoRemoved.Actor = get.Required.Field "actor" actor.Decode
+                  RepoRemoved.ApprovedBy =
+                    get.Optional.Field "approvedBy" (Decode.option actor.Decode) |> Option.flatten }) }
 
     let private repoBranchSwitched : Codec<RepoBranchSwitched> =
         { Encode =
@@ -575,14 +583,17 @@ module Codec =
                       "repo", repoRef.Encode p.Repo
                       "branch", Encode.string p.Branch
                       "created", Encode.bool p.Created
-                      "actor", actor.Encode p.Actor ]
+                      "actor", actor.Encode p.Actor
+                      "approvedBy", Encode.option actor.Encode p.ApprovedBy ]
           Decode =
             Decode.object (fun get ->
                 { RepoBranchSwitched.MessageId = get.Required.Field "messageId" messageId.Decode
                   RepoBranchSwitched.Repo = get.Required.Field "repo" repoRef.Decode
                   RepoBranchSwitched.Branch = get.Required.Field "branch" Decode.string
                   RepoBranchSwitched.Created = get.Required.Field "created" Decode.bool
-                  RepoBranchSwitched.Actor = get.Required.Field "actor" actor.Decode }) }
+                  RepoBranchSwitched.Actor = get.Required.Field "actor" actor.Decode
+                  RepoBranchSwitched.ApprovedBy =
+                    get.Optional.Field "approvedBy" (Decode.option actor.Decode) |> Option.flatten }) }
 
     let private workSandboxStarted : Codec<WorkSandboxStarted> =
         { Encode =
@@ -596,7 +607,8 @@ module Codec =
                       // every peer, and a shape that could hold a token eventually does.
                       "forwarded", Encode.list (p.Forwarded |> List.map Encode.string)
                       "credentialOwner", Encode.option actor.Encode p.CredentialOwner
-                      "actor", actor.Encode p.Actor ]
+                      "actor", actor.Encode p.Actor
+                      "approvedBy", Encode.option actor.Encode p.ApprovedBy ]
           Decode =
             Decode.object (fun get ->
                 { WorkSandboxStarted.MessageId = get.Required.Field "messageId" messageId.Decode
@@ -604,7 +616,9 @@ module Codec =
                   WorkSandboxStarted.Backend = get.Required.Field "backend" Decode.string
                   WorkSandboxStarted.Forwarded = get.Required.Field "forwarded" (Decode.list Decode.string)
                   WorkSandboxStarted.CredentialOwner = get.Required.Field "credentialOwner" (Decode.option actor.Decode)
-                  WorkSandboxStarted.Actor = get.Required.Field "actor" actor.Decode }) }
+                  WorkSandboxStarted.Actor = get.Required.Field "actor" actor.Decode
+                  WorkSandboxStarted.ApprovedBy =
+                    get.Optional.Field "approvedBy" (Decode.option actor.Decode) |> Option.flatten }) }
 
     let private workSandboxStopped : Codec<WorkSandboxStopped> =
         { Encode =
@@ -612,12 +626,36 @@ module Codec =
                 Encode.object
                     [ "messageId", messageId.Encode p.MessageId
                       "sandbox", sandboxName.Encode p.Sandbox
-                      "actor", actor.Encode p.Actor ]
+                      "actor", actor.Encode p.Actor
+                      "approvedBy", Encode.option actor.Encode p.ApprovedBy ]
           Decode =
             Decode.object (fun get ->
                 { WorkSandboxStopped.MessageId = get.Required.Field "messageId" messageId.Decode
                   WorkSandboxStopped.Sandbox = get.Required.Field "sandbox" sandboxName.Decode
-                  WorkSandboxStopped.Actor = get.Required.Field "actor" actor.Decode }) }
+                  WorkSandboxStopped.Actor = get.Required.Field "actor" actor.Decode
+                  WorkSandboxStopped.ApprovedBy =
+                    get.Optional.Field "approvedBy" (Decode.option actor.Decode) |> Option.flatten }) }
+
+    let private commandRefused : Codec<CommandRefused> =
+        { Encode =
+            fun (p: CommandRefused) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId
+                      "queueId", queueId.Encode p.QueueId
+                      "tool", Encode.string p.Tool
+                      "summary", Encode.string p.Summary
+                      "author", actor.Encode p.Author
+                      "rejectedBy", actor.Encode p.RejectedBy
+                      "reason", Encode.option Encode.string p.Reason ]
+          Decode =
+            Decode.object (fun get ->
+                { CommandRefused.MessageId = get.Required.Field "messageId" messageId.Decode
+                  CommandRefused.QueueId = get.Required.Field "queueId" queueId.Decode
+                  CommandRefused.Tool = get.Required.Field "tool" Decode.string
+                  CommandRefused.Summary = get.Required.Field "summary" Decode.string
+                  CommandRefused.Author = get.Required.Field "author" actor.Decode
+                  CommandRefused.RejectedBy = get.Required.Field "rejectedBy" actor.Decode
+                  CommandRefused.Reason = get.Required.Field "reason" (Decode.option Decode.string) }) }
 
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
@@ -698,7 +736,9 @@ module Codec =
                 | WorkSandboxStarted p ->
                     Encode.object [ "type", Encode.string "workSandboxStarted"; "payload", workSandboxStarted.Encode p ]
                 | WorkSandboxStopped p ->
-                    Encode.object [ "type", Encode.string "workSandboxStopped"; "payload", workSandboxStopped.Encode p ])
+                    Encode.object [ "type", Encode.string "workSandboxStopped"; "payload", workSandboxStopped.Encode p ]
+                | SessionEvent.CommandRefused p ->
+                    Encode.object [ "type", Encode.string "commandRefused"; "payload", commandRefused.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -742,6 +782,7 @@ module Codec =
                 | "repoBranchSwitched" -> Decode.field "payload" repoBranchSwitched.Decode |> Decode.map RepoBranchSwitched
                 | "workSandboxStarted" -> Decode.field "payload" workSandboxStarted.Decode |> Decode.map WorkSandboxStarted
                 | "workSandboxStopped" -> Decode.field "payload" workSandboxStopped.Decode |> Decode.map WorkSandboxStopped
+                | "commandRefused" -> Decode.field "payload" commandRefused.Decode |> Decode.map SessionEvent.CommandRefused
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

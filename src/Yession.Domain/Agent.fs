@@ -113,9 +113,61 @@ type CommandTarget =
 
 type ExecuteCommand = CommandTarget option -> string -> Async<Result<TerminalCommandOutcome, string>>
 
-/// Resume a handle `ExecuteCommand` yielded (Plan 13, stage 3b): an approval that arrived
-/// late, a long build. Returns the same shape, so the agent learns one thing rather than two.
-type ReadTerminalBlock = QueueId -> Async<Result<TerminalCommandOutcome, string>>
+/// Where a COMMAND the agent asked for has got to (Plan 15, stage 3b). The same three shapes
+/// `TerminalCommandStatus` has, minus the two that are about a process: a command has no pty
+/// to be busy and no deadline of its own.
+type CommandStatus =
+    /// It ran, and this is what it said. The ordinary answer, and the only one an UNGATED
+    /// command can give — which is every command until somebody configures otherwise.
+    | CommandRan of string
+    /// A human has to approve it. Unbounded in principle, so the tool yields a handle rather
+    /// than holding the turn — `TerminalCommandAwaitingApproval`'s reasoning, unchanged.
+    | CommandAwaitingApproval
+    /// Somebody said no. Comes back to the model as an error rather than a silence, because
+    /// a command that vanishes gets retried another way.
+    | CommandRefusedBy of by: ActorRef * reason: string option
+
+/// What one gated command answered with.
+type CommandOutcome =
+    { /// The handle that resumes it — the SAME `QueueId` a terminal command yields, which is
+      /// what lets one `check_pending` serve both. `None` when nothing was ever pending: an
+      /// ungated command has no entry to resume, and handing out a handle to something that
+      /// already finished is an invitation to poll it.
+      Handle : QueueId option
+      Tool : string
+      Summary : string
+      Status : CommandStatus }
+
+/// One command, as its gate needs to know it.
+type GatedCall =
+    { /// The MCP tool name: what the model called, and what a mode is configured against.
+      Tool : string
+      /// The arguments as a human should READ them (`add_repo octo/hello`) — what the card
+      /// shows and what a refusal records, rendered once here rather than three times
+      /// downstream.
+      Summary : string
+      /// Who is asking. Always the agent today; `yession.yaml` will ask too.
+      Author : ActorRef }
+
+/// Run a command through its approval gate (Plan 15, stage 3b). A capability rather than a
+/// detail of the MCP adapter, so the declarative executor gets the same gate the agent does
+/// instead of a second path around it.
+/// The thunk receives WHO approved it, when somebody had to, so the command's own event can
+/// carry `ApprovedBy` — the approver stays attached to the act they released rather than to
+/// a second event beside it. `None` is the ordinary case: nothing was gated.
+type RunGatedCommand =
+    GatedCall -> (ActorRef option -> Async<Result<string, string>>) -> Async<Result<CommandOutcome, string>>
+
+/// What a handle resolved to. One tool, two shapes — the alternative being an agent that has
+/// to know, before it asks, which kind of thing it is waiting on.
+type PendingOutcome =
+    | PendingTerminal of TerminalCommandOutcome
+    | PendingCommand of CommandOutcome
+
+/// Resume a handle `ExecuteCommand` or a gated command yielded (Plan 13, stage 3b; Plan 15,
+/// stage 3b): an approval that arrived late, a long build. One verb, because the handle type
+/// is one type.
+type CheckPending = QueueId -> Async<Result<PendingOutcome, string>>
 
 /// The read-only repo verbs (Plan 14): clone-and-orient, NO mutation of history and NO
 /// push — everything irreversible goes through `ExecuteCommand` in the WorkSandbox,
@@ -126,11 +178,15 @@ type ReadTerminalBlock = QueueId -> Async<Result<TerminalCommandOutcome, string>
 /// Clone a repo into the session's repos directory (a no-op returning the current state
 /// when it is already there). The checkout is visible to every peer and to the
 /// WorkSandbox from the moment it lands.
-type AddRepo = RepoRef -> Async<Result<RepoListing, string>>
+/// Answers with a `CommandOutcome` rather than the listing, because every MUTATING command
+/// goes through its approval gate (Plan 15, stage 3b) and a gate has three answers, not one.
+/// The rendering that used to live in the MCP adapter moved into the thunk the gate wraps —
+/// which is where it has to be anyway, since what the gate carries is what the agent reads.
+type AddRepo = RepoRef -> Async<Result<CommandOutcome, string>>
 
 /// Switch a repo's checkout to a branch, optionally creating it. Local ref movement
 /// only — never touches the remote.
-type SwitchRepoBranch = RepoRef -> string -> bool -> Async<Result<RepoListing, string>>
+type SwitchRepoBranch = RepoRef -> string -> bool -> Async<Result<CommandOutcome, string>>
 
 /// Fetch a repo's remote refs (prune, no submodules). The one network verb besides the
 /// clone itself; runs on the same per-invocation credential.
@@ -162,11 +218,11 @@ type DeleteSessionSecret = SecretName -> Async<Result<bool, string>>
 /// `forward` is a list of credential NAMES. Each resolves for the turn human (Plan 08
 /// precedence) into that sandbox's environment; the value goes nowhere else, and the
 /// event records which names and whose, never what.
-type StartWorkSandbox = SandboxName -> string list -> Async<Result<string, string>>
+type StartWorkSandbox = SandboxName -> string list -> Async<Result<CommandOutcome, string>>
 
 /// Stop one, taking whatever is running in it down. The way to change a sandbox's
 /// forwarding, and stated as such wherever the change is refused.
-type StopWorkSandbox = SandboxName -> Async<Result<string, string>>
+type StopWorkSandbox = SandboxName -> Async<Result<CommandOutcome, string>>
 
 /// Answer one of the session's registered queries (Plan 15). The agent reaches the SAME
 /// registry the humans' settings surface streams from — that is the whole point of a
@@ -187,7 +243,8 @@ type AgentCapabilities =
       /// The agent's ONLY execution path — that is what makes the approval gate real.
       ExecuteCommand : ExecuteCommand
       /// Resume a handle `ExecuteCommand` yielded.
-      ReadTerminalBlock : ReadTerminalBlock
+      CheckPending : CheckPending
+      RunGated : RunGatedCommand
       SetSecret : SetSessionSecret
       ListSecrets : ListSessionSecrets
       DeleteSecret : DeleteSessionSecret
@@ -217,7 +274,17 @@ module AgentCapabilities =
     /// A turn with no environment authority at all (Phase 1 behaviour).
     let none : AgentCapabilities =
         { ExecuteCommand = fun _ _ -> async { return Error "no terminal capability" }
-          ReadTerminalBlock = fun _ -> async { return Error "no terminal capability" }
+          CheckPending = fun _ -> async { return Error "no terminal capability" }
+          // A denial that still RUNS the command: the gate is a wrapper, and a session with
+          // no collaborative state to park an act in must not lose the act.
+          RunGated =
+            fun call run ->
+                async {
+                    match! run None with
+                    | Error reason -> return Error reason
+                    | Ok text ->
+                        return Ok { Handle = None; Tool = call.Tool; Summary = call.Summary; Status = CommandRan text }
+                }
           SetSecret = fun _ _ -> async { return Error "no secrets capability" }
           ListSecrets = fun () -> async { return Error "no secrets capability" }
           DeleteSecret = fun _ -> async { return Error "no secrets capability" }

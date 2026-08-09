@@ -1628,18 +1628,24 @@ module TerminalCommands =
 
     type TerminalCommands =
         { Execute : ExecuteCommand
-          Read : ReadTerminalBlock }
+          /// Resume a terminal handle. The terminal HALF of `CheckPending` (Plan 15, stage
+          /// 3b): the Host joins it to the command gate's half, because a handle names a
+          /// request without saying which kind, which is exactly what makes one tool enough.
+          Read : QueueId -> Async<Result<TerminalCommandOutcome, string>> }
 
     let unavailable : TerminalCommands =
         { Execute = fun _ _ -> async { return Error "this session has no terminals" }
           Read = fun _ -> async { return Error "this session has no terminals" } }
 
-    /// Wake on the next change, or on a short tick.
+    /// Wake on the next change, or on a short tick. The tick is a floor, not the mechanism:
+    /// a change wakes the wait immediately, which is what makes `AutoRun` synchronous, and
+    /// the tick only guarantees that a deadline can still fire in a quiet session where
+    /// nothing else is happening.
     ///
-    /// The tick is a floor, not the mechanism: a change wakes the wait immediately, which is
-    /// what makes `AutoRun` synchronous, and the tick only guarantees that a deadline can
-    /// still fire in a quiet session where nothing else is happening.
-    let private nextWake (onChanged: OnChanged) : Async<unit> =
+    /// Public because the command gate (Plan 15, stage 3) waits on exactly the same signal:
+    /// one wait mechanism, so a parked act and a queued command cannot end up with different
+    /// liveness.
+    let nextWake (onChanged: OnChanged) : Async<unit> =
         Async.FromContinuations (fun (cont, _, _) ->
             let mutable fired = false
             let mutable unsubscribe : unit -> unit = ignore
