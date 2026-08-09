@@ -463,7 +463,9 @@ type ClientMsg =
     /// Reorder a queued command within its terminal: one fractional-index register write.
     | ReorderPendingMsg of QueueId * order: float
     /// Set a terminal's approval mode.
-    | SetTerminalModeMsg of TerminalId * ApprovalMode
+    /// Set a SUBJECT's approval mode (Plan 15, stage 3c) — a terminal's, or a command's.
+    /// One message, because it is one register.
+    | SetGateMsg of GateSubject * ApprovalMode
 
 module ClientModel =
 
@@ -772,6 +774,17 @@ module ClientModel =
     /// A terminal's queued commands in run order.
     let terminalQueue (terminal: TerminalId) (model: ClientModel) : PendingAct list =
         TerminalQueueOrder.sortedFor terminal model.Synced.Pending
+
+    /// Every act waiting on a verdict, in a stable total order (Plan 15, stage 3c): by
+    /// subject, then by the subject's own order, then by id. What the chat column shows,
+    /// and it deliberately includes the TERMINAL ones — approving a command the agent is
+    /// about to run is the same act as reading what it is about to say, so it belongs where
+    /// the reading happens rather than only inside a panel you may not have open.
+    let pendingActs (model: ClientModel) : PendingAct list =
+        model.Synced.Pending
+        |> Map.toList
+        |> List.map snd
+        |> List.sortBy (fun act -> GateSubject.describe act.Subject, act.Order, QueueId.value act.QueueId)
 
     /// The composer slots published in a terminal, in stable order — every peer mid-command
     /// there, the local peer included.
@@ -1201,5 +1214,5 @@ module ClientModel =
                     { model.Synced with
                         Pending = Map.add queueId { entry with Order = order } model.Synced.Pending }
             | None -> model
-        | SetTerminalModeMsg (terminal, mode) ->
-            model |> withSynced { model.Synced with Gates = Map.add (ForTerminal terminal) mode model.Synced.Gates }
+        | SetGateMsg (subject, mode) ->
+            model |> withSynced { model.Synced with Gates = Map.add subject mode model.Synced.Gates }
