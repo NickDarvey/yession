@@ -350,10 +350,40 @@ let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabi
                 | Error _ -> ()
                 return result
             }
+        // Through the gate (Plan 15, stage 3b), which for an ungated command — every command,
+        // until somebody configures otherwise — is the call itself and nothing more. The
+        // rendering lives inside the thunk because what the gate carries IS what the agent
+        // reads, and the approver arrives here so the event can name them.
+        let gated (tool: string) (summary: string) (run: ActorRef option -> Async<Result<string, string>>) =
+            capabilities.RunGated { Tool = tool; Summary = summary; Author = ActorRef.Agent } run
         { capabilities with
-            AddRepo = service.AddRepo caller >> andPublish
-            SwitchRepoBranch = fun repo branch create -> andPublish (service.SwitchBranch caller repo branch create)
-            FetchRepo = service.FetchRepo caller
+            AddRepo =
+              fun repo ->
+                gated "add_repo" (sprintf "add_repo %s" (RepoRef.value repo)) (fun approvedBy ->
+                    andPublish (
+                        async {
+                            match! service.AddRepo (caller approvedBy) repo with
+                            | Error e -> return Error e
+                            | Ok listing ->
+                                return
+                                    Ok (
+                                        sprintf
+                                            "added %s — the checkout is shared with everyone in this session and visible in the work environment"
+                                            (RepoListing.describe listing))
+                        }))
+            SwitchRepoBranch =
+              fun repo branch create ->
+                let summary =
+                    if create then sprintf "switch_branch %s -> new branch %s" (RepoRef.value repo) branch
+                    else sprintf "switch_branch %s -> %s" (RepoRef.value repo) branch
+                gated "switch_branch" summary (fun approvedBy ->
+                    andPublish (
+                        async {
+                            match! service.SwitchBranch (caller approvedBy) repo branch create with
+                            | Error e -> return Error e
+                            | Ok listing -> return Ok (sprintf "now on %s" (RepoListing.describe listing))
+                        }))
+            FetchRepo = service.FetchRepo (caller None)
             RepoStatus = service.RepoStatus
             RepoLog = service.RepoLog
             RepoDiff = service.RepoDiff }
@@ -363,36 +393,46 @@ let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabi
 /// the act without anybody refreshing — a command is the only thing that can change the
 /// answer, so it is the only thing that has to say so.
 let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
-    let caller : WorkSandboxes.SandboxCaller = { Actor = ActorRef.Agent; Credential = turnActor }
+    let caller (approvedBy: ActorRef option) : WorkSandboxes.SandboxCaller =
+        { Actor = ActorRef.Agent; Credential = turnActor; ApprovedBy = approvedBy }
+    let gated (tool: string) (summary: string) (run: ActorRef option -> Async<Result<string, string>>) =
+        capabilities.RunGated { Tool = tool; Summary = summary; Author = ActorRef.Agent } run
     { capabilities with
         StartWorkSandbox =
           fun name forward ->
-            async {
-                match! workSandboxes.Ensure caller name forward with
-                | Error e -> return Error e
-                | Ok entry ->
-                    queryRegistry.Invalidate WorkSandboxes.queryName
-                    let forwarding =
-                        match entry.Forwarded with
-                        | [] -> "nothing forwarded into it"
-                        | names -> "forwarding " + String.concat ", " names
-                    return
-                        Ok (
-                            sprintf
-                                "sandbox '%s' is up on %s, %s — run things in it with execute_command"
-                                (SandboxName.value entry.Name)
-                                entry.Backend
-                                forwarding)
-            }
+            let summary =
+                match WorkSandboxes.normaliseForward forward with
+                | [] -> sprintf "start_work_sandbox %s" (SandboxName.value name)
+                | names ->
+                    sprintf "start_work_sandbox %s forwarding %s" (SandboxName.value name) (String.concat ", " names)
+            gated "start_work_sandbox" summary (fun approvedBy ->
+                async {
+                    match! workSandboxes.Ensure (caller approvedBy) name forward with
+                    | Error e -> return Error e
+                    | Ok entry ->
+                        queryRegistry.Invalidate WorkSandboxes.queryName
+                        let forwarding =
+                            match entry.Forwarded with
+                            | [] -> "nothing forwarded into it"
+                            | names -> "forwarding " + String.concat ", " names
+                        return
+                            Ok (
+                                sprintf
+                                    "sandbox '%s' is up on %s, %s — run things in it with execute_command"
+                                    (SandboxName.value entry.Name)
+                                    entry.Backend
+                                    forwarding)
+                })
         StopWorkSandbox =
           fun name ->
-            async {
-                match! workSandboxes.Stop caller name with
-                | Error e -> return Error e
-                | Ok () ->
-                    queryRegistry.Invalidate WorkSandboxes.queryName
-                    return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxName.value name))
-            } }
+            gated "stop_work_sandbox" (sprintf "stop_work_sandbox %s" (SandboxName.value name)) (fun approvedBy ->
+                async {
+                    match! workSandboxes.Stop (caller approvedBy) name with
+                    | Error e -> return Error e
+                    | Ok () ->
+                        queryRegistry.Invalidate WorkSandboxes.queryName
+                        return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxName.value name))
+                }) }
 
 /// Per-turn credential dispatch (Plan 08): resolve the credential the TURN ACTOR runs
 /// on — the session's own explicit credential first, then the actor's — fresh from the
@@ -576,6 +616,20 @@ Async.StartImmediate (
         // capabilities and the `work_sandboxes` query read is filled here — before the
         // readiness line, and therefore before any turn or any browser can ask.
         workSandboxes <- host.Sandboxes
+        // The operator's gate configuration (Plan 15, stage 3b), SEEDED into the synced
+        // register rather than consulted at decision time — which is what leaves exactly one
+        // place a mode is ever read from, and lets a human change their mind mid-session
+        // without a restart. Empty by default, so a session nobody configured behaves exactly
+        // as it did before the gate existed. A restart re-asserts the operator's list: the
+        // configuration is what the session BOOTS as, and a mid-session change is a change to
+        // this run.
+        match CommandGates.parseConfiguredGates (Interop.envOr "YESSION_GATED_COMMANDS" "") with
+        | [] -> ()
+        | tools ->
+            for tool in tools do
+                SyncedStateSync.setGate host.Doc (ForCommand tool) ApproveAgent
+            eprintfn "[session %s] these commands need a human to approve them: %s"
+                (SessionId.value sessionId) (String.concat ", " tools)
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

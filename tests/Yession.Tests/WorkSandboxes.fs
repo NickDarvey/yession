@@ -58,7 +58,7 @@ let private registry (log: EventLog<SessionEvent>) (credentials: WorkSandboxes.C
         |> expect
     sandboxes, built
 
-let private caller : WorkSandboxes.SandboxCaller = { Actor = ActorRef.Agent; Credential = ada }
+let private caller : WorkSandboxes.SandboxCaller = { Actor = ActorRef.Agent; Credential = ada; ApprovedBy = None }
 
 let private githubCredential (value: string option) : WorkSandboxes.CredentialSource =
     { Name = "github"; EnvVar = "GITHUB_TOKEN"; Resolve = fun _ -> async { return value } }
@@ -349,7 +349,7 @@ let private timelineTests =
                           Backend = "srt"
                           Forwarded = [ "github" ]
                           CredentialOwner = Some ada
-                          Actor = ActorRef.Agent } }
+                          Actor = ActorRef.Agent; ApprovedBy = None } }
             let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
             | [ item ] ->
@@ -372,7 +372,8 @@ let private timelineTests =
                           Backend = "host"
                           Forwarded = []
                           CredentialOwner = None
-                          Actor = ada } }
+                          Actor = ada
+                          ApprovedBy = None } }
             let proj, _ = ConversationProjection.applyEvents None [ envelope ] ConversationProjection.empty
             match proj.Items with
             | [ item ] -> Expect.equal item.Body "started sandbox test (host)" "no forwarding clause"

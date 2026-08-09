@@ -2,7 +2,7 @@ module Yession.Host.Agent
 
 // The real agent runner: an adapter from the `RunAgent` capability to the Claude Agent
 // SDK. The turn's typed capabilities are exposed to the model as MCP tools —
-// `execute_command` and `read_terminal_block` (Plan 13, stage 3b) — so a live agent runs
+// `execute_command` and `check_pending` (Plan 13, stage 3b; Plan 15, stage 3b) — so a live agent runs
 // commands through the session's terminals, where people can see them, exactly like the
 // scripted agents in the deterministic suite. Requires ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN; the
 // deterministic tests never call this, and the live smoke test is gated on credentials,
@@ -36,14 +36,14 @@ type private RunOutcome =
       tools: [
         sdk.tool(
           'execute_command',
-          'Run a shell command in one of this session\'s terminals, where the people in the session can see it, edit it, and — depending on the terminal — approve it before it runs. This is the only way to run anything. Pass `sandbox` to run in a named work sandbox (start_work_sandbox creates one); omit it for the default sandbox, which is where everything runs unless you say otherwise. It waits for the result and returns the exit code and output; if it is waiting on a person, or the terminal is busy, or the command is still going, it says so and returns a handle for read_terminal_block instead of hanging. Read what it returns: every answer states which of those happened.',
+          'Run a shell command in one of this session\'s terminals, where the people in the session can see it, edit it, and — depending on the terminal — approve it before it runs. This is the only way to run anything. Pass `sandbox` to run in a named work sandbox (start_work_sandbox creates one); omit it for the default sandbox, which is where everything runs unless you say otherwise. It waits for the result and returns the exit code and output; if it is waiting on a person, or the terminal is busy, or the command is still going, it says so and returns a handle for check_pending instead of hanging. Read what it returns: every answer states which of those happened.',
           { command: z.string().describe('the shell command line to run, e.g. "npm test -- --watch=false"'), sandbox: z.string().optional().describe('the work sandbox to run in, e.g. "test"; omit for the default one') },
           async (args) => ({ content: [{ type: 'text', text: await $3(args.command, args.sandbox || '') }] })
         ),
         sdk.tool(
-          'read_terminal_block',
-          'Pick a command back up by the handle execute_command returned — an approval that arrived late, or a long build. Returns the same thing execute_command does.',
-          { handle: z.string().describe('the handle from execute_command') },
+          'check_pending',
+          'Pick anything back up by the handle it returned — a command waiting on somebody to approve it, an approval that arrived late, a long build. Works for execute_command and for any command that said it was waiting for a human. Returns the same thing the original call would have.',
+          { handle: z.string().describe('the handle from execute_command, or from a command that said it was waiting') },
           async (args) => ({ content: [{ type: 'text', text: await $4(args.handle) }] })
         ),
         sdk.tool(
@@ -142,7 +142,7 @@ type private RunOutcome =
         // own it left the read-only built-ins reachable (a session could list the host
         // filesystem). It stays so our tools run without a permission round-trip.
         tools: [],
-        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__read_terminal_block', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__add_repo', 'mcp__yession__switch_branch', 'mcp__yession__fetch_repo', 'mcp__yession__repo_status', 'mcp__yession__repo_log', 'mcp__yession__repo_diff', 'mcp__yession__start_work_sandbox', 'mcp__yession__stop_work_sandbox', ...$12.map(q => 'mcp__yession__' + q.name)],
+        allowedTools: ['mcp__yession__execute_command', 'mcp__yession__check_pending', 'mcp__yession__set_secret', 'mcp__yession__list_secrets', 'mcp__yession__delete_secret', 'mcp__yession__add_repo', 'mcp__yession__switch_branch', 'mcp__yession__fetch_repo', 'mcp__yession__repo_status', 'mcp__yession__repo_log', 'mcp__yession__repo_diff', 'mcp__yession__start_work_sandbox', 'mcp__yession__stop_work_sandbox', ...$12.map(q => 'mcp__yession__' + q.name)],
         abortController: controller,
         ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
         env: $1,
@@ -348,15 +348,43 @@ let private executeFor (capabilities: AgentCapabilities) : string -> string -> J
         }
         |> Async.StartAsPromise
 
-/// The `read_terminal_block` tool body: resume a handle the tool above yielded.
-let private readBlockFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
+/// The one renderer for every gated command (Plan 15, stage 3b). A gate has three answers,
+/// so this is where they become the three sentences the model reads — once, rather than once
+/// per command, which is what stops a new command inventing its own vocabulary for
+/// "somebody has to approve this".
+///
+/// A refusal is phrased as a refusal and not as an error the model should route around: it
+/// names who said no, and their reason when they gave one, for `TerminalCommandRejected`'s
+/// reason — a decision that reads as a malfunction gets retried another way.
+let private renderCommandOutcome (outcome: CommandOutcome) : string =
+    match outcome.Status with
+    | CommandRan said -> said
+    | CommandAwaitingApproval ->
+        match outcome.Handle with
+        | Some handle ->
+            sprintf
+                "WAITING FOR A HUMAN TO APPROVE `%s`. It has NOT happened. Do not wait for it — say what you proposed and why. Call check_pending with handle '%s' once they have had a chance to look."
+                outcome.Summary
+                (QueueId.value handle)
+        | None -> sprintf "WAITING FOR A HUMAN TO APPROVE `%s`. It has NOT happened." outcome.Summary
+    | CommandRefusedBy (by, reason) ->
+        let who = ActorRef.token by
+        match reason with
+        | Some reason -> sprintf "REFUSED by %s: %s. `%s` did not happen — do not try another way round it." who reason outcome.Summary
+        | None -> sprintf "REFUSED by %s. `%s` did not happen — do not try another way round it." who outcome.Summary
+
+/// The `check_pending` tool body: resume a handle, whichever kind of act it named (Plan 15,
+/// stage 3b). ONE verb, because the handle is one type — the alternative is an agent that
+/// has to know, before it asks, what it is waiting on.
+let private checkPendingFor (capabilities: AgentCapabilities) : string -> JS.Promise<string> =
     fun handle ->
         async {
             match QueueId.create handle with
             | Error e -> return sprintf "not a command handle: %s" e
             | Ok handle ->
-                match! capabilities.ReadTerminalBlock handle with
-                | Ok outcome -> return renderOutcome outcome
+                match! capabilities.CheckPending handle with
+                | Ok (PendingTerminal outcome) -> return renderOutcome outcome
+                | Ok (PendingCommand outcome) -> return renderCommandOutcome outcome
                 | Error reason -> return sprintf "could not read that command: %s" reason
         }
         |> Async.StartAsPromise
@@ -418,7 +446,7 @@ let private addRepoFor (capabilities: AgentCapabilities) : string -> JS.Promise<
         withRepo raw (fun repo ->
             async {
                 match! capabilities.AddRepo repo with
-                | Ok listing -> return sprintf "added %s — the checkout is shared with everyone in this session and visible in the work environment" (RepoListing.describe listing)
+                | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not add the repo: %s" e
             })
 
@@ -449,7 +477,7 @@ let private switchBranchFor (capabilities: AgentCapabilities) : string -> string
         withRepo raw (fun repo ->
             async {
                 match! capabilities.SwitchRepoBranch repo branch create with
-                | Ok listing -> return sprintf "now on %s" (RepoListing.describe listing)
+                | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not switch branch: %s" e
             })
 
@@ -486,7 +514,7 @@ let private startWorkSandboxFor (capabilities: AgentCapabilities) : string -> st
         withSandbox raw (fun name ->
             async {
                 match! capabilities.StartWorkSandbox name (List.ofArray forward) with
-                | Ok said -> return said
+                | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not start the sandbox: %s" e
             })
 
@@ -495,7 +523,7 @@ let private stopWorkSandboxFor (capabilities: AgentCapabilities) : string -> JS.
         withSandbox raw (fun name ->
             async {
                 match! capabilities.StopWorkSandbox name with
-                | Ok said -> return said
+                | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not stop the sandbox: %s" e
             })
 
@@ -524,7 +552,7 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (toEnvObj (Map.toArray env))
                     (claudePath ())
                     (executeFor capabilities)
-                    (readBlockFor capabilities)
+                    (checkPendingFor capabilities)
                     (fun text -> onChunk { Text = text })
                     signal.OnAbort
                     (setSecretFor capabilities)

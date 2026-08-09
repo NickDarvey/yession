@@ -174,6 +174,23 @@ module ConversationProjection =
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset } ] }
+        // A refusal reads in the timeline beside the acts that happened, attributed to the
+        // person who said no rather than to the agent that asked (Plan 15, stage 3). Same
+        // reason `BlockRejected` renders in the terminal: an act that simply vanishes is
+        // indistinguishable from a bug.
+        | SessionEvent.CommandRefused c ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = c.MessageId
+                          Author = c.RejectedBy
+                          Body =
+                            match c.Reason with
+                            | Some reason -> sprintf "refused %s — %s" c.Summary reason
+                            | None -> sprintf "refused %s" c.Summary
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset } ] }
         | AgentMessageStarted a ->
             { Items =
                 proj.Items

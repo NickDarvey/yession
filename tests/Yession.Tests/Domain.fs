@@ -213,24 +213,25 @@ let private frameSerializationTests =
                   CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandFailed 3 }
                   CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandTimedOut }
                   CommandCompleted { CommandId = CommandId.create "cmd-1" |> expect; Result = CommandExecutionFailed "denied" }
-                  RepoAdded { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "main"; Actor = PeerRef peerId }
-                  RepoRemoved { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Actor = ActorRef.Agent }
-                  RepoBranchSwitched { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "feature/x"; Created = true; Actor = UserRef (UserId.create "alice" |> expect) }
+                  RepoAdded { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "main"; Actor = PeerRef peerId; ApprovedBy = None }
+                  RepoRemoved { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Actor = ActorRef.Agent; ApprovedBy = None }
+                  RepoBranchSwitched { MessageId = messageId; Repo = RepoRef.create "octo/hello" |> expect; Branch = "feature/x"; Created = true; Actor = UserRef (UserId.create "alice" |> expect); ApprovedBy = Some (PeerRef peerId) }
                   WorkSandboxStarted
                     { MessageId = messageId
                       Sandbox = SandboxName.create "test" |> expect
                       Backend = "srt"
                       Forwarded = [ "github" ]
                       CredentialOwner = Some (UserRef (UserId.create "alice" |> expect))
-                      Actor = ActorRef.Agent }
+                      Actor = ActorRef.Agent; ApprovedBy = None }
                   WorkSandboxStarted
                     { MessageId = messageId
                       Sandbox = SandboxName.defaultName
                       Backend = "host"
                       Forwarded = []
                       CredentialOwner = None
-                      Actor = PeerRef peerId }
-                  WorkSandboxStopped { MessageId = messageId; Sandbox = SandboxName.create "test" |> expect; Actor = ActorRef.Agent } ]
+                      Actor = PeerRef peerId
+                      ApprovedBy = None }
+                  WorkSandboxStopped { MessageId = messageId; Sandbox = SandboxName.create "test" |> expect; Actor = ActorRef.Agent; ApprovedBy = None } ]
             for event in everyCase do
                 let env = { sampleEnvelope with Event = event }
                 let roundTripped =
@@ -280,14 +281,14 @@ let private repoTests =
             let repo = RepoRef.create "octo/hello" |> expect
             let ada = PeerId.create "ada" |> expect
             let folded =
-                [ RepoAdded { MessageId = msg "r1"; Repo = repo; Branch = "main"; Actor = PeerRef ada }
-                  RepoBranchSwitched { MessageId = msg "r2"; Repo = repo; Branch = "feature/x"; Created = true; Actor = ActorRef.Agent }
+                [ RepoAdded { MessageId = msg "r1"; Repo = repo; Branch = "main"; Actor = PeerRef ada; ApprovedBy = None }
+                  RepoBranchSwitched { MessageId = msg "r2"; Repo = repo; Branch = "feature/x"; Created = true; Actor = ActorRef.Agent; ApprovedBy = None }
                   MessageSent { MessageId = msg "m"; QueueId = None; Author = PeerRef ada; Body = "hi" } ]
                 |> List.fold ReposProjection.applyEvent ReposProjection.empty
             Expect.equal folded.Repos [ { Repo = repo; Branch = "feature/x"; AddedBy = PeerRef ada } ] "one repo, on the switched branch"
-            let readded = ReposProjection.applyEvent folded (RepoAdded { MessageId = msg "r3"; Repo = repo; Branch = "main"; Actor = ActorRef.Agent })
+            let readded = ReposProjection.applyEvent folded (RepoAdded { MessageId = msg "r3"; Repo = repo; Branch = "main"; Actor = ActorRef.Agent; ApprovedBy = None })
             Expect.equal readded.Repos [ { Repo = repo; Branch = "main"; AddedBy = ActorRef.Agent } ] "re-add replaces in place"
-            let removed = ReposProjection.applyEvent readded (RepoRemoved { MessageId = msg "r4"; Repo = repo; Actor = PeerRef ada })
+            let removed = ReposProjection.applyEvent readded (RepoRemoved { MessageId = msg "r4"; Repo = repo; Actor = PeerRef ada; ApprovedBy = None })
             Expect.equal removed.Repos [] "removed"
 
         testCase "repo events fold into the timeline as attributed notes" <| fun () ->
@@ -296,9 +297,9 @@ let private repoTests =
             let sessionId = SessionId.create "repo-session" |> expect
             let ada = PeerId.create "ada" |> expect
             let envelopes =
-                [ RepoAdded { MessageId = msg "r1"; Repo = repo; Branch = "main"; Actor = PeerRef ada }
-                  RepoBranchSwitched { MessageId = msg "r2"; Repo = repo; Branch = "fix/y"; Created = false; Actor = ActorRef.Agent }
-                  RepoRemoved { MessageId = msg "r3"; Repo = repo; Actor = PeerRef ada } ]
+                [ RepoAdded { MessageId = msg "r1"; Repo = repo; Branch = "main"; Actor = PeerRef ada; ApprovedBy = None }
+                  RepoBranchSwitched { MessageId = msg "r2"; Repo = repo; Branch = "fix/y"; Created = false; Actor = ActorRef.Agent; ApprovedBy = None }
+                  RepoRemoved { MessageId = msg "r3"; Repo = repo; Actor = PeerRef ada; ApprovedBy = None } ]
                 |> List.mapi (fun i event ->
                     { EventId = EventId.fresh ()
                       SessionId = sessionId

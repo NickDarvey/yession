@@ -269,8 +269,27 @@ focus on.
   every consumer re-answer "which terminal" with a default or a `failwith` — a lie about a
   value the plan's own filter already proved. Command acts wait in the same map and the drain
   skips them: no shell, no order to hold, and their own gate resolves them.
-- **3b** — `Gates.run`, the `check_pending` unification, `CommandRefused` and `ApprovedBy`,
-  and `YESSION_GATED_COMMANDS` seeding the register.
+- **3b** — the gate, the `check_pending` unification, `CommandRefused` and `ApprovedBy`, and
+  `YESSION_GATED_COMMANDS` seeding the register. Three concretions the sketch above did not
+  have:
+
+  - **Every mutating command answers `Result<CommandOutcome, string>`**, not its own typed
+    value. A gate has three answers and a listing has one, so the rendering that used to sit
+    in the MCP adapter moved into the thunk the gate wraps — which is where it has to be,
+    since what the gate carries IS what the agent reads. The payoff is one renderer for every
+    gated command instead of one per command, so the next command cannot invent its own
+    vocabulary for "somebody has to approve this".
+  - **The watcher is detached from the MCP call.** An approval must take effect whether or
+    not an agent turn is still waiting, or a human pressing approve would watch nothing
+    happen. The call observes; a background continuation acts.
+  - **A parked command does NOT survive a restart, and says so.** A terminal command does,
+    because the doc holds its whole payload — a line of text a cold drain can run. A
+    structured call's arguments are typed and the entry holds only what a human was shown, so
+    the thing that would carry it out is the continuation this process is holding.
+    `sweepAtBoot` therefore refuses whatever was still parked, attributed to the session and
+    with the reason, rather than leaving a card up whose approve button can never do anything.
+    Buying durability instead would mean putting the raw arguments in the doc and dispatching
+    by tool name — named in Deferred rather than half-built.
 - **3c** — the one card, both mounts, and the mode control generalized from the terminal's
   existing `<select>`.
 
@@ -290,6 +309,9 @@ focus on.
   DSL is the only thing in the way; a JSON-Schema-subset renderer is the missing piece.
 - MCP resource subscriptions for the agent side of live updates.
 - Per-query authorization (today every signed-in session member reads every query).
+- Restart-durable command acts: the raw arguments in the doc plus a dispatch-by-tool-name
+  table, which is what would let a cold process carry out an approval it did not propose.
+  Today a restart refuses them, visibly (`CommandGates.sweepAtBoot`).
 - Editing a structured proposal before approving it. A `CommandCall` card is approve-or-reject;
   making its arguments editable needs the same JSON-Schema-subset renderer the external-server
   item above is waiting on, and a half-built form is worse than a legible refusal.

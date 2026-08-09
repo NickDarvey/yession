@@ -46,3 +46,4 @@ module Bootstrap =
         | SessionEvent.RepoBranchSwitched _ -> "repo-branch-switched"
         | SessionEvent.WorkSandboxStarted _ -> "work-sandbox-started"
         | SessionEvent.WorkSandboxStopped _ -> "work-sandbox-stopped"
+        | SessionEvent.CommandRefused _ -> "command-refused"
