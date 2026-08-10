@@ -20,22 +20,45 @@ open Lit
 
 // --- Rendering (pure Lit templates, rendered to strings by Ssr) -------------------------
 
+/// Both registries are FIXED-layout tables: the columns are declared once in the header
+/// and every row obeys them, so what a row contains can never move a column — a launch
+/// that widens `status` cannot squeeze `name` into a second line, and the two tables hang
+/// their controls on the same right rail. The name column takes whatever is left.
+module private Col =
+    let table = "w-full text-left border-collapse table-fixed"
+    /// Wide enough for a whole Crockford id in 12px mono — a half id identifies nothing,
+    /// so this column is sized to never truncate. The first thing to go on a phone.
+    let id = "w-[204px] max-md:hidden"
+    /// Holds the status word plus `port · pid` uncut; on a phone, just the word.
+    let status = "w-[256px] max-md:w-[100px]"
+    /// One `h-8` control, full-bleed in its column, plus the cell's left gutter. The
+    /// session rail can be tighter on a phone — Launch and Stop are short words, and
+    /// what the rail spares there the name gets — where Withdraw is not.
+    let actions = "w-[128px]"
+    let actionsNarrow = "w-[128px] max-md:w-[104px]"
+
 // The status word carries the colour (text, never boxed — the affordance rule); the
-// process detail (port · pid) is plumbing, so it sits beside the word in faint mono
-// rather than shouting in the status voice, and yields on narrow screens.
+// process detail (port · pid) is plumbing, so it sits beside the word in the quieter
+// faint mono step rather than shouting in the status voice, and yields on narrow
+// screens. It stays on ONE line at every width its column is given: a status that
+// wraps when a session starts is a row that changes height when a session starts.
 let private statusView (status: ProcessManager.SessionStatus) : TemplateResult =
     match status with
     | ProcessManager.NotRunning ->
         html $"""<span class="{Style.statusFaint}" data-status="{Dom.Manager.statusStopped}">stopped</span>"""
     | ProcessManager.Running (port, pid) ->
         html
-            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-mono text-[12px] leading-4 text-ink-faint tabular-nums ml-2.5 max-md:hidden">port {port} · pid {pid}</span>"""
+            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-mono text-code-sm text-ink-faint tabular-nums ml-2.5 max-md:hidden">port {port} · pid {pid}</span>"""
     | ProcessManager.Exited code ->
         let reason = code |> Option.map string |> Option.defaultValue "signal"
         html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""
 
-let private actions (access: PublicAccess) (view: ProcessManager.SessionView) : TemplateResult =
-    let id = SessionId.value view.Record.SessionId
+/// The name cell. Opening a running session is THE act on it, and it is carried by the
+/// name — content is the interface — rather than by a second bordered rectangle in the
+/// right rail: with five sessions listed, a per-row Open plus a per-row lifecycle verb is
+/// ten buttons competing with the page's one real CTA (Create). A stopped session has
+/// nothing to open yet, so its name is plain text and its row's one control says Launch.
+let private nameView (access: PublicAccess) (view: ProcessManager.SessionView) : TemplateResult =
     match view.Status with
     | ProcessManager.Running (port, _) ->
         // A plain URL: access is authorized by the OIDC bounce (session -> manager ->
@@ -45,33 +68,43 @@ let private actions (access: PublicAccess) (view: ProcessManager.SessionView) : 
         // The address comes from the deployment's session template (docs/plans/10), the
         // same declaration the session itself used to register its redirect URI.
         let openUrl = sprintf "%s/" (PublicAccess.sessionAddress view.Record.SessionId port access).Url
-        // Open is THE action on a running session, so it is first in the DOM (first in
-        // focus order) and wears the primary button; Stop is secondary — its border
-        // stays dim until hovered (btnDanger's affordance). The row-reverse container
-        // puts the primary on the right rail (the column Launch holds on stopped rows)
-        // and, when the pair wraps on a narrow screen, on the top line.
-        html $"""
-            <a class="{Style.btnPrimary} min-w-[88px] inline-block text-center no-underline" href="{openUrl}" target="_blank" data-open>Open ↗</a>
-            <button type="button" class="{Style.btnDanger}" data-stop="{id}">Stop</button>"""
+        html
+            $"""<a class="{Style.recordLink}" href="{openUrl}" target="_blank" data-open>{view.Record.DisplayName}<span class="{Style.recordLinkMark}" aria-hidden="true">↗</span></a>"""
+    | ProcessManager.NotRunning
+    | ProcessManager.Exited _ -> html $"""<span class="{Style.body}">{view.Record.DisplayName}</span>"""
+
+/// The row's one control: the lifecycle verb this session is currently capable of. Both
+/// faces rest on the quiet rim and answer to the pointer (Stop turns err, Launch turns
+/// ink), so a column of them reads as a rail of outlines rather than a column of CTAs.
+/// Full width of its column, so Launch and Stop share both edges as rows change state.
+let private actions (view: ProcessManager.SessionView) : TemplateResult =
+    let id = SessionId.value view.Record.SessionId
+    match view.Status with
+    | ProcessManager.Running _ ->
+        html $"""<button type="button" class="{Style.btnDanger} w-full" data-stop="{id}">Stop</button>"""
     | ProcessManager.NotRunning
     | ProcessManager.Exited _ ->
-        html $"""<button type="button" class="{Style.btnPrimary} min-w-[88px]" data-launch="{id}">Launch</button>"""
+        html $"""<button type="button" class="{Style.btn} w-full" data-launch="{id}">Launch</button>"""
 
 /// One session row — an action's swap unit: launch/stop replace it wholesale, so the markup is
 /// always a pure function of the Manager's current view. (Live status replaces the whole table
 /// instead; see the rows stream.) The human name leads (content is the interface); the minted
 /// id is plumbing, faint mono, and yields on narrow screens. Actions anchor the right edge so
 /// the row reads name → state → verb.
+///
+/// A row is the same height whatever its state. The table is fixed-layout (`Col`), so
+/// launching cannot widen the status column and squeeze a name into a second line, and each
+/// cell holds ONE line — a single `h-8` control in the action column, ellipsis rather than
+/// wrap in the text ones. Rows that jump as processes start and stop make a list you cannot
+/// keep your place in, and put a control under a pointer that was aimed at its neighbour.
 let private rowTemplate (access: PublicAccess) (view: ProcessManager.SessionView) : TemplateResult =
     let id = SessionId.value view.Record.SessionId
     html $"""
         <tr class="border-b border-hair hover:bg-surface transition-colors" data-session="{id}">
-          <td class="py-3 pr-4 align-middle {Style.body} max-md:max-w-[38vw] max-md:truncate">{view.Record.DisplayName}</td>
-          <td class="py-3 pr-4 align-middle font-mono text-[12px] leading-4 text-ink-faint max-md:hidden">{id}</td>
-          <td class="py-3 pr-4 align-middle whitespace-nowrap">{statusView view.Status}</td>
-          <td class="py-3 pl-4 align-middle">
-            <div class="flex flex-row-reverse flex-wrap items-center gap-x-4 gap-y-2">{actions access view}</div>
-          </td>
+          <td class="py-3 pr-4 align-middle truncate" title="{view.Record.DisplayName}">{nameView access view}</td>
+          <td class="py-3 pr-4 align-middle font-mono text-code text-ink-faint truncate max-md:hidden">{id}</td>
+          <td class="py-3 pr-4 align-middle truncate">{statusView view.Status}</td>
+          <td class="py-3 pl-4 align-middle">{actions view}</td>
         </tr>"""
 
 // The swap unit for a create is the whole section (label, count, table), so the count
@@ -91,13 +124,13 @@ let private tableTemplate (access: PublicAccess) (views: ProcessManager.SessionV
             <span class="{Style.label}">sessions</span>
             <span class="font-semibold text-[11px] leading-4 tracking-[0.18em] text-ink-faint tabular-nums">{List.length views}</span>
           </div>
-          <table class="w-full text-left border-collapse">
+          <table class="{Col.table}">
             <thead>
               <tr class="border-b border-hair">
                 <th scope="col" class="py-2 pr-4 {Style.label}">name</th>
-                <th scope="col" class="py-2 pr-4 {Style.label} max-md:hidden">id</th>
-                <th scope="col" class="py-2 pr-4 {Style.label}">status</th>
-                <th scope="col" class="py-2 pl-4"><span class="sr-only">actions</span></th>
+                <th scope="col" class="py-2 pr-4 {Style.label} {Col.id}">id</th>
+                <th scope="col" class="py-2 pr-4 {Style.label} {Col.status}">status</th>
+                <th scope="col" class="py-2 pl-4 {Col.actionsNarrow}"><span class="sr-only">actions</span></th>
               </tr>
             </thead>
             <tbody>{rows}</tbody>
@@ -121,11 +154,21 @@ let private script =
       const t = document.createElement('template'); t.innerHTML = htmlText.trim()
       const n = t.content.firstElementChild
       if (!n || !el || n.outerHTML === el.outerHTML) return
-      const hadFocus = el.contains(document.activeElement)
-      el.replaceWith(n)
       // Keyboard continuity (WCAG 2.0): replacing the focused element strands focus on
-      // <body>; land it on the replacement's first action instead (the primary, by DOM order).
-      if (hadFocus) { const f = n.querySelector('a[href], button, input'); if (f) f.focus() }
+      // <body>. Land it back on the SAME session — the swap unit is often the whole table
+      // (the rows stream, a create), and the replacement's first action belongs to the
+      // first row, which is another session's control under the same finger.
+      const active = el.contains(document.activeElement) ? document.activeElement : null
+      const row = active && active.closest('[data-session]')
+      const wasAction = !!active && (active.hasAttribute('data-launch') || active.hasAttribute('data-stop'))
+      el.replaceWith(n)
+      if (!active) return
+      const sel = row && '[data-session="' + CSS.escape(row.getAttribute('data-session')) + '"]'
+      const scope = (sel && (n.matches(sel) ? n : n.querySelector(sel))) || n
+      // A row whose state just changed has swapped its verb (Launch <-> Stop): follow the
+      // ACT, not the word, so the hand that pressed Launch is left on Stop.
+      const f = (wasAction && scope.querySelector('[data-launch],[data-stop]')) || scope.querySelector('a[href], button, input')
+      if (f) f.focus()
     }
     document.addEventListener('click', async (e) => {
       const b = e.target.closest('[data-launch],[data-stop]'); if (!b) return
@@ -180,13 +223,12 @@ let private mcpRowTemplate (views: ProcessManager.SessionView list) (declaration
             label, SessionId.value id
     html $"""
         <tr class="border-b border-hair hover:bg-surface transition-colors" data-mcp-server="{name}">
-          <td class="py-3 pr-4 align-middle {Style.body}">{name}</td>
-          <td class="py-3 pr-4 align-middle font-mono text-[12px] leading-4 text-ink-faint max-md:hidden">{McpTransport.describe declaration.Server.Transport}</td>
-          <td class="py-3 pr-4 align-middle {Style.small}">{audience}</td>
+          <td class="py-3 pr-4 align-middle {Style.body} truncate" title="{name}">{name}</td>
+          <td class="py-3 pr-4 align-middle font-mono text-code text-ink-faint truncate max-md:hidden"
+              title="{McpTransport.describe declaration.Server.Transport}">{McpTransport.describe declaration.Server.Transport}</td>
+          <td class="py-3 pr-4 align-middle {Style.small} truncate" title="{audience}">{audience}</td>
           <td class="py-3 pl-4 align-middle">
-            <div class="flex flex-row-reverse">
-              <button type="button" class="{Style.btnDanger}" data-mcp-withdraw="{name}" data-mcp-audience="{audienceValue}">Withdraw</button>
-            </div>
+            <button type="button" class="{Style.btnDanger} w-full" data-mcp-withdraw="{name}" data-mcp-audience="{audienceValue}">Withdraw</button>
           </td>
         </tr>"""
 
@@ -212,13 +254,13 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
             <span class="{Style.label}">MCP servers</span>
             <span class="font-semibold text-[11px] leading-4 tracking-[0.18em] text-ink-faint tabular-nums">{List.length declarations}</span>
           </div>
-          <table class="w-full text-left border-collapse">
+          <table class="{Col.table}">
             <thead>
               <tr class="border-b border-hair">
                 <th scope="col" class="py-2 pr-4 {Style.label}">name</th>
-                <th scope="col" class="py-2 pr-4 {Style.label} max-md:hidden">address</th>
-                <th scope="col" class="py-2 pr-4 {Style.label}">reaches</th>
-                <th scope="col" class="py-2 pl-4"><span class="sr-only">actions</span></th>
+                <th scope="col" class="py-2 pr-4 {Style.label} {Col.id}">address</th>
+                <th scope="col" class="py-2 pr-4 {Style.label} {Col.status}">reaches</th>
+                <th scope="col" class="py-2 pl-4 {Col.actions}"><span class="sr-only">actions</span></th>
               </tr>
             </thead>
             <tbody>{rows}</tbody>
