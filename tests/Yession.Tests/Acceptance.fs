@@ -945,12 +945,11 @@ let private chromeTests =
                     (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
                     (sprintf "a control has no visible focus ring: %s" classes)
 
-        // Blue is interactive, and focus is the most interactive a thing gets. A field that
-        // went green (or anything else) on focus would make the same event mean two things.
-        testCase "focus is blue, everywhere" <| fun () ->
-            for tone in [ "focus:border-green"; "focus:border-ink"; "focus:border-err"
-                          "focus-within:border-green"; "focus-within:border-ink" ] do
-                Expect.isFalse ((shell + settingsShell).Contains tone) (sprintf "focus must not be %s" tone)
+        // Deliberately no "focus is blue, everywhere" here. That focus is BLUE rather than
+        // green is house style, not a floor — a design that moved it would fail such a test
+        // while breaking nothing, which is the shape this suite does not keep (AGENTS.md,
+        // "Writing tests"). That focus is VISIBLE is the invariant, and the two cases above
+        // are what hold it.
     ]
 
 // What the session page must keep saying, whatever it comes to look like: one person wears

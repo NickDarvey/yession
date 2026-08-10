@@ -288,3 +288,11 @@ is FOR. **If a screenshot would settle it, it is not a test** — look at the sc
 The tell that you are about to write one anyway: the assertion quotes a class name, or it
 would still pass if the surface rendered upside down in the dark. Both mean the test knows how
 the view is BUILT rather than what it PROMISES. Write the promise, or write nothing.
+
+One caveat, because loosening a UI assertion is how it quietly stops testing: a whole-page
+render contains every surface at once, so a bare `.Contains "swift-heron"` is satisfied by the
+ROSTER while the element under test still prints a raw id. Scope the assertion — to the
+element, or to the phrase around it — then confirm it by REGRESSING the behaviour and watching
+it go red. Decoupling from incidental copy is only an improvement while the test still fails
+for the right reason; a test loosened into vacuity is worse than the brittle one it replaced,
+because it reads as coverage.
