@@ -21,10 +21,12 @@ Boundaries: code/commits/PRs written normal.
 ## Contributing changes
 
 Read `.agents/skills/contributing-changes/SKILL.md` when completing a plan to integrate
-changes. Short version: compare implementation to plan; if consistent (no interesting
-deviations, blockers, or uncompletable work), open PR with auto-merge, subscribe to PR
-events, then watch the master pipeline after merge — auto-fix failures and repeat the
-process until master is green. Deviations stop the loop and get reported instead.
+changes. Short version: ship each independently-shippable plan step as its own PR rather
+than banking them — master moves while a branch sits, and the rebase tax is superlinear;
+compare implementation to plan; if consistent (no interesting deviations, blockers, or
+uncompletable work), open PR with auto-merge, subscribe to PR events, then watch the master
+pipeline after merge — auto-fix failures and repeat the process until master is green.
+Deviations stop the loop and get reported instead.
 
 ## Bootstrap
 

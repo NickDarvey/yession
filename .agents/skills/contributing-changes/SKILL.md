@@ -10,6 +10,35 @@ This is the exit ramp for planned work. When the implementation is done, don't s
 pipeline is green. This skill defines the gate for proceeding autonomously and the loop
 that drives a change all the way through.
 
+## Step 0: Integrate in the smallest increments the plan allows
+
+Do this before writing the code, not after. A plan's Delivery steps are usually
+independently shippable — each one compiles, passes `check`, and is useful on its own. When
+they are, integrate each as its own PR rather than saving them up: finish step one, run this
+process end to end, then start step two from the merged master.
+
+The cost of not doing this is not style, it is rebase tax, and it compounds. Master moves
+while a branch sits: five PRs landed under Plan 17's single four-step branch, and reconciling
+one branch against them took longer than all four features took to write. Each of those four
+steps would have merged in minutes on its own. The tax is superlinear — twice the branch
+against twice the drift is four times the conflict — and every hour of it is spent
+re-deciding questions already answered.
+
+Split on the plan's own seams:
+
+- **Ship a step when it stands alone.** It builds, `check` passes, and nothing merged is
+  broken by it — even if the feature it belongs to is not yet whole. A capability behind an
+  unset flag, a domain type nothing calls yet, an engine with no provider on top: all
+  mergeable.
+- **Keep steps together only when splitting would land something broken** — a protocol
+  change and the only caller that speaks it, a rename and its call sites.
+- **Bump the version once, on the step that earns it.** Four PRs is still one feature; the
+  marker goes on the commit that actually moves the contract, not on each slice.
+
+If you find yourself with several finished steps on one branch anyway, do not bundle them
+out of sympathy for the work already done — open the PR for what is there, and split the
+NEXT plan.
+
 ## Step 1: Compare implementation to plan
 
 Re-read the plan and diff it against what was actually built. You're looking for
