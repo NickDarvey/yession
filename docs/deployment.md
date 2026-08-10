@@ -28,7 +28,10 @@ yession-manager --auth trusted-headers   # an authenticating proxy in front
 | `localhost` | Any loopback request is the single unattributed subject `local`. |
 | `trusted-headers` | The proxy in front asserts the user in canonical `x-yession-*` headers, trusted verbatim. |
 
-An unknown name fails the boot loudly rather than defaulting to anything.
+An unknown name fails the boot loudly rather than defaulting to anything — as does an
+unknown OPTION, which matters more than it sounds: `--auht localhost` used to be ignored,
+and an ignored `--auth` is deny-everything, so a typo presented as a Manager that refused
+everyone. Every bin answers `--help` with what it accepts.
 
 `trusted-headers` **replaces** `localhost` and must never compose with it. Behind a
 loopback-terminating proxy every request arrives over loopback, so composing them would

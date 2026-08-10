@@ -12,11 +12,11 @@ open Yession.Domain
 open Yession.SessionProcess
 open Yession.Host
 
-// `--version` answers before any configuration is read: no data directory, no ports, no
-// Manager. It is the one thing a Session Process will do without a session.
-if Interop.versionFlag () then
-    printfn "%s" Version.current
-    Interop.exit 0
+// This bin takes no options of its own — everything it needs arrives in the environment the
+// Manager spawns it with. `--version` and `--help` still answer, before any configuration is
+// read: no data directory, no ports, no Manager. They are the only things a Session Process
+// will do without a session.
+Cli.parseOrExit (Cli.spec "yession-session" []) Version.current |> ignore
 
 let private expect =
     function

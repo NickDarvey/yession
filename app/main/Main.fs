@@ -13,11 +13,18 @@ module Yession.Host.Main
 open Yession.Domain
 open Yession.Host
 
-// `--version` answers before any configuration is read: no data directory, no ports, no
-// sessions launched.
-if Interop.versionFlag () then
-    printfn "%s" Version.current
-    Interop.exit 0
+// What this bin accepts, declared once. `--version` and `--help` answer from here before
+// any configuration is read — no data directory, no ports, no sessions launched — and an
+// unknown option or a missing value stops the boot with the reason and the usage, rather
+// than being ignored into a deny-everything Manager.
+let private authOption =
+    Cli.value "auth" "rule" "how a request's subject is established: none, localhost, trusted-headers"
+
+let private secretsOption =
+    Cli.value "secrets" "mode" "whether secrets persist across restarts: durable, ephemeral"
+
+let private cli = Cli.spec "yession-manager" [ authOption; secretsOption ]
+let private args = Cli.parseOrExit cli Version.current
 
 let private expect =
     function
@@ -37,7 +44,7 @@ let private managerPort = Interop.envOr "YESSION_MANAGER_PORT" "8321" |> int
 let private idleTimeout =
     match Yession.Manager.IdleWindow.parse (Interop.envOr "YESSION_SESSION_IDLE_TIMEOUT" "") with
     | Ok window -> window
-    | Error e -> failwith e
+    | Error e -> Cli.abort e
 
 // Who the humans at this Manager are (docs/plans/07): `--auth localhost` trusts the
 // loopback interface (single-machine deployment), `--auth trusted-headers` trusts the
@@ -45,18 +52,18 @@ let private idleTimeout =
 // No `--auth` means nobody authenticates — choosing a trust rule is deliberate, and an
 // unknown name fails the boot loudly rather than defaulting to anything.
 let private strategy =
-    match Yession.Oidc.Strategy.ofName (Interop.argValue "auth") with
+    match Yession.Oidc.Strategy.ofName (Cli.valueOf authOption args) with
     | Ok s -> s
-    | Error e -> failwith e
+    | Error e -> Cli.rejectValue cli e
 
 // Whether secrets persist across restarts (`--secrets`). Only the NAME is settled here —
 // what it resolves to needs the host probed for a credential manager, which happens in the
 // async below. Parsed up here beside `--auth` so an unknown value refuses the boot before
 // anything else is touched.
 let private secretsMode =
-    match ProcessManager.SecretsMode.ofName (Interop.argValue "secrets") with
+    match ProcessManager.SecretsMode.ofName (Cli.valueOf secretsOption args) with
     | Ok m -> m
-    | Error e -> failwith e
+    | Error e -> Cli.rejectValue cli e
 
 // How this deployment is reached from outside (docs/plans/09). Parsed once, HERE, so a
 // combination that cannot work is a refused boot rather than links and redirect URIs that
@@ -65,7 +72,7 @@ let private secretsMode =
 let private publicAccess =
     match Interop.publicAccess () with
     | Ok access -> access
-    | Error e -> failwith e
+    | Error e -> Cli.abort e
 
 [<Fable.Core.Emit("process.execPath")>]
 let private nodePath : string = Fable.Core.Util.jsNative
@@ -99,7 +106,10 @@ Async.StartImmediate(
         let secretsBacking =
             match ProcessManager.SecretsBacking.forMode secretsMode keyStore with
             | Ok backing -> backing
-            | Error e -> failwith e
+            // `--secrets durable` on a host with no credential manager. A configuration
+            // refusal like the ones above, and reported the same way — it just could not be
+            // decided until the host had been probed.
+            | Error e -> Cli.abort e
         let! manager =
             ProcessManager.createWithUi
                 { ProcessManager.Options.defaults dataDir sessionCommand sessionArgs with
