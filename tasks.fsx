@@ -427,10 +427,19 @@ let stage (version: string) =
 
 // --- boot-smoke: run a yession bin with ephemeral ports and assert it comes up ---------------
 
-// Reused by `package`, `install-smoke`, and CI's nix-package job: spawn the given command
-// with an ephemeral data dir + port 0, and assert it logs "management UI at" before a deadline.
-// A bin that cannot boot never passes the gate.
-let bootSmoke (command: string) (arguments: string list) =
+// What each bin says when it is up, quoted once so a caller cannot smoke the wrong line.
+let managerReady = "management UI at"
+let serialReady = "MCP at"
+
+// Reused by `package`, `install-smoke`, and CI's nix-package job: spawn the given command with
+// an ephemeral data dir + port 0, and assert it prints `ready` before a deadline. A bin that
+// cannot boot never passes the gate.
+//
+// The readiness line is a PARAMETER because the bins do not announce the same thing: the
+// Manager serves the management UI, the serial provider serves an MCP endpoint and names
+// itself. Asserting the Manager's line against every bin would have made the serial wrapper
+// unsmokeable, which is how it went unwrapped in the first place.
+let bootSmoke (ready: string) (command: string) (arguments: string list) =
     let dataDir = Path.Combine (Path.GetTempPath (), "yession-boot-" + Guid.NewGuid().ToString "N")
     Directory.CreateDirectory dataDir |> ignore
 
@@ -443,18 +452,19 @@ let bootSmoke (command: string) (arguments: string list) =
     psi.RedirectStandardOutput <- true
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- dataDir
     psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- "0"
+    psi.EnvironmentVariables.["YESSION_SERIAL_PORT"] <- "0"
     let p = Process.Start psi
 
     try
-        let mutable ready = false
+        let mutable seen = false
         let deadline = DateTime.UtcNow.AddSeconds 30.0
-        while not ready && DateTime.UtcNow < deadline && not p.HasExited do
+        while not seen && DateTime.UtcNow < deadline && not p.HasExited do
             let line = p.StandardOutput.ReadLine ()
             if line <> null then
                 printfn "[smoke] %s" line
-                if line.Contains "management UI at" then ready <- true
-        if not ready then failwithf "boot-smoke: %s never reported readiness" command
-        printfn "boot-smoke: %s booted and served both surfaces" command
+                if line.Contains ready then seen <- true
+        if not seen then failwithf "boot-smoke: %s never printed %s" command ready
+        printfn "boot-smoke: %s booted and printed %s" command ready
     finally
         try p.Kill true with _ -> ()
 
@@ -465,7 +475,8 @@ let package (version: string) =
     stage version
     // Boot the packaged bin shim (it self-sets YESSION_SESSION_MAIN); externals resolve from the
     // repo node_modules two levels up from dist/npm.
-    bootSmoke "node" [ Path.Combine (pkg, "bin/yession-manager.js") ]
+    bootSmoke managerReady "node" [ Path.Combine (pkg, "bin/yession-manager.js") ]
+    bootSmoke serialReady "node" [ Path.Combine (pkg, "bin/yession-serial.js") ]
     let packed = runIn pkg "npm" [ "pack"; "--pack-destination"; dist ] |> fun out -> out.Split('\n') |> Array.last
     printfn "packaged dist/%s" (Path.GetFileName (packed.Trim ()))
 
@@ -490,7 +501,8 @@ let installSmoke (tgz: string) =
     if not (Directory.Exists ndcRelease && (Directory.GetFiles (ndcRelease, "*.node")).Length > 0) then
         failwith "install-smoke: node-datachannel addon was not built"
 
-    bootSmoke "node" [ Path.Combine (prefix, "node_modules/.bin/yession-manager") ]
+    bootSmoke managerReady "node" [ Path.Combine (prefix, "node_modules/.bin/yession-manager") ]
+    bootSmoke serialReady "node" [ Path.Combine (prefix, "node_modules/.bin/yession-serial") ]
     printfn "install-smoke: native deps resolved and the installed package booted"
 
 // --- check: capability-gated test orchestration ----------------------------------------------
@@ -644,8 +656,11 @@ let private buildNixPackage () =
                     "--no-link"; "--print-out-paths"; "--print-build-logs" ]
     let outPath = out.Split '\n' |> Array.last |> fun s -> s.Trim ()
     // A build is not a boot: the wrapped bins resolve their runtime node_modules and the native
-    // addon out of the store paths this derivation assembled, and only running one proves it.
-    bootSmoke (Path.Combine (outPath, "bin/yession-manager")) []
+    // addons out of the store paths this derivation assembled, and only running them proves it.
+    // Every bin the package declares gets booted — a wrapper the derivation forgot to make is a
+    // missing file here, and a wrapper that cannot find its addon is a dead process.
+    bootSmoke managerReady (Path.Combine (outPath, "bin/yession-manager")) []
+    bootSmoke serialReady (Path.Combine (outPath, "bin/yession-serial")) []
 
 // A full `verify` spends its first ~80 seconds in restore, build, Fable and stage — tools that
 // are either silent or so chatty their own progress reads as scrollback, so the run looks
@@ -854,8 +869,8 @@ match arg 1 with
     | None -> failwith "install-smoke <tgz>"
 | Some "boot-smoke" ->
     match rest 2 with
-    | cmd :: cmdArgs -> bootSmoke cmd cmdArgs
-    | [] -> failwith "boot-smoke <command…>"
+    | ready :: cmd :: cmdArgs -> bootSmoke ready cmd cmdArgs
+    | _ -> failwith "boot-smoke <ready-line> <command…>"
 | Some "clean" -> clean ()
 | Some "clean-docker" -> cleanDocker ()
 | Some version -> package version // backwards compat: `tasks.fsx <version>` == `package <version>`
