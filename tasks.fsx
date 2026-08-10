@@ -579,6 +579,22 @@ let private srtAvailable () =
                                       bwrap; "--ro-bind"; "/"; "/"; "--unshare-user"; "true" ]
         probeSucceeds socat [ "-V" ] && probeSucceeds ripgrep [ "--version" ] && confines
 
+// A real serial engine, probed by USING it rather than by looking for files — the same rule
+// `Srt` follows, and for a sharper reason here: the `serialport` addon can be present and still
+// unable to enumerate, because `SerialPort.list()` shells out to `udevadm` on Linux and a box
+// without it throws. socat is the third leg: a PTY pair is a serial port at both ends, which is
+// how the engine is exercised with no hardware attached.
+let private serialAvailable () =
+    let socat = match Environment.GetEnvironmentVariable "YESSION_SOCAT_PATH" with null | "" -> "socat" | path -> path
+    let listed =
+        // `SerialPort.list()` for real. Zero ports is a pass — the question is whether the
+        // engine ANSWERS, not whether this box has hardware.
+        probeSucceeds
+            "node"
+            [ "-e"
+              "import('serialport').then(m => m.SerialPort.list()).then(() => process.exit(0), () => process.exit(1))" ]
+    probeSucceeds socat [ "-V" ] && listed
+
 // ASKING FOR A CAPABILITY IS REQUIRING IT. A run names the capabilities it wants; anything it
 // named and cannot host is an ERROR, with the reason, before a single test runs.
 //
@@ -602,6 +618,9 @@ let private requireCapabilities (caps: string list) =
           if List.contains "Pty" caps && not (ptyAvailable ()) then
             "Pty: node-pty could not open a pseudo-terminal (is the native addon built, and "
             + "does this box allow /dev/pts?)"
+          if List.contains "Serial" caps && not (serialAvailable ()) then
+            "Serial: no working serial engine (needs the `serialport` addon, `udevadm` for "
+            + "enumeration, and socat for a PTY pair — `devenv shell` provides all three on Linux)"
           if List.contains "Srt" caps && not (srtAvailable ()) then
             "Srt: no working confinement (bubblewrap, socat, ripgrep, and — under the strict "
             + "profile — a nested user namespace; an unprivileged container needs "
@@ -755,7 +774,8 @@ let check (caps: string list) =
     restore ()
     runCheckOnce caps
 
-let verify () = check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt"; "Pty" ]
+let verify () =
+    check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt"; "Pty"; "Serial" ]
 
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 

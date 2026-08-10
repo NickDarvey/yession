@@ -423,12 +423,15 @@ derivation — does not have to carry a native addon it never loads. Cross-platf
 tarball, so an ordinary `npm install` gets a working engine everywhere and nothing is built
 from source.
 
-**Still uncovered: the engine.** Everything above the `SerialEngine` seam is tested over real
-sockets; `SerialPorts.real` — the `serialport` import, the open, the line settings — is not,
-because this repo's dev tree deliberately does not install it. Closing that is a `Serial`
-capability over a socat PTY pair, and it needs `serialport` in the dev tree, which needs a
-`fetchNpmDeps` hash regenerated somewhere with unproxied network. That is the whole of the
-remaining work and it is one commit.
+**The engine is covered too**, by the `Serial` capability: socat gives two pseudo-terminals
+wired to each other, `SerialPorts.real` opens one and plain file I/O holds the other, and
+every byte that crosses went through the same `open`/`termios`/`read` a USB adapter would.
+It earned its keep on the first run: `serialport` emits neither `close` nor `error` on an
+IDLE port whose device has gone away — it reports the failure only when something next
+writes — so a read-only attach to an unplugged adapter hung for ever instead of emitting
+`exited`. The engine now watches the device node for removal, which is what unplugging
+actually does. What a PTY cannot prove is anything about a specific chip; that stays in
+`docs/GAPS.md`.
 
 ## Risks & open questions
 

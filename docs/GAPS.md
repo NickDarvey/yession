@@ -424,13 +424,13 @@ Items are roughly ordered by how much they matter.
 - The vendored Hedgehog does no shrinking: a failing property prints the whole
   schedule, not a minimal one.
 - Load/scale characteristics (many peers, large logs, long drafts) are unmeasured.
-- **The serial engine itself is untested** ([Plan 16](plans/16-serial-devices.md), part E).
-  Everything above the `SerialEngine` seam runs over real sockets against the real
-  provider — the MCP lifecycle, the claim, the WebSocket attach — but `SerialPorts.real`
-  (the `serialport` import, the open, the line settings) has no coverage. Closing it is a
-  `Serial` capability over a socat PTY pair; the container also needs `udevadm` on PATH,
-  because `SerialPort.list()` shells out to it on Linux and without it enumeration fails
-  and the engine degrades to "no devices".
+- **The serial engine is tested against a tty, never against a chip**
+  ([Plan 16](plans/16-serial-devices.md), part E). `check Serial` drives `SerialPorts.real`
+  over a socat PTY pair, so the open, the line settings, the read and write paths and the
+  vanish path all cross a real kernel tty. What no CI box can cover is a specific adapter:
+  a baud rate the driver silently rounds, a chip that needs DTR/RTS toggled to come out of
+  reset, a USB stack that reuses `/dev/ttyUSB0` for a different device after a replug.
+  Those are found on hardware or not at all.
 
 ## Terminals (Plan 13)
 

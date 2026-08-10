@@ -35,10 +35,17 @@ in
   # no darwin build, and macOS confines with Seatbelt, which ships with the OS. ripgrep is
   # listed with them because it is the same story — srt scans for its mandatory denies with it,
   # on Linux only.
+  #
+  # eudev backs the `Serial` capability alongside socat, and is Linux-only because the need
+  # is: `SerialPort.list()` shells out to `udevadm` on Linux to learn a port's vendor and
+  # product, and without it enumeration throws rather than answering. eudev rather than
+  # systemd because it is the standalone udev — its `udevadm info` answers from sysfs with no
+  # daemon running, which a container has none of. socat is what makes the rest testable with
+  # no hardware: a PTY pair is a serial port at both ends.
   packages =
     [ pkgs.git pkgs.actionlint ]
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux
-         [ pkgs.dbus pkgs.gnome-keyring pkgs.bubblewrap pkgs.socat pkgs.ripgrep ];
+         [ pkgs.dbus pkgs.gnome-keyring pkgs.bubblewrap pkgs.socat pkgs.ripgrep pkgs.eudev ];
 
   # Name the confinement tools for the srt backend exactly as the installable's wrappers do
   # (nix/packages.nix), so a dev-shell run and an installed run confine through the same

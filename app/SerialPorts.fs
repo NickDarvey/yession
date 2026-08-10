@@ -88,8 +88,24 @@ type private RawOpen =
 /// Open one port. `binary` is deliberately NOT used: the stream is decoded as UTF-8 text
 /// because that is what a terminal emulator downstream consumes, and a device speaking
 /// binary is a case this provider does not claim to serve.
+///
+/// The interval is not belt-and-braces over the `close`/`error` handlers — it covers a case
+/// they demonstrably do not. An IDLE open port whose device has gone away emits NEITHER
+/// event: measured against a hung-up tty, `serialport` sat there with `isOpen === true`
+/// indefinitely, and only surfaced EIO when something tried to write. Nothing writes to a
+/// device the human is only reading from, so without this an unplugged adapter is
+/// indistinguishable from a quiet one and the attached terminal waits forever. What the
+/// handlers cover and this does not is the reverse: OUR close, and an I/O error on a device
+/// node that still exists.
+///
+/// Vanishing is detected by the device node disappearing, because that is what unplugging
+/// actually does — `/dev/ttyUSB0` is removed, exactly as a pty slave is removed when its
+/// master hangs up. Armed only when the path exists as a file at open time, which keeps it
+/// off Windows, where `COM3` is not a filesystem entry and the check would report every
+/// port as instantly gone.
 [<Emit("""(async () => {
   try {
+    const fs = await import('node:fs')
     const { SerialPort } = await import('serialport')
     const port = await new Promise((resolve, reject) => {
       const p = new SerialPort(
@@ -97,10 +113,25 @@ type private RawOpen =
         (err) => { if (err) reject(err); else resolve(p) })
     })
     let closed = false
-    const finish = (why) => { if (!closed) { closed = true; $6(why) } }
+    let watchdog = null
+    const finish = (why) => {
+      if (watchdog) { clearInterval(watchdog); watchdog = null }
+      if (!closed) { closed = true; $6(why) }
+    }
     port.on('data', (chunk) => $5(chunk.toString('utf8')))
     port.on('close', () => finish('the port closed'))
     port.on('error', (err) => finish(String((err && err.message) || err)))
+    if (fs.existsSync($0)) {
+      watchdog = setInterval(() => {
+        if (fs.existsSync($0)) return
+        // Release the fd as well as reporting it: the device is gone, so the handle is
+        // never becoming useful again, and `close` on a dead node can itself throw.
+        try { port.close(() => {}) } catch (e) {}
+        finish('the device went away')
+      }, 500)
+      // Never a reason for the process to stay alive.
+      if (watchdog.unref) watchdog.unref()
+    }
     return {
       ok: true,
       reason: '',
