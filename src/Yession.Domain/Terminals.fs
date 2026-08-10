@@ -70,7 +70,9 @@ type TerminalView =
       /// Which of the session's WorkSandboxes this terminal runs in (Plan 15, stage 2).
       /// Fixed at open, because a terminal IS a shell process inside one sandbox — moving
       /// it would mean killing it, which is a close and an open, and those already exist.
-      Sandbox : SandboxName
+      /// `None` for a terminal attached to a stream somebody else produces (Plan 16, part
+      /// D): it runs nowhere this session owns.
+      Sandbox : SandboxName option
       /// A closed terminal keeps its blocks: the audit outlives the process.
       IsOpen : bool
       /// Why it closed, when it has.

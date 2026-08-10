@@ -155,7 +155,7 @@ let
   npmDeps = pkgs.fetchNpmDeps {
     src = npmManifests;
     name = "yession-npm-deps";
-    hash = "sha256-xIiY4M4PeqUYqvFJKVD8i3vGlaxCSNB05DBzU3s4LcQ=";
+    hash = "sha256-O00mg/VnhhFPnm6swCvvEtDHI6LOts55VFofPyygZr0=";
   };
 
   # node_modules as a Nix artifact: the offline npm tree (npmConfigHook installs it from npmDeps

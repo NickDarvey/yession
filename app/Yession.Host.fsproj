@@ -24,6 +24,9 @@
     <Compile Include="Emulator.fs" />
     <Compile Include="Fs.fs" />
     <Compile Include="Sandboxes.fs" />
+    <!-- Attaching a terminal to somebody else's byte stream (Plan 16, part D). Beside the
+         sandbox adapters because it is the same kind of thing: a way to get a PtyHandle. -->
+    <Compile Include="AttachWs.fs" />
     <!-- The query registry (Plan 15). Before every capability that declares a query, and
          after Sse/SessionAuth, which are the only things its route needs. -->
     <Compile Include="Queries.fs" />
@@ -39,9 +42,23 @@
     <Compile Include="Broker.fs" />
     <Compile Include="NotificationHub.fs" />
     <Compile Include="RetainedHub.fs" />
+    <!-- Per-session retained broadcast (Plan 17): what a session's MCP server SET rides.
+         Beside the other two hubs because it is the third shape of the same idea. -->
+    <Compile Include="KeyedRetainedHub.fs" />
     <Compile Include="ManagerOidc.fs" />
     <Compile Include="Control.fs" />
     <Compile Include="ControlClient.fs" />
+    <!-- The session as an MCP client (Plan 17, step 3). After Sse.fs (it reuses the frame
+         parser) and after Version.fs (its clientInfo says which build is asking). -->
+    <Compile Include="McpClient.fs" />
+    <!-- The serial device provider (Plan 16, part E): a separate bin that owns some ttys and
+         speaks the two protocols a session already knows. `McpServer` is the other end of
+         `McpClient`, written independently on purpose; `WsServer` is the other end of
+         `AttachWs`, for the same reason. -->
+    <Compile Include="McpServer.fs" />
+    <Compile Include="WsServer.fs" />
+    <Compile Include="SerialPorts.fs" />
+    <Compile Include="SerialProvider.fs" />
     <Compile Include="ClaudeConnection.fs" />
     <Compile Include="GitHubConnection.fs" />
     <Compile Include="Spawn.fs" />
@@ -50,6 +67,9 @@
     <Compile Include="Host.fs" />
     <Compile Include="Manager.fs" />
     <Compile Include="SessionMain.fs" />
+    <!-- The provider's entry. Last, like the other two: an entry has top-level effects, and
+         nothing may depend on one. -->
+    <Compile Include="SerialMain.fs" />
   </ItemGroup>
 
   <ItemGroup>

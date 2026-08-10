@@ -236,8 +236,9 @@ let private subscribeNotifications =
     | _, "" -> None
     | url, secret -> Some (fun handler -> ControlClient.subscribeNotifications url secret handler)
 
-// The MCP tool stream over the same control channel: the current tool list on subscribe, then
-// updates as MCP services come and go. Absent a control channel, the session runs without it.
+// This session's MCP server set over the same control channel (Plan 17): the resolved set
+// on subscribe, then a fresh whole set on every change. Absent a control channel there is
+// nobody to declare a server, so the session runs with none — which is an ordinary session.
 let private subscribeMcp =
     match Interop.envOr "YESSION_CONTROL_URL" "", Interop.envOr "YESSION_CONTROL_SECRET" "" with
     | "", _
@@ -312,6 +313,15 @@ let mutable private queryRegistry : Queries.QueryRegistry = Queries.empty
 // log the registry appends to), so this cell is filled once `startFull` resolves — before
 // which no turn can run, because nothing is listening.
 let mutable private workSandboxes : WorkSandboxes.WorkSandboxes = WorkSandboxes.unavailable
+
+// The MCP servers this session was given (Plan 17). Composed HERE rather than by the Host,
+// unlike the other reverse legs, because what arrives on that leg has two consumers: a
+// turn's registry, which the Host builds, and the `mcp_servers` query, which is this
+// module's. A session with no control channel gets `none` and never subscribes.
+let private mcpServers =
+    match subscribeMcp with
+    | Some _ -> McpClient.create ()
+    | None -> McpClient.McpConnections.none
 
 /// The acting party's GitHub token for a repo network verb: the session's explicit
 /// credential first, then the named actor's own, then the ambient `GITHUB_TOKEN` (the
@@ -630,7 +640,8 @@ Async.StartImmediate (
                   | None -> ()
                   // Reads the cell rather than a value: the registry is the Host's, and
                   // the Host has not been started yet. By the time anyone reads it, it is.
-                  WorkSandboxes.query (fun () -> workSandboxes) ]
+                  WorkSandboxes.query (fun () -> workSandboxes)
+                  McpClient.query (fun () -> mcpServers) ]
             match Queries.create registrations with
             | Ok registry -> queryRegistry <- registry
             | Error e -> failwithf "queries: %s" e
@@ -695,7 +706,7 @@ Async.StartImmediate (
         // work; the resolution is the Plan 08 precedence, unchanged.
         let forwardableCredentials : WorkSandboxes.CredentialSource list =
             [ { Name = "github"; EnvVar = "GITHUB_TOKEN"; Resolve = resolveGitHubToken } ]
-        let! host = Host.startFull runAgent (Some (makeSandboxes forwardableCredentials)) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications subscribeMcp connectionRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
+        let! host = Host.startFull runAgent (Some (makeSandboxes forwardableCredentials)) (secretsCapabilitiesFor sessionId) (Some log) (Some docStore) (Some transcriptStore) reportName reportActivity telemetry.Emit subscribeNotifications mcpServers connectionRoutes sessionId auth sessionMount managerOrigin ephemeralStorage port
         // The Host built the sandbox registry (it owns the log), so the cell the turn
         // capabilities and the `work_sandboxes` query read is filled here — before the
         // readiness line, and therefore before any turn or any browser can ask.
@@ -725,6 +736,56 @@ Async.StartImmediate (
                 SyncedStateSync.setGate host.Doc (GatedCommands.subject command) ApproveAgent
             eprintfn "[session %s] these commands need a human to approve them: %s"
                 (SessionId.value sessionId) (commands |> List.map (fun c -> c.Tool) |> String.concat ", ")
+        // The reverse leg starts LAST, after the query registry exists and the Host is up:
+        // a set frame rebuilds a registry and invalidates a query, and both of those have
+        // to be there before the first frame can arrive.
+        //
+        // Fire-and-forget on the frame: a handshake is a network round trip and the sink is
+        // an SSE frame handler. A turn that begins mid-handshake gets the registry as it
+        // stood — without the new server, never a half-built one — and the tools appear on
+        // the next turn, which is what the invalidation below tells the panel too.
+        match subscribeMcp with
+        | Some subscribe ->
+            let note (name: McpServerName) (make: McpServerNoted -> SessionEvent) =
+                async {
+                    match MessageId.create (string (System.Guid.NewGuid ())) with
+                    | Error _ -> return ()
+                    | Ok messageId ->
+                        // `ActorRef.System`, because nobody in the session did this.
+                        let! _ = log.Append ActorRef.System (make { MessageId = messageId; Name = name })
+                        return ()
+                }
+            subscribe (fun set ->
+                Async.StartImmediate (
+                    async {
+                        // The delta is computed against the LOG — what this session was
+                        // last TOLD it had — so a boot, a reconnect and a process restart
+                        // all emit nothing, and only a genuine change by the operator is
+                        // loud. Read before applying: `Apply` is the slow part and the log
+                        // does not move while it runs.
+                        let! page = log.Read None System.Int32.MaxValue
+                        let announced = McpNotes.announced (page.Events |> List.map (fun e -> e.Event))
+                        let gained, lost = McpNotes.delta announced set
+                        do! mcpServers.Apply set
+                        for name in gained do
+                            do! note name SessionEvent.McpServerAvailable
+                        for name in lost do
+                            do! note name SessionEvent.McpServerUnavailable
+                        queryRegistry.Invalidate McpClient.queryName
+                    }))
+            |> ignore
+            // ...and keep asking. A set frame says WHICH servers this session has; only
+            // asking them says what they can do right now. A provider that starts after the
+            // declaration, restarts, or grows tools as a device is plugged in is invisible
+            // otherwise — the declaration never changed, so no frame is coming.
+            Interop.setInterval McpClient.PollIntervalMs (fun () ->
+                Async.StartImmediate (
+                    async {
+                        let! moved = mcpServers.Poll ()
+                        if moved then queryRegistry.Invalidate McpClient.queryName
+                    }))
+            |> ignore
+        | None -> ()
         // Register this launch's OAuth client with the Manager — HERE, after listen
         // (the redirect URI needs the OS-assigned port) and BEFORE the readiness line
         // (readiness implies the login surface works). A session that cannot register

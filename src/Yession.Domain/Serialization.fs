@@ -361,6 +361,266 @@ module Codec =
         { Encode = BlockId.value >> Encode.string
           Decode = viaSmartCtor BlockId.create Decode.string }
 
+    let toolUseId : Codec<ToolUseId> =
+        { Encode = ToolUseId.value >> Encode.string
+          Decode = viaSmartCtor ToolUseId.create Decode.string }
+
+    /// A JSON value carried as TEXT: decode renders whatever is there back to a compact
+    /// string; encode parses the string and embeds it as a real JSON node, so an MCP
+    /// `inputSchema` object stays an object on the wire and never becomes a quoted string.
+    /// A value that is not valid JSON degrades to a JSON string rather than throwing.
+    let private rawJson : Codec<string> =
+        { Encode =
+            (fun raw ->
+                match Decode.fromString Decode.value raw with
+                | Ok value -> value
+                | Error _ -> Encode.string raw)
+          Decode = Decode.value |> Decode.map (Encode.toString 0) }
+
+    /// MCP's own `Tool`. What the SESSION's client decodes a server's `tools/list` into
+    /// (Plan 17) — it lives here rather than in the Manager's control wire because the
+    /// Manager never becomes an MCP client and so never sees one.
+    let mcpTool : Codec<McpTool> =
+        { Encode =
+            fun (t: McpTool) ->
+                Encode.object
+                    ([ "name", Encode.string t.Name
+                       "inputSchema", rawJson.Encode t.InputSchema ]
+                     @ (t.Title |> Option.map (fun x -> [ "title", Encode.string x ]) |> Option.defaultValue [])
+                     @ (t.Description
+                        |> Option.map (fun x -> [ "description", Encode.string x ])
+                        |> Option.defaultValue []))
+          Decode =
+            Decode.object (fun get ->
+                { McpTool.Name = get.Required.Field "name" Decode.string
+                  McpTool.Title = get.Optional.Field "title" Decode.string
+                  McpTool.Description = get.Optional.Field "description" Decode.string
+                  McpTool.InputSchema = get.Required.Field "inputSchema" rawJson.Decode }) }
+
+    /// MCP's `ListToolsResult` (its `tools` array).
+    let mcpToolList : Codec<McpToolList> =
+        { Encode = fun (l: McpToolList) -> Encode.object [ "tools", l.Tools |> List.map mcpTool.Encode |> Encode.list ]
+          Decode =
+            Decode.object (fun get -> { McpToolList.Tools = get.Required.Field "tools" (Decode.list mcpTool.Decode) }) }
+
+    // Declaring an MCP server (Plan 17). One set of codecs for two consumers — the
+    // Manager's state file and the `/control/mcp` frame — because they carry the same
+    // value, and two codecs for one type is two chances to disagree about it.
+
+    let mcpServerName : Codec<McpServerName> =
+        { Encode = McpServerName.value >> Encode.string
+          Decode = viaSmartCtor McpServerName.create Decode.string }
+
+    /// Tagged even with one case: a second transport changes who owns the PROCESS, and a
+    /// bare url on the wire would have to be re-tagged to admit one.
+    let mcpTransport : Codec<McpTransport> =
+        { Encode =
+            fun (transport: McpTransport) ->
+                match transport with
+                | McpHttp url -> Encode.object [ "type", Encode.string "http"; "url", Encode.string url ]
+          Decode =
+            Decode.field "type" Decode.string
+            |> Decode.andThen (fun t ->
+                match t with
+                | "http" -> Decode.field "url" Decode.string |> Decode.map McpHttp
+                | other -> Decode.fail (sprintf "Unknown MCP transport: %s" other)) }
+
+    let mcpServerRef : Codec<McpServerRef> =
+        { Encode =
+            fun (server: McpServerRef) ->
+                Encode.object
+                    [ "name", mcpServerName.Encode server.Name
+                      "transport", mcpTransport.Encode server.Transport
+                      "description", Encode.string server.Description ]
+          Decode =
+            Decode.object (fun get ->
+                { McpServerRef.Name = get.Required.Field "name" mcpServerName.Decode
+                  McpServerRef.Transport = get.Required.Field "transport" mcpTransport.Decode
+                  McpServerRef.Description =
+                    get.Optional.Field "description" Decode.string |> Option.defaultValue "" }) }
+
+    let mcpAudience : Codec<McpAudience> =
+        { Encode =
+            fun (audience: McpAudience) ->
+                match audience with
+                | AnySession -> Encode.object [ "type", Encode.string "any" ]
+                | OneSession id ->
+                    Encode.object [ "type", Encode.string "session"; "sessionId", sessionId.Encode id ]
+          Decode =
+            Decode.field "type" Decode.string
+            |> Decode.andThen (fun t ->
+                match t with
+                | "any" -> Decode.succeed AnySession
+                | "session" -> Decode.field "sessionId" sessionId.Decode |> Decode.map OneSession
+                | other -> Decode.fail (sprintf "Unknown MCP audience: %s" other)) }
+
+    let mcpServerNoted : Codec<McpServerNoted> =
+        { Encode =
+            fun (p: McpServerNoted) ->
+                Encode.object
+                    [ "messageId", messageId.Encode p.MessageId; "name", mcpServerName.Encode p.Name ]
+          Decode =
+            Decode.object (fun get ->
+                { McpServerNoted.MessageId = get.Required.Field "messageId" messageId.Decode
+                  McpServerNoted.Name = get.Required.Field "name" mcpServerName.Decode }) }
+
+    let mcpDeclaration : Codec<McpDeclaration> =
+        { Encode =
+            fun (declaration: McpDeclaration) ->
+                Encode.object
+                    [ "server", mcpServerRef.Encode declaration.Server
+                      "audience", mcpAudience.Encode declaration.Audience ]
+          Decode =
+            Decode.object (fun get ->
+                { McpDeclaration.Server = get.Required.Field "server" mcpServerRef.Decode
+                  McpDeclaration.Audience = get.Required.Field "audience" mcpAudience.Decode }) }
+
+    // Talking to a server (Plan 17, step 3). JSON-RPC 2.0 as MCP profiles it, and the two
+    // results we read. Codecs rather than string surgery in the Host, so the protocol is
+    // testable with no socket — which is the same split `Sse.fs` and the control wire use.
+
+    let jsonRpcRequest : Codec<JsonRpcRequest> =
+        { Encode =
+            fun (r: JsonRpcRequest) ->
+                Encode.object
+                    [ yield "jsonrpc", Encode.string "2.0"
+                      yield "id", Encode.int r.Id
+                      yield "method", Encode.string r.Method
+                      match r.Params with
+                      | Some p -> yield "params", rawJson.Encode p
+                      | None -> () ]
+          Decode =
+            Decode.object (fun get ->
+                { JsonRpcRequest.Id = get.Required.Field "id" Decode.int
+                  JsonRpcRequest.Method = get.Required.Field "method" Decode.string
+                  JsonRpcRequest.Params = get.Optional.Field "params" rawJson.Decode }) }
+
+    /// A NOTIFICATION: a method call with no id, which is what tells the server not to
+    /// answer. Encode-only, because we send them and never receive one.
+    let jsonRpcNotification (method: string) : string =
+        Encode.object [ "jsonrpc", Encode.string "2.0"; "method", Encode.string method ]
+        |> Encode.toString 0
+
+    /// Success and failure are the same frame with different fields, and which arrived is
+    /// the interesting part — so it decodes to a DU rather than to a record with two
+    /// optionals for a caller to re-derive it from.
+    let jsonRpcResponse : Codec<JsonRpcResponse> =
+        { Encode =
+            fun (r: JsonRpcResponse) ->
+                match r with
+                | JsonRpcResult (id, result) ->
+                    Encode.object
+                        [ "jsonrpc", Encode.string "2.0"
+                          "id", Encode.int id
+                          "result", rawJson.Encode result ]
+                | JsonRpcFailure (id, code, message) ->
+                    Encode.object
+                        [ "jsonrpc", Encode.string "2.0"
+                          "id", (match id with Some i -> Encode.int i | None -> Encode.nil)
+                          "error", Encode.object [ "code", Encode.int code; "message", Encode.string message ] ]
+          Decode =
+            Decode.object (fun get ->
+                match get.Optional.Field "error" (Decode.option Decode.value) |> Option.flatten with
+                | Some _ ->
+                    JsonRpcFailure (
+                        get.Optional.Field "id" (Decode.option Decode.int) |> Option.flatten,
+                        get.Optional.At [ "error"; "code" ] Decode.int |> Option.defaultValue 0,
+                        get.Optional.At [ "error"; "message" ] Decode.string
+                        |> Option.defaultValue "the server reported an error with no message")
+                | None ->
+                    JsonRpcResult (
+                        get.Required.Field "id" Decode.int,
+                        get.Optional.Field "result" rawJson.Decode |> Option.defaultValue "{}")) }
+
+    /// `initialize`'s params. We declare NO client capabilities: a client that declared
+    /// `sampling` would be offering the provider a way to drive the model, which is the
+    /// opposite of what a proxied server is for. `roots` and `elicitation` are absent for
+    /// the same reason — nothing is offered that was not asked for.
+    let mcpInitializeParams (clientVersion: string) : string =
+        Encode.object
+            [ "protocolVersion", Encode.string McpProtocol.Version
+              "capabilities", Encode.object []
+              "clientInfo",
+              Encode.object [ "name", Encode.string "yession"; "version", Encode.string clientVersion ] ]
+        |> Encode.toString 0
+
+    /// `tools/call`'s params. The arguments arrive as the JSON text the model produced and
+    /// are embedded as an object; text that will not parse becomes an empty object rather
+    /// than a quoted string, because a server reading `arguments` as a string would fail in
+    /// a way that reads like OUR bug.
+    let mcpCallParams (name: string) (arguments: string) : string =
+        Encode.object
+            [ "name", Encode.string name
+              "arguments",
+              (match Decode.fromString Decode.value arguments with
+               | Ok value -> value
+               | Error _ -> Encode.object []) ]
+        |> Encode.toString 0
+
+    /// `tools/call`'s params, as a SERVER reads them. The mirror of `mcpCallParams`, and
+    /// the arguments come back as the raw JSON text a tool body decodes for itself — the
+    /// same discipline `ToolCall` follows, for the same reason.
+    let mcpCallRequest : Codec<string * string> =
+        { Encode = fun (name, arguments) -> rawJson.Encode (mcpCallParams name arguments)
+          Decode =
+            Decode.object (fun get ->
+                get.Required.Field "name" Decode.string,
+                get.Optional.Field "arguments" rawJson.Decode |> Option.defaultValue "{}") }
+
+    /// `initialize`'s result, reduced to what we use. `capabilities` and `instructions` are
+    /// not decoded — see `McpHandshake` for why the second one is dropped on purpose.
+    let mcpHandshake : Codec<McpHandshake> =
+        { Encode =
+            fun (h: McpHandshake) ->
+                Encode.object
+                    [ "protocolVersion", Encode.string h.ProtocolVersion
+                      "serverInfo",
+                      Encode.object
+                          [ "name", Encode.string h.ServerName; "version", Encode.string h.ServerVersion ] ]
+          Decode =
+            Decode.object (fun get ->
+                { McpHandshake.ProtocolVersion = get.Required.Field "protocolVersion" Decode.string
+                  McpHandshake.ServerName =
+                    get.Optional.At [ "serverInfo"; "name" ] Decode.string |> Option.defaultValue ""
+                  McpHandshake.ServerVersion =
+                    get.Optional.At [ "serverInfo"; "version" ] Decode.string |> Option.defaultValue "" }) }
+
+    /// `tools/call`'s result. Content blocks are flattened to the text the model reads; a
+    /// block of some other kind is NAMED rather than dropped, so a provider answering with
+    /// an image produces "[image]" instead of a blank the model reads as success.
+    let mcpCallResult : Codec<McpCallResult> =
+        let block : Decoder<string> =
+            Decode.field "type" Decode.string
+            |> Decode.andThen (fun kind ->
+                match kind with
+                | "text" -> Decode.field "text" Decode.string
+                | other -> Decode.succeed (sprintf "[%s]" other))
+        { Encode =
+            fun (r: McpCallResult) ->
+                Encode.object
+                    [ "content",
+                      Encode.list [ Encode.object [ "type", Encode.string "text"; "text", Encode.string r.Text ] ]
+                      "isError", Encode.bool r.IsError ]
+          Decode =
+            Decode.object (fun get ->
+                { McpCallResult.Text =
+                    get.Optional.Field "content" (Decode.list block)
+                    |> Option.defaultValue []
+                    |> String.concat "\n"
+                  McpCallResult.IsError =
+                    get.Optional.Field "isError" Decode.bool |> Option.defaultValue false }) }
+
+    /// One `/control/mcp` frame: the whole resolved set for THIS session, every time. The
+    /// AUDIENCE is deliberately absent — resolution already happened, and a session that
+    /// could read who else reaches a server would be reading the Manager's configuration.
+    let mcpServerSet : Codec<McpServerSet> =
+        { Encode =
+            fun (set: McpServerSet) ->
+                Encode.object [ "servers", set.Servers |> List.map mcpServerRef.Encode |> Encode.list ]
+          Decode =
+            Decode.object (fun get ->
+                { McpServerSet.Servers = get.Required.Field "servers" (Decode.list mcpServerRef.Decode) }) }
+
     let private terminalOpened : Codec<TerminalOpened> =
         { Encode =
             fun (p: TerminalOpened) ->
@@ -368,18 +628,21 @@ module Codec =
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "openedBy", actor.Encode p.OpenedBy
                       "title", Encode.string p.Title
-                      "sandbox", sandboxName.Encode p.Sandbox ]
+                      "sandbox", Encode.option sandboxName.Encode p.Sandbox ]
           Decode =
             Decode.object (fun get ->
+                // Three states in one field, and they are three different facts, so the
+                // key's PRESENCE is read rather than just its value: absent is a log
+                // written before named sandboxes (those terminals ran in the one sandbox
+                // the session had, so `default` is where they were, not a guess), null is
+                // an attached source that runs in no sandbox at all, and a name is a name.
+                let written = get.Required.Raw Decode.keys |> List.contains "sandbox"
                 { TerminalOpened.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalOpened.OpenedBy = get.Required.Field "openedBy" actor.Decode
                   TerminalOpened.Title = get.Required.Field "title" Decode.string
-                  // OPTIONAL on the way in: a log written before named sandboxes has no
-                  // such field, and those terminals were in the one sandbox the session
-                  // had. Decoding them as `default` is not a guess — it is where they ran.
                   TerminalOpened.Sandbox =
-                    get.Optional.Field "sandbox" sandboxName.Decode
-                    |> Option.defaultValue SandboxName.defaultName }) }
+                    if written then get.Optional.Field "sandbox" sandboxName.Decode
+                    else Some SandboxName.defaultName }) }
 
     let private terminalClosed : Codec<TerminalClosed> =
         { Encode =
@@ -657,6 +920,56 @@ module Codec =
                   CommandRefused.RejectedBy = get.Required.Field "rejectedBy" actor.Decode
                   CommandRefused.Reason = get.Required.Field "reason" (Decode.option Decode.string) }) }
 
+    /// Whether the CALL happened. Tagged rather than a nullable reason, so "it went fine"
+    /// and "it failed with an empty message" stay distinguishable on the wire.
+    let private toolOutcome : Codec<ToolOutcome> =
+        { Encode =
+            fun (outcome: ToolOutcome) ->
+                match outcome with
+                | ToolCallOk -> Encode.object [ "type", Encode.string "ok" ]
+                | ToolCallFailed reason ->
+                    Encode.object [ "type", Encode.string "failed"; "reason", Encode.string reason ]
+          Decode =
+            Decode.field "type" Decode.string
+            |> Decode.andThen (fun t ->
+                match t with
+                | "ok" -> Decode.succeed ToolCallOk
+                | "failed" -> Decode.field "reason" Decode.string |> Decode.map ToolCallFailed
+                | other -> Decode.fail (sprintf "Unknown tool outcome: %s" other)) }
+
+    let private toolUseStarted : Codec<ToolUseStarted> =
+        { Encode =
+            fun (p: ToolUseStarted) ->
+                Encode.object
+                    [ "toolUseId", toolUseId.Encode p.ToolUseId
+                      "agentTurnId", agentTurnId.Encode p.AgentTurnId
+                      "namespace", Encode.string p.Namespace
+                      "name", Encode.string p.Name
+                      // `null` and a recorded object are different facts: nothing of this
+                      // call's arguments may be recorded, versus these are its arguments
+                      // with the secrets already gone.
+                      "arguments", (match p.Arguments with Some a -> Encode.string a | None -> Encode.nil) ]
+          Decode =
+            Decode.object (fun get ->
+                { ToolUseStarted.ToolUseId = get.Required.Field "toolUseId" toolUseId.Decode
+                  ToolUseStarted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
+                  ToolUseStarted.Namespace = get.Required.Field "namespace" Decode.string
+                  ToolUseStarted.Name = get.Required.Field "name" Decode.string
+                  ToolUseStarted.Arguments = get.Required.Field "arguments" (Decode.option Decode.string) }) }
+
+    let private toolUseFinished : Codec<ToolUseFinished> =
+        { Encode =
+            fun (p: ToolUseFinished) ->
+                Encode.object
+                    [ "toolUseId", toolUseId.Encode p.ToolUseId
+                      "outcome", toolOutcome.Encode p.Outcome
+                      "block", (match p.Block with Some b -> blockId.Encode b | None -> Encode.nil) ]
+          Decode =
+            Decode.object (fun get ->
+                { ToolUseFinished.ToolUseId = get.Required.Field "toolUseId" toolUseId.Decode
+                  ToolUseFinished.Outcome = get.Required.Field "outcome" toolOutcome.Decode
+                  ToolUseFinished.Block = get.Required.Field "block" (Decode.option blockId.Decode) }) }
+
     let sessionEvent : Codec<SessionEvent> =
         { Encode =
             (fun e ->
@@ -738,7 +1051,15 @@ module Codec =
                 | WorkSandboxStopped p ->
                     Encode.object [ "type", Encode.string "workSandboxStopped"; "payload", workSandboxStopped.Encode p ]
                 | SessionEvent.CommandRefused p ->
-                    Encode.object [ "type", Encode.string "commandRefused"; "payload", commandRefused.Encode p ])
+                    Encode.object [ "type", Encode.string "commandRefused"; "payload", commandRefused.Encode p ]
+                | ToolUseStarted p ->
+                    Encode.object [ "type", Encode.string "toolUseStarted"; "payload", toolUseStarted.Encode p ]
+                | ToolUseFinished p ->
+                    Encode.object [ "type", Encode.string "toolUseFinished"; "payload", toolUseFinished.Encode p ]
+                | McpServerAvailable p ->
+                    Encode.object [ "type", Encode.string "mcpServerAvailable"; "payload", mcpServerNoted.Encode p ]
+                | McpServerUnavailable p ->
+                    Encode.object [ "type", Encode.string "mcpServerUnavailable"; "payload", mcpServerNoted.Encode p ])
           Decode =
             Decode.field "type" Decode.string
             |> Decode.andThen (fun t ->
@@ -783,6 +1104,12 @@ module Codec =
                 | "workSandboxStarted" -> Decode.field "payload" workSandboxStarted.Decode |> Decode.map WorkSandboxStarted
                 | "workSandboxStopped" -> Decode.field "payload" workSandboxStopped.Decode |> Decode.map WorkSandboxStopped
                 | "commandRefused" -> Decode.field "payload" commandRefused.Decode |> Decode.map SessionEvent.CommandRefused
+                | "toolUseStarted" -> Decode.field "payload" toolUseStarted.Decode |> Decode.map ToolUseStarted
+                | "toolUseFinished" -> Decode.field "payload" toolUseFinished.Decode |> Decode.map ToolUseFinished
+                | "mcpServerAvailable" ->
+                    Decode.field "payload" mcpServerNoted.Decode |> Decode.map McpServerAvailable
+                | "mcpServerUnavailable" ->
+                    Decode.field "payload" mcpServerNoted.Decode |> Decode.map McpServerUnavailable
                 | other -> Decode.fail (sprintf "Unknown session event type: %s" other)) }
 
     /// Wrap any event codec into a codec for its envelope.

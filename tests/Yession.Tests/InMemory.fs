@@ -228,7 +228,7 @@ let tests =
                 // replayed log brings it back up in the same one rather than in default.
                 let! page = host.Log.Read None 200
                 match page.Events |> List.choose (fun e -> match e.Event with SessionEvent.TerminalOpened t -> Some t | _ -> None) with
-                | [ opened ] -> Expect.equal opened.Sandbox test "the terminal is recorded as belonging to the named sandbox"
+                | [ opened ] -> Expect.equal opened.Sandbox (Some test) "the terminal is recorded as belonging to the named sandbox"
                 | other -> failwithf "expected exactly one terminal to have opened, got %A" other
                 do! host.Stop ()
             }
@@ -480,7 +480,7 @@ let tests =
                 let awaitReport = Async.FromContinuations (fun (cont, _, _) -> reportCont <- Some cont)
                 let report (name: string) = async { match reportCont with Some c -> reportCont <- None; c name | None -> () }
 
-                let! host = Host.startFull (fun () -> None) None None None None None (Some report) None (fun _ _ -> ()) None None None (sid ()) None "" None false 0
+                let! host = Host.startFull (fun () -> None) None None None None None (Some report) None (fun _ _ -> ()) None McpClient.McpConnections.none None (sid ()) None "" None false 0
                 let! a = connectInMemoryClient host "ada" "Ada"
                 let! reportWaiter = Async.StartChild awaitReport
                 a.Runner.Dispatch (user (EditTitleMsg (Text.insert 0 "ship it" (a.Runner.Model ()).Synced.Title)))
@@ -513,7 +513,7 @@ let tests =
                 let report (busy: bool) = async { reports.Add busy }
 
                 let! host =
-                    Host.startFull (fun () -> None) None None None None None None (Some report) (fun _ _ -> ()) None None None (sid ()) None "" None false 0
+                    Host.startFull (fun () -> None) None None None None None None (Some report) (fun _ _ -> ()) None McpClient.McpConnections.none None (sid ()) None "" None false 0
 
                 // A session nobody has attached to is idle from the moment it boots — which
                 // is what lets the Manager's window start at launch rather than at first

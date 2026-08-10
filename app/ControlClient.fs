@@ -37,14 +37,19 @@ let subscribeNotifications (baseUrl: string) (secret: string) (onNotification: S
         secret
         (decoding "notification" ControlWire.sessionNotification onNotification)
 
-/// Subscribe to the Manager's MCP tool stream. The current list arrives immediately, then a
-/// fresh `McpToolList` on every change; each is handed to `onList`. A malformed frame is
-/// logged and skipped. Returns a cancel that stops the subscription and closes the connection.
-let subscribeMcp (baseUrl: string) (secret: string) (onList: Sink<McpToolList>) : Subscription =
+/// Subscribe to this session's MCP server set (Plan 17). The current set arrives
+/// immediately, then a fresh WHOLE set on every change; each is handed to `onSet`. A
+/// malformed frame is logged and skipped. Returns a cancel that stops the subscription and
+/// closes the connection.
+///
+/// The secret names the launch, and the Manager resolves the session from it — so this
+/// stream carries the servers THIS session may reach, never the Manager's whole
+/// configuration.
+let subscribeMcp (baseUrl: string) (secret: string) (onSet: Sink<McpServerSet>) : Subscription =
     openEventStream
         (sprintf "%s/control/mcp" baseUrl)
         secret
-        (decoding "mcp list" ControlWire.mcpToolList onList)
+        (decoding "mcp server set" Codec.mcpServerSet onSet)
 
 /// Subscribe to the Manager's session registry stream (`/sessions/stream`,
 /// docs/plans/09) — the management surface, not a control leg, so no secret rides the

@@ -260,7 +260,7 @@ let private drainTests =
 // --- The projection --------------------------------------------------------------------
 
 let private opened (id: TerminalId) (title: string) =
-    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = SandboxName.defaultName }
+    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxName.defaultName }
 
 let private started (id: TerminalId) (b: string) (command: string) (fromSeq: int) =
     SessionEvent.TerminalBlockStarted
@@ -1083,7 +1083,7 @@ let private leaseCommandTests =
                 let handle =
                     SessionCommands.handle
                         (fun _ _ -> Ok ())
-                        (fun _ _ -> async { return Error "not this test" })
+                        (fun _ _ _ -> async { return Error "not this test" })
                         (fun _ _ -> async { return Error "not this test" })
                         (fun id by -> async { calls.Add (sprintf "take:%s:%A" (TerminalId.value id) by); return Ok () })
                         (fun id by ->
@@ -1593,7 +1593,7 @@ let private mintFrom (ids: string list) =
         if remaining.Count > 1 then remaining.RemoveAt 0
         next
 
-let private makeTerminals (log: EventLog<SessionEvent>) environment openTranscript openAtBoot =
+let private makeTerminalsWith attach (log: EventLog<SessionEvent>) environment openTranscript openAtBoot =
     let mintTerminal = mintFrom [ "term-a"; "term-b" ]
     let mintBlock = mintFrom [ "b-1"; "b-2"; "b-3" ]
     let records = ResizeArray<TerminalId * int * TranscriptRecord> ()
@@ -1620,8 +1620,12 @@ let private makeTerminals (log: EventLog<SessionEvent>) environment openTranscri
             // (`TerminalScheduler`), and wiring a real one here would test the scheduler twice
             // while making every manager assertion depend on it.
             ignore
+            attach
             openAtBoot
     terminals, records
+
+let private makeTerminals log environment openTranscript openAtBoot =
+    makeTerminalsWith AttachTerminal.unavailable log environment openTranscript openAtBoot
 
 let private managerTests =
     testList "Terminal manager" [
@@ -1631,7 +1635,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 Expect.isTrue (terminals.IsOpen id) "it is open"
                 let! events = eventsOf log
@@ -1649,7 +1653,7 @@ let private managerTests =
                     scriptedEnvironment (fun _ -> [ Stdout, "hello\n"; Stderr, "warn\n" ], 0)
                 let openTranscript, readTranscript, _, _ = recordingTranscripts ()
                 let terminals, records = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let entry = entry "a1" id (PeerRef ada) 1.0 None
                 let mutable startedCalled = 0
@@ -1699,7 +1703,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stderr, "no such file\n" ], 2)
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "cat missing" ignore
                 let! events = eventsOf log
@@ -1718,7 +1722,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "\u001b[31mred\r\n" ], 0)
                 let openTranscript, _, readKeyframes, awaitKeyframes = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "first" ignore
                 do! terminals.RunBlock id (entry "a2" id (PeerRef ada) 2.0 None) "second" ignore
@@ -1748,7 +1752,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0 (Some bob)) "rm -rf build" ignore
                 let! events = eventsOf log
@@ -1766,7 +1770,7 @@ let private managerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, flood ], 0)
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "yes" ignore
                 let! events = eventsOf log
@@ -1800,7 +1804,7 @@ let private managerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let! _ = terminals.Close id "closed by a peer"
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "make" ignore
@@ -1822,7 +1826,7 @@ let private schedulerTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [ Stdout, "ok\n" ], 0)
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals Set.empty
@@ -1845,7 +1849,7 @@ let private schedulerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals Set.empty
@@ -1878,7 +1882,7 @@ let private schedulerTests =
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) "build" SandboxName.defaultName
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 // The crash window: a block start reached the log, the doc removal did not.
@@ -1963,8 +1967,118 @@ let private syncTests =
     ]
 
 
+// --- Foreign sources (Plan 16, part D) ----------------------------------------------------
+
+/// An environment that REFUSES to start, so "did the open ensure the sandbox?" is answerable
+/// by whether the open succeeded rather than by counting calls.
+let private refusingEnvironment () =
+    let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
+    { environment with Ensure = fun _ _ -> async { return EnvironmentUnavailable "no sandbox here" } }, spawned
+
+/// A stream that records what was written to it and never ends on its own.
+let private loopback () =
+    let written = ResizeArray<string> ()
+    let attach : AttachTerminal =
+        fun _ _ _ onData ->
+            async {
+                return
+                    Ok
+                        { Write = fun text -> written.Add text
+                          Resize = fun _ _ -> ()
+                          Kill = ignore
+                          Exited = async { return SandboxExited 0 }
+                          }
+                    |> Result.map (fun handle ->
+                        onData "ready\n"
+                        handle)
+            }
+    attach, written
+
+let private deviceTicket =
+    { Url = "ws://127.0.0.1:0/device"
+      Capabilities = SourceCapabilities.byteStream
+      Label = "USB serial" }
+
+let private sourceTests =
+    testList "Foreign terminal sources" [
+
+        // The whole point of a second kind of source: a session that only talks to a serial
+        // port should not start a container to do it.
+        testCaseAsync "an attached source does NOT ensure the WorkSandbox" <|
+            async {
+                let log = newLog ()
+                let environment, _ = refusingEnvironment ()
+                let openTranscript, _, _, _ = recordingTranscripts ()
+                let attach, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript []
+                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                Expect.isError shell "a shell terminal IS a need, so a refused sandbox refuses the open"
+                let! device = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                Expect.isOk device "an attached one needs nothing this session runs"
+            }
+
+        testCaseAsync "an attached source's bytes reach the transcript" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, linesOf, _, _ = recordingTranscripts ()
+                let attach, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let id = opened |> expect
+                let printed =
+                    linesOf id
+                    |> List.choose (function TranscriptRecordLine record -> Some record.Data | _ -> None)
+                    |> String.concat ""
+                Expect.stringContains printed "ready" "the same output path a shell gets"
+            }
+
+        // Declared, not discovered at the third command: a source that cannot carry the
+        // OSC 133 bootstrap has nothing that could ever report a command's outcome, so the
+        // block is refused as a value instead of hanging forever.
+        testCaseAsync "a live-only source refuses blocks rather than leaving them open" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _ = recordingTranscripts ()
+                let attach, written = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let id = opened |> expect
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "make" ignore
+                let! events = eventsOf log
+                let completed =
+                    events
+                    |> List.choose (function SessionEvent.TerminalBlockCompleted e -> Some e.Result | _ -> None)
+                match completed with
+                | [ CommandExecutionFailed reason ] ->
+                    Expect.stringContains reason "live-only" "it says WHY, so the agent does not retry"
+                | other -> failwithf "expected one refused block, got %A" other
+                // Refused BEFORE the write: typing a shell command line at a serial device is
+                // not a no-op.
+                Expect.isFalse (written |> Seq.exists (fun w -> w.Contains "make")) "nothing was typed at the device"
+            }
+
+        // A serial line has no rows. Telling it it has 24 would be inventing a fact the
+        // emulator would then draw against.
+        testCaseAsync "a source that declared no size is not resized" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _ = recordingTranscripts ()
+                let attach, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let id = opened |> expect
+                let! taken = terminals.Take id (PeerRef ada)
+                Expect.isOk taken "a device can still be typed at — the lease is what arbitrates"
+                Expect.isFalse (terminals.Resize id (PeerRef ada) 132 43) "but it has no size to set"
+            }
+    ]
+
 let tests =
     testList "Terminals (Plan 13)" [
+        sourceTests
         approvalTests
         drainTests
         projectionTests

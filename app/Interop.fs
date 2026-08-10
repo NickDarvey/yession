@@ -145,6 +145,11 @@ let headerOf (req: IncomingMessage) (name: string) : string option = jsNative
 [<Emit("crypto.randomUUID()")>]
 let randomSecret () : string = jsNative
 
+/// A repeating timer, for the beats a long-lived process keeps (the MCP poll, the activity
+/// report). Returns the handle `clearInterval` wants.
+[<Emit("setInterval($1, $0)")>]
+let setInterval (ms: int) (callback: unit -> unit) : obj = jsNative
+
 [<ImportAll("node:crypto")>]
 let private nodeCrypto : obj = jsNative
 

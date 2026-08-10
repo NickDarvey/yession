@@ -585,7 +585,7 @@ let private startControlServer (callers: (string * Control.ControlCaller) list) 
                         (fun _ _ -> async { return Ok () })
                         (fun _ _ -> async { return Ok () })
                         (fun _ _ -> Subscription.none)
-                        (fun _ -> Subscription.none)
+                        (fun _ _ _ -> Subscription.none)
                         dummyRegister
                         api
                         None

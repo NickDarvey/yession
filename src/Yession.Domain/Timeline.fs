@@ -80,6 +80,13 @@ type TimelineItem =
     | TimelineBlock of EventOffset * TerminalId * BlockId
     /// A stretch of live mode, at the offset it concluded.
     | TimelineStretch of TerminalStretch
+    /// A tool the agent called, at the offset it STARTED (Plan 16, part C). It takes the
+    /// block's anchoring rule rather than the stretch's, for the block's reason: a call that
+    /// takes four minutes must be visible while it is the only thing happening.
+    ///
+    /// Carried by id, like a block, and resolved against `ToolUses` below — so the outcome
+    /// arriving later moves what the chip says without moving where it sits.
+    | TimelineToolUse of EventOffset * ToolUseId
 
 module TimelineItem =
 
@@ -89,6 +96,42 @@ module TimelineItem =
         | TimelineMessage item -> item.Offset
         | TimelineBlock (offset, _, _) -> offset
         | TimelineStretch stretch -> stretch.Offset
+        | TimelineToolUse (offset, _) -> offset
+
+/// One tool call, as the chat currently knows it. `Outcome = None` is a call still running:
+/// it already holds its place, and says so, rather than appearing out of nowhere when it
+/// finishes.
+type ToolUse =
+    { ToolUseId : ToolUseId
+      /// The turn that made the call — what lets a chatty turn group into one line.
+      AgentTurnId : AgentTurnId
+      Namespace : string
+      Name : string
+      /// As recorded: secrets already gone, `None` for a tool whose schema we did not write.
+      Arguments : string option
+      Outcome : ToolOutcome option
+      Block : BlockId option }
+
+module ToolUse =
+
+    /// Where a reader is sent, and what a link carries: `<namespace>/<name>` names the tool
+    /// and the minted id names the call.
+    let label (use': ToolUse) : string = sprintf "%s/%s" use'.Namespace use'.Name
+
+/// One DRAWN row of the chat. A row is usually one item; a run of consecutive tool calls
+/// from one turn is one row holding several, so the chat costs a line per turn rather than
+/// a line per call.
+type TimelineRow =
+    | RowItem of TimelineItem
+    | RowToolRun of AgentTurnId * TimelineItem list
+
+module TimelineRow =
+
+    let offset =
+        function
+        | RowItem item -> TimelineItem.offset item
+        | RowToolRun (_, items) ->
+            items |> List.tryHead |> Option.map TimelineItem.offset |> Option.defaultValue EventOffset.zero
 
 /// The terminal side of the timeline, folded from the log. Conversation items are not
 /// folded again here — they are merged in by `items`, from the projection that already has
@@ -103,12 +146,31 @@ type TimelineProjection =
       OpenLeases : Map<string, ActorRef * int * DateTimeOffset>
       /// Each terminal's title as `TerminalOpened` gave it, so a stretch can name the place
       /// without the merge having to carry a second projection in.
-      Titles : Map<string, string> }
+      Titles : Map<string, string>
+      /// What each tool call currently says, by its minted id. Held HERE rather than in a
+      /// projection of its own because this is already the chat's fold and the two would
+      /// have to be applied in lockstep anyway — `OpenLeases` is the same kind of
+      /// bookkeeping.
+      ToolUses : Map<string, ToolUse> }
 
 module TimelineProjection =
 
     let empty : TimelineProjection =
-        { TerminalItems = []; OpenLeases = Map.empty; Titles = Map.empty }
+        { TerminalItems = []; OpenLeases = Map.empty; Titles = Map.empty; ToolUses = Map.empty }
+
+    /// What one tool-use item currently says.
+    let toolUse (id: ToolUseId) (proj: TimelineProjection) : ToolUse option =
+        Map.tryFind (ToolUseId.value id) proj.ToolUses
+
+    /// Does this call draw a chip of its own?
+    ///
+    /// Not when it became a block: the block chip already says who ran what and how it went,
+    /// and a second item beside it would be two renderings of one fact, free to disagree.
+    /// The RECORD still exists — the audit wants every call — it simply does not draw twice.
+    let drawsChip (id: ToolUseId) (proj: TimelineProjection) : bool =
+        match toolUse id proj with
+        | Some use' -> Option.isNone use'.Block
+        | None -> false
 
     /// A range is `None` unless it holds at least one line. `[from, to)` with `to <= from`
     /// is what a rejected command carries and what a pre-Plan-14 lease event decodes to;
@@ -157,6 +219,29 @@ module TimelineProjection =
                     TerminalItems = proj.TerminalItems @ [ TimelineStretch stretch ]
                     OpenLeases = Map.remove key proj.OpenLeases }
             | _ -> proj
+        | SessionEvent.ToolUseStarted e ->
+            let use' =
+                { ToolUseId = e.ToolUseId
+                  AgentTurnId = e.AgentTurnId
+                  Namespace = e.Namespace
+                  Name = e.Name
+                  Arguments = e.Arguments
+                  Outcome = None
+                  Block = None }
+            { proj with
+                TerminalItems = proj.TerminalItems @ [ TimelineToolUse (envelope.Offset, e.ToolUseId) ]
+                ToolUses = Map.add (ToolUseId.value e.ToolUseId) use' proj.ToolUses }
+        | SessionEvent.ToolUseFinished e ->
+            // No new item: the call already has its place. Only what it SAYS changes.
+            match Map.tryFind (ToolUseId.value e.ToolUseId) proj.ToolUses with
+            | Some use' ->
+                { proj with
+                    ToolUses =
+                        Map.add
+                            (ToolUseId.value e.ToolUseId)
+                            { use' with Outcome = Some e.Outcome; Block = e.Block }
+                            proj.ToolUses }
+            | None -> proj
         | SessionEvent.TerminalClosed e ->
             // The lease goes with the terminal, and WITHOUT a release event — that is the
             // Process's rule, so the stretch has to be closed here or it would never appear.
@@ -209,3 +294,33 @@ module TimelineProjection =
         let said = conversation.Items |> List.map TimelineMessage
         said @ proj.TerminalItems
         |> List.sortBy (TimelineItem.offset >> EventOffset.value)
+
+    /// The chat as it is DRAWN, which is not quite the chat as it happened.
+    ///
+    /// Two rules apply here rather than in the fold, because both are about rendering and
+    /// the fold is about facts: a call that became a block is dropped (its block already
+    /// draws), and consecutive calls from ONE turn collapse into a run. The events already
+    /// carry the turn, and a chatty turn should cost one line rather than twenty — tool use
+    /// is the first item a single turn can emit a dozen of.
+    let rows (conversation: ConversationProjection) (proj: TimelineProjection) : TimelineRow list =
+        let turnOf item =
+            match item with
+            | TimelineToolUse (_, id) -> toolUse id proj |> Option.map (fun u -> u.AgentTurnId)
+            | _ -> None
+        items conversation proj
+        |> List.filter (fun item ->
+            match item with
+            | TimelineToolUse (_, id) -> drawsChip id proj
+            | _ -> true)
+        |> List.fold
+            (fun rows item ->
+                match turnOf item, rows with
+                // Only CONSECUTIVE calls group: a message between two of them means the turn
+                // said something in the middle, and hiding that inside one line would tell a
+                // reader the wrong story about the order.
+                | Some turn, RowToolRun (previous, earlier) :: rest when previous = turn ->
+                    RowToolRun (turn, earlier @ [ item ]) :: rest
+                | Some turn, _ -> RowToolRun (turn, [ item ]) :: rows
+                | None, _ -> RowItem item :: rows)
+            []
+        |> List.rev

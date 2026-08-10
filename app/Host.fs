@@ -98,7 +98,11 @@ let startFull
     // scheduler. `ignore` in the layered helpers below and whenever telemetry is off.
     (emitUsage: AgentTurnId -> AgentUsage -> unit)
     (subscribeNotifications: Subscribe<SessionNotification> option)
-    (subscribeMcp: Subscribe<McpToolList> option)
+    // The MCP servers this session was given (Plan 17). Composed by the caller rather than
+    // subscribed here, unlike the other reverse legs: what arrives on that leg has to
+    // invalidate a QUERY as well as rebuild a registry, and the query surface is the
+    // composition root's. `McpConnections.none` is a session that was given none.
+    (mcpConnections: McpClient.McpConnections)
     // Extra HTTP routes on the session's server (Plan 08: the connection surface).
     (extraHttpRoutes: (Interop.IncomingMessage -> Interop.ServerResponse -> bool) option)
     (sessionId: SessionId)
@@ -259,6 +263,10 @@ let startFull
             match MessageId.create (string (Guid.NewGuid ())) with
             | Ok id -> id
             | Error e -> failwithf "message id invariant violated: %s" e
+        let mintToolUseId () =
+            match ToolUseId.create (string (Guid.NewGuid ())) with
+            | Ok id -> id
+            | Error e -> failwithf "tool use id invariant violated: %s" e
         // --- Terminals (Plan 13) -----------------------------------------------------
         //
         // A second consumer over a second queue, sharing nothing with the agent scheduler
@@ -302,6 +310,10 @@ let startFull
                 // cycle needs: a lease that ends inside the manager — the alt-screen flip, a
                 // dropped peer — has nothing the scheduler could have observed.
                 (fun () -> reDrainTerminals ())
+                // How a foreign stream is reached (Plan 16, part D). One implementation, not
+                // a configurable one: the wire is part of the seam's contract, so a second
+                // way to attach would be a second contract nobody wrote down.
+                AttachWs.attach
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 
         // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
@@ -337,7 +349,7 @@ let startFull
                     let title =
                         if sandbox = SandboxName.defaultName then label
                         else sprintf "[%s] %s" key label
-                    match! terminals.Open ActorRef.Agent title sandbox with
+                    match! terminals.Open ActorRef.Agent (SandboxShell sandbox) title with
                     | Error reason -> return Error reason
                     | Ok id ->
                         agentTerminalIds.Value <- Map.add key id agentTerminalIds.Value
@@ -403,6 +415,40 @@ let startFull
                     | Ok outcome -> return Ok (PendingTerminal outcome)
                     | Error reason -> return Error reason
             }
+        /// The audit seam (Plan 16, part C), bound to one turn. Every tool call the turn
+        /// makes appends here — the session's own verbs today, a proxied provider's
+        /// tomorrow — and `set_secret` is the reason it exists: writing a secret was
+        /// recorded NOWHERE, so a human could not find out that the agent had done it.
+        ///
+        /// The id is minted here rather than derived, for the same reason `BlockId` is: a
+        /// chip somebody will tap, and eventually link to, must not be identified by a rule
+        /// that lives nowhere in the data.
+        let toolUseLogFor (turnId: AgentTurnId) : ToolUseLog =
+            { Started =
+                fun (started: ToolUseBegin) ->
+                    async {
+                        let id = mintToolUseId ()
+                        let! _ =
+                            log.Append
+                                ActorRef.Agent
+                                (SessionEvent.ToolUseStarted
+                                    { ToolUseId = id
+                                      AgentTurnId = turnId
+                                      Namespace = started.Namespace
+                                      Name = started.Name
+                                      Arguments = started.Arguments })
+                        return Some id
+                    }
+              Finished =
+                fun id (ended: ToolUseEnd) ->
+                    async {
+                        let! _ =
+                            log.Append
+                                ActorRef.Agent
+                                (SessionEvent.ToolUseFinished
+                                    { ToolUseId = id; Outcome = ended.Outcome; Block = ended.Block })
+                        return ()
+                    } }
 
         let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
             { ExecuteCommand = terminalCommands.Execute
@@ -439,7 +485,11 @@ let startFull
               // forwarding start resolves belongs to the TURN ACTOR, and only the
               // dispatcher knows who that is.
               StartWorkSandbox = AgentCapabilities.none.StartWorkSandbox
-              StopWorkSandbox = AgentCapabilities.none.StopWorkSandbox }
+              StopWorkSandbox = AgentCapabilities.none.StopWorkSandbox
+              RecordToolUse = toolUseLogFor turnId
+              // Snapshotted HERE, which is what makes a turn's tool list stable: a set
+              // change mid-turn lands on the next turn, never underneath the model.
+              ForeignTools = mcpConnections.Registries () }
 
         // The queue drain and turn scheduler (Phase 3) — the real machinery lives in
         // `Scheduler` (shared with the property harness); the Host wires it to this
@@ -555,18 +605,11 @@ let startFull
             notifications <- Some (subscribe handle)
         | None -> ()
 
-        // The MCP tool stream (the second reverse leg): subscribe when the launch handed us a
-        // channel. The current list arrives immediately, then a fresh list on every change. The
-        // DEFAULT handler just logs the count — making the tools available to agent turns is
-        // left to whatever handler a later composition wants.
-        let mutable mcpTools : Subscription option = None
-        match subscribeMcp with
-        | Some subscribe ->
-            let handle (list: McpToolList) : unit =
-                eprintfn "[session %s] mcp tools available: %d" (SessionId.value sessionId) (List.length list.Tools)
-            mcpTools <- Some (subscribe handle)
-        | None -> ()
-
+        // The MCP server set (the second reverse leg, Plan 17): subscribe when the launch
+        // handed us a channel. The current set arrives immediately, then a fresh WHOLE set on
+        // every change — and with no attach step this is the ONLY way a session learns a
+        // server exists, so what arrives here is held rather than logged.
+        //
         // Terminals a previous process left open belong to a sandbox that died with it, so
         // the log is describing something that no longer exists. Close them before anything
         // reads the projection — and before the terminal drain, which must not try to run a
@@ -600,11 +643,7 @@ let startFull
                   OnCommand =
                     SessionCommands.handle
                         requestInterrupt
-                        // A peer's "open a terminal" lands in `default`. Choosing a
-                        // sandbox is a COMMAND, and commands are the agent's (Plan 15) —
-                        // a human who wants a terminal in the `test` sandbox asks for one,
-                        // and sees the act-line for it.
-                        (fun actor title -> terminals.Open actor title SandboxName.defaultName)
+                        terminals.Open
                         terminals.Close
                         terminals.Take
                         terminals.Release
@@ -762,7 +801,6 @@ let startFull
                     async {
                         clearInterval idleLeaseBeat
                         notifications |> Option.iter (fun s -> s.Stop ())
-                        mcpTools |> Option.iter (fun s -> s.Stop ())
                         // Sandbox lifetime = session lifetime: take the WorkSandbox (and
                         // anything still running in it) down with the session.
                         do! sandboxes.StopAll ()
@@ -787,7 +825,7 @@ let startWithEnvironment
     // No mount: these helpers serve an unfronted, origin-root session. No transcript store
     // either — terminals fall back to the in-memory one, which is the right default for a
     // host with no data directory.
-    startFull (fun () -> runAgent) makeSandboxes None baseLog None None None None (fun _ _ -> ()) None None None sessionId None "" None false port
+    startFull (fun () -> runAgent) makeSandboxes None baseLog None None None None (fun _ _ -> ()) None McpClient.McpConnections.none None sessionId None "" None false port
 
 /// `startWithEnvironment` without an environment — Step 08-era topology.
 let startWith (runAgent: RunAgent option) (sessionId: SessionId) (port: int) : Async<SessionHost> =

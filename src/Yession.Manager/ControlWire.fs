@@ -56,39 +56,6 @@ module ControlWire =
                 | "environmentChanged" -> Decode.succeed (EnvironmentChanged ())
                 | other -> Decode.fail (sprintf "Unknown notification: %s" other)) }
 
-    /// Carry an arbitrary JSON value through as raw text: decode reads the value and renders it
-    /// back to a compact string; encode parses the string and embeds it as a real JSON node (so
-    /// an MCP `inputSchema` object stays an object on the wire, never a quoted string). A value
-    /// that is not valid JSON degrades to a JSON string rather than throwing.
-    let private rawJson : Codec<string> =
-        { Encode =
-            (fun raw ->
-                match Decode.fromString Decode.value raw with
-                | Ok value -> value
-                | Error _ -> Encode.string raw)
-          Decode = Decode.value |> Decode.map (Encode.toString 0) }
-
-    let private mcpTool : Codec<McpTool> =
-        { Encode =
-            fun (t: McpTool) ->
-                Encode.object
-                    ([ "name", Encode.string t.Name
-                       "inputSchema", rawJson.Encode t.InputSchema ]
-                     @ (t.Title |> Option.map (fun x -> [ "title", Encode.string x ]) |> Option.defaultValue [])
-                     @ (t.Description |> Option.map (fun x -> [ "description", Encode.string x ]) |> Option.defaultValue []))
-          Decode =
-            Decode.object (fun get ->
-                { McpTool.Name = get.Required.Field "name" Decode.string
-                  McpTool.Title = get.Optional.Field "title" Decode.string
-                  McpTool.Description = get.Optional.Field "description" Decode.string
-                  McpTool.InputSchema = get.Required.Field "inputSchema" rawJson.Decode }) }
-
-    /// The MCP tool list — the standard `ListToolsResult` shape (`{ "tools": [...] }`). The
-    /// payload of every `/control/mcp` frame (Manager→Session): the current list, then updates.
-    let mcpToolList : Codec<McpToolList> =
-        { Encode = fun (l: McpToolList) -> Encode.object [ "tools", l.Tools |> List.map mcpTool.Encode |> Encode.list ]
-          Decode = Decode.object (fun get -> { McpToolList.Tools = get.Required.Field "tools" (Decode.list mcpTool.Decode) }) }
-
     // --- secrets (Plan 06; resolve reworked with session-owned sandboxes) -----------------
     // Requests carry an explicit scope: the wire is self-describing and deny paths are
     // testable, even though v1 policy only ever permits a session's own scope for writes.
