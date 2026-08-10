@@ -72,12 +72,14 @@ let targetFor (sessionId: SessionId) (owner: CredentialOwner) (scopeChoice: stri
     | "mine" -> Ok { Scope = CredentialOwner.scope owner; Name = secretName }
     | other -> Error (sprintf "unknown scope choice '%s' (expected 'session' or 'mine')" other)
 
-/// The per-operation credential targets, most specific first: the session's own
-/// explicit credential, then the acting human's. Mirrors `ClaudeConnection.turnTargets`.
+/// The per-operation credential targets, most specific first: the session's own explicit
+/// credential, then the acting human's, then the deployment's. Mirrors
+/// `ClaudeConnection.turnTargets` — including why `LocalScope` is named unconditionally.
 let turnTargets (sessionId: SessionId) (actor: ActorRef) : SecretId list =
     [ Some { SecretId.Scope = SessionScope sessionId; Name = secretName }
       CredentialOwner.ofActor actor
-      |> Option.map (fun owner -> { SecretId.Scope = CredentialOwner.scope owner; Name = secretName }) ]
+      |> Option.map (fun owner -> { SecretId.Scope = CredentialOwner.scope owner; Name = secretName })
+      Some { SecretId.Scope = LocalScope; Name = secretName } ]
     |> List.choose id
 
 // --- the device flow, as data ----------------------------------------------------------
@@ -135,13 +137,11 @@ let pollOutcome (currentInterval: int) (body: string) : PollOutcome =
 
 type private GitHubRequestBody =
     { Scope : string
-      PeerId : string option
       Token : string option }
 
 let private bodyDecoder : Decoder<GitHubRequestBody> =
     Decode.object (fun get ->
         { Scope = get.Optional.Field "scope" Decode.string |> Option.defaultValue "mine"
-          PeerId = get.Optional.Field "peerId" Decode.string
           Token = get.Optional.Field "token" Decode.string })
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
@@ -160,13 +160,10 @@ let private respondText (res: ServerResponse) (status: int) (text: string) =
 let private jsonString (raw: string) : string = Encode.toString 0 (Encode.string raw)
 
 /// The credential owner behind a browser request — identical to the Claude rule.
-let private ownerOf (identity: CookieIdentity) (peerIdRaw: string option) : Result<CredentialOwner, string> =
+let ownerOf (identity: CookieIdentity) : CredentialOwner =
     match identity.Attribution with
-    | AttributedUser user -> Ok (UserOwner user)
-    | UnattributedAccess ->
-        match peerIdRaw with
-        | Some raw -> PeerId.create raw |> Result.map PeerOwner
-        | None -> Error "peer id required for an unattributed connection"
+    | AttributedUser user -> UserOwner user
+    | UnattributedAccess -> LocalOwner
 
 /// POST a JSON body and resolve with `(ok, responseText)`. GitHub's OAuth endpoints
 /// answer form-encoded unless asked for JSON, so the accept header is load-bearing.
@@ -199,95 +196,92 @@ let routes
             | None -> respondText res 401 "unauthorized"
             | Some identity ->
                 let handle (body: GitHubRequestBody) : unit =
-                    match ownerOf identity body.PeerId with
-                    | Error e -> respondText res 400 e
-                    | Ok owner ->
-                        let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
-                        match routeOf () with
-                        | Some GitHubStatus ->
-                            let statusJson (target: SecretId) =
-                                match statusOf target with
-                                | Some kind -> jsonString (kindLabel kind)
-                                | None -> "null"
-                            let sessionTarget : SecretId = { Scope = SessionScope sessionId; Name = secretName }
-                            let mineTarget : SecretId = { Scope = CredentialOwner.scope owner; Name = secretName }
-                            let ownerLabel =
-                                match owner with
-                                | UserOwner _ -> "user"
-                                | PeerOwner _ -> "peer"
-                            respondJson res 200
-                                (sprintf """{"session":%s,"mine":%s,"owner":"%s"}"""
-                                    (statusJson sessionTarget) (statusJson mineTarget) ownerLabel)
-                        | Some (GitHub action) ->
-                            match targetFor sessionId owner body.Scope with
-                            | Error e -> respondText res 400 e
-                            | Ok target ->
-                                Async.StartImmediate (
-                                    async {
-                                        match action with
-                                        | GitHubAction.Begin ->
-                                            match configuredClientId () with
-                                            | None ->
-                                                respondText res 400
-                                                    "no GitHub App is configured (set YESSION_GITHUB_CLIENT_ID) — paste a token instead"
-                                            | Some clientId ->
-                                                let url = envOr "YESSION_GITHUB_DEVICE_URL" deviceCodeUrl
-                                                let request = sprintf """{"client_id":%s}""" (jsonString clientId)
-                                                let! reply = postJson url request |> Interop.awaitPromise
-                                                if not reply.ok then respondText res 502 reply.body
-                                                else
-                                                    match Decode.fromString deviceCodeDecoder reply.body with
-                                                    | Error e -> respondText res 502 (sprintf "unrecognised device-code reply: %s" e)
-                                                    | Ok grant ->
-                                                        pending <- Map.add target grant pending
-                                                        respondJson res 200
-                                                            (sprintf """{"userCode":%s,"verificationUri":%s,"interval":%d}"""
-                                                                (jsonString grant.UserCode) (jsonString grant.VerificationUri) grant.Interval)
-                                        | GitHubAction.Poll ->
-                                            match Map.tryFind target pending, configuredClientId () with
-                                            | None, _ -> respondText res 400 "no sign-in in progress for that scope — begin again"
-                                            | Some _, None -> respondText res 400 "no GitHub App is configured (set YESSION_GITHUB_CLIENT_ID)"
-                                            | Some grant, Some clientId ->
-                                                let url = envOr "YESSION_GITHUB_TOKEN_URL" tokenUrl
-                                                let request =
-                                                    sprintf """{"client_id":%s,"device_code":%s,"grant_type":"urn:ietf:params:oauth:grant-type:device_code"}"""
-                                                        (jsonString clientId) (jsonString grant.DeviceCode)
-                                                let! reply = postJson url request |> Interop.awaitPromise
-                                                match pollOutcome grant.Interval reply.body with
-                                                | PollPending interval ->
-                                                    if interval <> grant.Interval then
-                                                        pending <- Map.add target { grant with Interval = interval } pending
-                                                    respondJson res 200 (sprintf """{"status":"pending","interval":%d}""" interval)
-                                                | PollGranted token ->
-                                                    pending <- Map.remove target pending
-                                                    match! connections.Put target token with
-                                                    | Ok () -> respondJson res 200 """{"status":"connected"}"""
-                                                    | Error e -> respondText res 502 e
-                                                | PollFailed reason ->
-                                                    pending <- Map.remove target pending
-                                                    respondText res 400 reason
-                                        | GitHubAction.Token ->
-                                            match body.Token |> Option.map classifyPasted with
-                                            | None -> respondText res 400 "missing token"
-                                            | Some (Error e) -> respondText res 400 e
-                                            | Some (Ok token) ->
+                    let owner = ownerOf identity
+                    let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
+                    match routeOf () with
+                    | Some GitHubStatus ->
+                        let statusJson (target: SecretId) =
+                            match statusOf target with
+                            | Some kind -> jsonString (kindLabel kind)
+                            | None -> "null"
+                        let sessionTarget : SecretId = { Scope = SessionScope sessionId; Name = secretName }
+                        let mineTarget : SecretId = { Scope = CredentialOwner.scope owner; Name = secretName }
+                        let ownerLabel =
+                            match owner with
+                            | UserOwner _ -> "user"
+                            | LocalOwner -> "local"
+                        respondJson res 200
+                            (sprintf """{"session":%s,"mine":%s,"owner":"%s"}"""
+                                (statusJson sessionTarget) (statusJson mineTarget) ownerLabel)
+                    | Some (GitHub action) ->
+                        match targetFor sessionId owner body.Scope with
+                        | Error e -> respondText res 400 e
+                        | Ok target ->
+                            Async.StartImmediate (
+                                async {
+                                    match action with
+                                    | GitHubAction.Begin ->
+                                        match configuredClientId () with
+                                        | None ->
+                                            respondText res 400
+                                                "no GitHub App is configured (set YESSION_GITHUB_CLIENT_ID) — paste a token instead"
+                                        | Some clientId ->
+                                            let url = envOr "YESSION_GITHUB_DEVICE_URL" deviceCodeUrl
+                                            let request = sprintf """{"client_id":%s}""" (jsonString clientId)
+                                            let! reply = postJson url request |> Interop.awaitPromise
+                                            if not reply.ok then respondText res 502 reply.body
+                                            else
+                                                match Decode.fromString deviceCodeDecoder reply.body with
+                                                | Error e -> respondText res 502 (sprintf "unrecognised device-code reply: %s" e)
+                                                | Ok grant ->
+                                                    pending <- Map.add target grant pending
+                                                    respondJson res 200
+                                                        (sprintf """{"userCode":%s,"verificationUri":%s,"interval":%d}"""
+                                                            (jsonString grant.UserCode) (jsonString grant.VerificationUri) grant.Interval)
+                                    | GitHubAction.Poll ->
+                                        match Map.tryFind target pending, configuredClientId () with
+                                        | None, _ -> respondText res 400 "no sign-in in progress for that scope — begin again"
+                                        | Some _, None -> respondText res 400 "no GitHub App is configured (set YESSION_GITHUB_CLIENT_ID)"
+                                        | Some grant, Some clientId ->
+                                            let url = envOr "YESSION_GITHUB_TOKEN_URL" tokenUrl
+                                            let request =
+                                                sprintf """{"client_id":%s,"device_code":%s,"grant_type":"urn:ietf:params:oauth:grant-type:device_code"}"""
+                                                    (jsonString clientId) (jsonString grant.DeviceCode)
+                                            let! reply = postJson url request |> Interop.awaitPromise
+                                            match pollOutcome grant.Interval reply.body with
+                                            | PollPending interval ->
+                                                if interval <> grant.Interval then
+                                                    pending <- Map.add target { grant with Interval = interval } pending
+                                                respondJson res 200 (sprintf """{"status":"pending","interval":%d}""" interval)
+                                            | PollGranted token ->
+                                                pending <- Map.remove target pending
                                                 match! connections.Put target token with
-                                                | Ok () -> respondJson res 200 """{"ok":true}"""
-                                                | Error e -> respondText res 400 e
-                                        | GitHubAction.Disconnect ->
-                                            pending <- Map.remove target pending
-                                            match! connections.Disconnect target with
-                                            | Ok existed -> respondJson res 200 (sprintf """{"disconnected":%b}""" existed)
+                                                | Ok () -> respondJson res 200 """{"status":"connected"}"""
+                                                | Error e -> respondText res 502 e
+                                            | PollFailed reason ->
+                                                pending <- Map.remove target pending
+                                                respondText res 400 reason
+                                    | GitHubAction.Token ->
+                                        match body.Token |> Option.map classifyPasted with
+                                        | None -> respondText res 400 "missing token"
+                                        | Some (Error e) -> respondText res 400 e
+                                        | Some (Ok token) ->
+                                            match! connections.Put target token with
+                                            | Ok () -> respondJson res 200 """{"ok":true}"""
                                             | Error e -> respondText res 400 e
-                                    })
-                        // Unreachable: this handler only runs for the two cases above.
-                        | Some _
-                        | None -> respondText res 404 "not found"
+                                    | GitHubAction.Disconnect ->
+                                        pending <- Map.remove target pending
+                                        match! connections.Disconnect target with
+                                        | Ok existed -> respondJson res 200 (sprintf """{"disconnected":%b}""" existed)
+                                        | Error e -> respondText res 400 e
+                                })
+                    // Unreachable: this handler only runs for the two cases above.
+                    | Some _
+                    | None -> respondText res 404 "not found"
                 match req.``method`` with
                 | "GET" ->
                     handle
                         { Scope = "mine"
-                          PeerId = Interop.queryParamOf req.url "peer_id"
                           Token = None }
                 | _ ->
                     readBody req (fun raw ->

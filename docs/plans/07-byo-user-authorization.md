@@ -119,6 +119,12 @@ namespaces the asserting browser's own secrets within the deployment's trust bou
 Under a real strategy, `UserScope` is the durable home; peer scope is the unattributed
 deployment's counterpart.
 
+> Superseded in part by [2026-08-10-local-scope](../decisions/2026-08-10-local-scope.md)
+> for CONNECTION credentials only: peer scope turned out not to be a durable home for
+> anything, because the id lives in origin-partitioned localStorage and changes under the
+> person holding it. An unattributed deployment now owns connections as `LocalScope`.
+> Everything on this page about GENERIC peer-scoped secrets still stands.
+
 ## Threat model
 
 - **Header forgery = loopback access.** Anyone who can reach the Manager's port

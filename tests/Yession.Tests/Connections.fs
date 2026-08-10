@@ -231,19 +231,44 @@ let private claudeTests =
         testCase "scope choices map to targets" <| fun () ->
             Expect.equal (ClaudeConnection.targetFor sessionA (UserOwner alice) "session") (Ok (target (SessionScope sessionA))) "this session"
             Expect.equal (ClaudeConnection.targetFor sessionA (UserOwner alice) "mine") (Ok (target (UserScope alice))) "all my sessions (user)"
-            Expect.equal (ClaudeConnection.targetFor sessionA (PeerOwner peer1) "mine") (Ok (target (PeerScope peer1))) "all my sessions (peer)"
+            Expect.equal (ClaudeConnection.targetFor sessionA LocalOwner "mine") (Ok (target LocalScope)) "all my sessions (unattributed deployment)"
             Expect.isError (ClaudeConnection.targetFor sessionA (UserOwner alice) "everyone") "unknown choice"
 
-        testCase "turn targets: session first, then the actor's own scope, nothing for non-humans" <| fun () ->
+        testCase "a connection is owned by the cookie's attribution, never by the browser" <| fun () ->
+            // The whole reason `ownerOf` stopped taking a peer id: a browser's self-asserted
+            // identity churns (origin-partitioned localStorage) and used to strand the
+            // credential behind every new value it took.
+            let identity attribution : Yession.SessionProcess.CookieIdentity =
+                { Subject = "local"; DisplayName = None; Attribution = attribution }
+            Expect.equal
+                (ClaudeConnection.ownerOf (identity (Yession.SessionProcess.AttributedUser alice)))
+                (UserOwner alice)
+                "an attributed user owns their own"
+            Expect.equal
+                (ClaudeConnection.ownerOf (identity Yession.SessionProcess.UnattributedAccess))
+                LocalOwner
+                "unattributed access owns the deployment's"
+            Expect.equal
+                (GitHubConnection.ownerOf (identity Yession.SessionProcess.UnattributedAccess))
+                LocalOwner
+                "and GitHub reads the same rule"
+
+        testCase "turn targets: session first, then the actor's own scope, then the deployment's" <| fun () ->
             Expect.equal
                 (ClaudeConnection.turnTargets sessionA (UserRef alice))
-                [ target (SessionScope sessionA); target (UserScope alice) ]
-                "session shadows the actor"
+                [ target (SessionScope sessionA); target (UserScope alice); target LocalScope ]
+                "session shadows the actor, who shadows the deployment"
+            // A peer owns nothing of their own. Naming LocalScope here is unconditional and
+            // safe: an attributed deployment never reports it readable, so this candidate is
+            // filtered out before anything is resolved.
             Expect.equal
                 (ClaudeConnection.turnTargets sessionA (PeerRef peer1))
-                [ target (SessionScope sessionA); target (PeerScope peer1) ]
-                "peer actor"
-            Expect.equal (ClaudeConnection.turnTargets sessionA ActorRef.Agent) [ target (SessionScope sessionA) ] "agent has no own scope"
+                [ target (SessionScope sessionA); target LocalScope ]
+                "an unverified peer falls straight through to the deployment"
+            Expect.equal
+                (ClaudeConnection.turnTargets sessionA ActorRef.Agent)
+                [ target (SessionScope sessionA); target LocalScope ]
+                "agent has no own scope"
 
         testCase "the begin request declares Anthropic's JSON token dialect" <| fun () ->
             // Anthropic's token endpoint rejects a standards-correct form body
@@ -277,12 +302,15 @@ let private githubTests =
             Expect.equal (GitHubConnection.targetFor sessionA (UserOwner alice) "mine") (Ok (githubTarget (UserScope alice))) "all my sessions (user)"
             Expect.isError (GitHubConnection.targetFor sessionA (UserOwner alice) "everyone") "unknown choice"
 
-        testCase "operation targets: session first, then the actor's own scope, nothing for non-humans" <| fun () ->
+        testCase "operation targets: session first, then the actor's own scope, then the deployment's" <| fun () ->
             Expect.equal
                 (GitHubConnection.turnTargets sessionA (UserRef alice))
-                [ githubTarget (SessionScope sessionA); githubTarget (UserScope alice) ]
-                "session shadows the actor"
-            Expect.equal (GitHubConnection.turnTargets sessionA ActorRef.Agent) [ githubTarget (SessionScope sessionA) ] "agent has no own scope"
+                [ githubTarget (SessionScope sessionA); githubTarget (UserScope alice); githubTarget LocalScope ]
+                "session shadows the actor, who shadows the deployment"
+            Expect.equal
+                (GitHubConnection.turnTargets sessionA ActorRef.Agent)
+                [ githubTarget (SessionScope sessionA); githubTarget LocalScope ]
+                "agent has no own scope"
 
         testCase "a device-code grant decodes, defaulting the interval" <| fun () ->
             let full = """{"device_code":"dc-1","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","expires_in":900,"interval":7}"""
@@ -561,8 +589,8 @@ let private brokerTests =
 
 // --- [Ports]: the control routes + status stream --------------------------------------------
 
-let private caller sessionId users peers : Control.ControlCaller =
-    { SessionId = sessionId; Users = users; Peers = peers }
+let private caller sessionId users peers local : Control.ControlCaller =
+    { SessionId = sessionId; Users = users; Peers = peers; Local = local }
 
 /// A bare control server with the SAME pre-authorized connection handlers the Manager
 /// composes (ProcessManager.connectionsApiFor), plus the ProcessManager-style status
@@ -621,8 +649,8 @@ let private routeTests =
                 let! endpoint = startTokenEndpoint ()
                 let! url =
                     startConnectionsServer
-                        [ "secret-a", caller sessionA (Set.singleton alice) Set.empty
-                          "secret-b", caller sessionB Set.empty (Set.singleton peer1) ]
+                        [ "secret-a", caller sessionA (Set.singleton alice) Set.empty false
+                          "secret-b", caller sessionB Set.empty (Set.singleton peer1) false ]
                 let clientA = ControlClient.connections url "secret-a"
                 let clientB = ControlClient.connections url "secret-b"
 
@@ -657,7 +685,7 @@ let private routeTests =
 
         testCaseAsync "the status stream sends a snapshot on subscribe and a fresh frame on change" <|
             async {
-                let! url = startConnectionsServer [ "secret-a", caller sessionA (Set.singleton alice) Set.empty ]
+                let! url = startConnectionsServer [ "secret-a", caller sessionA (Set.singleton alice) Set.empty false ]
                 let clientA = ControlClient.connections url "secret-a"
                 let! _ = clientA.Put (target (UserScope alice)) "sk-ant-oat01-x"
 
@@ -725,10 +753,11 @@ let private cookieOf (jar: OidcHttp.Jar) : string =
 
 /// Poll the session's /claude status until `predicate` holds — the session learns of
 /// credential changes over its control stream, so the flip is asynchronous by design.
-let private awaitClaudeStatus (sessionUrl: string) (cookie: string) (peerId: string) (predicate: string -> bool) : Async<unit> =
+let private awaitClaudeStatus (sessionUrl: string) (cookie: string) (predicate: string -> bool) : Async<unit> =
     let rec go attempts =
         async {
-            let! reply = getWithCookie (sprintf "%s/claude?peer_id=%s" sessionUrl peerId) cookie |> Async.AwaitPromise
+            // No peer id: the cookie is the whole identity this route reads.
+            let! reply = getWithCookie (sessionUrl + "/claude") cookie |> Async.AwaitPromise
             if reply.status = 200 && predicate reply.body then return ()
             elif attempts <= 0 then return failwithf "claude status never settled; last: %d %s" reply.status reply.body
             else
@@ -754,7 +783,7 @@ let private e2eTests =
                     ProcessManager.create
                         { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
                             Strategy = Some Strategy.localhost
-                            Secrets = Some ProcessManager.EphemeralSecrets }
+                            Secrets = Some (ProcessManager.EphemeralSecrets ProcessManager.OperatorChose) }
                 let record = pm.CreateSession "conn-child" "Connections child" |> expect
                 let! launched = pm.Launch record.SessionId
                 unsetEnv "YESSION_AGENT"
@@ -779,7 +808,7 @@ let private e2eTests =
                         m.Conversation.Items
                         |> List.exists (fun i -> i.Status = Complete && i.Body.Contains "hello before sign-in"))
                 // The status surface says so honestly: no agent in this session yet.
-                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body -> body.Contains "\"agent\":false")
+                do! awaitClaudeStatus sessionUrl cookieA (fun body -> body.Contains "\"agent\":false")
 
                 // 2. A pastes a setup token for "all my sessions" through the session's
                 //    /claude surface; the gate flips without a relaunch.
@@ -787,10 +816,10 @@ let private e2eTests =
                     postJsonWithCookie
                         (sessionUrl + "/claude/token")
                         cookieA
-                        """{"scope":"mine","peerId":"browser-a","token":"sk-ant-oat01-fake"}"""
+                        """{"scope":"mine","token":"sk-ant-oat01-fake"}"""
                     |> Async.AwaitPromise
                 Expect.equal putMine.status 200 (sprintf "the paste stores: %s" putMine.body)
-                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body ->
+                do! awaitClaudeStatus sessionUrl cookieA (fun body ->
                         body.Contains "\"mine\":\"static\"" && body.Contains "\"agent\":true")
 
                 do! compose a a.Hello.PeerId "hello after sign-in"
@@ -805,20 +834,23 @@ let private e2eTests =
                     1
                     "the gate was off for the first message"
 
-                // 3. Peer B (never signed in a credential): its turn fails legibly,
-                //    naming the actor — no borrowing of A's credential.
+                // 3. Peer B is a DIFFERENT browser identity that connected nothing — a new
+                //    profile, a cleared store, a second device. Under this unattributed
+                //    strategy every peer is the same principal, so B's turn runs on the
+                //    credential A connected. This is the reconnect bug pinned: B used to be
+                //    told to connect a Claude account of its own.
                 let! openedB = OidcHttp.openSessionVia [] "/login?peer_id=browser-b" sessionUrl
                 let! b = connectClient (sessionUrl + "/signal") openedB.PeerToken "browser-b" "Bob"
-                do! compose b b.Hello.PeerId "bob without a credential"
+                do! compose b b.Hello.PeerId "bob on the deployment's credential"
                 b.Connection.SendDraft b.Hello.PeerId
-                // The failure reason streams as the item's body before the turn fails,
-                // so it is visible in every timeline (and assertable here).
                 do! b.Runner.WaitFor (fun m ->
                         m.Conversation.Items
                         |> List.exists (fun i ->
-                            i.Author = ActorRef.Agent
-                            && i.Status = ConversationItemStatus.Failed
-                            && i.Body.Contains "no Claude account connected for peer browser-b"))
+                            i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "credential: CLAUDE_CODE_OAUTH_TOKEN"))
+                // B's own status surface agrees, without B having asserted any identity.
+                let cookieB = cookieOf openedB.Jar
+                do! awaitClaudeStatus sessionUrl cookieB (fun body ->
+                        body.Contains "\"mine\":\"static\"" && body.Contains "\"owner\":\"local\"")
 
                 // 4. A stores a SESSION-scoped api key: it overrides for every actor —
                 //    Bob's next turn now runs on it.
@@ -826,10 +858,10 @@ let private e2eTests =
                     postJsonWithCookie
                         (sessionUrl + "/claude/token")
                         cookieA
-                        """{"scope":"session","peerId":"browser-a","token":"sk-ant-api03-fake"}"""
+                        """{"scope":"session","token":"sk-ant-api03-fake"}"""
                     |> Async.AwaitPromise
                 Expect.equal putSession.status 200 (sprintf "the session-scoped paste stores: %s" putSession.body)
-                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body -> body.Contains "\"session\":\"static\"")
+                do! awaitClaudeStatus sessionUrl cookieA (fun body -> body.Contains "\"session\":\"static\"")
                 do! compose b b.Hello.PeerId "bob under the session credential"
                 b.Connection.SendDraft b.Hello.PeerId
                 do! b.Runner.WaitFor (fun m ->
@@ -839,16 +871,96 @@ let private e2eTests =
 
                 // 5. Disconnect both; the status empties again.
                 let! _ =
-                    postJsonWithCookie (sessionUrl + "/claude/disconnect") cookieA """{"scope":"session","peerId":"browser-a"}"""
+                    postJsonWithCookie (sessionUrl + "/claude/disconnect") cookieA """{"scope":"session"}"""
                     |> Async.AwaitPromise
                 let! _ =
-                    postJsonWithCookie (sessionUrl + "/claude/disconnect") cookieA """{"scope":"mine","peerId":"browser-a"}"""
+                    postJsonWithCookie (sessionUrl + "/claude/disconnect") cookieA """{"scope":"mine"}"""
                     |> Async.AwaitPromise
-                do! awaitClaudeStatus sessionUrl cookieA "browser-a" (fun body ->
+                do! awaitClaudeStatus sessionUrl cookieA (fun body ->
                         body.Contains "\"session\":null" && body.Contains "\"mine\":null")
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()
+                do! pm.StopAll ()
+            }
+
+        testCaseAsync "an attributed deployment shares nothing: one user's credential never runs another's turn" <|
+            async {
+                // The counterpart to step 3 above. Sharing is a property of deployments that
+                // attribute NOBODY; where real users exist, `LocalScope` is never granted and
+                // each turn runs on its own actor's credential or fails saying so. Without
+                // this case the "no Claude account connected" branch has no behavioural test
+                // anywhere.
+                let dataDir =
+                    sprintf "tests/Yession.Tests/out/.data/conn-byo-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let savedKey = getEnvRaw "ANTHROPIC_API_KEY"
+                let savedToken = getEnvRaw "CLAUDE_CODE_OAUTH_TOKEN"
+                setEnv "ANTHROPIC_API_KEY" ""
+                setEnv "CLAUDE_CODE_OAUTH_TOKEN" ""
+                setEnv "YESSION_AGENT" "credential-probe"
+                let! pm =
+                    ProcessManager.create
+                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                            Strategy = Some Strategy.trustedHeaders
+                            Secrets = Some (ProcessManager.EphemeralSecrets ProcessManager.OperatorChose) }
+                let record = pm.CreateSession "byo-child" "BYO child" |> expect
+                let! launched = pm.Launch record.SessionId
+                unsetEnv "YESSION_AGENT"
+                let restore name saved =
+                    match saved with
+                    | Some v -> setEnv name v
+                    | None -> unsetEnv name
+                restore "ANTHROPIC_API_KEY" savedKey
+                restore "CLAUDE_CODE_OAUTH_TOKEN" savedToken
+                let port = launched |> expect
+                let sessionUrl = sprintf "http://127.0.0.1:%d" port
+
+                let asUser name = [ Strategy.SubjectHeader, name ]
+                let! openedAlice = OidcHttp.openSessionVia (asUser "alice@example.com") "/login" sessionUrl
+                let cookieAlice = cookieOf openedAlice.Jar
+                let! alice = connectClient (sessionUrl + "/signal") openedAlice.PeerToken "browser-alice" "Alice"
+
+                // The launch was attributed, so it holds no deployment credential at all.
+                let! aliceStatus = getWithCookie (sessionUrl + "/claude") cookieAlice |> Async.AwaitPromise
+                Expect.isTrue (aliceStatus.body.Contains "\"owner\":\"user\"") "an attributed deployment owns by user"
+
+                let! putMine =
+                    postJsonWithCookie
+                        (sessionUrl + "/claude/token")
+                        cookieAlice
+                        """{"scope":"mine","token":"sk-ant-oat01-alices"}"""
+                    |> Async.AwaitPromise
+                Expect.equal putMine.status 200 (sprintf "alice connects her own: %s" putMine.body)
+                do! awaitClaudeStatus sessionUrl cookieAlice (fun body -> body.Contains "\"mine\":\"static\"")
+
+                do! compose alice alice.Hello.PeerId "alice on her own credential"
+                alice.Connection.SendDraft alice.Hello.PeerId
+                do! alice.Runner.WaitFor (fun m ->
+                        m.Conversation.Items
+                        |> List.exists (fun i ->
+                            i.Author = ActorRef.Agent && i.Status = Complete && i.Body.Contains "credential: CLAUDE_CODE_OAUTH_TOKEN"))
+
+                // Bob is a different verified human. Alice's credential is hers, not the
+                // deployment's, so his turn fails naming him rather than borrowing it.
+                let! openedBob = OidcHttp.openSessionVia (asUser "bob@example.com") "/login" sessionUrl
+                let cookieBob = cookieOf openedBob.Jar
+                let! bob = connectClient (sessionUrl + "/signal") openedBob.PeerToken "browser-bob" "Bob"
+                let! bobStatus = getWithCookie (sessionUrl + "/claude") cookieBob |> Async.AwaitPromise
+                Expect.isTrue (bobStatus.body.Contains "\"mine\":null") "bob does not inherit alice's"
+
+                do! compose bob bob.Hello.PeerId "bob without a credential"
+                bob.Connection.SendDraft bob.Hello.PeerId
+                // The failure reason streams as the item's body before the turn fails, so it
+                // is visible in every timeline (and assertable here).
+                do! bob.Runner.WaitFor (fun m ->
+                        m.Conversation.Items
+                        |> List.exists (fun i ->
+                            i.Author = ActorRef.Agent
+                            && i.Status = ConversationItemStatus.Failed
+                            && i.Body.Contains "no Claude account connected for bob@example.com"))
+
+                do! alice.Channel.Close ()
+                do! bob.Channel.Close ()
                 do! pm.StopAll ()
             }
     ]
@@ -1006,12 +1118,42 @@ let private githubRouteTests =
                         Expect.equal bogus.status 400 "a scope string is not a scope"
                         Expect.isTrue (bogus.body.Contains "unknown scope choice") "and says so"
 
-                        // Unattributed access owns nothing until it names the peer it is.
-                        let! anon = postJsonWithCookie (url + "/github/begin") "who=anon" """{"scope":"mine"}""" |> Async.AwaitPromise
-                        Expect.equal anon.status 400 "no owner, no target"
-                        Expect.isTrue (anon.body.Contains "peer id required") "and says so"
                         Expect.equal recorder.Puts.Count 0 "nothing was stored by any of it"
                     })
+            }
+
+        testCaseAsync "unattributed access owns the deployment's credential, whatever the browser calls itself" <|
+            async {
+                // The reconnect bug, at the surface. Under an unattributed strategy the
+                // credential used to be owned by the browser's own peer id — which lives in
+                // origin-partitioned localStorage, so it changed under the person holding it
+                // and every new value stranded the last one's credential.
+                let recorder = recordingConnections ()
+                let stored = ResizeArray<SecretId> ()
+                let! url = startGitHubRoutes recorder.Client (fun target -> if stored.Contains target then Some StaticConnection else None)
+
+                let! connected =
+                    postJsonWithCookie (url + "/github/token") "who=anon" """{"scope":"mine","token":"ghp_abc"}"""
+                    |> Async.AwaitPromise
+                Expect.equal connected.status 200 "unattributed access can connect"
+                Expect.equal recorder.Puts.Count 1 "one credential stored"
+                let target, _ = recorder.Puts.[0]
+                Expect.equal target.Scope LocalScope "owned by the deployment, not by any browser"
+                stored.Add target
+
+                // A DIFFERENT browser — no shared storage, no shared id, nothing carried over
+                // but the same deployment. Before this change it saw `"mine":null` and was
+                // shown a Connect button.
+                let! elsewhere = getWithCookie (url + "/github") "who=anon" |> Async.AwaitPromise
+                Expect.equal elsewhere.status 200 "readable"
+                Expect.isTrue (elsewhere.body.Contains "\"mine\":\"static\"") "already connected, from a browser that never connected anything"
+                Expect.isTrue (elsewhere.body.Contains "\"owner\":\"local\"") "and says whose it is: the deployment's"
+
+                // An attributed user is untouched by any of it — they own their own, and the
+                // deployment's credential is not theirs to see.
+                let! alicesView = getWithCookie (url + "/github") "who=alice" |> Async.AwaitPromise
+                Expect.isTrue (alicesView.body.Contains "\"mine\":null") "an attributed user does not inherit it"
+                Expect.isTrue (alicesView.body.Contains "\"owner\":\"user\"") "and owns by user"
             }
 
         testCaseAsync "begin hands the browser the user code and keeps the device code; poll paces, then connects" <|

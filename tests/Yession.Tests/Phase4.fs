@@ -325,7 +325,7 @@ let private startControlServer (secrets: (string * SessionId) list) : Async<Inte
         let table =
             secrets
             |> List.map (fun (secret, sessionId) ->
-                let caller : Control.ControlCaller = { SessionId = sessionId; Users = Set.empty; Peers = Set.empty }
+                let caller : Control.ControlCaller = { SessionId = sessionId; Users = Set.empty; Peers = Set.empty; Local = false }
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()

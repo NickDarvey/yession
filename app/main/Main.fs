@@ -49,6 +49,15 @@ let private strategy =
     | Ok s -> s
     | Error e -> failwith e
 
+// Whether secrets persist across restarts (`--secrets`). Only the NAME is settled here —
+// what it resolves to needs the host probed for a credential manager, which happens in the
+// async below. Parsed up here beside `--auth` so an unknown value refuses the boot before
+// anything else is touched.
+let private secretsMode =
+    match ProcessManager.SecretsMode.ofName (Interop.argValue "secrets") with
+    | Ok m -> m
+    | Error e -> failwith e
+
 // How this deployment is reached from outside (docs/plans/09). Parsed once, HERE, so a
 // combination that cannot work is a refused boot rather than links and redirect URIs that
 // point somewhere unreachable. Sessions inherit the same variables by env and parse them
@@ -82,11 +91,15 @@ Async.StartImmediate(
         telemetry.Log "manager started" [ "yession.manager.data_dir", box dataDir ]
         // Secrets (Plan 06): the OS credential manager keys the durable store; a host
         // without one runs in-memory only (loud at boot) — never a plaintext key file.
-        let! keyStore = KeyStore.detect ()
+        // `--secrets` overrides both directions: `ephemeral` refuses persistence this host
+        // could have had, `durable` refuses the BOOT on a host that cannot offer it.
+        let! keyStore =
+            if ProcessManager.SecretsMode.needsCredentialManager secretsMode then KeyStore.detect ()
+            else async { return None }
         let secretsBacking =
-            match keyStore with
-            | Some store -> ProcessManager.DurableSecrets store
-            | None -> ProcessManager.EphemeralSecrets
+            match ProcessManager.SecretsBacking.forMode secretsMode keyStore with
+            | Ok backing -> backing
+            | Error e -> failwith e
         let! manager =
             ProcessManager.createWithUi
                 { ProcessManager.Options.defaults dataDir sessionCommand sessionArgs with

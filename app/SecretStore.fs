@@ -189,19 +189,27 @@ module SecretResolution =
                 else return Ok value
             }
 
-    /// The scopes a session may draw injected values from, most specific first:
-    /// the session's own, then its bound users', then its witnessed peers'.
-    let scopesFor (sessionId: SessionId) (users: Set<UserId>) (peers: Set<PeerId>) : SecretScope list =
+    /// The scopes a launch may read from, most specific first: the session's own, then
+    /// its bound users', then its witnessed peers', then — where the Manager granted it
+    /// unattributed access — the deployment's own.
+    ///
+    /// `LocalScope` sits LAST because it is the least specific owner there is. Generic
+    /// secret injection walks it and the policy denies (there is no local rule for
+    /// `SecretAction`), so the walk simply moves on; it is here for the connection status
+    /// listing, which derives a caller's readable set from this same list.
+    let scopesFor (sessionId: SessionId) (users: Set<UserId>) (peers: Set<PeerId>) (local: bool) : SecretScope list =
         SessionScope sessionId
         :: (users |> Set.toList |> List.map UserScope)
         @ (peers |> Set.toList |> List.map PeerScope)
+        @ (if local then [ LocalScope ] else [])
 
-    let compose (observe: Observe) (store: SecretStore) (usersOf: SessionId -> Set<UserId>) (peersOf: SessionId -> Set<PeerId>) (fallback: ResolveSecret) : ResolveSecret =
+    let compose (observe: Observe) (store: SecretStore) (usersOf: SessionId -> Set<UserId>) (peersOf: SessionId -> Set<PeerId>) (localOf: SessionId -> bool) (fallback: ResolveSecret) : ResolveSecret =
         fun sessionId name ->
             async {
                 let users = usersOf sessionId
                 let peers = peersOf sessionId
-                let subject : AuthzSubject = { Session = Some sessionId; Users = users; Peers = peers }
+                let local = localOf sessionId
+                let subject : AuthzSubject = { Session = Some sessionId; Users = users; Peers = peers; Local = local }
                 let rec walk scopes =
                     async {
                         match scopes with
@@ -232,7 +240,7 @@ module SecretResolution =
                                 | Ok None -> return! walk rest
                                 | Error e -> return Error e
                     }
-                return! walk (scopesFor sessionId users peers)
+                return! walk (scopesFor sessionId users peers local)
             }
 
 /// The secrets/ABAC feature's audit telemetry (Plan 06). Audit is a cross-cutting concern,
@@ -288,6 +296,10 @@ module Audit =
         | PeerScope peer ->
             [ "yession.secret.scope", StringValue "peer"
               "yession.secret.scope_key", StringValue (PeerId.value peer) ]
+        // No scope_key: the deployment is the owner, so there is no id to name — and an
+        // empty key would read as a missing one.
+        | LocalScope ->
+            [ "yession.secret.scope", StringValue "local" ]
 
     let private session (sessionId: SessionId) = "yession.session.id", StringValue (SessionId.value sessionId)
     let private outcome ok = "yession.outcome", StringValue (if ok then "ok" else "failed")
@@ -379,16 +391,28 @@ module Audit =
               "yession.secrets.entries", IntValue entries ]
             (sprintf "secrets store open (%s)" mode)
 
-    let storeEphemeral : Record =
-        make "yession.secrets.store_open" Severity.warn
-            [ "yession.secrets.mode", StringValue "ephemeral" ]
-            "secrets: no OS credential manager available — secrets are IN-MEMORY ONLY and die with this Manager"
+    /// An in-memory store, and WHY. The severity is the point: a store the operator asked
+    /// to be ephemeral (`--secrets ephemeral`) is the deliberate, safer posture and reads
+    /// as INFO; one that fell back because this host offered no credential manager is a
+    /// degraded deployment and reads as WARN. Logging both as warnings would invert the
+    /// signal and train an operator to ignore the line that matters.
+    let storeEphemeral (chosen: bool) : Record =
+        make "yession.secrets.store_open" (if chosen then Severity.info else Severity.warn)
+            [ "yession.secrets.mode", StringValue "ephemeral"
+              "yession.secrets.reason", StringValue (if chosen then "operator" else "no-credential-manager") ]
+            (if chosen then
+                "secrets: --secrets ephemeral — secrets are IN-MEMORY ONLY and die with this Manager"
+             else
+                "secrets: no OS credential manager available — secrets are IN-MEMORY ONLY and die with this Manager")
 
+    /// A durable file this run will not open. Says only what is true either way — the
+    /// CAUSE is carried by the `storeEphemeral` record printed immediately before it, and
+    /// the pair reads as one story.
     let storeInaccessible (path: string) : Record =
         make "yession.secrets.store_open" Severity.warn
             [ "yession.secrets.mode", StringValue "ephemeral"
               "yession.secrets.path", StringValue path ]
-            (sprintf "secrets: %s exists but its key lives in a credential manager this host cannot reach — stored secrets stay inaccessible (and untouched) until one is available" path)
+            (sprintf "secrets: %s exists but this run's store is in-memory — its entries stay unread (and untouched)" path)
 
     let storeOpenFailed (kind: string) (detail: string) : Record =
         make "yession.secrets.store_open_failed" Severity.error
@@ -446,5 +470,9 @@ module Audit =
             | SecretResolution.InjectedFromScope (SessionScope _) -> sink (inject sessionId name "session")
             | SecretResolution.InjectedFromScope (UserScope _) -> sink (inject sessionId name "user")
             | SecretResolution.InjectedFromScope (PeerScope _) -> sink (inject sessionId name "peer")
+            // Unreachable while the policy has no local rule for `SecretAction` — generic
+            // injection never resolves at this scope. Recorded honestly rather than
+            // silently, so the day a rule is added the audit already says so.
+            | SecretResolution.InjectedFromScope LocalScope -> sink (inject sessionId name "local")
             | SecretResolution.InjectedFromFallback -> sink (inject sessionId name "env")
             | SecretResolution.InjectMissed reason -> sink (injectMiss sessionId name reason)

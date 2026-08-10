@@ -226,7 +226,7 @@ let tests =
                 let! _ = store.Set { Scope = SessionScope sessionId; Name = secretName "SESSION_TOKEN" } "session-held"
                 let! _ = store.Set { Scope = UserScope alice; Name = secretName "USER_TOKEN" } "user-held"
                 setEnv "SESSION_TOKEN" "env-shadowed"
-                let walk = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
+                let walk = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) (fun _ -> Set.empty) (fun _ -> false) SecretStore.SecretResolution.processEnv
                 let spec =
                     { alpineSpec with
                         EnvironmentVariables =
@@ -243,7 +243,7 @@ let tests =
                 unsetEnv "SESSION_TOKEN"
 
                 // Without the user binding, the user-scoped secret is unreachable.
-                let unbound = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
+                let unbound = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) (fun _ -> Set.empty) (fun _ -> false) SecretStore.SecretResolution.processEnv
                 let session2 = SessionId.mint ()
                 let spec2 = { alpineSpec with EnvironmentVariables = Map.ofList [ "USER_TOKEN", SecretRef (secretName "USER_TOKEN") ] }
                 match! start (fun n -> unbound session2 n) spec2 with

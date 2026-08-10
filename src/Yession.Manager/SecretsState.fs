@@ -94,7 +94,8 @@ module SecretsCodec =
                 | Error e -> Decode.fail e) }
 
     /// Shared with the control wire:
-    /// {"kind":"session",...} | {"kind":"user",...} | {"kind":"peer",...}.
+    /// {"kind":"session",...} | {"kind":"user",...} | {"kind":"peer",...} | {"kind":"local"}.
+    /// `local` carries no key — the deployment IS the owner, so there is nothing to name.
     let secretScope : Codec<SecretScope> =
         { Encode =
             (fun scope ->
@@ -104,13 +105,16 @@ module SecretsCodec =
                 | UserScope user ->
                     Encode.object [ "kind", Encode.string "user"; "sub", userSubject.Encode user ]
                 | PeerScope peer ->
-                    Encode.object [ "kind", Encode.string "peer"; "peerId", Codec.peerId.Encode peer ])
+                    Encode.object [ "kind", Encode.string "peer"; "peerId", Codec.peerId.Encode peer ]
+                | LocalScope ->
+                    Encode.object [ "kind", Encode.string "local" ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "session" -> Decode.field "sessionId" Codec.sessionId.Decode |> Decode.map SessionScope
                 | "user" -> Decode.field "sub" userSubject.Decode |> Decode.map UserScope
                 | "peer" -> Decode.field "peerId" Codec.peerId.Decode |> Decode.map PeerScope
+                | "local" -> Decode.succeed LocalScope
                 | other -> Decode.fail (sprintf "Unknown secret scope: %s" other)) }
 
     let secretMetadata : Codec<SecretMetadata> =

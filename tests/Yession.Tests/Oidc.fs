@@ -509,8 +509,10 @@ let private flowTests =
                 Expect.equal login.Status 302 "/login redirects into the authorize chain"
                 Expect.isTrue (login.Location.StartsWith (managerUrl + "/authorize")) "to the manager's authorize endpoint"
 
-                // No login has completed yet, so the Manager has bound no user (Plan 06).
+                // No login has completed yet, so the Manager has bound no user (Plan 06) and
+                // granted no local access — access is per-login, not per-installation.
                 Expect.equal (pm.UsersOf record.SessionId) Set.empty "no user binding before a login"
+                Expect.isFalse (pm.LocalOf record.SessionId) "no local access before a login"
 
                 // The full chain: login -> authorize -> callback -> cookie -> /me token.
                 let! opened = OidcHttp.openSession sessionUrl
@@ -524,6 +526,9 @@ let private flowTests =
                     (pm.UsersOf record.SessionId)
                     (Set.singleton (UserId.create "local" |> expect))
                     "the login bound the localhost strategy's user to the launch"
+                // And it was UNATTRIBUTED, so this launch may read the deployment's own
+                // credential — the grant behind `LocalScope`.
+                Expect.isTrue (pm.LocalOf record.SessionId) "an unattributed login grants local access"
 
                 // DCR with a forged control secret is refused at the door.
                 let! forged =
@@ -545,6 +550,7 @@ let private flowTests =
 
                 // The user binding died with the launch, exactly like the registration.
                 Expect.equal (pm.UsersOf record.SessionId) Set.empty "bindings die with the launch"
+                Expect.isFalse (pm.LocalOf record.SessionId) "and so did the local access"
 
                 do! pm.StopAll ()
             }
@@ -599,6 +605,10 @@ let private byoTests =
                     (pm.PeersOf record.SessionId)
                     (Set.singleton (PeerId.create "browser-abc" |> expect))
                     "the peer id that rode the bounce is witnessed into the launch"
+                // A real human was named, so this launch is granted NO local access — which
+                // is what keeps one deployment-wide credential out of an attributed
+                // deployment entirely.
+                Expect.isFalse (pm.LocalOf record.SessionId) "an attributed login grants no local access"
 
                 // Bindings die with the launch, peers exactly like users (Plan 06 rule).
                 do! pm.Stop record.SessionId |> Async.Ignore
