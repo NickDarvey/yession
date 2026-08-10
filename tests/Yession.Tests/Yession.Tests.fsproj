@@ -56,6 +56,7 @@
     <Compile Include="Properties.fs" />
     <Compile Include="Acceptance.fs" />
     <Compile Include="InMemory.fs" />
+    <Compile Include="Cli.fs" />
     <Compile Include="NixSource.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>

@@ -15,11 +15,10 @@ module Yession.Host.SerialMain
 open Yession.Domain
 open Yession.Host
 
-// `--version` before anything is read, like the other two bins: a running Yession is never
-// anonymous, and this is the one thing it will do without a port.
-if Interop.versionFlag () then
-    printfn "%s" Version.current
-    Interop.exit 0
+// No options of its own; configured by the environment. `--version` and `--help` answer
+// before anything is read, like the other two bins: a running Yession is never anonymous,
+// and this is the one thing it will do without a port.
+Cli.parseOrExit (Cli.spec "yession-serial" []) Version.current |> ignore
 
 let private port = Interop.envOr "YESSION_SERIAL_PORT" "7333" |> int
 let private host = Interop.envOr "YESSION_SERIAL_HOST" "127.0.0.1"
