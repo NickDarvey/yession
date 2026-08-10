@@ -168,6 +168,18 @@ module Dom =
         let chatBlockStatus = "data-chat-block-status"
         let chatStretch = "data-chat-stretch"
         let chatStretchEnd = "data-chat-stretch-end"
+        /// A turn's tool calls in the CHAT (Plan 16, part C). A `<details>` per RUN of
+        /// consecutive calls from one turn — expandable by construction, so it is keyboard-
+        /// operable without a handler — carrying the turn id; and one row inside it per
+        /// call, carrying the Process-minted `ToolUseId` that a deep link will address.
+        ///
+        /// A call that became a block is not here at all: the block chip beside it already
+        /// says who ran what and how it went.
+        let chatToolRun = "data-chat-tool-run"
+        let chatTool = "data-chat-tool"
+        /// The call's outcome, in the SAME tokens a block's status uses (`running` / `ok` /
+        /// `failed`) rather than a parallel vocabulary meaning the same three things.
+        let chatToolStatus = "data-chat-tool-status"
         /// The pane's tab strip (Plan 14, stage 2). One hook for every tab whatever it shows
         /// — a terminal, a block's read-only view, a stretch's replay — because they are one
         /// tablist and a test asserting keyboard order should not have to know which is which.

@@ -70,10 +70,14 @@ type ProcessManager =
       /// RPC): fans out over that session's live `/control/notifications` subscriptions.
       /// A no-op for a session that is not running or has no control channel.
       Notify : SessionId -> Sink<SessionNotification>
-      /// Announce the current MCP tool list to every session (the `/control/mcp` reverse
-      /// leg): replaces the retained list and pushes it to all live subscribers, and every
-      /// session that subscribes later receives it as its initial snapshot.
-      PublishMcpTools : Sink<McpToolList>
+      /// Declare an MCP server (Plan 17): durable, then republished to every session the
+      /// declaration changes the resolved set of. Refuses a name any one session would
+      /// then see twice.
+      DeclareMcpServer : McpDeclaration -> Result<unit, string>
+      /// Withdraw one, by name AND audience. A no-op for a declaration that is not there.
+      WithdrawMcpServer : McpServerName -> McpAudience -> unit
+      /// Every declaration, in the order they were made — the management surface's read.
+      McpServers : unit -> McpDeclaration list
       /// Users the Manager verified into the session's live launch at ID-token
       /// issuance (Plan 06). Empty for a stopped session or before any login —
       /// bindings die with the launch.
@@ -374,9 +378,11 @@ let createWithUi
     // same per-launch secret, so a session's stream dies exactly when its launch does.
     let notifications = NotificationHub.create ()
 
-    // The MCP tool stream (the second reverse leg): a Manager-level retained list broadcast to
-    // every subscribed session, so all sessions see the same available MCP services.
-    let mcp = RetainedHub.create McpToolList.empty
+    // The MCP server set (the second reverse leg, Plan 17): PER SESSION, because what a
+    // session may reach is now a question with a different answer for each of them. Retained
+    // by session so a relaunch is handed the current set rather than an empty one, delivered
+    // by launch secret so a sink dies exactly when its launch does.
+    let mcp = KeyedRetainedHub.create McpServerSet.empty
 
     // Session changes (docs/plans/09), published on every launch, exit, and display-name
     // change: the full session list with each status, retained so a new subscriber is current
@@ -418,6 +424,36 @@ let createWithUi
     let notify (sessionId: SessionId) (notification: SessionNotification) : unit =
         secretSessions
         |> Map.iter (fun secret sid -> if sid = sessionId then notifications.NotifySecret secret notification)
+
+    // Republish every session's RESOLVED set (Plan 17). Called after any change to the
+    // declarations, over every session in the registry rather than only the running ones:
+    // the hub retains by session, so a session that is not up yet finds its set waiting.
+    //
+    // Whole sets, always, and every session, always — a declaration change is rare and a
+    // "which sessions did this affect" diff here would be a second implementation of
+    // `resolve`, free to disagree with the one that answers the question for real.
+    let publishMcpServers () : unit =
+        for record in state.Sessions do
+            mcp.Publish record.SessionId (ManagerState.mcpServersFor record.SessionId state)
+
+    // Declare an MCP server. Durable before visible, like every other registry write, and
+    // refused rather than resolved when the name would collide — the operator is standing
+    // right there and can pick another.
+    let declareMcpServer (declaration: McpDeclaration) : Result<unit, string> =
+        match ManagerState.declareMcpServer declaration state with
+        | Error e -> Error e
+        | Ok next ->
+            ManagerStore.save statePath next
+            state <- next
+            publishMcpServers ()
+            Ok ()
+
+    let withdrawMcpServer (name: McpServerName) (audience: McpAudience) : unit =
+        let next = ManagerState.withdrawMcpServer name audience state
+        if next.McpServers <> state.McpServers then
+            ManagerStore.save statePath next
+            state <- next
+            publishMcpServers ()
 
     // Update a session's display name (the reported title). Idempotent: unknown sessions and
     // no-op renames are skipped, and the registry write is durable before it is visible.
@@ -713,6 +749,10 @@ let createWithUi
                 // Durable before visible: the registry write precedes any use.
                 ManagerStore.save statePath next
                 state <- next
+                // A brand-new session may already be named by a host-wide declaration
+                // (Plan 17), and the hub retains per session — so seed its set now rather
+                // than leaving it empty until the next declaration change.
+                publishMcpServers ()
                 Ok record
 
     let launch (sessionId: SessionId) : Async<Result<int, string>> =
@@ -772,6 +812,7 @@ let createWithUi
                          // The launch's notification subscriptions, OAuth client
                          // registration, and user bindings die with its authority.
                          notifications.Drop secret
+                         mcp.Drop secret
                          connectionsHub.Drop secret
                          provider.RevokeByControlSecret secret
                          launchUsers <- Map.remove secret launchUsers
@@ -903,7 +944,9 @@ let createWithUi
                 ManagerState.tryFind sessionId state
                 |> Option.map (fun r -> { Record = r; Status = statusOf r })
           Notify = notify
-          PublishMcpTools = mcp.Publish
+          DeclareMcpServer = declareMcpServer
+          WithdrawMcpServer = withdrawMcpServer
+          McpServers = fun () -> state.McpServers
           UsersOf = usersOf
           PeersOf = peersOf
           EndpointPort = controlServer |> Option.map Interop.serverPort

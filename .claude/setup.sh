@@ -58,6 +58,23 @@ RC
 export USER="\${USER:-\$(id -un)}"
 export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt
 export https_proxy="\${https_proxy:-\${HTTPS_PROXY:-}}"
+# ...and no_proxy must be CLEARED, which is not an oversight to fix later.
+#
+# Every egress from this container is TLS-intercepted, and the proxy's CA lives in the
+# SYSTEM trust store. A Nix build cannot see that store: a fixed-output derivation runs
+# sandboxed with SSL_CERT_FILE pinned to nixpkgs' \`cacert\` (Mozilla roots only), and no
+# impure env var can override it from out here. So a builder that connects DIRECT gets the
+# interception certificate, fails to validate it, and dies with curl 60.
+#
+# Going through the proxy is the path that works: it CONNECTs straight through to hosts like
+# registry.npmjs.org without intercepting them, so the real certificate arrives and the
+# Mozilla roots accept it. The ambient no_proxy — which names registry.npmjs.org — pushes
+# builders off exactly that path, and this wrapper inherits the caller's environment, so it
+# has to be unset rather than merely not set.
+#
+# The symptom this fixes is \`fetchNpmDeps\` being unable to fetch anything, which made
+# adding one npm dependency look impossible in this container.
+unset no_proxy NO_PROXY
 export PATH="\$HOME/.nix-profile/bin:\$PATH"
 exec "\$HOME/.nix-profile/bin/$tool" "\$@"
 WRAP

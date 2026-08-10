@@ -585,8 +585,9 @@ module SessionTerminals =
           Emulator : Emulator
           /// Which WorkSandbox this terminal's shell lives in (Plan 15, stage 2). Not
           /// mutable: a terminal IS a process inside one sandbox, so "moving" it would be
-          /// a close and an open, and those already exist.
-          Sandbox : SandboxName
+          /// a close and an open, and those already exist. `None` for an ATTACHED source
+          /// (Plan 16, part D) — its process is somebody else's, in nothing we run.
+          Sandbox : SandboxName option
           mutable Shell : PtyHandle option }
 
     /// Bytes of output one block may write to the transcript. Beyond it, output is dropped
@@ -628,12 +629,13 @@ module SessionTerminals =
         "\u0015" + kept + "\r" 
 
     type SessionTerminals =
-        { /// Open a terminal, ensuring the WorkSandbox exists first — opening one IS a
-          /// need, so a session where nobody opens a terminal still starts nothing.
-          /// Open a terminal in one of the session's WorkSandboxes (Plan 15, stage 2).
-          /// The sandbox is an argument rather than an option because `default` is a real
-          /// name — a caller that does not care passes it, and nothing is implicit.
-          Open : ActorRef -> string -> SandboxName -> Async<Result<TerminalId, string>>
+        { /// Open a terminal over a SOURCE (Plan 16, part D). `SandboxShell name` ensures
+          /// THAT WorkSandbox exists first — opening one IS a need, so a session where
+          /// nobody opens a terminal still starts nothing, and `default` is a real name a
+          /// caller who does not care passes explicitly. An `Attached` source ensures
+          /// nothing: a session that only talks to a serial port should not start a
+          /// container.
+          Open : ActorRef -> TerminalSource -> string -> Async<Result<TerminalId, string>>
           /// Close a terminal. Rejected when it is not open.
           Close : TerminalId -> string -> Async<Result<unit, string>>
           /// Run one drained queue entry to completion, recording the block and streaming
@@ -763,6 +765,10 @@ module SessionTerminals =
         // and unlike block completion, a lease can end from inside here (the alt-screen flip,
         // a dropped peer) where the scheduler has nothing to observe.
         (reDrain: unit -> unit)
+        // How a foreign byte stream is reached (Plan 16, part D). Injected like every other
+        // capability, so a session given no provider simply cannot attach one — rather than
+        // carrying a client for a thing it will never talk to.
+        (attach: AttachTerminal)
         (openAtBoot: TerminalId list)
         : SessionTerminals =
 
@@ -791,6 +797,21 @@ module SessionTerminals =
         /// The re-arm closure per terminal, built in `openShell` because it needs that
         /// terminal's nonce and rc — the same ones its output scanner is bound to.
         let rearmers = Collections.Generic.Dictionary<string, unit -> Async<bool>> ()
+        /// What each open terminal's source declared it can do (Plan 16, part D). Consulted
+        /// where a capability is actually USED — before running a block, before resizing —
+        /// rather than being re-derived from whether a rearmer happens to exist.
+        let sources = Collections.Generic.Dictionary<string, SourceCapabilities> ()
+        /// Whether this terminal's source claimed it can carry the OSC 133 bootstrap. An
+        /// unknown terminal answers `true`: everything that existed before sources did was a
+        /// sandbox shell, and defaulting the other way would silently break them.
+        let canInstrument (key: string) =
+            match sources.TryGetValue key with
+            | true, capabilities -> capabilities.CanInstrument
+            | _ -> true
+        let canResize (key: string) =
+            match sources.TryGetValue key with
+            | true, capabilities -> capabilities.CanResize
+            | _ -> true
         let mutable busy : Set<string> = Set.empty
         let mutable lost : Set<string> = Set.empty
         let mutable leases = TerminalLeases.empty
@@ -801,7 +822,7 @@ module SessionTerminals =
         /// are closed at boot rather than run in.
         let environmentOf (id: TerminalId) : SessionEnvironment.SessionEnvironment =
             match live.TryGetValue (TerminalId.value id) with
-            | true, terminal -> environmentFor terminal.Sandbox
+            | true, terminal -> environmentFor (Option.defaultValue SandboxName.defaultName terminal.Sandbox)
             | _ -> environmentFor SandboxName.defaultName
 
         let append event =
@@ -974,7 +995,7 @@ module SessionTerminals =
         /// down and the terminal keeps the per-block path. Deciding by observation rather than
         /// by shell name is the point: a POSIX `sh` has no prompt hook at all and rides its
         /// marks in PS1, which is the shakiest of the three and cannot be trusted on a name.
-        let openShell (id: TerminalId) (terminal: LiveTerminal) : Async<unit> =
+        let openShell (id: TerminalId) (terminal: LiveTerminal) (sandbox: SandboxName) : Async<unit> =
             async {
                 let key = TerminalId.value id
                 let nonce = mintNonce ()
@@ -1032,7 +1053,7 @@ module SessionTerminals =
                                         emit id current TranscriptOutput kept
                                 | _ -> emit id current TranscriptOutput clean
                     let! spawned =
-                        (environmentFor terminal.Sandbox).SpawnPty
+                        (environmentFor sandbox).SpawnPty
                             { Executable = shell.Executable
                               Arguments = shell.InteractiveArguments
                               Env = Map.empty
@@ -1093,14 +1114,38 @@ module SessionTerminals =
                             rearmers.Remove key |> ignore
             }
 
-        let openTerminal (openedBy: ActorRef) (title: string) (sandbox: SandboxName) : Async<Result<TerminalId, string>> =
+        /// Attach to a stream somebody else is producing (Plan 16, part D). The same output
+        /// path a shell gets — the emulator, the transcript, the broadcast — over bytes this
+        /// process did not spawn. No mark scanning and no rc bootstrap: an uninstrumentable
+        /// source has no prompt to bootstrap, and typing one at a serial device would put
+        /// our instrumentation on somebody's wire.
+        let openAttached (id: TerminalId) (terminal: LiveTerminal) (ticket: AttachTicket) : Async<unit> =
             async {
-                // A terminal is a need, and the need is identified before the terminal
+                let key = TerminalId.value id
+                let onOutput (data: string) =
+                    match live.TryGetValue key with
+                    | false, _ -> ()
+                    | true, current -> emit id current TranscriptOutput data
+                let! attached = attach ticket 80 24 onOutput
+                match attached with
+                | Error _ -> return ()
+                | Ok handle -> terminal.Shell <- Some handle
+            }
+
+        let openTerminal (openedBy: ActorRef) (source: TerminalSource) (title: string) : Async<Result<TerminalId, string>> =
+            async {
+                // A SHELL terminal is a need, and the need is identified before the terminal
                 // exists — so a failed environment start is reported as a failed open
                 // rather than as a terminal nothing can run in. A sandbox this session
                 // does not have refuses HERE, for the same reason: better no terminal than
-                // one whose every command fails.
-                match! (environmentFor sandbox).Ensure None "a terminal was opened" with
+                // one whose every command fails. An ATTACHED terminal is not a need at
+                // all: its bytes come from somewhere this session does not run.
+                let sandbox = TerminalSource.needsSandbox source
+                let! ensured =
+                    match sandbox with
+                    | Some name -> (environmentFor name).Ensure None "a terminal was opened"
+                    | None -> async { return EnvironmentAvailable }
+                match ensured with
                 | EnvironmentUnavailable reason -> return Error reason
                 | EnvironmentAvailable ->
                     let id = mintTerminalId ()
@@ -1122,7 +1167,10 @@ module SessionTerminals =
                     live.[TerminalId.value id] <- terminal
                     appliedSize.[TerminalId.value id] <- TerminalSize.default'
                     terminal.Emulator.OnAltScreen (fun alt -> Async.StartImmediate (flip id alt))
-                    do! openShell id terminal
+                    sources.[TerminalId.value id] <- TerminalSource.capabilities source
+                    match source with
+                    | SandboxShell name -> do! openShell id terminal name
+                    | Attached ticket -> do! openAttached id terminal ticket
                     do! appendAs openedBy (SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = openedBy; Title = title; Sandbox = sandbox })
                     return Ok id
             }
@@ -1152,6 +1200,7 @@ module SessionTerminals =
                     lost <- Set.remove (TerminalId.value id) lost
                     sawCommandStart.Remove (TerminalId.value id) |> ignore
                     rearmers.Remove (TerminalId.value id) |> ignore
+                    sources.Remove (TerminalId.value id) |> ignore
                     do! append (SessionEvent.TerminalClosed { TerminalId = id; Reason = reason })
                     return Ok ()
             }
@@ -1209,6 +1258,17 @@ module SessionTerminals =
 
                     let! result =
                         match terminal.Shell with
+                        // A LIVE-ONLY source (Plan 16, part D): bytes both ways, no prompt,
+                        // no marks — so nothing here could ever report that a command ended.
+                        // Refused as a value rather than left open forever, and refused
+                        // BEFORE the write, because writing a shell command line at a serial
+                        // device is not a no-op.
+                        | Some _ when not (canInstrument key) ->
+                            async {
+                                return
+                                    CommandExecutionFailed
+                                        "this terminal is live-only: its source cannot report a command's outcome"
+                            }
                         | Some pty ->
                             // TYPED into the terminal's one shell, which is what makes `cd`
                             // in this block move the next one — the property a per-block
@@ -1377,7 +1437,10 @@ module SessionTerminals =
             | None -> false
 
         let resize (id: TerminalId) (by: ActorRef) (cols: int) (rows: int) : bool =
-            if not (TerminalSize.isValid { Cols = cols; Rows = rows }) then false
+            // A source that declared no size is not resized and does not pretend to have
+            // been: a serial line has no rows, and telling it it has 24 would be inventing a
+            // fact the emulator would then draw against.
+            if not (TerminalSize.isValid { Cols = cols; Rows = rows }) || not (canResize (TerminalId.value id)) then false
             else
                 match heldPty id by with
                 | Some pty ->
@@ -1403,7 +1466,7 @@ module SessionTerminals =
                 | _ -> false
             // Leased terminals are the holder's to size, and an invalid size reaches us from a
             // doc any peer can write — neither is a resize.
-            if unchanged || not (TerminalSize.isValid size) || Map.containsKey key leases then ()
+            if unchanged || not (TerminalSize.isValid size) || not (canResize key) || Map.containsKey key leases then ()
             else
                 match live.TryGetValue key with
                 | true, terminal ->

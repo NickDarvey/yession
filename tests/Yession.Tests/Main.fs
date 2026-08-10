@@ -35,10 +35,21 @@ let all =
         // stand-in, and what it must prove (the door, and one connection carrying the
         // burst and every later change) is exactly what crosses the wire.
         Tag.needs "Query stream routes" [ Tag.Ports ] (fun () -> Queries.portsTests)
+        Tag.needs "Tools" [] (fun () -> Tools.tests)
+        Tag.needs "Mcp" [] (fun () -> Mcp.tests)
+        // The lifecycle IS the thing being tested, against a provider written by hand —
+        // there is no in-memory stand-in for headers the protocol turns on.
+        Tag.needs "Declared MCP servers" [ Tag.Ports ] (fun () -> Mcp.portsTests)
+        // The loop both plans were built to close: the session's own client and its own
+        // WebSocket attach, against the provider we ship. Real HTTP, real upgrade; only the
+        // serial ENGINE is substituted, so it runs on a box with no hardware.
+        Tag.needs "The serial provider" [ Tag.Ports ] (fun () -> Mcp.serialTests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
         Tag.needs "Terminals" [] (fun () -> Terminals.tests)
         Tag.needs "Timeline" [] (fun () -> Timeline.tests)
+        // The upgrade IS the thing being tested, and there is no in-memory stand-in for it.
+        Tag.needs "Foreign terminal attach" [ Tag.Ports ] (fun () -> Attach.portsTests)
         Tag.needs "Editor" [] (fun () -> Editor.tests)
         Tag.needs "Agent" [] (fun () -> Agent.tests)
         Tag.needs "Version" [] (fun () -> Version.tests)

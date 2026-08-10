@@ -28,6 +28,26 @@ Items are roughly ordered by how much they matter.
   strategy (verify against an operator JWKS; `Fable.Jose.jwtVerify` is already bound)
   is the recorded hardening follow-up. No `nonce` in ID tokens yet (PKCE +
   confidential client); the Plan 04 note stands.
+- **A declared MCP server's tool descriptions are untrusted text in the model's context**
+  ([Plan 16](plans/16-serial-devices.md), [Plan 17](plans/17-mcp-server-configuration.md)):
+  an external server's `tools/list` descriptions go straight into the prompt, and with
+  always-available servers they do so without a second human confirming. `instructions`
+  are dropped for exactly this reason, but tool descriptions cannot be — the model must
+  read them to call anything. `ToolDescriptor.Foreign` already marks the affected set;
+  the recorded mitigation is an `AutoApprove` flag on the DECLARATION, where the operator
+  already is, rather than a per-call prompt.
+- **A declared MCP server is unconfined, and so is what it owns**
+  ([Plan 16](plans/16-serial-devices.md)): there is no srt/docker analogue for a serial
+  port, and `yession-serial` runs on the host with whatever access its user has. A device
+  is more physical than a filesystem path — writing to the wrong tty can reflash a board.
+  The provider narrows this by refusing to list ports it does not recognise (an
+  unrecognised tty is usually the machine's own console), which is a policy, not a
+  boundary. Its control leg is unauthenticated and must stay on loopback.
+- **A provider's lifecycle is nobody's** ([Plan 16](plans/16-serial-devices.md)): who
+  starts `yession-serial` — systemd, an operator, nothing — is unsettled, and "the
+  Manager only declares" argues for nothing. Softened by Plan 17's poll, which retries a
+  server forever and picks it up whenever it appears, so nothing has to restart to
+  notice; but nothing starts it either.
 - **Remote WebRTC has no relay fallback** ([Plan 09](plans/09-remote-session-access.md)).
   Sessions are remotely reachable through an operator's proxy — the `/sessions/stream`
   registry drives the serving binding, and `YESSION_SESSION_URL` is a template over
@@ -404,6 +424,13 @@ Items are roughly ordered by how much they matter.
 - The vendored Hedgehog does no shrinking: a failing property prints the whole
   schedule, not a minimal one.
 - Load/scale characteristics (many peers, large logs, long drafts) are unmeasured.
+- **The serial engine itself is untested** ([Plan 16](plans/16-serial-devices.md), part E).
+  Everything above the `SerialEngine` seam runs over real sockets against the real
+  provider — the MCP lifecycle, the claim, the WebSocket attach — but `SerialPorts.real`
+  (the `serialport` import, the open, the line settings) has no coverage. Closing it is a
+  `Serial` capability over a socat PTY pair; the container also needs `udevadm` on PATH,
+  because `SerialPort.list()` shells out to it on Linux and without it enumeration fails
+  and the engine degrades to "no devices".
 
 ## Terminals (Plan 13)
 

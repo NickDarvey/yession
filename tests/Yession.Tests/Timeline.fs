@@ -43,7 +43,7 @@ let private merge (events: EventEnvelope<SessionEvent> list) : TimelineItem list
     TimelineProjection.items conversation timeline
 
 let private opened (id: TerminalId) (title: string) =
-    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = SandboxName.defaultName }
+    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxName.defaultName }
 
 let private sent (n: string) (body: string) =
     MessageSent { MessageId = message n; QueueId = None; Author = PeerRef ada; Body = body }
@@ -73,7 +73,8 @@ let private shapes (items: TimelineItem list) : string list =
     |> List.map (function
         | TimelineMessage item -> "said:" + MessageId.value item.MessageId
         | TimelineBlock (_, _, blockId) -> "ran:" + BlockId.value blockId
-        | TimelineStretch stretch -> "held:" + TerminalId.value stretch.TerminalId)
+        | TimelineStretch stretch -> "held:" + TerminalId.value stretch.TerminalId
+        | TimelineToolUse (_, id) -> "used:" + ToolUseId.value id)
 
 let private stretchesOf (items: TimelineItem list) : TerminalStretch list =
     items |> List.choose (function TimelineStretch s -> Some s | _ -> None)
@@ -890,9 +891,115 @@ let private dvrTests =
                 "there is no live edge to be behind"
     ]
 
+// --- Tool use (Plan 16, part C) ---------------------------------------------------------
+
+let private toolUse (n: string) = ToolUseId.create ("t-" + n) |> expect
+let private turn (n: string) = AgentTurnId.create ("turn-" + n) |> expect
+
+let private used (n: string) (t: string) (name: string) =
+    SessionEvent.ToolUseStarted
+        { ToolUseId = toolUse n
+          AgentTurnId = turn t
+          Namespace = "yession"
+          Name = name
+          Arguments = Some "{}" }
+
+let private toolDone (n: string) (outcome: ToolOutcome) (blk: BlockId option) =
+    SessionEvent.ToolUseFinished { ToolUseId = toolUse n; Outcome = outcome; Block = blk }
+
+let private drawn (events: EventEnvelope<SessionEvent> list) : string list =
+    let conversation, _ = ConversationProjection.applyEvents None events ConversationProjection.empty
+    let timeline, _ = TimelineProjection.applyEvents None events TimelineProjection.empty
+    TimelineProjection.rows conversation timeline
+    |> List.map (function
+        | RowItem item -> List.head (shapes [ item ])
+        | RowToolRun (t, items) -> sprintf "run:%s:%d" (AgentTurnId.value t) (List.length items))
+
+let private toolTests =
+    testList "Tool use in the chat" [
+        testCase "a call anchors where it STARTED, like a block and unlike a stretch" <| fun () ->
+            // Same reason: a four-minute call must be visible while it is the only thing
+            // happening, rather than appearing from nowhere when it finishes.
+            let items =
+                merge
+                    [ at 1L 0.0 (used "1" "a" "repo_status")
+                      at 2L 1.0 (sent "1" "any luck?")
+                      at 3L 2.0 (toolDone "1" ToolCallOk None) ]
+            Expect.equal (shapes items) [ "used:t-1"; "said:m-1" ] "the item holds the place it started at"
+
+        testCase "the outcome moves what it SAYS, not where it sits" <| fun () ->
+            // Carried by id, resolved against the projection — the same property that makes a
+            // block chip mutate in place for free.
+            let events =
+                [ at 1L 0.0 (used "1" "a" "repo_status")
+                  at 2L 1.0 (toolDone "1" (ToolCallFailed "no such tool") None) ]
+            let running, _ = TimelineProjection.applyEvents None [ List.head events ] TimelineProjection.empty
+            let finished, _ = TimelineProjection.applyEvents None events TimelineProjection.empty
+            Expect.equal running.TerminalItems finished.TerminalItems "the entry does not move"
+            Expect.equal
+                (TimelineProjection.toolUse (toolUse "1") running |> Option.bind (fun u -> u.Outcome))
+                None
+                "a running call says it is running"
+            Expect.equal
+                (TimelineProjection.toolUse (toolUse "1") finished |> Option.bind (fun u -> u.Outcome))
+                (Some (ToolCallFailed "no such tool"))
+                "and the finish is what changes it"
+
+        testCase "a call that became a block draws no second chip" <| fun () ->
+            // The block chip already says who ran what and how it went. Two renderings of one
+            // fact are free to disagree; the RECORD still exists, it just does not draw twice.
+            let events =
+                [ at 1L 0.0 (opened terminalA "agent")
+                  at 2L 1.0 (used "1" "a" "execute_command")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (toolDone "1" ToolCallOk (Some (block "1"))) ]
+            Expect.equal (drawn events) [ "ran:b-1" ] "only the block's chip is drawn"
+            let timeline, _ = TimelineProjection.applyEvents None events TimelineProjection.empty
+            Expect.isTrue
+                (Map.containsKey (ToolUseId.value (toolUse "1")) timeline.ToolUses)
+                "the audit record is still there — the audit wants every call"
+
+        testCase "consecutive calls from one turn collapse into a single row" <| fun () ->
+            // Tool use is the first item a SINGLE turn can emit a dozen of, so a chatty turn
+            // costs one line rather than twenty.
+            let events =
+                [ at 1L 0.0 (used "1" "a" "repo_status")
+                  at 2L 1.0 (used "2" "a" "repo_log")
+                  at 3L 2.0 (used "3" "a" "repo_diff") ]
+            Expect.equal (drawn events) [ "run:turn-a:3" ] "three calls, one row"
+
+        testCase "…but only CONSECUTIVE ones, and only within one turn" <| fun () ->
+            // A message between two calls means the turn said something in the middle, and
+            // hiding that inside one line would tell a reader the wrong story about the order.
+            let events =
+                [ at 1L 0.0 (used "1" "a" "repo_status")
+                  at 2L 1.0 (sent "1" "hold on")
+                  at 3L 2.0 (used "2" "a" "repo_log")
+                  at 4L 3.0 (used "3" "b" "repo_diff") ]
+            Expect.equal
+                (drawn events)
+                [ "run:turn-a:1"; "said:m-1"; "run:turn-a:1"; "run:turn-b:1" ]
+                "the message splits the run, and a new turn starts another"
+
+        testCase "an id minted for a call is a handle a link can carry" <| fun () ->
+            // Why it is MINTED rather than derived: a fact that will be addressed must not be
+            // identified by a rule that lives nowhere in the data (Plan 13, stage 2a).
+            let timeline, _ =
+                TimelineProjection.applyEvents None [ at 1L 0.0 (used "1" "a" "set_secret") ] TimelineProjection.empty
+            match timeline.TerminalItems with
+            | [ TimelineToolUse (_, id) ] ->
+                Expect.equal (ToolUseId.value id) "t-1" "the item carries the minted id, not its position"
+                Expect.equal
+                    (TimelineProjection.toolUse id timeline |> Option.map ToolUse.label)
+                    (Some "yession/set_secret")
+                    "and it resolves to the call it names"
+            | other -> failwithf "expected one tool-use item, got %A" other
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
         orderTests
+        toolTests
         chipTests
         stretchTests
         unchangedTests

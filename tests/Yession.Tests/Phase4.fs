@@ -34,9 +34,21 @@ let private record (id: string) (name: string) : SessionRecord =
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
       DataDir = sprintf "sessions/%s" id }
 
+let private sessionA = SessionId.create "alpha" |> expect
+let private sessionB = SessionId.create "beta" |> expect
+
+let private serverRef (name: string) (url: string) (description: string) : McpServerRef =
+    { Name = McpServerName.create name |> expect
+      Transport = McpHttp url
+      Description = description }
+
+let private serialServer = serverRef "serial" "http://127.0.0.1:7333" "USB serial ports on this host"
+let private printerServer = serverRef "printer" "http://127.0.0.1:7401" ""
+
 let private twoSessions : ManagerState =
     { Version = ManagerState.currentVersion
-      Sessions = [ record "alpha" "Alpha work"; record "beta" "Beta work" ] }
+      Sessions = [ record "alpha" "Alpha work"; record "beta" "Beta work" ]
+      McpServers = [] }
 
 let private stateTests =
     testList "Manager state & codec (Step 22)" [
@@ -50,7 +62,10 @@ let private stateTests =
             let withExtras =
                 """{"version":1,"futureField":true,"sessions":[{"sessionId":"alpha","displayName":"Alpha work","token":"alpha-token","createdAt":"2026-07-15T12:00:00.0000000+00:00","dataDir":"sessions/alpha","colour":"teal"}]}"""
             let decoded = ManagerCodec.fromString withExtras |> expect
-            Expect.equal decoded { Version = 1; Sessions = [ record "alpha" "Alpha work" ] } "known fields decode; unknown fields are ignored"
+            Expect.equal
+                decoded
+                { Version = 1; Sessions = [ record "alpha" "Alpha work" ]; McpServers = [] }
+                "known fields decode; unknown fields are ignored"
 
         testCase "adding a duplicate session id is rejected" <| fun () ->
             match ManagerState.addSession (record "alpha" "Again") twoSessions with
@@ -72,6 +87,84 @@ let private stateTests =
         testCase "setDisplayName on an unknown session is a no-op" <| fun () ->
             let unchanged = ManagerState.setDisplayName (SessionId.create "ghost" |> expect) "Nope" twoSessions
             Expect.equal unchanged twoSessions "an unregistered session leaves the state unchanged"
+
+        // Plan 17. The declarations are durable state like the registry, and the state file
+        // is the ONLY way they touch storage — so the round trip is the contract.
+        testCase "MCP declarations round-trip through the state codec" <| fun () ->
+            let alpha = SessionId.create "alpha" |> expect
+            let declared =
+                twoSessions
+                |> ManagerState.declareMcpServer
+                    { Server =
+                        { Name = McpServerName.create "printer" |> expect
+                          Transport = McpHttp "http://127.0.0.1:7401"
+                          Description = "the label printer" }
+                      Audience = AnySession }
+                |> expect
+                |> ManagerState.declareMcpServer
+                    { Server =
+                        { Name = McpServerName.create "serial" |> expect
+                          Transport = McpHttp "http://127.0.0.1:7333"
+                          Description = "" }
+                      Audience = OneSession alpha }
+                |> expect
+            let decoded = ManagerCodec.toString declared |> ManagerCodec.fromString |> expect
+            Expect.equal decoded declared "decode∘encode is the identity, audiences and all"
+
+        testCase "a state file written before Plan 17 loads with no declarations" <| fun () ->
+            let old =
+                """{"version":1,"sessions":[{"sessionId":"alpha","displayName":"Alpha work","createdAt":"2026-07-15T12:00:00.0000000+00:00","dataDir":"sessions/alpha"}]}"""
+            let decoded = ManagerCodec.fromString old |> expect
+            Expect.isEmpty decoded.McpServers "no declarations is the ordinary starting state, not a migration"
+
+        testCase "a session resolves the servers that name it, and only those" <| fun () ->
+            let alpha = SessionId.create "alpha" |> expect
+            let beta = SessionId.create "beta" |> expect
+            let declared =
+                twoSessions
+                |> ManagerState.declareMcpServer
+                    { Server = serverRef "printer" "http://127.0.0.1:7401" ""; Audience = AnySession }
+                |> expect
+                |> ManagerState.declareMcpServer
+                    { Server = serverRef "serial" "http://127.0.0.1:7333" ""; Audience = OneSession alpha }
+                |> expect
+            let namesFor id =
+                (ManagerState.mcpServersFor id declared).Servers
+                |> List.map (fun s -> McpServerName.value s.Name)
+            Expect.equal (namesFor alpha) [ "printer"; "serial" ] "alpha was named by both"
+            Expect.equal (namesFor beta) [ "printer" ] "beta only by the host-wide one"
+
+        testCase "declaring a name a session would see twice is refused" <| fun () ->
+            let alpha = SessionId.create "alpha" |> expect
+            let declared =
+                twoSessions
+                |> ManagerState.declareMcpServer
+                    { Server = serverRef "serial" "http://127.0.0.1:7333" ""; Audience = AnySession }
+                |> expect
+            match
+                ManagerState.declareMcpServer
+                    { Server = serverRef "serial" "http://127.0.0.1:9999" ""; Audience = OneSession alpha }
+                    declared
+            with
+            | Ok _ -> failwith "a session was given two servers with one name"
+            | Error e -> Expect.stringContains e "serial" "the refusal names the clash"
+
+        testCase "withdrawing removes exactly one declaration" <| fun () ->
+            let alpha = SessionId.create "alpha" |> expect
+            let declared =
+                twoSessions
+                |> ManagerState.declareMcpServer
+                    { Server = serverRef "printer" "http://127.0.0.1:7401" ""; Audience = AnySession }
+                |> expect
+                |> ManagerState.declareMcpServer
+                    { Server = serverRef "serial" "http://127.0.0.1:7333" ""; Audience = OneSession alpha }
+                |> expect
+            let left =
+                ManagerState.withdrawMcpServer (McpServerName.create "serial" |> expect) (OneSession alpha) declared
+            Expect.equal
+                ((ManagerState.mcpServersFor alpha left).Servers |> List.map (fun s -> McpServerName.value s.Name))
+                [ "printer" ]
+                "only the withdrawn one is gone"
 
         testCase "a missing state file is the empty state; the registry survives a restart" <| fun () ->
             let path = statePath "restart"
@@ -227,7 +320,7 @@ let private freePort () : Async<int> =
 /// Start a bare control server over the given secret→session table, plus the real
 /// notification and MCP hubs wired to their SSE routes. Returns both hubs so a test
 /// can push down the same wires the Manager uses.
-let private startControlServer (secrets: (string * SessionId) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * RetainedHub.RetainedHub<McpToolList>> =
+let private startControlServer (secrets: (string * SessionId) list) : Async<Interop.HttpServer * string * NotificationHub.NotificationHub<SessionNotification> * KeyedRetainedHub.KeyedRetainedHub<McpServerSet>> =
     async {
         let table =
             secrets
@@ -236,7 +329,7 @@ let private startControlServer (secrets: (string * SessionId) list) : Async<Inte
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
-        let mcp = RetainedHub.create McpToolList.empty
+        let mcp = KeyedRetainedHub.create McpServerSet.empty
         // This bare control server has no OIDC provider; the DCR route is not under test.
         let registerClient _ (sessionId: SessionId) _ : Yession.Oidc.RegisterClientResponse =
             { ClientId = SessionId.value sessionId; ClientSecret = "unused"; Issuer = "http://unused" }
@@ -326,11 +419,35 @@ let private uiRenderTests =
             Expect.isTrue (crashed.Contains (Dom.attr Dom.Manager.launch "ui-render")) "a crashed session can relaunch"
 
         testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
-            let html = ManagerUi.page "app.css" PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            let html =
+                ManagerUi.page "app.css" PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ] []
             Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
             Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
             Expect.isFalse (html.Contains "src=\"http") "no external/CDN scripts (local-first)"
             Expect.isTrue (html.Contains Dom.Manager.createSession) "the create form renders"
+
+        // Plan 17. Declaring is the ONE act that names a url, and the only management
+        // action that can be refused for a reason a human has to read.
+        testCase "the MCP section renders its declarations, and the form that adds one" <| fun () ->
+            let views = [ { ProcessManager.Record = uiRecord; ProcessManager.Status = ProcessManager.NotRunning } ]
+            let empty = ManagerUi.mcpSection views []
+            Expect.isTrue (empty.Contains "no MCP servers declared") "an empty registry says so rather than showing a bare table"
+            Expect.isTrue (empty.Contains "data-declare-mcp") "and still offers the form"
+
+            let declared =
+                ManagerUi.mcpSection
+                    views
+                    [ { Server = serialServer; Audience = AnySession }
+                      { Server = printerServer; Audience = OneSession uiRecord.SessionId } ]
+            Expect.isTrue (declared.Contains "http://127.0.0.1:7333") "the address an operator typed is what is shown back"
+            Expect.isTrue (declared.Contains "any session") "a host-wide declaration says who it reaches"
+            Expect.isTrue (declared.Contains "UI &lt;Render&gt;") "a session-scoped one names the session (escaped), not its id"
+            Expect.isTrue (declared.Contains "data-mcp-withdraw=\"serial\"") "each row can be withdrawn"
+            // WCAG: every input has a label, and the refusal has somewhere to be announced.
+            Expect.isTrue (declared.Contains "for=\"mcp-name\"") "the name input is labelled"
+            Expect.isTrue (declared.Contains "for=\"mcp-url\"") "the address input is labelled"
+            Expect.isTrue (declared.Contains "for=\"mcp-audience\"") "the audience select is labelled"
+            Expect.isTrue (declared.Contains "aria-live") "a refusal is announced rather than only drawn"
     ]
 
 // --- WCAG 2.0 AA floor (AGENTS.md "UI baseline"): theme contrast, pinned by test ---------
@@ -995,55 +1112,87 @@ let private searchTool : McpTool =
       InputSchema = """{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}""" }
 
 let private mcpTests =
-    testList "MCP tool stream: codec & hub" [
-        testCase "a tool list round-trips through the control wire codec, inputSchema intact" <| fun () ->
-            let original = { Tools = [ searchTool; { Name = "noop"; Title = None; Description = None; InputSchema = "{}" } ] }
+    testList "MCP server set: codec & hub" [
+        testCase "a tool list round-trips, inputSchema intact" <| fun () ->
+            // MCP's own `Tool`, which the SESSION decodes a provider's `tools/list` into
+            // (Plan 17). It no longer crosses the control leg, but the schema must survive
+            // a round trip wherever it is carried.
+            let original =
+                { Tools = [ searchTool; { Name = "noop"; Title = None; Description = None; InputSchema = "{}" } ] }
             let roundTripped =
-                ControlWire.toString ControlWire.mcpToolList original
-                |> ControlWire.fromString ControlWire.mcpToolList
+                ControlWire.toString Codec.mcpToolList original
+                |> ControlWire.fromString Codec.mcpToolList
                 |> expect
-            Expect.equal roundTripped original "tool list round-trip is identity (schema stays a JSON object, optionals preserved)"
+            Expect.equal roundTripped original "round-trip is identity (schema stays an object, optionals preserved)"
 
         testCase "inputSchema is a real JSON object on the wire, not a quoted string" <| fun () ->
-            let json = ControlWire.toString ControlWire.mcpToolList { Tools = [ searchTool ] }
+            let json = ControlWire.toString Codec.mcpToolList { Tools = [ searchTool ] }
             Expect.isTrue (json.Contains "\"inputSchema\":{") "the schema serialises as an embedded object"
 
-        testCase "the hub hands a new subscriber the current list at once, then every change" <| fun () ->
-            let hub = RetainedHub.create McpToolList.empty
-            let mutable received : McpToolList list = []
-            let _ = hub.Register (fun l -> received <- received @ [ l ])
-            // The retained snapshot: an empty list arrives immediately on subscribe.
-            Expect.equal received [ McpToolList.empty ] "the subscriber gets the current (empty) list at once"
+        testCase "a server set round-trips, and carries no audience" <| fun () ->
+            let original = { Servers = [ serialServer ] }
+            let json = ControlWire.toString Codec.mcpServerSet original
+            Expect.equal
+                (ControlWire.fromString Codec.mcpServerSet json |> expect)
+                original
+                "decode∘encode is the identity"
+            // Resolution already happened. A session that could read who ELSE reaches a
+            // server would be reading the Manager's configuration rather than its own set.
+            Expect.isFalse (json.Contains "audience") "the frame carries the servers, not the declarations"
 
-            hub.Publish { Tools = [ searchTool ] }
-            Expect.equal (List.last received) { Tools = [ searchTool ] } "a publish pushes the new list"
-            Expect.equal (hub.Current ()) { Tools = [ searchTool ] } "the hub retains the latest list"
+        testCase "the hub retains PER SESSION, so two sessions see different sets" <| fun () ->
+            let hub = KeyedRetainedHub.create McpServerSet.empty
+            let mutable toA : McpServerSet list = []
+            let mutable toB : McpServerSet list = []
+            let _ = hub.Register sessionA "secret-a" (fun s -> toA <- toA @ [ s ])
+            let _ = hub.Register sessionB "secret-b" (fun s -> toB <- toB @ [ s ])
+            Expect.equal toA [ McpServerSet.empty ] "A gets its current (empty) set at once"
+            Expect.equal toB [ McpServerSet.empty ] "and so does B"
 
-            // A LATER subscriber gets the retained list as its initial snapshot, no publish needed.
-            let mutable late : McpToolList list = []
-            let unsubLate = hub.Register (fun l -> late <- late @ [ l ])
-            Expect.equal late [ { Tools = [ searchTool ] } ] "a late subscriber gets the retained list immediately"
+            hub.Publish sessionA { Servers = [ serialServer ] }
+            Expect.equal (List.last toA) { Servers = [ serialServer ] } "A got the change"
+            Expect.equal toB [ McpServerSet.empty ] "B did not — it is not A"
+            Expect.equal (hub.Current sessionA) { Servers = [ serialServer ] } "the hub retains A's set"
 
-            // Unsubscribe stops delivery to that sink only.
-            unsubLate.Stop ()
-            hub.Publish McpToolList.empty
-            Expect.equal (List.last late) { Tools = [ searchTool ] } "the unsubscribed sink received nothing further"
-            Expect.equal (List.last received) McpToolList.empty "the still-subscribed sink got the change"
+        testCase "a RELAUNCH under a new secret is handed the retained set" <| fun () ->
+            // The reason retention is keyed by session and delivery by secret. A session
+            // that restarts subscribes under a secret the hub has never seen; it must find
+            // its servers waiting, not an empty set.
+            let hub = KeyedRetainedHub.create McpServerSet.empty
+            hub.Publish sessionA { Servers = [ serialServer ] }
+            let mutable relaunched : McpServerSet list = []
+            let _ = hub.Register sessionA "a-second-launch" (fun s -> relaunched <- relaunched @ [ s ])
+            Expect.equal relaunched [ { Servers = [ serialServer ] } ] "the new launch is current at once"
+
+        testCase "dropping a secret kills its sinks and NOTHING else" <| fun () ->
+            let hub = KeyedRetainedHub.create McpServerSet.empty
+            let mutable dying : McpServerSet list = []
+            let mutable surviving : McpServerSet list = []
+            let _ = hub.Register sessionA "old-launch" (fun s -> dying <- dying @ [ s ])
+            let _ = hub.Register sessionB "other-launch" (fun s -> surviving <- surviving @ [ s ])
+
+            hub.Drop "old-launch"
+            hub.Publish sessionA { Servers = [ serialServer ] }
+            hub.Publish sessionB { Servers = [ serialServer ] }
+            Expect.equal dying [ McpServerSet.empty ] "the dropped launch's sink received nothing further"
+            Expect.equal (List.last surviving) { Servers = [ serialServer ] } "the other launch is untouched"
+            // The DECLARATION outlives the launch — that is the whole point of keying
+            // retention by session rather than by secret.
+            Expect.equal (hub.Current sessionA) { Servers = [ serialServer ] } "A's set survived its launch ending"
     ]
 
 let private mcpStreamTests =
-    testList "MCP tool stream over SSE (reverse control leg)" [
-        testCaseAsync "a subscriber gets the current list on connect, then every change, and stops on cancel" <|
+    testList "MCP server set over SSE (reverse control leg)" [
+        testCaseAsync "a session gets its own set on connect, then every change, and stops on cancel" <|
             async {
-                let! server, url, _, mcp =
-                    startControlServer [ "secret-a", (SessionId.create "sse-mcp" |> expect) ]
-                // Seed a list before anyone subscribes: a connecting session must still see it.
-                mcp.Publish { Tools = [ searchTool ] }
+                let sseSession = SessionId.create "sse-mcp" |> expect
+                let! server, url, _, mcp = startControlServer [ "secret-a", sseSession ]
+                // Seeded before anyone subscribes: a connecting session must still see it.
+                mcp.Publish sseSession { Servers = [ serialServer ] }
 
-                let mutable received : McpToolList list = []
-                let cancel = ControlClient.subscribeMcp url "secret-a" (fun l -> received <- received @ [ l ])
+                let mutable received : McpServerSet list = []
+                let cancel = ControlClient.subscribeMcp url "secret-a" (fun s -> received <- received @ [ s ])
 
-                // The retained snapshot arrives on connect without any further publish.
                 let rec waitFor (remaining: int) =
                     async {
                         if not (List.isEmpty received) || remaining <= 0 then return ()
@@ -1052,12 +1201,13 @@ let private mcpStreamTests =
                             return! waitFor (remaining - 1)
                     }
                 do! waitFor 60
-                Expect.isTrue (not (List.isEmpty received)) "the initial (retained) list arrived on connect"
-                Expect.equal (List.head received) { Tools = [ searchTool ] } "the initial snapshot is the current list, decoded across the wire"
+                Expect.equal
+                    (List.tryHead received)
+                    (Some { Servers = [ serialServer ] })
+                    "the retained set arrived on connect, decoded across the wire"
 
-                // A subsequent change is pushed to the live subscriber.
                 let before = List.length received
-                mcp.Publish { Tools = [ searchTool; { Name = "fetch"; Title = None; Description = None; InputSchema = "{}" } ] }
+                mcp.Publish sseSession { Servers = [ serialServer; printerServer ] }
                 let rec waitGrow (remaining: int) =
                     async {
                         if List.length received > before || remaining <= 0 then return ()
@@ -1066,15 +1216,17 @@ let private mcpStreamTests =
                             return! waitGrow (remaining - 1)
                     }
                 do! waitGrow 60
-                Expect.equal (List.last received |> fun l -> List.length l.Tools) 2 "the change was pushed to the live subscriber"
+                Expect.equal
+                    (List.last received |> fun s -> List.length s.Servers)
+                    2
+                    "the change was pushed to the live subscriber"
 
-                // Cancel closes the stream; later changes never arrive.
                 cancel.Stop ()
                 do! Async.Sleep 200
                 let settled = List.length received
-                mcp.Publish McpToolList.empty
+                mcp.Publish sseSession McpServerSet.empty
                 do! Async.Sleep 200
-                Expect.equal (List.length received) settled "after cancel, no further lists arrive"
+                Expect.equal (List.length received) settled "after cancel, no further sets arrive"
 
                 server.close ignore
             }
@@ -1420,7 +1572,7 @@ let tests =
         // missing capability could possibly report itself.
         Tag.needs "Session-owned environment across real processes" [ Tag.Ports; Tag.Native; Tag.Srt ] (fun () -> controlRpcTests)
         Tag.needs "Manager→Session notifications over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> notificationStreamTests)
-        Tag.needs "MCP tool stream over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
+        Tag.needs "MCP server set over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Idle reaping over the process boundary (Plan 11)" [ Tag.Ports; Tag.Native ] (fun () -> reapingTests)

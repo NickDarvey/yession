@@ -101,6 +101,25 @@ type SessionEvent =
     // The approval gate's refusal (Plan 15, stage 3). Only the refusal: an approval is
     // recorded on the event of the command it released.
     | CommandRefused of CommandRefused
+    // Tool use (Plan 16, part C): every call the agent makes, recorded. Two events rather
+    // than one, and for the same reason a block has two — a call that takes four minutes
+    // must hold its place in the chat WHILE it is the only thing happening, so the start
+    // anchors it and the finish moves what it says without touching where it sits.
+    //
+    // These fold into the TIMELINE and deliberately not into `ConversationProjection`: the
+    // agent made the call and already has the result in its own transcript, so feeding it
+    // back would double-feed the model. That is the same rule terminals follow, and the
+    // opposite of the one repos follow — the question is not "did the agent do it" but
+    // "does a future turn need to be told?".
+    | ToolUseStarted of ToolUseStarted
+    | ToolUseFinished of ToolUseFinished
+    // The MCP servers this session was given (Plan 17). With no attach step there is no
+    // human act to record — but the SESSION still gains and loses whole namespaces of
+    // tools while it runs, and a turn that suddenly has four serial tools it did not have
+    // before needs to know why. So the question part C asked applies: not "did the agent
+    // do it" but "does a future turn need to be told?".
+    | McpServerAvailable of McpServerNoted
+    | McpServerUnavailable of McpServerNoted
 
 and SessionCreated =
     { SessionId : SessionId }
@@ -206,7 +225,13 @@ and TerminalOpened =
       /// log has to be able to bring the terminal back up in the same sandbox it was in.
       /// A log written before named sandboxes decodes to `default`, which is where those
       /// terminals were.
-      Sandbox : SandboxName }
+      ///
+      /// `None` means the terminal runs in NO sandbox: its bytes come from a stream
+      /// somebody else produces (Plan 16, part D). Optional rather than defaulted, because
+      /// saying an attached serial port is in `default` would be inventing a fact — and the
+      /// two consumers both need the difference: the panel says where a terminal is, and
+      /// the block runner picks an environment by it.
+      Sandbox : SandboxName option }
 
 and TerminalClosed =
     { TerminalId : TerminalId
@@ -345,8 +370,7 @@ and RepoAdded =
       /// `None` is the ordinary case and means nobody had to — exactly as it does on
       /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
       /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option
-      }
+      ApprovedBy : ActorRef option }
 
 and RepoRemoved =
     { MessageId : MessageId
@@ -356,8 +380,7 @@ and RepoRemoved =
       /// `None` is the ordinary case and means nobody had to — exactly as it does on
       /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
       /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option
-      }
+      ApprovedBy : ActorRef option }
 
 and RepoBranchSwitched =
     { MessageId : MessageId
@@ -371,8 +394,7 @@ and RepoBranchSwitched =
       /// `None` is the ordinary case and means nobody had to — exactly as it does on
       /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
       /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option
-      }
+      ApprovedBy : ActorRef option }
 
 and WorkSandboxStarted =
     { MessageId : MessageId
@@ -395,8 +417,7 @@ and WorkSandboxStarted =
       /// `None` is the ordinary case and means nobody had to — exactly as it does on
       /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
       /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option
-      }
+      ApprovedBy : ActorRef option }
 
 and WorkSandboxStopped =
     { MessageId : MessageId
@@ -406,8 +427,7 @@ and WorkSandboxStopped =
       /// `None` is the ordinary case and means nobody had to — exactly as it does on
       /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
       /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option
-      }
+      ApprovedBy : ActorRef option }
 
 /// A command a human refused at its gate (Plan 15, stage 3). The mirror of
 /// `TerminalCommandRejected`, and it exists for that event's reason: a refusal that simply
@@ -433,3 +453,45 @@ and CommandRefused =
       Author : ActorRef
       RejectedBy : ActorRef
       Reason : string option }
+
+/// Whether the CALL happened, which is not whether it went well. A command that exits 1
+/// succeeded as a tool call — the model is meant to read that and choose differently.
+/// `ToolCallFailed` means the call never reached a tool at all: no such tool, or arguments
+/// that could not be read.
+and ToolOutcome =
+    | ToolCallOk
+    | ToolCallFailed of reason: string
+
+and ToolUseStarted =
+    { /// Minted by the Process, so the chip has a handle a link can carry.
+      ToolUseId : ToolUseId
+      /// The turn that made the call — what lets a chatty turn be grouped into one line
+      /// instead of twenty.
+      AgentTurnId : AgentTurnId
+      /// Where the call went. `yession` for the session's own verbs; a provider's name for
+      /// anything a session was given.
+      Namespace : string
+      Name : string
+      /// The arguments AS RECORDED. Fields the schema marks `writeOnly` never reach here —
+      /// they are dropped as the record is built, so there is no write path to get wrong.
+      /// `None` for a tool whose schema we did not write: we cannot trust a foreign schema
+      /// to mark its own secrets, so nothing of a foreign call's arguments is recorded.
+      Arguments : string option }
+
+/// A server entering or leaving what this session may reach.
+///
+/// `ActorRef.System` on the way in, always, because nobody in the session did it —
+/// attributing it to the agent, or to whoever happens to be connected, would be inventing
+/// an actor. The name alone, not the url: the timeline is what a human reads, and where a
+/// server lives is the `mcp_servers` query's business.
+and McpServerNoted =
+    { MessageId : MessageId
+      Name : McpServerName }
+
+and ToolUseFinished =
+    { ToolUseId : ToolUseId
+      Outcome : ToolOutcome
+      /// The block the call became, when it became one. Set means the block's own chip
+      /// already says who ran what and how it went, so this draws nothing beside it — two
+      /// renderings of one fact are free to disagree.
+      Block : BlockId option }

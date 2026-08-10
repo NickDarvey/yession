@@ -141,15 +141,127 @@ let private script =
       const r = await fetch('/sessions', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(new FormData(f)) })
       if (r.ok) { swap(document.querySelector('[data-sessions]'), await r.text()); f.reset() }
     })
+    // Declaring an MCP server (Plan 17): the only place a url is written, and the only
+    // management action that can be REFUSED for a reason a human needs to read — a name
+    // clash. So this one reports, where create/launch/stop only swap.
+    const mcpSwap = (htmlText) => swap(document.querySelector('[data-mcp]'), htmlText)
+    document.addEventListener('submit', async (e) => {
+      const f = e.target.closest('[data-declare-mcp]'); if (!f) return
+      e.preventDefault()
+      const r = await fetch('/mcp/servers', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(new FormData(f)) })
+      const text = await r.text()
+      if (r.ok) { mcpSwap(text) } else { const p = f.querySelector('[data-mcp-error]'); if (p) p.textContent = text }
+    })
+    document.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-mcp-withdraw]'); if (!b) return
+      const body = new URLSearchParams({ name: b.getAttribute('data-mcp-withdraw'), session: b.getAttribute('data-mcp-audience') || '' })
+      const r = await fetch('/mcp/servers/withdraw', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body })
+      if (r.ok) mcpSwap(await r.text())
+    })
     const rows = new EventSource('/sessions/rows')
     rows.onmessage = (e) => { if (e.data) swap(document.querySelector('[data-sessions]'), e.data) }
     """
+
+/// One declared MCP server (Plan 17). The AUDIENCE is a column rather than a separate
+/// table, because host-wide and session-scoped declarations are the same kind of fact and
+/// splitting them would make "which of these does session A get?" a question you answer by
+/// reading two places.
+let private mcpRowTemplate (views: ProcessManager.SessionView list) (declaration: McpDeclaration) : TemplateResult =
+    let name = McpServerName.value declaration.Server.Name
+    let audience, audienceValue =
+        match declaration.Audience with
+        | AnySession -> "any session", ""
+        | OneSession id ->
+            let label =
+                views
+                |> List.tryFind (fun v -> v.Record.SessionId = id)
+                |> Option.map (fun v -> v.Record.DisplayName)
+                |> Option.defaultValue (SessionId.value id)
+            label, SessionId.value id
+    html $"""
+        <tr class="border-b border-hair hover:bg-surface transition-colors" data-mcp-server="{name}">
+          <td class="py-3 pr-4 align-middle {Style.body}">{name}</td>
+          <td class="py-3 pr-4 align-middle font-mono text-[12px] leading-4 text-ink-faint max-md:hidden">{McpTransport.describe declaration.Server.Transport}</td>
+          <td class="py-3 pr-4 align-middle {Style.small}">{audience}</td>
+          <td class="py-3 pl-4 align-middle">
+            <div class="flex flex-row-reverse">
+              <button type="button" class="{Style.btnDanger}" data-mcp-withdraw="{name}" data-mcp-audience="{audienceValue}">Withdraw</button>
+            </div>
+          </td>
+        </tr>"""
+
+/// The whole MCP section — the swap unit, so the count and the empty state can never go
+/// stale against the rows they describe. This is the ONE place a url is ever written: a
+/// session does not select from these, and the agent has no command that changes them.
+let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: McpDeclaration list) : TemplateResult =
+    let rows =
+        match declarations with
+        | [] ->
+            [ html $"""
+                <tr>
+                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers declared — a session reaches only its own tools</td>
+                </tr>""" ]
+        | declarations -> declarations |> List.map (mcpRowTemplate views)
+    let options =
+        views
+        |> List.map (fun view ->
+            html $"""<option value="{SessionId.value view.Record.SessionId}">{view.Record.DisplayName}</option>""")
+    html $"""
+        <section class="flex flex-col gap-3" data-mcp>
+          <div class="flex items-baseline gap-2.5">
+            <span class="{Style.label}">MCP servers</span>
+            <span class="font-semibold text-[11px] leading-4 tracking-[0.18em] text-ink-faint tabular-nums">{List.length declarations}</span>
+          </div>
+          <table class="w-full text-left border-collapse">
+            <thead>
+              <tr class="border-b border-hair">
+                <th scope="col" class="py-2 pr-4 {Style.label}">name</th>
+                <th scope="col" class="py-2 pr-4 {Style.label} max-md:hidden">address</th>
+                <th scope="col" class="py-2 pr-4 {Style.label}">reaches</th>
+                <th scope="col" class="py-2 pl-4"><span class="sr-only">actions</span></th>
+              </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+          </table>
+          <form class="flex flex-col gap-3 pt-3" data-declare-mcp>
+            <div class="flex flex-wrap items-end gap-3">
+              <div class="flex flex-col gap-1.5">
+                <label class="{Style.label}" for="mcp-name">name</label>
+                <input id="mcp-name" name="name" placeholder="serial" autocomplete="off" required
+                  class="w-40 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+              </div>
+              <div class="flex flex-col gap-1.5">
+                <label class="{Style.label}" for="mcp-url">address</label>
+                <input id="mcp-url" name="url" type="url" placeholder="http://127.0.0.1:7333" autocomplete="off" required
+                  class="w-72 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+              </div>
+              <div class="flex flex-col gap-1.5">
+                <label class="{Style.label}" for="mcp-audience">reaches</label>
+                <select id="mcp-audience" name="session"
+                  class="w-56 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+                  <option value="">any session</option>
+                  {options}
+                </select>
+              </div>
+              <button type="submit" class="{Style.btnPrimary}">Declare</button>
+            </div>
+            <p class="{Style.small}" data-mcp-error aria-live="polite"></p>
+          </form>
+        </section>"""
+
+/// The MCP section, rendered as an action's answer.
+let mcpSection (views: ProcessManager.SessionView list) (declarations: McpDeclaration list) : string =
+    Ssr.render (mcpTemplate views declarations)
 
 // The page keeps the workspace anatomy: the shared 88px header band (wordmark on the
 // common baseline, hairline below), then labelled sections on one left rail. The body
 // shell is `Style.app` (h-screen, overflow-hidden), so <main> owns the scrolling — a
 // long registry scrolls under a fixed viewport instead of clipping.
-let private bodyTemplate (access: PublicAccess) (views: ProcessManager.SessionView list) : TemplateResult =
+let private bodyTemplate
+    (access: PublicAccess)
+    (views: ProcessManager.SessionView list)
+    (declarations: McpDeclaration list)
+    : TemplateResult =
     html $"""
         <main class="flex-1 min-w-0 overflow-y-auto">
           <div class="max-w-4xl w-full mx-auto flex flex-col px-8 max-md:px-4">
@@ -167,12 +279,18 @@ let private bodyTemplate (access: PublicAccess) (views: ProcessManager.SessionVi
               </div>
             </form>
             <div class="pb-10">{tableTemplate access views}</div>
+            <div class="pb-10">{mcpTemplate views declarations}</div>
           </div>
         </main>"""
 
 /// `styleSheetUrl` is passed in rather than read from the module below: F# scopes top-down, and
 /// the stylesheet's address is derived from bytes read further down the file.
-let page (styleSheetUrl: string) (access: PublicAccess) (views: ProcessManager.SessionView list) : string =
+let page
+    (styleSheetUrl: string)
+    (access: PublicAccess)
+    (views: ProcessManager.SessionView list)
+    (declarations: McpDeclaration list)
+    : string =
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
@@ -180,7 +298,7 @@ let page (styleSheetUrl: string) (access: PublicAccess) (views: ProcessManager.S
         "<title>Yession Manager</title>"
         Style.headTags styleSheetUrl
         sprintf "</head><body class=\"%s\">" Style.app
-        Ssr.render (bodyTemplate access views)
+        Ssr.render (bodyTemplate access views declarations)
         sprintf "<script>%s</script>" script
         "</body></html>"
     ]
@@ -308,7 +426,7 @@ let tryHandle
     let route : (unit -> unit) option =
         match req.``method``, path with
         | "GET", "/" ->
-            Some (fun () -> html res (page cssUrl pm.Public (pm.Sessions ())))
+            Some (fun () -> html res (page cssUrl pm.Public (pm.Sessions ()) (pm.McpServers ())))
         | "GET", path when path = "/" + cssUrl ->
             // The same locally built stylesheet the session shell uses — shared style, no CDN
             // — and the one management response that is cacheable, because it is addressed by
@@ -332,6 +450,46 @@ let tryHandle
                     match pm.CreateSession id (formField body "name") with
                     | Ok _ -> html res (sessionsTable pm.Public (pm.Sessions ()))
                     | Error e -> respond res 400 "text/plain" e))
+        // Declaring an MCP server (Plan 17). The ONE act that names a url, and the only
+        // one that is not read-only. There is deliberately no per-session enable beside it:
+        // an operator who declares a server declares it in order for it to be used.
+        | "POST", "/mcp/servers" ->
+            Some (fun () ->
+                readBody req (fun body ->
+                    let audience =
+                        match formField body "session" with
+                        | "" -> Ok AnySession
+                        | id -> SessionId.create id |> Result.map OneSession
+                    let declared =
+                        match McpServerName.create (formField body "name"), audience with
+                        | Error e, _ -> Error e
+                        | _, Error e -> Error e
+                        | Ok name, Ok audience ->
+                            match formField body "url" with
+                            | "" -> Error "an MCP server needs an address"
+                            | url ->
+                                Ok
+                                    { Server =
+                                        { Name = name
+                                          Transport = McpHttp url
+                                          Description = formField body "description" }
+                                      Audience = audience }
+                    match declared |> Result.bind pm.DeclareMcpServer with
+                    | Ok () -> html res (mcpSection (pm.Sessions ()) (pm.McpServers ()))
+                    | Error e -> respond res 400 "text/plain" e))
+        | "POST", "/mcp/servers/withdraw" ->
+            Some (fun () ->
+                readBody req (fun body ->
+                    let audience =
+                        match formField body "session" with
+                        | "" -> Ok AnySession
+                        | id -> SessionId.create id |> Result.map OneSession
+                    match McpServerName.create (formField body "name"), audience with
+                    | Error e, _
+                    | _, Error e -> respond res 400 "text/plain" e
+                    | Ok name, Ok audience ->
+                        pm.WithdrawMcpServer name audience
+                        html res (mcpSection (pm.Sessions ()) (pm.McpServers ()))))
         | method', path when path.StartsWith "/sessions/" ->
             let rest = path.Substring "/sessions/".Length
             match method', rest.Split '/' with

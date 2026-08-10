@@ -1083,12 +1083,62 @@ module View =
                   <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
                   <span class="shrink-0">{stretchEnding model stretch.End}</span>
                 </button>"""
+        // One call the agent made. No pane tab: unlike a block there is nothing recorded to
+        // open — what there is to know (where it went, with what, and how it went) fits on
+        // the line. The minted id rides the row anyway, because that is what a deep link
+        // will address once there is somewhere for it to land.
+        let toolCall (use': ToolUse) =
+            let status, rendered =
+                match use'.Outcome with
+                | None ->
+                    Dom.Text.blockRunning,
+                    html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>running</span>"""
+                | Some ToolCallOk -> Dom.Text.blockOk, html $"""<span class="{Style.statusOk}">{Icon.checkSm}</span>"""
+                | Some (ToolCallFailed reason) -> Dom.Text.blockFailed, html $"""<span class="{Style.statusErr}">{reason}</span>"""
+            // `None` is not "no arguments" — it is a foreign tool, whose schema we did not
+            // write and therefore cannot trust to have marked its own secrets.
+            let args =
+                match use'.Arguments with
+                | Some recorded -> recorded
+                | None -> "(arguments not recorded)"
+            html $"""
+                <div class="{Style.chatToolCall}"
+                     data-chat-tool="{ToolUseId.value use'.ToolUseId}"
+                     data-chat-tool-status="{status}">
+                  <code class="{Style.chatToolName}">{ToolUse.label use'}</code>
+                  <code class="{Style.chatToolArgs}">{args}</code>
+                  <span class="shrink-0">{rendered}</span>
+                </div>"""
+        let toolRun (turn: AgentTurnId) (uses: ToolUse list) =
+            let summary =
+                match uses with
+                | [ one ] -> ToolUse.label one
+                | many -> sprintf "%d tools" (List.length many)
+            html $"""
+                <details class="{Style.chatToolRun}" data-chat-tool-run="{AgentTurnId.value turn}">
+                  <summary class="{Style.chatToolSummary}">
+                    <span class="{Style.chatChipWho}">{Dom.Text.agent}</span>
+                    <span class="{Style.chatChipText}">used {summary}</span>
+                  </summary>
+                  {uses |> List.map toolCall}
+                </details>"""
+        let rows = TimelineProjection.rows model.Conversation model.Timeline
         let items =
-            TimelineProjection.items model.Conversation model.Timeline
+            rows
             |> List.map (function
-                | TimelineMessage item -> message item
-                | TimelineBlock (_, terminalId, blockId) -> blockChip terminalId blockId
-                | TimelineStretch stretch -> stretchItem stretch)
+                | RowItem (TimelineMessage item) -> message item
+                | RowItem (TimelineBlock (_, terminalId, blockId)) -> blockChip terminalId blockId
+                | RowItem (TimelineStretch stretch) -> stretchItem stretch
+                // `rows` never puts a tool use in a bare row, and never a run of anything
+                // else — but both are `TimelineItem`s, so the types cannot say so.
+                | RowItem (TimelineToolUse _) -> Lit.nothing
+                | RowToolRun (turn, calls) ->
+                    let uses =
+                        calls
+                        |> List.choose (function
+                            | TimelineToolUse (_, id) -> TimelineProjection.toolUse id model.Timeline
+                            | _ -> None)
+                    if List.isEmpty uses then Lit.nothing else toolRun turn uses)
         // A session with nothing in it yet opens on an empty column, and an empty column says
         // nothing about where the conversation starts or that the near-black composer below it
         // is where you type. So the chat carries its OWN idle symbol — a caret standing where
@@ -1096,13 +1146,17 @@ module View =
         // empty pane. A mark, not a sentence: it is the same blinking caret a streaming message
         // wears, so it reads as "text goes here" without a word of instruction.
         //
+        // Keyed on the ROWS, not on the rendered list: the mapping above answers a bare tool
+        // use and an empty run with `Lit.nothing`, so a timeline can hold rows and still draw
+        // nothing — and "has rows" would then hide the caret on a screen that is blank.
+        //
         // `aria-hidden`, because it is a typographic mark rather than content: a reader that
         // cannot see it is told the timeline is empty by the timeline being empty.
         let body =
-            match items with
+            match rows with
             | [] ->
                 [ html $"""<div class="{Style.timelineIdle}" aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
-            | items -> items
+            | _ -> items
         html $"""<section class="{Style.timeline}" data-conversation>{body}</section>"""
 
     /// One block: the command that ran, then everything it printed.

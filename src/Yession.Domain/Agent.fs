@@ -288,7 +288,25 @@ type AgentCapabilities =
       // and reads the act-line. `execute_command` is still the one door into a sandbox —
       // these decide which sandboxes exist, not what runs in them.
       StartWorkSandbox : StartWorkSandbox
-      StopWorkSandbox : StopWorkSandbox }
+      StopWorkSandbox : StopWorkSandbox
+      /// Where every tool call this turn makes is recorded (Plan 16, part C). ONE seam,
+      /// bound to the turn by whoever built these capabilities, and wrapped around the
+      /// WHOLE registry rather than around each tool — so a provider added later cannot
+      /// arrive with its own logging, or with none.
+      ///
+      /// It is a capability like the rest for the usual reason: a turn that must not be
+      /// recorded is given a log that records nothing, rather than a flag somebody has to
+      /// remember to check.
+      RecordToolUse : ToolUseLog
+      /// The tools of the MCP servers this session was given (Plan 17), one registry per
+      /// connected server, ready to merge with the session's own.
+      ///
+      /// A LIST rather than a merged registry, because the merge belongs where the audit
+      /// wrap does — around the whole, once. And a value rather than a thunk for the reason
+      /// the whole record is resolved per turn: the turn holds a SNAPSHOT, so a set change
+      /// mid-turn lands on the next turn and the model's tool list never shifts underneath
+      /// it. A server that is down contributes nothing here and fails nothing.
+      ForeignTools : ToolRegistry list }
 
 module AgentCapabilities =
 
@@ -316,7 +334,9 @@ module AgentCapabilities =
           Queries = []
           ReadQuery = fun _ -> async { return Error "no query capability" }
           StartWorkSandbox = fun _ _ -> async { return Error "no sandbox capability" }
-          StopWorkSandbox = fun _ -> async { return Error "no sandbox capability" } }
+          StopWorkSandbox = fun _ -> async { return Error "no sandbox capability" }
+          RecordToolUse = ToolUseLog.none
+          ForeignTools = [] }
 
 /// The abort seam (Phase 3, Step 17): how an interrupt reaches a running turn. The
 /// Session Process owns the signal; the runner observes it — poll `IsAborted` at

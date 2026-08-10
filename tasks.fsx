@@ -7,8 +7,9 @@
 // The verbs are the dispatch at the bottom of this file; each has its own section below. A
 // bare version (`dotnet fsi tasks.fsx 1.2.3`) is shorthand for `package`.
 //
-// Yession ships as ONE npm package with two bins, `yession` (the Manager) and
-// `yession-session` (a Session Process). Both entries are esbuild-bundled to single ESM files
+// Yession ships as ONE npm package with three bins: `yession` (the Manager),
+// `yession-session` (a Session Process), and `yession-serial` (the serial device provider).
+// Every entry is esbuild-bundled to a single ESM file
 // with the native / self-resolving deps kept EXTERNAL — node-datachannel loads its addon and
 // the Agent SDK resolves its native `claude` sibling via import.meta.url, neither of which
 // works bundled. Assets are copied in and read package-relative at runtime.
@@ -301,9 +302,13 @@ let dev () =
 // helper binaries beside its own module. zod is a dynamic import shared with the SDK; dockerode
 // is pure JS but pulls ssh2 (with an optional native addon), so it resolves from node_modules
 // too. Everything else (yjs, lib0, Thoth, prosemirror, …) inlines.
+// `serialport` joins them for the same reason and one more: it is OPTIONAL. The provider
+// lazily imports it and degrades to "no devices" when it is absent, which is what lets the
+// package install on a box with no hardware — and what lets this repo's own dev tree, whose
+// npm dependencies are a Nix fixed-output derivation, not carry it at all.
 let private externals =
     [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "@anthropic-ai/sandbox-runtime"
-      "zod"; "dockerode"; "@napi-rs/keyring" ]
+      "zod"; "dockerode"; "@napi-rs/keyring"; "serialport" ]
     |> List.map (sprintf "--external:%s")
 
 // The OTel SDK does a dynamic `require('util')`; esbuild's ESM output can't satisfy a runtime
@@ -344,6 +349,10 @@ let private yessionSessionBinJs = """#!/usr/bin/env node
 import('../session.js')
 """
 
+let private yessionSerialBinJs = """#!/usr/bin/env node
+import('../serial.js')
+"""
+
 // package.json — runtime deps are exactly the externals; npm resolves their platform-native
 // optionalDependencies (node-datachannel's addon, the SDK's native `claude`) on install.
 let private packageJson (version: string) =
@@ -354,9 +363,10 @@ let private packageJson (version: string) =
   "type": "module",
   "bin": {
     "yession-manager": "bin/yession-manager.js",
-    "yession-session": "bin/yession-session.js"
+    "yession-session": "bin/yession-session.js",
+    "yession-serial": "bin/yession-serial.js"
   },
-  "files": ["bin/", "manager.js", "session.js", "assets/", "README.md"],
+  "files": ["bin/", "manager.js", "session.js", "serial.js", "assets/", "README.md"],
   "engines": { "node": ">=24" },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "%s",
@@ -365,6 +375,9 @@ let private packageJson (version: string) =
     "dockerode": "%s",
     "node-datachannel": "%s",
     "zod": "%s"
+  },
+  "optionalDependencies": {
+    "serialport": "^13.0.0"
   }
 }
 """
@@ -385,7 +398,9 @@ let stage (version: string) =
     compile ()
     printfn "staging yession %s (npm, one package / two bins) -> dist/npm" version
 
-    for required in [ "app/out/Main.js"; "app/SessionMain.js"; "app/out/public/client.js"; "app/out/public/app.css" ] do
+    for required in
+        [ "app/out/Main.js"; "app/SessionMain.js"; "app/SerialMain.js"
+          "app/out/public/client.js"; "app/out/public/app.css" ] do
         if not (File.Exists (Path.Combine (repoRoot, required))) then
             failwithf "missing %s after compile" required
 
@@ -396,6 +411,7 @@ let stage (version: string) =
 
     bundle version "app/out/Main.js" "manager.js"
     bundle version "app/SessionMain.js" "session.js"
+    bundle version "app/SerialMain.js" "serial.js"
 
     // Assets (read package-relative at runtime by Interop.readAsset).
     File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
@@ -405,6 +421,7 @@ let stage (version: string) =
     // in one install), so it spawns `node session.js` with no PATH assumptions.
     File.WriteAllText (Path.Combine (pkg, "bin/yession-manager.js"), managerBinJs)
     File.WriteAllText (Path.Combine (pkg, "bin/yession-session.js"), yessionSessionBinJs)
+    File.WriteAllText (Path.Combine (pkg, "bin/yession-serial.js"), yessionSerialBinJs)
     File.WriteAllText (Path.Combine (pkg, "package.json"), packageJson version)
     File.Copy (Path.Combine (repoRoot, "README.md"), Path.Combine (pkg, "README.md"), true)
 

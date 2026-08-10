@@ -24,8 +24,9 @@ module Yession.Host.Control
 //        the Manager pushing notifications DOWN to this session, multiplexed as SSE frames
 //        of `ControlWire.sessionNotification` JSON — see NotificationHub / SessionNotification)
 //   GET  /control/mcp                               -> text/event-stream (a second reverse leg:
-//        the current MCP tool list on subscribe, then a fresh list on every change, as SSE
-//        frames of `ControlWire.mcpToolList` — the standard `ListToolsResult` — see McpHub)
+//        THIS session's resolved MCP server set on subscribe, then a fresh whole set on
+//        every change, as SSE frames of `Codec.mcpServerSet` (Plan 17). The Manager says
+//        WHERE the servers are; the session is the MCP client that talks to them.)
 //   POST /control/connections/begin      ConnectionBeginRequest -> { authorizeUrl, state }
 //   POST /control/connections/complete   { target, code }       -> "ok" (manual paste completion)
 //   POST /control/connections/put        { target, value }      -> "ok" (static token)
@@ -110,7 +111,9 @@ let tryHandle
     // secret exactly like the name report — so the report dies with the launch it describes.
     (reportActivity: string -> bool -> Async<Result<unit, string>>)
     (subscribeNotifications: string -> Subscribe<SessionNotification>)
-    (subscribeMcp: Subscribe<McpToolList>)
+    // Plan 17: keyed by session (what it resolves to) AND by launch secret (whose sink it
+    // is), because the retained set outlives a launch and the sink must not.
+    (subscribeMcp: SessionId -> string -> Subscribe<McpServerSet>)
     (registerClient: string -> SessionId -> string -> RegisterClientResponse)
     (secretsApi: SecretsApi option)
     (connectionsApi: ConnectionsApi option)
@@ -288,11 +291,17 @@ let tryHandle
                     (subscribeNotifications (Option.defaultValue "" secret))
                 |> ignore
             | "GET", "/control/mcp" ->
-                // The MCP reverse leg: the standard tool list, streamed. The secret already
-                // resolved to capabilities above, so it is valid. Subscribing writes the current
-                // list at once (the hub's retained snapshot); every later change writes a fresh
-                // one.
-                Sse.stream req res (ControlWire.toString ControlWire.mcpToolList) subscribeMcp
+                // The MCP reverse leg (Plan 17): the servers THIS session may reach, resolved
+                // by the Manager and streamed whole. The secret already resolved to a caller
+                // above, so both the session and the launch are known. Subscribing writes the
+                // current set at once (the hub's retained snapshot); every later change writes
+                // a fresh whole set, so a reconnect is the entire recovery protocol.
+                //
+                // With no attach step this is the ONLY way a session learns a server exists.
+                // Reactivity is the feature, not a refinement of one.
+                Sse.stream req res
+                    (ControlWire.toString Codec.mcpServerSet)
+                    (subscribeMcp caller.SessionId (Option.defaultValue "" secret))
                 |> ignore
             | _ -> respond res 404 "not found"
         true

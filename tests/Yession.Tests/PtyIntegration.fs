@@ -123,8 +123,9 @@ let private withLiveTerminal
                     (fun () -> name + "-nonce")
                     (fun _ _ _ -> ())
                     (fun () -> reDrains <- reDrains + 1)
+                    AttachTerminal.unavailable
                     []
-            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) name SandboxName.defaultName with
+            match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxName.defaultName) name with
             | Error e -> failwith e
             | Ok id ->
                 do! body terminals id records log (fun () -> reDrains) advance
