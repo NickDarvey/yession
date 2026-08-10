@@ -338,10 +338,12 @@ let private setInputValue (el: obj) (value: string) : unit = jsNative
 /// same element does not stack a second handler on it — and one that creates a fresh element
 /// gets its own.
 ///
-/// Enter RUNS the command, the same bargain the message composer strikes (`Editor`'s keymap).
-/// A command line is one line, so there is no new line for Alt-Enter to insert and none is
-/// bound. `isComposing` guards the IME: mid-composition Enter commits the candidate word, and
-/// running a half-typed command because someone accepted a suggestion is not a thing to do.
+/// Enter RUNS the command — and here that is the whole of it, which is why this diverges from
+/// the message composer, where Enter edits and Mod-Enter sends (`Editor`'s keymap). A command
+/// line is one line: there is no paragraph to open and no list to continue, so nothing is
+/// competing for the bare key, and Enter-runs is what every shell has taught. `isComposing`
+/// guards the IME: mid-composition Enter commits the candidate word, and running a half-typed
+/// command because someone accepted a suggestion is not a thing to do.
 [<Emit("""(() => {
   const __yBind = $0;
   if (__yBind.__yessionBound) return false;
@@ -623,9 +625,9 @@ let private start () =
                         match fieldOfKey key, sel with
                         | Some field, Some (a, h) -> sendFocus (Some { Field = field; Pos = { Anchor = a; Head = h } })
                         | _ -> sendFocus None
-                    // Enter sends — but only from a DRAFT, which is the only body with a send.
-                    // A queued message is edited in place and has nothing to commit, so it
-                    // keeps plain Enter (and Alt-Enter never has to be learned there).
+                    // Mod-Enter sends — but only from a DRAFT, which is the only body with a
+                    // send. A queued message is edited in place and has nothing to commit, so
+                    // it simply has no send key; its Enter is the editor's, like everywhere.
                     let onSubmit =
                         match fieldOfKey key with
                         | Some (DraftBody author) ->

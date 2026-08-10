@@ -442,13 +442,11 @@ let editorTests =
                 do! awaitU (page.ClickAsync ".ProseMirror")
                 do! awaitU (page.Keyboard.TypeAsync "# Heading one")
                 let! _ = await (page.WaitForFunctionAsync "document.querySelector('.ProseMirror h1')?.textContent === 'Heading one'")
-                // `**bold**` -> a <strong> mark; `- ` -> a bullet list <ul><li>. The new line is
-                // Alt+Enter here because the harness mounts the editor as the COMPOSER does,
-                // where plain Enter sends (asserted below).
-                do! awaitU (page.Keyboard.PressAsync "Alt+Enter")
+                // `**bold**` -> a <strong> mark; `- ` -> a bullet list <ul><li>.
+                do! awaitU (page.Keyboard.PressAsync "Enter")
                 do! awaitU (page.Keyboard.TypeAsync "text with **bold** now")
                 let! _ = await (page.WaitForFunctionAsync "!!document.querySelector('.ProseMirror strong')")
-                do! awaitU (page.Keyboard.PressAsync "Alt+Enter")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
                 do! awaitU (page.Keyboard.TypeAsync "- item one")
                 let! _ = await (page.WaitForFunctionAsync "!!document.querySelector('.ProseMirror ul li')")
 
@@ -463,7 +461,7 @@ let editorTests =
                 server.Stop ()
             }
 
-        testCaseAsync "Enter sends, Shift+Enter breaks the line, Alt+Enter opens a paragraph" <|
+        testCaseAsync "Enter edits (paragraph, next list item), Shift+Enter breaks the line, Mod+Enter sends" <|
             async {
                 let server = serveStatic harnessRoot (EDITOR_PORT + 2)
                 let! pw = await (Playwright.CreateAsync ())
@@ -477,14 +475,16 @@ let editorTests =
 
                 do! awaitU (page.ClickAsync ".ProseMirror")
                 do! awaitU (page.Keyboard.TypeAsync "first line")
-                // Enter asks to send, and — the half that matters — leaves the document
-                // exactly as it was. A binding that sends AND splits the block would look
-                // right in a screenshot and lose a paragraph into every message.
+                // Enter is the EDITOR's Enter: it opens a second block and sends nothing. The
+                // composer is the only body with a send at all, and even here the bare key
+                // belongs to the document — a person reaching for the next line is editing.
                 do! awaitU (page.Keyboard.PressAsync "Enter")
-                let! _ = await (page.WaitForFunctionAsync "window.__sends === 1")
-                let! afterSend = await (page.EvaluateAsync<string> "() => window.__md()")
-                Expect.stringContains afterSend "first line" "the text is untouched by the send"
-                Expect.isFalse (afterSend.Trim().Contains "\n\n") "Enter inserted no new block"
+                do! awaitU (page.Keyboard.TypeAsync "second block")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelectorAll('.ProseMirror > p').length === 2")
+                let! afterEnter = await (page.EvaluateAsync<int> "() => window.__sends")
+                Expect.equal afterEnter 0 "Enter opened a block and sent nothing"
 
                 // Shift+Enter breaks the LINE: a <br> inside the block it was already in, so
                 // the paragraph is still one paragraph. This is the half a single Enter could
@@ -495,23 +495,36 @@ let editorTests =
                 let! _ = await (page.WaitForFunctionAsync "!!document.querySelector('.ProseMirror br')")
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        "document.querySelectorAll('.ProseMirror > p').length === 1")
+                        "document.querySelectorAll('.ProseMirror > p').length === 2")
                 let! broken = await (page.EvaluateAsync<string> "() => window.__md()")
-                Expect.stringContains broken "first line" "the text before the break survived"
+                Expect.stringContains broken "second block" "the text before the break survived"
                 Expect.stringContains broken "same paragraph" "and the text after it"
-                Expect.isFalse (broken.Trim().Contains "\n\n") "a line break is not a paragraph break"
 
-                // Alt+Enter is where the PARAGRAPH went: a second block, and no second send.
-                do! awaitU (page.Keyboard.PressAsync "Alt+Enter")
-                do! awaitU (page.Keyboard.TypeAsync "second block")
+                // The case the binding exists for: reaching for the next bullet must not send
+                // the half-written list. `- ` autoformats into a list, and Enter inside one
+                // opens the next item — the behaviour every editor has and none of it costs a
+                // message.
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                do! awaitU (page.Keyboard.TypeAsync "- item one")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                do! awaitU (page.Keyboard.TypeAsync "item two")
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        "document.querySelectorAll('.ProseMirror > p').length === 2")
+                        "document.querySelectorAll('.ProseMirror li').length === 2")
+                let! afterList = await (page.EvaluateAsync<int> "() => window.__sends")
+                Expect.equal afterList 0 "continuing a list sent nothing"
+
+                // Mod+Enter is the send — and, the half that matters, it leaves the document
+                // exactly as it was. A binding that sent AND split the block would look right
+                // in a screenshot and lose a paragraph into every message.
+                do! awaitU (page.Keyboard.PressAsync "ControlOrMeta+Enter")
+                let! _ = await (page.WaitForFunctionAsync "window.__sends === 1")
                 let! md = await (page.EvaluateAsync<string> "() => window.__md()")
-                Expect.stringContains md "first line" "the first block survived"
-                Expect.stringContains md "second block" "Alt+Enter opened a second block"
-                let! sends = await (page.EvaluateAsync<int> "() => window.__sends")
-                Expect.equal sends 1 "neither Shift+Enter nor Alt+Enter sent"
+                Expect.stringContains md "first line" "the first block survived the send"
+                Expect.stringContains md "item two" "and so did the list it was left in"
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelectorAll('.ProseMirror li').length === 2")
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()

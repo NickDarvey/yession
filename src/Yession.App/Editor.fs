@@ -94,21 +94,25 @@ module Editor =
                     (editCommand (fun state ->
                         trScrollIntoView ((state.tr).replaceSelectionWith (nodeCreate br, false)))))
 
-    /// Base editing keys + list handling + Yjs-aware undo/redo, and Enter's three jobs.
+    /// Base editing keys + list handling + Yjs-aware undo/redo, and Enter's jobs.
     ///
-    /// Enter used to mean both "commit" and "new block", and nothing meant "new line". It now
-    /// means one thing per key:
+    /// Enter is the EDITOR's Enter in every body, composer or not. Sending is the modified key:
     ///
-    ///   Enter        — send, in a COMPOSER. What Enter does in every chat surface.
-    ///   Alt-Enter    — a new PARAGRAPH: exactly the behaviour Enter used to have (split the
+    ///   Enter        — a new PARAGRAPH, or the next item when you are in a list (split the
     ///                  list item, else split the block), read off `baseKeymap` rather than
     ///                  rebuilt, so the two can never drift.
+    ///   Mod-Enter    — send, in a COMPOSER. Cmd on macOS, Ctrl elsewhere.
     ///   Shift-Enter  — a LINE BREAK within the block. Bound in every body, composer or not:
     ///                  it is an editing key, not part of the send bargain.
     ///
+    /// Send takes the MODIFIED key rather than the bare one because it is the only one of the
+    /// three with a control on screen. The Send button is always there, so the binding it
+    /// stands for never has to be taught; a new paragraph — and continuing a bullet list — has
+    /// no button anywhere, so it takes the key a person will actually reach for. Bare Enter as
+    /// the send cost exactly that: reaching for the next bullet sent the half-written list.
+    ///
     /// A body with nothing to send (a queued message being edited in place) passes `None` for
-    /// `onSubmit` and keeps plain Enter as the paragraph: binding a send there would fire an
-    /// action that does not exist.
+    /// `onSubmit` and simply has no send key.
     let private editorKeymap (onSubmit: (unit -> unit) option) : obj =
         let keys = createObj []
         keys?("Mod-z") <- yUndo
@@ -129,11 +133,8 @@ module Editor =
             keys?("Mod-[") <- liftListItem li
             keys?("Mod-]") <- sinkListItem li
         lineBreak () |> Option.iter (fun command -> keys?("Shift-Enter") <- command)
-        match onSubmit with
-        | Some submit ->
-            keys?("Enter") <- effectCommand submit
-            keys?("Alt-Enter") <- newParagraph
-        | None -> keys?("Enter") <- newParagraph
+        keys?("Enter") <- newParagraph
+        onSubmit |> Option.iter (fun submit -> keys?("Mod-Enter") <- effectCommand submit)
         keys
 
     // --- Presence: report the local selection, overlay remote ones -------------------------

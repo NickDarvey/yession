@@ -36,10 +36,10 @@ let private exposeMd (f: unit -> string) : unit = jsNative
 [<Emit("(function(f){ window.__pushRemote = f; })($0)")>]
 let private exposePush (f: string -> unit) : unit = jsNative
 
-/// How many times Enter has asked to send. The harness mounts the editor exactly as the
-/// COMPOSER does (`onSubmit` supplied), so the E2E drives the real binding: Enter sends and
-/// inserts nothing, Alt+Enter is the new line. A counter rather than a callback because what
-/// the test needs to know is "did it fire", and the send itself belongs to the app.
+/// How many times the composer has asked to send. The harness mounts the editor exactly as
+/// the COMPOSER does (`onSubmit` supplied), so the E2E drives the real binding: Mod+Enter
+/// sends and inserts nothing, bare Enter stays the editor's. A counter rather than a callback
+/// because what the test needs to know is "did it fire", and the send itself belongs to the app.
 [<Emit("(function(n){ window.__sends = n; })($0)")>]
 let private exposeSends (n: int) : unit = jsNative
 
