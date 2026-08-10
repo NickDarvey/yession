@@ -269,11 +269,6 @@ module Dom =
         /// meantime. Everything already sent is safe; it is on the server.
         let localFallbackEphemeral =
             "You can keep writing, but this session reopens at a new address — anything written here while it is away will not come back with it."
-        /// What the composer's keys do, shown in the composer while you are in it. Enter is
-        /// the send because that is what every chat surface's Enter is; what it used to do
-        /// did not disappear, it split in two — a line break and a paragraph, which Enter
-        /// alone could never tell apart.
-        let composerKeys = "Enter sends · Shift+Enter line · Alt+Enter paragraph"
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.

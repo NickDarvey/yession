@@ -199,7 +199,7 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
         | [] ->
             [ html $"""
                 <tr>
-                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers declared — a session reaches only its own tools</td>
+                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers declared</td>
                 </tr>""" ]
         | declarations -> declarations |> List.map (mcpRowTemplate views)
     let options =

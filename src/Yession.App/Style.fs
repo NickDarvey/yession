@@ -640,13 +640,6 @@ module Style =
 
     let draftActions = "flex items-center gap-2 pl-4 pr-2 pb-2"
 
-    /// What the keys do, said where the keys are — and only while you are in the composer,
-    /// so it teaches once and then gets out of the way. Never the only route: every action
-    /// it names has a button on this same row.
-    let draftHint =
-        "hidden md:block min-w-0 truncate " + caps + " text-ink-faint opacity-0 transition-opacity "
-        + "group-focus-within:opacity-100 motion-reduce:transition-none"
-
     /// Send sits at the TRAILING edge — where the eye ends the line it just wrote, and where
     /// every send button a person has ever used lives — with discard as its quiet neighbour.
     /// Everything that describes the draft (who is in it, whose it is) stays on the left.

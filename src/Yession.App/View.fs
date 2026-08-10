@@ -924,7 +924,6 @@ module View =
                   <div class="{Style.draftActions}">
                     <span class="{Style.draftEditors}">{editors target}</span>
                     {author}
-                    <span class="{Style.draftHint}">{Dom.Text.composerKeys}</span>
                     <div class="{Style.draftCommit}">
                       {discard}
                       <button type="button" class="{sendClass}" aria-keyshortcuts="Enter"
