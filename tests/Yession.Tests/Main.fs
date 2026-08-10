@@ -44,6 +44,9 @@ let all =
         // WebSocket attach, against the provider we ship. Real HTTP, real upgrade; only the
         // serial ENGINE is substituted, so it runs on a box with no hardware.
         Tag.needs "The serial provider" [ Tag.Ports ] (fun () -> Mcp.serialTests)
+        // The half the provider's E2E substitutes away: the engine itself, against a socat
+        // PTY pair. Needs the `serialport` addon, udevadm and socat — see `Serial`.
+        Tag.needs "The serial engine" [ Tag.Serial ] (fun () -> SerialEngine.tests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
         Tag.needs "Terminals" [] (fun () -> Terminals.tests)
