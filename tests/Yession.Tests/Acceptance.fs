@@ -141,7 +141,7 @@ let private representativeModel : ClientModel =
       PaneRewound = None
       TerminalsOpen = true
       Claude =
-        { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = Some false }
+        { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = Some false }
           Flow = ClaudeIdle }
       GitHub =
         { Status = { SessionCredential = None; MineCredential = None }

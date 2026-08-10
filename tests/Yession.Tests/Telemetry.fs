@@ -244,7 +244,11 @@ let private auditTests =
                   SecretStore.Audit.inject sessionId name "session", "yession.secret.inject", 9
                   SecretStore.Audit.injectMiss sessionId name "none left", "yession.secret.inject", 13
                   SecretStore.Audit.storeOpen "durable" "in-memory" true 0, "yession.secrets.store_open", 9
-                  SecretStore.Audit.storeEphemeral, "yession.secrets.store_open", 13
+                  // The two ways to an in-memory store part company on SEVERITY: the
+                  // operator's own choice is information, a host that could not offer a
+                  // credential manager is a warning.
+                  SecretStore.Audit.storeEphemeral true, "yession.secrets.store_open", 9
+                  SecretStore.Audit.storeEphemeral false, "yession.secrets.store_open", 13
                   SecretStore.Audit.storeInaccessible "/tmp/x", "yession.secrets.store_open", 13
                   SecretStore.Audit.storeOpenFailed "corrupt" "detail", "yession.secrets.store_open_failed", 17
                   SecretStore.Audit.bindingRecorded sessionId alice, "yession.auth.binding_recorded", 9

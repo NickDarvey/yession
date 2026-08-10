@@ -233,7 +233,7 @@ let readAsset (assetName: string) (fallbackPath: string) (fs: obj) : string opti
 let exit (code: int) : unit = jsNative
 
 /// Was `--version` (or `-v`) passed? The two entries are otherwise configured from the
-/// environment; the Manager additionally reads `--auth` (see `argValue`).
+/// environment; the Manager additionally reads `--auth` and `--secrets` (see `argValue`).
 [<Emit("process.argv.slice(2).some(a => a === '--version' || a === '-v')")>]
 let versionFlag () : bool = jsNative
 

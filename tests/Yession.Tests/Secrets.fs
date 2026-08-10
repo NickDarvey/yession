@@ -22,15 +22,18 @@ let private bob = UserId.create "bob" |> expect
 let private name = SecretName.create "deploy-token" |> expect
 
 /// A launch of session A that alice (and only alice) has signed in to.
-let private callerA : AuthzSubject = { Session = Some sessionA; Users = Set.singleton alice; Peers = Set.empty }
+let private callerA : AuthzSubject = { Session = Some sessionA; Users = Set.singleton alice; Peers = Set.empty; Local = false }
 /// A launch of session A with no completed login.
-let private callerANoUsers : AuthzSubject = { Session = Some sessionA; Users = Set.empty; Peers = Set.empty }
+let private callerANoUsers : AuthzSubject = { Session = Some sessionA; Users = Set.empty; Peers = Set.empty; Local = false }
 /// A launch of session A the Manager witnessed peer "browser-1" into (Plan 07).
 let private peer1 = PeerId.create "browser-1" |> expect
 let private peer2 = PeerId.create "browser-2" |> expect
-let private callerAWithPeer : AuthzSubject = { Session = Some sessionA; Users = Set.empty; Peers = Set.singleton peer1 }
+let private callerAWithPeer : AuthzSubject = { Session = Some sessionA; Users = Set.empty; Peers = Set.empty |> Set.add peer1; Local = false }
+/// A launch of session A whose login was UNATTRIBUTED — `--auth localhost`. It has a
+/// subject (every launch does) but nobody was named behind it.
+let private callerALocal : AuthzSubject = { Session = Some sessionA; Users = Set.singleton alice; Peers = Set.empty; Local = true }
 /// A subject with no session at all (the future UI shape).
-let private noSession : AuthzSubject = { Session = None; Users = Set.singleton alice; Peers = Set.empty }
+let private noSession : AuthzSubject = { Session = None; Users = Set.singleton alice; Peers = Set.empty; Local = false }
 
 let private request subject action resource : AuthzRequest =
     { Subject = subject; Action = SecretAction action; Resource = resource }
@@ -56,6 +59,9 @@ let private constructorTests =
             Expect.equal (SecretScope.describe (SessionScope sessionA)) "session:session-aa" "session form"
             Expect.equal (SecretScope.describe (UserScope alice)) "user:alice" "user form"
             Expect.equal (SecretScope.describe (PeerScope peer1)) "peer:browser-1" "peer form"
+            // No key: the deployment IS the owner, so there is nothing to name after it.
+            // This string is also the cipher AAD, so it is a stored-data contract.
+            Expect.equal (SecretScope.describe LocalScope) "local" "local form"
     ]
 
 let private policyTests =
@@ -149,13 +155,27 @@ let private connectionPolicyTests =
         testCase "a session-less subject cannot touch session scope" <| fun () ->
             denies "no session" (onConnection noSession ConnectCredential (SessionScope sessionA))
 
+        testCase "local scope: a launch granted unattributed access permits; an attributed one denies" <| fun () ->
+            for action in connActions do
+                permits (sprintf "%A unattributed" action) (onConnection callerALocal action LocalScope)
+                // callerA has a BOUND USER and still denies: what grants the deployment
+                // credential is unattributed access, not merely having logged in.
+                denies (sprintf "%A attributed" action) (onConnection callerA action LocalScope)
+
+        testCase "local scope holds connection credentials only, never generic secrets" <| fun () ->
+            for action in [ SetSecret; DeleteSecret; InjectSecret ] do
+                denies (sprintf "%A on local" action) (request callerALocal action (SecretResource { Scope = LocalScope; Name = name }))
+            denies "list local" (request callerALocal ListSecrets (SecretCollection LocalScope))
+
         testCase "CredentialOwner maps actors and scopes" <| fun () ->
             Expect.equal (CredentialOwner.ofActor (UserRef alice)) (Some (UserOwner alice)) "user actor"
-            Expect.equal (CredentialOwner.ofActor (PeerRef peer1)) (Some (PeerOwner peer1)) "peer actor"
+            // A peer is nobody the Manager verified, so they own nothing of their own —
+            // their turn falls through to whatever the DEPLOYMENT holds.
+            Expect.equal (CredentialOwner.ofActor (PeerRef peer1)) None "peer actor owns nothing"
             Expect.equal (CredentialOwner.ofActor ActorRef.Agent) None "agent owns nothing"
             Expect.equal (CredentialOwner.ofActor ActorRef.System) None "system owns nothing"
             Expect.equal (CredentialOwner.scope (UserOwner alice)) (UserScope alice) "user scope"
-            Expect.equal (CredentialOwner.scope (PeerOwner peer1)) (PeerScope peer1) "peer scope"
+            Expect.equal (CredentialOwner.scope LocalOwner) LocalScope "local scope"
     ]
 
 // --- Step 2: the envelope + wire codecs -------------------------------------------------
@@ -251,6 +271,18 @@ let private wireTests =
         testCase "blank secret name fails the request decode" <| fun () ->
             let json = """{"scope":{"kind":"session","sessionId":"session-aa"},"name":"   ","value":"v"}"""
             Expect.isError (ControlWire.fromString ControlWire.setSecretRequest json) "blank name rejected"
+
+        testCase "every scope survives the wire, including the keyless one" <| fun () ->
+            // `local` carries no key, so it is the one scope whose encoding could silently
+            // lose information and still decode. This is a stored-file contract too — the
+            // same codec writes `secrets.json`.
+            for scope in [ SessionScope sessionA; UserScope alice; PeerScope peer1; LocalScope ] do
+                let r : ControlWire.DeleteSecretRequest = { Scope = scope; Name = name }
+                let round = ControlWire.toString ControlWire.deleteSecretRequest r |> ControlWire.fromString ControlWire.deleteSecretRequest |> expect
+                Expect.equal round r (sprintf "%A round-trips" scope)
+            Expect.isError
+                (ControlWire.fromString ControlWire.deleteSecretRequest """{"scope":{"kind":"everyone"},"name":"deploy-token"}""")
+                "an unknown scope kind is refused, never guessed at"
     ]
 
 // --- Step 3: cipher + store (real WebCrypto AES-GCM on Node; cheap tier) ----------------
@@ -467,7 +499,7 @@ let private resolutionTests =
                 let! _ = store.Set (id (UserScope alice)) "from-user"
                 let! _ = store.Set (id (PeerScope peer1)) "from-peer"
                 let fallback : SecretStore.ResolveSecret = fun _ _ -> async { return Ok "from-env" }
-                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) (fun _ -> Set.singleton peer1) fallback
+                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) (fun _ -> Set.singleton peer1) (fun _ -> false) fallback
 
                 let! full = resolve sessionA name
                 Expect.equal (expect full) "from-session" "the session's own secret wins"
@@ -492,7 +524,7 @@ let private resolutionTests =
                 // Session B has no bound users: alice's scope is never a candidate, and
                 // even a hand-crafted walk would be denied by the policy.
                 let fallback : SecretStore.ResolveSecret = fun _ n -> async { return Error (sprintf "secret '%s' is not available" (SecretName.value n)) }
-                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) (fun _ -> Set.empty) fallback
+                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) (fun _ -> Set.empty) (fun _ -> false) fallback
                 let! outcome = resolve sessionB name
                 Expect.isError outcome "nothing resolves"
             }
@@ -505,12 +537,12 @@ let private resolutionTests =
                 let observe sid n outcome = observed <- (SecretName.value n, outcome) :: observed
                 let ok : SecretStore.ResolveSecret = fun _ _ -> async { return Ok "env-v" }
                 let miss : SecretStore.ResolveSecret = fun _ _ -> async { return Error "nope" }
-                let resolveHit = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) (fun _ -> Set.empty) miss
+                let resolveHit = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) (fun _ -> Set.empty) (fun _ -> false) miss
                 let! _ = resolveHit sessionA name
-                let resolveEnv = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) (fun _ -> Set.empty) ok
+                let resolveEnv = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) (fun _ -> Set.empty) (fun _ -> false) ok
                 let other = SecretName.create "OTHER" |> expect
                 let! _ = resolveEnv sessionA other
-                let resolveMiss = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) (fun _ -> Set.empty) miss
+                let resolveMiss = SecretStore.SecretResolution.compose observe store (fun _ -> Set.empty) (fun _ -> Set.empty) (fun _ -> false) miss
                 let! _ = resolveMiss sessionA other
                 Expect.equal
                     (List.rev observed)
@@ -523,7 +555,7 @@ let private resolutionTests =
         testCaseAsync "a total miss reports the fallback's legible error" <|
             async {
                 let! store = openEphemeral ()
-                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) (fun _ -> Set.empty) SecretStore.SecretResolution.processEnv
+                let resolve = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) (fun _ -> Set.empty) (fun _ -> false) SecretStore.SecretResolution.processEnv
                 let missing = SecretName.create "YESSION_DEFINITELY_MISSING" |> expect
                 let! outcome = resolve sessionA missing
                 match outcome with
@@ -602,7 +634,7 @@ let private startControlServer (callers: (string * Control.ControlCaller) list) 
     }
 
 let private caller sessionId users : Control.ControlCaller =
-    { SessionId = sessionId; Users = users; Peers = Set.empty }
+    { SessionId = sessionId; Users = users; Peers = Set.empty; Local = false }
 
 /// The pre-authorized handlers over a store, with the SAME readable-scope walk the
 /// Manager composes for `resolve` — the user table injected per test.
@@ -613,6 +645,7 @@ let private apiOver (audit: SecretStore.Audit.Sink) (usersOf: SessionId -> Set<U
             store
             usersOf
             (fun _ -> Set.empty)
+            (fun _ -> false)
             (fun _ n -> async { return Error (sprintf "secret '%s' is not available in any readable scope" (SecretName.value n)) })
     ProcessManager.secretsApiFor audit walk store
 
@@ -779,8 +812,79 @@ let private routeTests =
             }
     ]
 
+// --- `--secrets`: what the operator asked for, and what this host can give ---------------
+// The resolution is pure once the credential-manager probe is passed in, so the whole
+// matrix runs in the cheap tier without a keyring.
+
+let private backingName (backing: ProcessManager.SecretsBacking) =
+    // DurableSecrets carries a record of FUNCTIONS: compare its name, never the value.
+    match backing with
+    | ProcessManager.DurableSecrets store -> "durable:" + store.Name
+    | ProcessManager.EphemeralSecrets ProcessManager.OperatorChose -> "ephemeral:operator"
+    | ProcessManager.EphemeralSecrets ProcessManager.NoCredentialManager -> "ephemeral:no-credential-manager"
+
+let private resolves (mode: ProcessManager.SecretsMode) keyStore expected =
+    match ProcessManager.SecretsBacking.forMode mode keyStore with
+    | Ok backing -> Expect.equal (backingName backing) expected "resolved backing"
+    | Error e -> failwithf "expected %s, got Error: %s" expected e
+
+let private secretsModeTests =
+    testList "secrets mode" [
+        testCase "mode names resolve exactly, and an unknown one refuses the boot" <| fun () ->
+            Expect.equal (ProcessManager.SecretsMode.ofName None) (Ok ProcessManager.AutoSecrets) "absent = no choice"
+            Expect.equal (ProcessManager.SecretsMode.ofName (Some "durable")) (Ok ProcessManager.RequireDurable) "durable"
+            Expect.equal (ProcessManager.SecretsMode.ofName (Some "ephemeral")) (Ok ProcessManager.ForceEphemeral) "ephemeral"
+            // No `auto` spelling: absence is the only way to decline the choice.
+            Expect.isError (ProcessManager.SecretsMode.ofName (Some "auto")) "auto is not a mode"
+            Expect.isError (ProcessManager.SecretsMode.ofName (Some "in-memory")) "unknown name refused"
+
+        testCase "the resolution matrix: what each mode does on a host with and without a credential manager" <| fun () ->
+            let keyStore = Some (KeyStore.inMemory ())
+            resolves ProcessManager.AutoSecrets keyStore "durable:in-memory"
+            resolves ProcessManager.AutoSecrets None "ephemeral:no-credential-manager"
+            resolves ProcessManager.RequireDurable keyStore "durable:in-memory"
+            // The opt-out actually opts out: a credential manager IS available and is
+            // deliberately not used.
+            resolves ProcessManager.ForceEphemeral keyStore "ephemeral:operator"
+            resolves ProcessManager.ForceEphemeral None "ephemeral:operator"
+
+        testCase "only a mode that could USE a credential manager pays to look for one" <| fun () ->
+            // The probe reaches for the platform credential store, which can be slow and can
+            // prompt. An operator who asked for an in-memory store has already declined it.
+            Expect.isTrue (ProcessManager.SecretsMode.needsCredentialManager ProcessManager.AutoSecrets) "auto might use one"
+            Expect.isTrue (ProcessManager.SecretsMode.needsCredentialManager ProcessManager.RequireDurable) "durable demands one"
+            Expect.isFalse (ProcessManager.SecretsMode.needsCredentialManager ProcessManager.ForceEphemeral) "ephemeral never uses one"
+            // And skipping it cannot change the answer — `forMode` resolves ForceEphemeral
+            // the same way whether or not a key store was found.
+            resolves ProcessManager.ForceEphemeral None "ephemeral:operator"
+            resolves ProcessManager.ForceEphemeral (Some (KeyStore.inMemory ())) "ephemeral:operator"
+
+        testCase "--secrets durable refuses the boot rather than running a store that dies" <| fun () ->
+            // Asking for a capability this host cannot offer is an error, never a silent
+            // downgrade — the same rule the test tiers hold.
+            Expect.isError
+                (ProcessManager.SecretsBacking.forMode ProcessManager.RequireDurable None)
+                "no credential manager, so durable is refused"
+
+        testCaseAsync "a durable store outlives the process that wrote it" <|
+            async {
+                // The other half of "connect once": the KEK is stable, so a Manager that
+                // restarts opens the same entries rather than an empty store.
+                let path = freshPath "restart"
+                let keyStore = KeyStore.inMemory ()
+                let id = sid LocalScope "claude-code"
+                let! before = openDurable path keyStore
+                let! _ = before.Set id "token-value"
+                let! after = openDurable path keyStore
+                let! resolved = after.Resolve id
+                Expect.equal (expect resolved) (Some "token-value") "the entry survived the reopen"
+                Expect.equal after.EntriesAtOpen 1 "and was there at open, not written again"
+            }
+    ]
+
 let tests =
     testList "Secrets" [
+        secretsModeTests
         constructorTests
         policyTests
         connectionPolicyTests

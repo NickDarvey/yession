@@ -398,6 +398,16 @@ module View =
               <div class="{Style.sideRow}"><span class="{Style.label}">environment</span><span class="{statusClass}">{statusInner}</span></div>
             </section>"""
 
+    /// What the non-session sign-in scope actually reaches here. On a deployment that
+    /// attributes its users it is that person's own; on one that attributes nobody
+    /// (`--auth localhost`) it is EVERYONE who can reach this Manager, and calling that
+    /// "mine" would be the panel promising something the deployment cannot keep.
+    /// Unknown until the first status probe answers — say the cautious thing meanwhile.
+    let private sharedScopeLabel (owner: string option) : string =
+        match owner with
+        | Some "user" -> "All my sessions"
+        | _ -> "Everyone using this Yession"
+
     /// The Claude connection panel (Plan 08), living in the settings drawer: status per
     /// sign-in scope, the OAuth flow (approve on claude.ai → paste the shown code), and
     /// the paste-a-token fallback.
@@ -424,7 +434,7 @@ module View =
                 html $"""
                     <label class="{Style.label}" for="claude-scope">sign in for</label>
                     <select id="claude-scope" class="{Style.field}" data-claude-scope aria-label="Sign-in scope">
-                      <option value="mine">All my sessions</option>
+                      <option value="mine">{sharedScopeLabel claude.Status.Owner}</option>
                       <option value="session">This session only</option>
                     </select>
                     <button type="button" class="{Style.btnPrimary}" data-claude-connect @click={Ev(fun _ -> actions.ClaudeConnect ())}>Connect Claude</button>
@@ -438,7 +448,7 @@ module View =
         html $"""
             <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-claude-panel>
               <span class="{Style.label}">claude</span>
-              {connectedRow "all my sessions" "mine" claude.Status.MineCredential}
+              {connectedRow ((sharedScopeLabel claude.Status.Owner).ToLowerInvariant ()) "mine" claude.Status.MineCredential}
               {connectedRow "this session" "session" claude.Status.SessionCredential}
               {error}
               {controls}

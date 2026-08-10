@@ -431,6 +431,16 @@ let stage (version: string) =
 let managerReady = "management UI at"
 let serialReady = "MCP at"
 
+// The Manager's smoke arguments. `--secrets ephemeral` matches the throwaway data dir: a smoke
+// boot has no business minting a KEK in the developer's real Keychain, and it makes the boot
+// behave the same on a laptop (credential manager present) as in CI (absent). It is also the
+// only place anything proves the flag STRING reaches its resolver — `Interop.argValue` is an
+// [<Emit>] over process.argv that no unit test can drive.
+//
+// A CALL-SITE argument rather than something `bootSmoke` adds: the verb smokes other bins too,
+// and `--secrets` means nothing to them.
+let managerSmokeArgs = [ "--secrets"; "ephemeral" ]
+
 // Reused by `package`, `install-smoke`, and CI's nix-package job: spawn the given command with
 // an ephemeral data dir + port 0, and assert it prints `ready` before a deadline. A bin that
 // cannot boot never passes the gate.
@@ -475,7 +485,7 @@ let package (version: string) =
     stage version
     // Boot the packaged bin shim (it self-sets YESSION_SESSION_MAIN); externals resolve from the
     // repo node_modules two levels up from dist/npm.
-    bootSmoke managerReady "node" [ Path.Combine (pkg, "bin/yession-manager.js") ]
+    bootSmoke managerReady "node" ([ Path.Combine (pkg, "bin/yession-manager.js") ] @ managerSmokeArgs)
     bootSmoke serialReady "node" [ Path.Combine (pkg, "bin/yession-serial.js") ]
     let packed = runIn pkg "npm" [ "pack"; "--pack-destination"; dist ] |> fun out -> out.Split('\n') |> Array.last
     printfn "packaged dist/%s" (Path.GetFileName (packed.Trim ()))
@@ -501,7 +511,7 @@ let installSmoke (tgz: string) =
     if not (Directory.Exists ndcRelease && (Directory.GetFiles (ndcRelease, "*.node")).Length > 0) then
         failwith "install-smoke: node-datachannel addon was not built"
 
-    bootSmoke managerReady "node" [ Path.Combine (prefix, "node_modules/.bin/yession-manager") ]
+    bootSmoke managerReady "node" ([ Path.Combine (prefix, "node_modules/.bin/yession-manager") ] @ managerSmokeArgs)
     bootSmoke serialReady "node" [ Path.Combine (prefix, "node_modules/.bin/yession-serial") ]
     printfn "install-smoke: native deps resolved and the installed package booted"
 
@@ -659,7 +669,7 @@ let private buildNixPackage () =
     // addons out of the store paths this derivation assembled, and only running them proves it.
     // Every bin the package declares gets booted — a wrapper the derivation forgot to make is a
     // missing file here, and a wrapper that cannot find its addon is a dead process.
-    bootSmoke managerReady (Path.Combine (outPath, "bin/yession-manager")) []
+    bootSmoke managerReady (Path.Combine (outPath, "bin/yession-manager")) managerSmokeArgs
     bootSmoke serialReady (Path.Combine (outPath, "bin/yession-serial")) []
 
 // A full `verify` spends its first ~80 seconds in restore, build, Fable and stage — tools that

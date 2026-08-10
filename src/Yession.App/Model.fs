@@ -72,6 +72,11 @@ type ClaudeFlowState =
 type ClaudeStatus =
     { SessionCredential : string option
       MineCredential : string option
+      /// Who the "all my sessions" scope would belong to here: `"user"` (this signed-in
+      /// human alone) or `"local"` (the whole deployment — everyone who can reach this
+      /// Manager, under `--auth localhost`). The panel must not promise "mine" for a
+      /// credential everybody shares. `None` until the first probe answers.
+      Owner : string option
       /// Whether THIS session currently has an agent at all (any connected credential
       /// or the host's ambient one). `None` until the first probe answers — the
       /// "no agent" prompt must never flash before the client actually knows.
@@ -510,7 +515,7 @@ module ClientModel =
           PaneRewound = None
           TerminalsOpen = false
           Claude =
-            { Status = { SessionCredential = None; MineCredential = None; AgentAvailable = None }
+            { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = None }
               Flow = ClaudeIdle }
           GitHub =
             { Status = { SessionCredential = None; MineCredential = None }

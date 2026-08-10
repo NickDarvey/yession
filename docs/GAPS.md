@@ -58,13 +58,27 @@ Items are roughly ordered by how much they matter.
   needs a network where the session host's addresses route directly (e.g. an overlay
   like a tailnet, verified per deployment); an unauthenticated visitor can also hold
   open refused-at-`PeerHello` peer connections (no `/signal` throttling).
-- **User-scoped secrets have exactly one writer: the connection broker**
+- **User- and local-scoped secrets have exactly one writer: the connection broker**
   ([Plan 08](plans/08-connections-and-claude-auth.md)). The Claude sign-in stores an
-  owner-scoped (user/peer) credential through the narrow `ConnectionAction` policy
-  family; the GENERIC `/secrets` write surface for users is still absent — sessions
-  still cannot `SetSecret` on `UserScope`, and there is no management-UI secrets page.
-  The policy rows for a session-less, user-only `AuthzSubject` (`Session = None`) exist
-  and are pinned by tests, but nothing constructs that subject yet.
+  owner-scoped credential through the narrow `ConnectionAction` policy family — under an
+  attributed strategy that owner is the user; under `--auth localhost` it is `LocalScope`,
+  the deployment itself ([ADR](decisions/2026-08-10-local-scope.md)). The GENERIC
+  `/secrets` write surface for users is still absent — sessions still cannot `SetSecret`
+  on `UserScope`, and there is no management-UI secrets page. The policy rows for a
+  session-less, user-only `AuthzSubject` (`Session = None`) exist and are pinned by tests,
+  but nothing constructs that subject yet.
+- **Under `--auth localhost` a connected credential is deployment-wide.** Every visitor is
+  the same unattributed subject, so one Claude/GitHub connection serves every session and
+  browser that reaches the Manager, and every visitor's agent turn spends against it. Same
+  boundary as the rest of that trust rule (they can already drive every session), and both
+  exits are documented: `--secrets ephemeral` bounds the lifetime to the Manager process,
+  `--auth trusted-headers` removes the sharing. Event ATTRIBUTION is unaffected — authors
+  stay `PeerRef`.
+- **Pre-`LocalScope` peer-scoped connection entries are never migrated.** They stay in
+  `secrets.json`, encrypted and untouched, and are inert: `PeerScope` was dropped from the
+  connection path entirely (a half-live entry would shadow the new one at turn time). No UI
+  addresses them and no route deletes them; the operator connects once and moves on.
+  `PeerScope` is unchanged for generic Plan 07 secrets.
 - **No transport encryption guarantees beyond WebRTC/DTLS.** Everything binds
   127.0.0.1; loopback HTTP is the RFC 8252 pattern, but nothing here is LAN-safe
   without the operator's proxy in front.
@@ -142,12 +156,16 @@ Items are roughly ordered by how much they matter.
   [Plan 07](plans/07-byo-user-authorization.md)). Remaining, deliberate:
   - **Hosts without a credential manager run in-memory only** (dev containers, CI,
     headless servers): secrets die with the Manager; loud at boot, never a plaintext
-    key file. (Tests cover the real keyring via the `Keyring` capability —
-    `check Keyring` self-wraps with dbus + gnome-keyring when headless.)
-  - **No shared/Manager-global scope.** User-scoped GENERIC secrets still have no
-    writer (the Plan 08 connection broker writes only its own credential entries,
-    through its own policy family). User↔launch and peer↔launch bindings are
-    launch-lifetime (re-login re-forms them).
+    key file. In-memory is now also an operator CHOICE (`--secrets ephemeral`, recorded
+    at info rather than warn), and `--secrets durable` refuses the boot on such a host
+    rather than degrading to it. (Tests cover the real keyring via the `Keyring`
+    capability — `check Keyring` self-wraps with dbus + gnome-keyring when headless.)
+  - **No AMBIENT scope.** `LocalScope` is deployment-wide but not ambient — it is
+    authorized against unattributed access the Manager recorded for that launch, and it
+    holds connection credentials only (generic `SecretAction`s on it deny). User-scoped
+    GENERIC secrets still have no writer (the Plan 08 connection broker writes only its
+    own credential entries, through its own policy family). User↔launch, peer↔launch and
+    local↔launch bindings are all launch-lifetime (re-login re-forms them).
   - **Two deliberate value-returning routes, both resolve-shaped**:
     `/control/connections/resolve` (Plan 08) returns a connection credential to the
     calling session (an agent turn needs the token in-process), and
