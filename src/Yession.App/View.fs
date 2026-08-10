@@ -1101,7 +1101,7 @@ module View =
         let body =
             match items with
             | [] ->
-                [ html $"""<div class="{Style.timelineIdle}" data-conversation-idle aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
+                [ html $"""<div class="{Style.timelineIdle}" aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
             | items -> items
         html $"""<section class="{Style.timeline}" data-conversation>{body}</section>"""
 

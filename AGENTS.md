@@ -264,3 +264,27 @@ then:
   test keeps proving it. Verify-once throwaways stay out.
 - Tag suites with the MINIMUM capabilities they truly need, so they run in the cheapest tier
   that can host them and skip (never error) everywhere else.
+
+**A UI test pins an invariant, never a design.** A rendered surface is the most-revised thing
+in the product. A test that asserts what it currently LOOKS like will be deleted by the next
+person to improve it, and until they do, its red says "your redesign is wrong" when it means
+"something moved" — which is how a suite stops being believed. So test only what has to hold
+true no matter how the screen is redrawn:
+
+- **Availability** — a destructive control is not offered over nothing; the composer is never
+  taken away by a network fault; an action a person is entitled to is reachable.
+- **Identity and attribution** — one person wears one name on every surface at once; an
+  author is never a raw id; a thing that was said is attributed to whoever said it.
+- **The accessibility floor** — keyboard-operable controls, accessible names, contrast held.
+  Pinned ONCE and centrally (the chrome-consistency and theme-contrast suites), never
+  re-asserted per surface.
+
+Not: which element marks an empty state, what a style token's Tailwind string contains,
+whether a control recedes by border or by opacity, the presence of a decorative mark, the copy
+of a label that is not itself a promise. Those are the design changing, which is what a design
+is FOR. **If a screenshot would settle it, it is not a test** — look at the screen (the
+`ui-exploration` skill drives real ones) and move on.
+
+The tell that you are about to write one anyway: the assertion quotes a class name, or it
+would still pass if the surface rendered upside down in the dark. Both mean the test knows how
+the view is BUILT rather than what it PROMISES. Write the promise, or write nothing.

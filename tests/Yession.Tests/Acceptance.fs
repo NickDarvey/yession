@@ -953,11 +953,13 @@ let private chromeTests =
                 Expect.isFalse ((shell + settingsShell).Contains tone) (sprintf "focus must not be %s" tone)
     ]
 
-// The three UX findings from the session-page review, pinned so they cannot quietly come
-// back. Each asserts what a person SEES, not how the view is built — a refactor that keeps
-// the behaviour keeps these green.
+// What the session page must keep saying, whatever it comes to look like: one person wears
+// one name, an author is never a raw id, and a control is offered only when it does something.
+// Deliberately NOT here — the caret marking an empty timeline, the composer's rest-state rail,
+// which weight a waiting button wears — because those are the design, and the design changing
+// is not a regression (AGENTS.md, "Writing tests").
 let private semanticsTests =
-    testList "What the screen says without words" [
+    testList "What the screen says about people and their choices" [
 
         /// What one message ELEMENT says, from its author hook to its body — so an assertion
         /// about the chat's attribution cannot be satisfied by the same word appearing in the
@@ -1022,52 +1024,20 @@ let private semanticsTests =
             Expect.isTrue (html.Contains (Dom.hookText Dom.Hooks.displayName "warm-tern")) "and so does the roster"
             Expect.isFalse (html.Contains "a-stale-name-from-the-log") "the log's older name is nobody's current name"
 
-        // An empty session used to open on a column with nothing in it at all — no anchor for
-        // where the conversation starts, and a composer whose surface barely separates from
-        // the canvas. The idle caret is the chat's own version of the terminals pane's `$`.
-        testCase "an empty conversation stands a caret where the first message will land" <| fun () ->
-            let empty =
-                { representativeModel with
-                    Conversation = { Items = []; ActiveAgentMessages = Map.empty }
-                    Timeline = TimelineProjection.empty }
+        // A destructive control offered over nothing is a live-looking button that does not do
+        // anything, and the way a working one and a dead one come to look identical. Whether
+        // it is a discard `x` at all, and what the send button WEARS while it waits, are
+        // design; that the offer follows the content is the invariant.
+        testCase "discard is offered only when there is something to discard" <| fun () ->
+            let empty = Support.render { representativeModel with Synced = { representativeModel.Synced with Drafts = Map.empty } }
+            let full = Support.render representativeModel
+            Expect.isFalse (empty.Contains Dom.Hooks.discardDraft) "nothing to discard, so nothing offers to"
+            Expect.isTrue (full.Contains Dom.Hooks.discardDraft) "and it is there once there is"
+            // The local-first promise, from the composer's side: an empty draft is not a
+            // blocked one. `Resilience.fs` pins the same thing against a dead feed.
             Expect.isTrue
-                ((Support.render empty).Contains Dom.Hooks.conversationIdle)
-                "nothing has happened yet, so the timeline says where it will"
-
-        testCase "a conversation with anything in it does not" <| fun () ->
-            Expect.isFalse
-                ((Support.render representativeModel).Contains Dom.Hooks.conversationIdle)
-                "the messages are the anchor once there are messages"
-
-        // The composer's left rail: present at rest so it marks where you type, and the
-        // gradient still GROWS on focus (`scale-y-0` -> `scale-y-100`), which is the motion
-        // this design language names. Both, or the fix traded one defect for another.
-        testCase "the composer is marked at rest and still grows on focus" <| fun () ->
-            let html = Support.render representativeModel
-            Expect.isTrue (html.Contains Style.draftRail) "a rail marks the composer before you touch it"
-            Expect.isTrue (html.Contains "group-focus-within:scale-y-100") "and the edge still grows from the top"
-
-        // Discard is a verdict, and a verdict on nothing is a control that looks live and is
-        // dead. `DraftSlot` publishes a slot exactly while the body has content, so the slot
-        // IS the question "is there anything here".
-        testCase "an empty draft offers no discard, and send waits" <| fun () ->
-            let html = Support.render { representativeModel with Synced = { representativeModel.Synced with Drafts = Map.empty } }
-            Expect.isFalse (html.Contains Dom.Hooks.discardDraft) "nothing to discard, so nothing offers to"
-            Expect.isTrue
-                (html.Contains (Dom.attr Dom.Hooks.sendDraft (PeerId.value ada)))
-                "send keeps its place — an empty composer is not a blocked one"
-            Expect.isTrue (html.Contains Style.btnWaiting) "and waits at a dimmed weight until there is something to send"
-
-        testCase "a draft with content offers discard, and send comes up to full strength" <| fun () ->
-            let html = Support.render representativeModel
-            Expect.isTrue (html.Contains Dom.Hooks.discardDraft) "there is something to discard now"
-            Expect.isFalse (html.Contains Style.btnWaiting) "and something to send"
-
-        // The waiting weight is a BORDER, never a faded label: `text-blue` dimmed on the
-        // composer's surface falls to about 2.5:1, well under the 4.5:1 this product holds
-        // itself to for an 11px caps word (AGENTS.md, UI baseline).
-        testCase "the waiting weight never dims the word" <| fun () ->
-            Expect.isFalse (Style.btnWaiting.Contains "opacity") "waiting is carried by the frame, not by fading the text"
+                (empty.Contains (Dom.attr Dom.Hooks.sendDraft (PeerId.value ada)))
+                "send keeps its place either way — it is never taken away"
     ]
 
 let tests =
