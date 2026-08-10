@@ -510,6 +510,22 @@ module Style =
     /// A stretch item's sentence — prose, not mono: nothing was typed that we recorded.
     let chatChipText = "font-light text-small text-ink-dim truncate min-w-0 flex-1"
 
+    /// A turn's tool calls (Plan 16): a `<details>` on the same content column as the chips,
+    /// so a chatty turn reads as one quiet line until somebody wants the detail.
+    let chatToolRun = "w-full max-w-[46rem] pl-[32px] py-0.5"
+    /// Its summary. A real `<summary>` rather than a button, so the disclosure is the
+    /// browser's and arrives keyboard-operable and correctly announced.
+    let chatToolSummary =
+        cls [ "flex items-baseline gap-2 cursor-pointer list-none"
+              "text-ink-dim hover:text-ink transition-colors duration-150 ease-out"
+              focusRing ]
+    /// One call inside an expanded run: the tool it called, then how it went.
+    let chatToolCall = "flex items-baseline gap-2 py-0.5"
+    /// `namespace/name` — mono, because it is an identifier and reads as one.
+    let chatToolName = "font-mono text-code-sm text-ink-dim truncate min-w-0"
+    /// The arguments as recorded. Dim and truncated: this is evidence, not content.
+    let chatToolArgs = "font-mono text-code-sm text-ink-faint truncate min-w-0 flex-1"
+
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
     let actNote = "max-w-[46rem] pl-[32px]"

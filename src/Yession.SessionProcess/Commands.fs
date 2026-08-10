@@ -21,7 +21,7 @@ module SessionCommands =
     /// source of truth about a durable fact — and then two code paths to keep agreeing.
     let handle
         (requestInterrupt: PeerId -> AgentTurnId -> Result<unit, string>)
-        (openTerminal: ActorRef -> string -> Async<Result<TerminalId, string>>)
+        (openTerminal: ActorRef -> TerminalSource -> string -> Async<Result<TerminalId, string>>)
         (closeTerminal: TerminalId -> string -> Async<Result<unit, string>>)
         (takeLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
         (releaseLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
@@ -38,7 +38,13 @@ module SessionCommands =
                 | Error reason -> return CommandRejected reason
             | OpenTerminal title ->
                 let title = if title.Trim () = "" then "terminal" else title.Trim ()
-                match! openTerminal (actorFor peerId) title with
+                // A peer's Open is always a SHELL in `default` (Plan 16, part D): an
+                // attached source needs a ticket from a provider, and a peer command
+                // carrying a URL would be a peer choosing what this session connects to.
+                // Choosing a NAMED sandbox is likewise a command, and commands are the
+                // agent's (Plan 15) — a human who wants a terminal in `test` asks for one,
+                // and sees the act-line for it.
+                match! openTerminal (actorFor peerId) (SandboxShell SandboxName.defaultName) title with
                 | Ok _ -> return CommandAccepted
                 | Error reason -> return CommandRejected reason
             | CloseTerminal terminalId ->

@@ -47,3 +47,7 @@ module Bootstrap =
         | SessionEvent.WorkSandboxStarted _ -> "work-sandbox-started"
         | SessionEvent.WorkSandboxStopped _ -> "work-sandbox-stopped"
         | SessionEvent.CommandRefused _ -> "command-refused"
+        | SessionEvent.ToolUseStarted _ -> "tool-use-started"
+        | SessionEvent.ToolUseFinished _ -> "tool-use-finished"
+        | SessionEvent.McpServerAvailable _ -> "mcp-server-available"
+        | SessionEvent.McpServerUnavailable _ -> "mcp-server-unavailable"

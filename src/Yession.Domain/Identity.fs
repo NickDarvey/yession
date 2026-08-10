@@ -180,6 +180,17 @@ module BlockId =
         normalize "BlockId" raw |> Result.map BlockId
     let value (BlockId s) = s
 
+/// One call the agent made to one tool (Plan 16, part C). Minted by the Session Process
+/// when the call starts, for the same reason `BlockId` is: a fact that will be ADDRESSED —
+/// a chip you can tap, a link you can send someone — must not be identified by something a
+/// reader has to derive, because the derivation rule then lives nowhere in the data.
+type ToolUseId = private ToolUseId of string
+
+module ToolUseId =
+    let create (raw: string) : Result<ToolUseId, string> =
+        normalize "ToolUseId" raw |> Result.map ToolUseId
+    let value (ToolUseId s) = s
+
 /// A Manager-verified user identity — the OIDC `sub` claim the Manager itself issued
 /// (docs/plans/04-session-authorization.md). Under the localhost strategy this is the
 /// single "local" user; a BYO strategy (docs/plans/07) mints real subjects.
@@ -305,3 +316,35 @@ module SandboxName =
         else Error (sprintf "'%s' is not a sandbox name (lowercase letters, digits, '-' and '_' only)" name)
 
     let value (SandboxName name) = name
+
+/// What a server is called — and, because Plan 16 part A made a namespace the SDK MCP
+/// server's NAME, the namespace every one of its tools lands in.
+///
+/// So this is not a label: it is the prefix of every wire name the model sees
+/// (`mcp__serial__acquire_device`) and the word the tool-use record shows. Constrained to
+/// what a tool name can carry, which is why the charset is `QueryName`'s rather than
+/// `SandboxName`'s — a name reaching the model has to survive the SDK's wire name, not a
+/// Docker volume.
+type McpServerName = private McpServerName of string
+
+module McpServerName =
+
+    /// The session's own namespace. Reserved, because the session's verbs are not something
+    /// a provider may impersonate: a server called `yession` would put foreign tools behind
+    /// the wire names `execute_command` and `set_secret` already answer to.
+    [<Literal>]
+    let Reserved = "yession"
+
+    let create (raw: string) : Result<McpServerName, string> =
+        let name = (defaultArg (Option.ofObj raw) "").Trim ()
+        let charOk c = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '_'
+        if name = "" then Error "server name cannot be empty"
+        elif name.Length > 64 then Error (sprintf "'%s' is too long for a server name" name)
+        elif name = Reserved then
+            Error (sprintf "'%s' is the session's own namespace and cannot be a server name" name)
+        elif name.StartsWith "_" || name.EndsWith "_" then
+            Error (sprintf "'%s' is not a server name (no leading or trailing underscore)" name)
+        elif name |> Seq.forall charOk then Ok (McpServerName name)
+        else Error (sprintf "'%s' is not a server name (lowercase, digits and underscore only)" name)
+
+    let value (McpServerName name) = name

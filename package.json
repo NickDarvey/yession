@@ -44,5 +44,8 @@
   "devDependencies": {
     "@tailwindcss/cli": "^4.0.0",
     "esbuild": "^0.28.1"
+  },
+  "optionalDependencies": {
+    "serialport": "^13.0.0"
   }
 }

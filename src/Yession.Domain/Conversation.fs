@@ -106,6 +106,12 @@ module ConversationProjection =
         | SessionEvent.TerminalIntegrationLost _
         | SessionEvent.TerminalIntegrationRestored _
         | SessionEvent.TerminalTranscriptTruncated _ -> proj
+        // Tool use (Plan 16, part C) does not fold here either, and for the same hazard in
+        // a sharper form: the agent MADE the call and already has the result in its own
+        // transcript, so feeding it back would be pure duplication. It folds into
+        // `TimelineProjection` — the screen — and nowhere else.
+        | SessionEvent.ToolUseStarted _
+        | SessionEvent.ToolUseFinished _ -> proj
         // Repos (Plan 14) DO fold into the timeline — unlike terminals, a repo change is
         // a session-shaping act ("we are now working on X, on branch Y") that reads like
         // a sentence, carries no output stream, and is exactly what a joining human or
@@ -188,6 +194,30 @@ module ConversationProjection =
                             match c.Reason with
                             | Some reason -> sprintf "refused %s — %s" c.Summary reason
                             | None -> sprintf "refused %s" c.Summary
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset } ] }
+        // The MCP set changing (Plan 17). `ActorRef.System`, because nobody in the session
+        // did it, and the DELTA only — the Process compares what it was last told, from
+        // its own events, against the newly resolved set, so a boot, a reconnect and a
+        // restart all emit nothing and only a genuine change by the operator is loud.
+        | SessionEvent.McpServerAvailable m ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = m.MessageId
+                          Author = ActorRef.System
+                          Body = sprintf "you can now use the %s tools" (McpServerName.value m.Name)
+                          Status = Complete
+                          Kind = ConversationItemKind.ActNote
+                          Offset = envelope.Offset } ] }
+        | SessionEvent.McpServerUnavailable m ->
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = m.MessageId
+                          Author = ActorRef.System
+                          Body = sprintf "the %s tools are no longer available" (McpServerName.value m.Name)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
                           Offset = envelope.Offset } ] }

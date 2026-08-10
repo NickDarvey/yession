@@ -182,6 +182,8 @@ let private frameSerializationTests =
         testCase "every SessionEvent case round-trips through the envelope codec" <| fun () ->
             let messageId = MessageId.create "msg-1" |> expect
             let turnId = AgentTurnId.create "turn-1" |> expect
+            let toolUseId = ToolUseId.create "tool-1" |> expect
+            let blockId = BlockId.create "blk-1" |> expect
             // One value per union case; extending SessionEvent without extending this
             // list is caught by the exhaustive-match warning in the projection instead,
             // so keep the two in step when adding events.
@@ -231,7 +233,18 @@ let private frameSerializationTests =
                       CredentialOwner = None
                       Actor = PeerRef peerId
                       ApprovedBy = None }
-                  WorkSandboxStopped { MessageId = messageId; Sandbox = SandboxName.create "test" |> expect; Actor = ActorRef.Agent; ApprovedBy = None } ]
+                  WorkSandboxStopped { MessageId = messageId; Sandbox = SandboxName.create "test" |> expect; Actor = ActorRef.Agent; ApprovedBy = None }
+                  // Tool use (Plan 16): both argument cases, because they are different
+                  // facts — recorded-with-secrets-gone, and a foreign tool whose arguments
+                  // are not recorded at all.
+                  ToolUseStarted { ToolUseId = toolUseId; AgentTurnId = turnId; Namespace = "yession"; Name = "set_secret"; Arguments = Some """{"name":"DEPLOY_TOKEN","value":null}""" }
+                  ToolUseStarted { ToolUseId = toolUseId; AgentTurnId = turnId; Namespace = "serial"; Name = "acquire_device"; Arguments = None }
+                  ToolUseFinished { ToolUseId = toolUseId; Outcome = ToolCallOk; Block = None }
+                  ToolUseFinished { ToolUseId = toolUseId; Outcome = ToolCallOk; Block = Some blockId }
+                  ToolUseFinished { ToolUseId = toolUseId; Outcome = ToolCallFailed "no such tool"; Block = None }
+                  // Plan 17: the two the operator's declarations produce.
+                  McpServerAvailable { MessageId = messageId; Name = McpServerName.create "serial" |> expect }
+                  McpServerUnavailable { MessageId = messageId; Name = McpServerName.create "printer" |> expect } ]
             for event in everyCase do
                 let env = { sampleEnvelope with Event = event }
                 let roundTripped =
