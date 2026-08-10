@@ -253,7 +253,7 @@ let
         --set-default YESSION_SOCAT_PATH ${pkgs.socat}/bin/socat \
         --set-default YESSION_RIPGREP_PATH ${pkgs.ripgrep}/bin/rg'';
 
-  # nix — the installable: two wrapped Node bins over tasks.fsx's shims, the runtime
+  # nix — the installable: the three wrapped Node bins over tasks.fsx's shims, the runtime
   # node_modules, and the Nix node-datachannel addon, with the agent pointed at claude-code.
   nix = pkgs.stdenv.mkDerivation {
     pname = "yession";
@@ -278,6 +278,13 @@ let
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-manager" \
         --add-flags "$out/libexec/yession/bin/yession-manager.js" \
         --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude ${srtToolFlags}
+
+      # The serial provider knows nothing about Yession and spawns nothing, so it takes neither
+      # the agent path nor the srt tools — but it IS a bin of this package, and one that is not
+      # wrapped is one an operator cannot start. Its native dep (serialport's addon) resolves
+      # from the same libexec node_modules as everyone else's.
+      makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-serial" \
+        --add-flags "$out/libexec/yession/bin/yession-serial.js"
       runHook postInstall
     '';
     dontStrip = true;
