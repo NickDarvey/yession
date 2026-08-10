@@ -945,12 +945,98 @@ let private chromeTests =
                     (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
                     (sprintf "a control has no visible focus ring: %s" classes)
 
-        // Blue is interactive, and focus is the most interactive a thing gets. A field that
-        // went green (or anything else) on focus would make the same event mean two things.
-        testCase "focus is blue, everywhere" <| fun () ->
-            for tone in [ "focus:border-green"; "focus:border-ink"; "focus:border-err"
-                          "focus-within:border-green"; "focus-within:border-ink" ] do
-                Expect.isFalse ((shell + settingsShell).Contains tone) (sprintf "focus must not be %s" tone)
+        // Deliberately no "focus is blue, everywhere" here. That focus is BLUE rather than
+        // green is house style, not a floor — a design that moved it would fail such a test
+        // while breaking nothing, which is the shape this suite does not keep (AGENTS.md,
+        // "Writing tests"). That focus is VISIBLE is the invariant, and the two cases above
+        // are what hold it.
+    ]
+
+// What the session page must keep saying, whatever it comes to look like: one person wears
+// one name, an author is never a raw id, and a control is offered only when it does something.
+// Deliberately NOT here — the caret marking an empty timeline, the composer's rest-state rail,
+// which weight a waiting button wears — because those are the design, and the design changing
+// is not a regression (AGENTS.md, "Writing tests").
+let private semanticsTests =
+    testList "What the screen says about people and their choices" [
+
+        /// What one message ELEMENT says, from its author hook to its body — so an assertion
+        /// about the chat's attribution cannot be satisfied by the same word appearing in the
+        /// roster, which is exactly how the first version of this test passed while the chat
+        /// was still printing a peer id.
+        let messageMetaOf (peer: PeerId) (html: string) : string =
+            let start = html.IndexOf (Dom.attr Dom.Hooks.messageAuthor (PeerId.value peer))
+            Expect.isTrue (start >= 0) "the message renders at all"
+            let stop = html.IndexOf (Dom.Hooks.messageBody, start)
+            html.Substring (start, stop - start)
+
+        /// The fixture with one message from a COLLABORATOR — `bob`, deliberately not the
+        /// local peer, so what the chat prints about him can only have come from the roster
+        /// lookup under test rather than from the client's own identity.
+        let withMessageFromBob (peers: Map<PeerId, string>) =
+            { representativeModel with
+                Peers = peers
+                Presence = Map.empty
+                Conversation =
+                    { Items =
+                        [ { MessageId = MessageId.create "msg-bob" |> expect
+                            Author = PeerRef bob
+                            Body = "on it"
+                            Status = Complete
+                            Kind = ConversationItemKind.Message
+                            Offset = EventOffset.create 1L |> expect } ]
+                      ActiveAgentMessages = Map.empty }
+                Timeline = TimelineProjection.empty }
+
+        // A peer id is a token, not a person. The roster, the draft summaries and the lease
+        // bar all resolved one to a name; the chat did not, so the same human appeared as
+        // `brave-owl` in the sidebar and `bob` on their own message.
+        testCase "the chat attributes a message to the name, not the peer id" <| fun () ->
+            let html = Support.render (withMessageFromBob (Map.ofList [ bob, "quiet-otter" ]))
+            let meta = messageMetaOf bob html
+            Expect.isTrue (meta.Contains ">quiet-otter<") "the author is the name the roster knows"
+            Expect.isFalse (meta.Contains ">bob<") "and never the raw id as a person's name"
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.messageAuthor (PeerId.value bob)))
+                "while the hook still carries the stable id, so tests and delegation do not move"
+
+        // The fallback is the reason this resolves through the roster rather than asserting a
+        // name exists: a peer who left before this client ever saw them has no name to show,
+        // and a blank author would be worse than an ugly one.
+        testCase "an unknown peer still gets attributed, by id" <| fun () ->
+            let html = Support.render (withMessageFromBob Map.empty)
+            Expect.isTrue
+                ((messageMetaOf bob html).Contains ">bob<")
+                "no name known, so the id stands in rather than nothing"
+
+        // The roster is folded from the durable `PeerJoined` log; your own display name comes
+        // from THIS connection. When a peer rejoined under a new name the two disagreed, and a
+        // chat reading the roster for its own messages would contradict the sidebar's "you"
+        // row — two names for one person, which is the defect this whole thread is about.
+        testCase "your own messages wear the name the sidebar calls you" <| fun () ->
+            let html =
+                Support.render
+                    { representativeModel with
+                        Peer = { PeerId = ada; DisplayName = "warm-tern" }
+                        Peers = Map.ofList [ ada, "a-stale-name-from-the-log" ] }
+            Expect.isTrue ((messageMetaOf ada html).Contains ">warm-tern<") "the chat says what you are called now"
+            Expect.isTrue (html.Contains (Dom.hookText Dom.Hooks.displayName "warm-tern")) "and so does the roster"
+            Expect.isFalse (html.Contains "a-stale-name-from-the-log") "the log's older name is nobody's current name"
+
+        // A destructive control offered over nothing is a live-looking button that does not do
+        // anything, and the way a working one and a dead one come to look identical. Whether
+        // it is a discard `x` at all, and what the send button WEARS while it waits, are
+        // design; that the offer follows the content is the invariant.
+        testCase "discard is offered only when there is something to discard" <| fun () ->
+            let empty = Support.render { representativeModel with Synced = { representativeModel.Synced with Drafts = Map.empty } }
+            let full = Support.render representativeModel
+            Expect.isFalse (empty.Contains Dom.Hooks.discardDraft) "nothing to discard, so nothing offers to"
+            Expect.isTrue (full.Contains Dom.Hooks.discardDraft) "and it is there once there is"
+            // The local-first promise, from the composer's side: an empty draft is not a
+            // blocked one. `Resilience.fs` pins the same thing against a dead feed.
+            Expect.isTrue
+                (empty.Contains (Dom.attr Dom.Hooks.sendDraft (PeerId.value ada)))
+                "send keeps its place either way — it is never taken away"
     ]
 
 let tests =
@@ -959,6 +1045,7 @@ let tests =
         presenceTests
         syncStatusTests
         chromeTests
+        semanticsTests
         reconnectOfferTests
         shellTests
     ]
