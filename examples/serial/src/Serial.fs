@@ -1,4 +1,4 @@
-namespace Yession.Domain
+namespace SerialProvider
 
 // The serial device provider's vocabulary (Plan 16, part E).
 //

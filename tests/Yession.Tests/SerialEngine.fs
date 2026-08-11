@@ -4,7 +4,7 @@ module Yession.Tests.SerialEngine
 //
 // Everything ABOVE the `SerialEngine` seam is already covered over real sockets, with the
 // engine substituted — the MCP lifecycle, the claim, the WebSocket attach. This is the half
-// that substitution deliberately skipped: `SerialPorts.real`, which is the `serialport`
+// that substitution deliberately skipped: `Ports.real`, which is the `serialport`
 // import, the port open, the line settings, and the close.
 //
 // socat is what makes that testable with no hardware. `socat pty,raw,echo=0 pty,raw,echo=0`
@@ -22,6 +22,7 @@ open Fable.Core
 open Fable.Pyxpecto
 open Yession.Domain
 open Yession.Host
+open SerialProvider
 
 let private expect =
     function
@@ -113,7 +114,7 @@ let tests =
                 let received = Text.StringBuilder ()
                 let mutable closedWith = None
                 let! opened =
-                    SerialPorts.real.Open
+                    Ports.real.Open
                         pair.ours
                         SerialSettings.defaults
                         (fun text -> received.Append text |> ignore)
@@ -151,7 +152,7 @@ let tests =
                 let! pair = startPair () |> Async.AwaitPromise
                 let mutable closedWith = None
                 let! opened =
-                    SerialPorts.real.Open pair.ours SerialSettings.defaults ignore (fun why -> closedWith <- Some why)
+                    Ports.real.Open pair.ours SerialSettings.defaults ignore (fun why -> closedWith <- Some why)
                 let port = opened |> expect
                 pair.stop ()
                 let! noticed = until (fun () -> closedWith.IsSome)
@@ -168,7 +169,7 @@ let tests =
                 let! pair = startPair () |> Async.AwaitPromise
                 let received = Text.StringBuilder ()
                 let! opened =
-                    SerialPorts.real.Open
+                    Ports.real.Open
                         pair.ours
                         { SerialSettings.defaults with BaudRate = 9600 }
                         (fun text -> received.Append text |> ignore)
@@ -186,7 +187,7 @@ let tests =
                 // The provider turns this into text the model reads. An engine that threw
                 // would take the whole attach down instead.
                 let! outcome =
-                    SerialPorts.real.Open "/dev/definitely-not-a-serial-port" SerialSettings.defaults ignore ignore
+                    Ports.real.Open "/dev/definitely-not-a-serial-port" SerialSettings.defaults ignore ignore
                 match outcome with
                 | Ok _ -> failwith "opening a nonexistent path should not succeed"
                 | Error reason -> Expect.isFalse (reason = "") "and the reason says something"
@@ -197,7 +198,7 @@ let tests =
                 // On Linux this shells out to `udevadm`; without it the call THROWS, which is
                 // how the `Serial` capability came to need eudev. Zero ports is a pass — the
                 // contract is that the engine answers, not that this box has hardware.
-                match! SerialPorts.real.List () with
+                match! Ports.real.List () with
                 | Error reason -> failwithf "enumeration should answer, not fail: %s" reason
                 | Ok ports ->
                     // Whatever it found must survive the discovery filter without throwing.

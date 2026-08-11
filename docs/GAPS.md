@@ -38,13 +38,14 @@ Items are roughly ordered by how much they matter.
   already is, rather than a per-call prompt.
 - **A declared MCP server is unconfined, and so is what it owns**
   ([Plan 16](plans/16-serial-devices.md)): there is no srt/docker analogue for a serial
-  port, and `yession-serial` runs on the host with whatever access its user has. A device
+  port, and the serial provider (`examples/serial`) runs on the host with whatever access
+  its user has. A device
   is more physical than a filesystem path — writing to the wrong tty can reflash a board.
   The provider narrows this by refusing to list ports it does not recognise (an
   unrecognised tty is usually the machine's own console), which is a policy, not a
   boundary. Its control leg is unauthenticated and must stay on loopback.
 - **A provider's lifecycle is nobody's** ([Plan 16](plans/16-serial-devices.md)): who
-  starts `yession-serial` — systemd, an operator, nothing — is unsettled, and "the
+  starts a provider — systemd, launchd, an operator, nothing — is unsettled, and "the
   Manager only declares" argues for nothing. Softened by Plan 17's poll, which retries a
   server forever and picks it up whenever it appears, so nothing has to restart to
   notice; but nothing starts it either.
@@ -443,7 +444,7 @@ Items are roughly ordered by how much they matter.
   schedule, not a minimal one.
 - Load/scale characteristics (many peers, large logs, long drafts) are unmeasured.
 - **The serial engine is tested against a tty, never against a chip**
-  ([Plan 16](plans/16-serial-devices.md), part E). `check Serial` drives `SerialPorts.real`
+  ([Plan 16](plans/16-serial-devices.md), part E). `check Serial` drives `Ports.real`
   over a socat PTY pair, so the open, the line settings, the read and write paths and the
   vanish path all cross a real kernel tty. What no CI box can cover is a specific adapter:
   a baud rate the driver silently rounds, a chip that needs DTR/RTS toggled to come out of

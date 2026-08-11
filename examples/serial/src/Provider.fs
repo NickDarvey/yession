@@ -1,4 +1,4 @@
-module Yession.Host.SerialProvider
+module SerialProvider.Provider
 
 // The serial device provider (Plan 16, part E): an ordinary MCP server that happens to own
 // some ttys.
@@ -20,8 +20,8 @@ module Yession.Host.SerialProvider
 
 open System
 open System.Collections.Generic
-open Yession.Domain
-open Yession.Host.Interop
+open SerialProvider
+open SerialProvider.Interop
 
 /// A device that has been claimed, and the port behind it once somebody attaches.
 type private Claimed =
@@ -37,7 +37,7 @@ type private Claimed =
       /// The live port, once the data leg opened. `None` while the claim is held but nobody
       /// has attached — an acquire that is never followed by an attach holds the DEVICE, not
       /// a file descriptor.
-      mutable Port : SerialPorts.OpenPort option }
+      mutable Port : Ports.OpenPort option }
 
 /// The provider, as its host process sees it.
 type SerialProvider =
@@ -51,49 +51,49 @@ type SerialProvider =
 
 // --- the tools, declared ------------------------------------------------------------------
 //
-// `ToolDescriptor`s, so the provider's tool list is built from the same vocabulary the
-// session's own tools are. That is not reuse for its own sake: it means `tools/list` cannot
-// disagree with what `tools/call` accepts, because both read this list.
+// One list, read by BOTH `tools/list` and `tools/call`, so the two cannot disagree about what
+// this server accepts. The descriptions are written for the MODEL, not for a person reading
+// the source: they say what the tool is for, what it costs, and what to do next, because a
+// tool description is the only documentation the caller will ever see.
 
-[<Literal>]
 let Namespace = "serial"
 
-let private deviceArg = ToolField.required "device_id" "string" "the device_id list_devices returned"
+let private deviceArg = Mcp.Schema.required "device_id" "string" "the device_id list_devices returned"
 
-let tools : ToolDescriptor list =
-    [ ToolDescriptor.create
-        Namespace
-        "list_devices"
-        "Every serial device attached to this host that this provider recognises, with a stable device_id, its make and model, and whether it is free. Unrecognised ports are deliberately not listed — a serial port that is not a known device is usually the machine's own console. Call this again after somebody plugs something in; the list is read from the OS each time."
-        (ToolSchema.ofFields [])
-      { ToolDescriptor.create
-          Namespace
-          "acquire_device"
-          "Claim a device for exclusive use and get back a URL to open its byte stream on. One holder at a time, because the OS gives out one handle: if somebody else has it, this says who. Release it when you are done."
-          (ToolSchema.ofFields [ deviceArg ]) with
-          Title = Some "Acquire a serial device" }
-      ToolDescriptor.create
-          Namespace
-          "configure_device"
-          "Set the line parameters of a device you hold. Takes effect on the NEXT attach, so configure before you open the stream. Defaults are 115200 8N1, which is what most boards boot at."
-          (ToolSchema.ofFields
-              [ deviceArg
-                ToolField.required "baud_rate" "integer" "e.g. 9600, 115200"
-                ToolField.optional "data_bits" "integer" "5, 6, 7 or 8 (default 8)"
-                ToolField.optional "stop_bits" "integer" "1 or 2 (default 1)"
-                ToolField.optional "parity" "string" "none, even or odd (default none)" ])
-      ToolDescriptor.create
-          Namespace
-          "release_device"
-          "Give a device back, closing its stream if one is open. Safe to call on a device you do not hold."
-          (ToolSchema.ofFields [ deviceArg ]) ]
+let tools : Mcp.Tool list =
+    [ { Name = "list_devices"
+        Title = None
+        Description =
+            "Every serial device attached to this host that this provider recognises, with a stable device_id, its make and model, and whether it is free. Unrecognised ports are deliberately not listed — a serial port that is not a known device is usually the machine's own console. Call this again after somebody plugs something in; the list is read from the OS each time."
+        InputSchema = Mcp.Schema.ofFields [] }
+      { Name = "acquire_device"
+        Title = Some "Acquire a serial device"
+        Description =
+            "Claim a device for exclusive use and get back a URL to open its byte stream on. One holder at a time, because the OS gives out one handle: if somebody else has it, this says who. Release it when you are done."
+        InputSchema = Mcp.Schema.ofFields [ deviceArg ] }
+      { Name = "configure_device"
+        Title = None
+        Description =
+            "Set the line parameters of a device you hold. Takes effect on the NEXT attach, so configure before you open the stream. Defaults are 115200 8N1, which is what most boards boot at."
+        InputSchema =
+            Mcp.Schema.ofFields
+                [ deviceArg
+                  Mcp.Schema.required "baud_rate" "integer" "e.g. 9600, 115200"
+                  Mcp.Schema.optional "data_bits" "integer" "5, 6, 7 or 8 (default 8)"
+                  Mcp.Schema.optional "stop_bits" "integer" "1 or 2 (default 1)"
+                  Mcp.Schema.optional "parity" "string" "none, even or odd (default none)" ] }
+      { Name = "release_device"
+        Title = None
+        Description =
+            "Give a device back, closing its stream if one is open. Safe to call on a device you do not hold."
+        InputSchema = Mcp.Schema.ofFields [ deviceArg ] } ]
 
 // --- the answers ---------------------------------------------------------------------------
 
 /// Build a provider over an engine. `origin` is the address a CLIENT should use to reach the
 /// data leg — passed in rather than derived from a request, because the provider may sit
 /// behind something and only its operator knows.
-let create (engine: SerialPorts.SerialEngine) (origin: unit -> string) : SerialProvider =
+let create (engine: Ports.SerialEngine) (origin: unit -> string) (version: string) : SerialProvider =
     // device_id -> claim. A `Dictionary` rather than a map in a ref because a claim is
     // mutated by three different legs (configure, attach, the port closing) and threading a
     // whole map through each would be bookkeeping with no reader.
@@ -109,7 +109,7 @@ let create (engine: SerialPorts.SerialEngine) (origin: unit -> string) : SerialP
             | Ok ports -> return Discovery.devices ports
         }
 
-    let mintToken () = randomSecret ()
+    let mintToken () = randomId ()
 
     let release (deviceId: string) : unit =
         match claimed.TryGetValue deviceId with
@@ -225,7 +225,7 @@ let create (engine: SerialPorts.SerialEngine) (origin: unit -> string) : SerialP
                 return sprintf "released %s" deviceId
         }
 
-    let invoke (holder: string) (call: ToolCall) : Async<Result<string, string>> =
+    let invoke (holder: string) (call: Mcp.ToolCall) : Async<Result<string, string>> =
         let ok (body: Async<string>) = async { let! text = body in return Ok text }
         let deviceOf (json: string) =
             match SerialWire.deviceId json with
@@ -251,11 +251,11 @@ let create (engine: SerialPorts.SerialEngine) (origin: unit -> string) : SerialP
 
     // --- the control leg ----------------------------------------------------------------
 
-    let mcp = McpServer.create { Name = "yession-serial"; Version = Version.current; Tools = tools; Invoke = invoke }
+    let mcp = Mcp.create { Name = "serial"; Version = version; Tools = tools; Invoke = invoke }
 
     // --- the data leg -------------------------------------------------------------------
 
-    let attach (token: string) (peer: WsServer.WsPeer) : WsServer.WsHandlers =
+    let attach (token: string) (peer: Ws.WsPeer) : Ws.WsHandlers =
         match tokens.TryGetValue token with
         | false, _ ->
             peer.Control (SerialWire.exited 1)
@@ -267,7 +267,7 @@ let create (engine: SerialPorts.SerialEngine) (origin: unit -> string) : SerialP
             // could be replayed would hand a second client the stream the claim says is
             // exclusive.
             tokens.Remove token |> ignore
-            let mutable port : SerialPorts.OpenPort option = None
+            let mutable port : Ports.OpenPort option = None
             let finish (why: string) =
                 // The in-band termination frame, which is what tells a client the difference
                 // between "the device went away" and "the network did". An abrupt close
@@ -306,7 +306,7 @@ let create (engine: SerialPorts.SerialEngine) (origin: unit -> string) : SerialP
     { TryHandle = mcp.TryHandle
       Serve =
         fun server ->
-            WsServer.serve server (fun path ->
+            Ws.serve server (fun path ->
                 if path.StartsWith "/attach/" then Some (attach (path.Substring "/attach/".Length))
                 else None)
       Claims =

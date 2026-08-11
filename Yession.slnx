@@ -20,6 +20,9 @@
     <Project Path="src/Yession.Oidc/Yession.Oidc.fsproj" />
     <Project Path="src/Yession.SessionProcess/Yession.SessionProcess.fsproj" />
   </Folder>
+  <Folder Name="/examples/">
+    <Project Path="examples/serial/SerialProvider.fsproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Yession.Tests/Yession.Tests.fsproj" />
   </Folder>

@@ -29,9 +29,6 @@
     <!-- The agent's tools as data (Plan 16, part A). Depends on nothing but Thoth: a
          descriptor is a name, a schema and a namespace, and knows nothing of sessions. -->
     <Compile Include="Tools.fs" />
-    <!-- The serial provider's vocabulary (Plan 16, part E). After Tools.fs because its tools
-         are declared as `ToolDescriptor`s like everyone else's; it knows nothing of sessions. -->
-    <Compile Include="Serial.fs" />
     <Compile Include="Conversation.fs" />
     <Compile Include="Repos.fs" />
     <!-- The read half of the imperative session API (Plan 15). Depends on nothing but

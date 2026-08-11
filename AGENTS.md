@@ -62,7 +62,7 @@ here) — the `Native` cap works too (see Testing).
 
 Every Yession build function lives in `tasks.fsx` — the complete, standalone build interface
 (`restore`/`build`/`start`/`dev`/`check`/`verify`/`lint`/`version`/`stage`/`package`/
-`install-smoke`/`boot-smoke`/`clean`/`clean-docker`). The devenv scripts, the GitHub Actions
+`install-smoke`/`boot-smoke`/`example`/`clean`/`clean-docker`). The devenv scripts, the GitHub Actions
 workflows, and the Nix `outputs` are thin wrappers over it — throw devenv and CI away and
 `dotnet fsi tasks.fsx <verb>` still drives everything.
 
@@ -83,6 +83,22 @@ is a verb. Anything that could be a verb, is a verb.
 locations, a fallback beside a primary), keep ONLY the one verified working here and delete
 the other. A redundant spare hides which path is live, rots unverified, and turns the next
 failure into an archaeology dig.
+
+## Examples
+
+`examples/` holds integrations built the way somebody OUTSIDE this repository would build
+them. An example is standalone by rule: it references nothing from `Yession.Domain` or
+`Yession.Host`, carries its own project and bundle, and is not in the npm package or the Nix
+installable. `dotnet fsi tasks.fsx example <name>` builds one.
+
+That rule is the whole value, and it is easy to erode. The serial provider USED to be a third
+shipped bin reaching into `Yession.Host.Interop` and the Domain's tool vocabulary — it worked,
+and it demonstrated a path no reader could reproduce. If an example needs something the
+product has, it copies it and owns the copy; the duplication is the point, not a smell.
+
+The suite still tests them (the serial provider's own tests are the reason `Serial` exists as
+a capability), via a ProjectReference from `tests/Yession.Tests`. That reference goes ONE way:
+nothing in the product may reference an example.
 
 ## UI baseline
 

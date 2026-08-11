@@ -1,4 +1,4 @@
-module Yession.Host.WsServer
+module SerialProvider.Ws
 
 // The server half of the byte-stream leg (Plan 16, part D/E), hand-written.
 //
@@ -14,7 +14,7 @@ module Yession.Host.WsServer
 // has to be able to check against the RFC.
 
 open Fable.Core
-open Yession.Host.Interop
+open SerialProvider.Interop
 
 [<ImportAll("node:crypto")>]
 let private nodeCrypto : obj = jsNative

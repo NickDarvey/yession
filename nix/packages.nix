@@ -253,7 +253,7 @@ let
         --set-default YESSION_SOCAT_PATH ${pkgs.socat}/bin/socat \
         --set-default YESSION_RIPGREP_PATH ${pkgs.ripgrep}/bin/rg'';
 
-  # nix — the installable: the three wrapped Node bins over tasks.fsx's shims, the runtime
+  # nix — the installable: the two wrapped Node bins over tasks.fsx's shims, the runtime
   # node_modules, and the Nix node-datachannel addon, with the agent pointed at claude-code.
   nix = pkgs.stdenv.mkDerivation {
     pname = "yession";
@@ -278,17 +278,55 @@ let
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-manager" \
         --add-flags "$out/libexec/yession/bin/yession-manager.js" \
         --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude ${srtToolFlags}
-
-      # The serial provider knows nothing about Yession and spawns nothing, so it takes neither
-      # the agent path nor the srt tools — but it IS a bin of this package, and one that is not
-      # wrapped is one an operator cannot start. Its native dep (serialport's addon) resolves
-      # from the same libexec node_modules as everyone else's.
-      makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-serial" \
-        --add-flags "$out/libexec/yession/bin/yession-serial.js"
       runHook postInstall
     '';
     dontStrip = true;
     meta.mainProgram = "yession-manager";
+  };
+
+  # serial-provider — the EXAMPLE, built as its own installable.
+  #
+  # Deliberately not part of `nix` (the product installable), and deliberately its own
+  # derivation rather than another bin bolted onto that one: an example ships on its own terms
+  # or it is not an example. `nix build .#serial-provider` is how you get a runnable copy —
+  # which is also what lets a machine run it as a service without vendoring the build.
+  serial-provider = pkgs.stdenv.mkDerivation {
+    pname = "serial-provider";
+    inherit version;
+    inherit src;
+    nativeBuildInputs = [ pkgs.dotnet-sdk_10 pkgs.nodejs_24 pkgs.makeWrapper ];
+    buildPhase = ''
+      runHook preBuild
+      ${dotnetEnv}
+      cp -a ${nodeModules}/node_modules ./node_modules
+      chmod -R u+w node_modules
+      export PATH="$PWD/node_modules/.bin:$PATH"
+      export NUGET_PACKAGES="$TMPDIR/nuget-packages"
+      cp -r --no-preserve=mode,ownership ${nugetDeps} "$NUGET_PACKAGES"
+      cat > nuget.config <<'EOF'
+      <?xml version="1.0" encoding="utf-8"?>
+      <configuration>
+        <packageSources><clear/></packageSources>
+      </configuration>
+      EOF
+      dotnet tool restore
+      dotnet fsi tasks.fsx example serial
+      runHook postBuild
+    '';
+    installPhase = ''
+      runHook preInstall
+      mkdir -p "$out/bin" "$out/libexec/serial-provider"
+      cp examples/serial/dist/main.js "$out/libexec/serial-provider/main.js"
+      # `serialport` is an optional native dep the provider imports lazily; absent, it reports
+      # no devices rather than failing to start. Not carried here, so this build is the
+      # degraded one until somebody installs it beside the bundle — which is honest: the addon
+      # is per-platform and the example is not the place to pin one.
+      makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/serial-provider" \
+        --add-flags "$out/libexec/serial-provider/main.js"
+      runHook postInstall
+    '';
+    dontStrip = true;
+    meta.mainProgram = "serial-provider";
   };
 
   # npm — the npm tarball, `npm pack`ed off the same staged package dir.
@@ -311,5 +349,5 @@ in
   # nugetDeps is exposed for one reason: its `outputHash` can only be re-derived by building it
   # (`nix build --file nix/worktree.nix nugetDeps`), and a hash you cannot rebuild on demand is
   # a hash nobody updates until a release job fails.
-  inherit libdatachannel node-datachannel node-pty claude-code nugetDeps nodeModules staged nix npm;
+  inherit libdatachannel node-datachannel node-pty claude-code nugetDeps nodeModules staged nix npm serial-provider;
 }

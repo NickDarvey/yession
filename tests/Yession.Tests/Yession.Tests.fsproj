@@ -79,6 +79,10 @@
     <ProjectReference Include="..\..\src\Yession.SessionProcess\Yession.SessionProcess.fsproj" />
     <ProjectReference Include="..\..\src\Yession.App\Yession.App.fsproj" />
     <ProjectReference Include="..\..\app\Yession.Host.fsproj" />
+    <!-- The serial provider is an EXAMPLE, not a component: nothing in the product
+         references it. The suite does, because the tests it came with are worth keeping —
+         the pure ones in the cheap tier, and a `Serial`-tagged one that drives a real pty. -->
+    <ProjectReference Include="..\..\examples\serial\SerialProvider.fsproj" />
   </ItemGroup>
 
 </Project>

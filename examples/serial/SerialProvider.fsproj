@@ -1,0 +1,39 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A standalone MCP provider. It references NOTHING from Yession — not the Domain, not the
+       Host — which is the property that makes it an example rather than a component: every
+       line here is a line you could write outside this repository. Its only dependencies are
+       Fable.Core (the JS interop attributes) and Thoth.Json (the codecs).
+
+       Compile order is the dependency order, as everywhere in this repo: the vocabulary, then
+       the two protocol halves, then the device engine, then the provider that joins them. -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- What can be decided without a port: which ports are interesting, what a device is
+         called, what the four tools take and answer. No IO, so it is testable with neither
+         hardware nor the native addon. -->
+    <Compile Include="src/Serial.fs" />
+    <!-- The Node surface, and the only file containing raw JavaScript. -->
+    <Compile Include="src/Interop.fs" />
+    <!-- The two wire protocols, each written out rather than pulled from a library, because
+         seeing them is the point of the example. -->
+    <Compile Include="src/Mcp.fs" />
+    <Compile Include="src/Ws.fs" />
+    <!-- The seam over `serialport`: a lazy dynamic import, so a box without the addon
+         degrades to "no devices" instead of failing to start. -->
+    <Compile Include="src/Ports.fs" />
+    <Compile Include="src/Provider.fs" />
+    <Compile Include="src/Main.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Thoth.Json" />
+    <PackageReference Include="Thoth.Json.Net" />
+    <PackageReference Include="Fable.Core" />
+  </ItemGroup>
+
+</Project>
