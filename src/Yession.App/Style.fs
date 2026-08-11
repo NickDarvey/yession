@@ -164,6 +164,20 @@ module Style =
     let btnDanger =
         cls [ btnBase; Stroke.rim; "text-ink-dim"; Stroke.hoverErr; "hover:text-err active:bg-err active:text-bg" ]
 
+    /// The name of a LISTED record, when the name itself opens it. The row's primary act
+    /// is carried by its content rather than by another rectangle in the right rail —
+    /// which is how a table of five sessions ends up wearing ten bordered buttons, all
+    /// shouting the same loudness as the page's one real CTA. Ink at rest, so a list of
+    /// names reads as a list of names; blue and underlined under the pointer, because
+    /// blue is what interactive means here. Underline (not colour) at rest would say the
+    /// same thing, but on every row at once — the same noise in a quieter register.
+    let recordLink =
+        cls [ body; "no-underline hover:text-blue hover:underline decoration-1 underline-offset-4"; focusRing ]
+
+    /// The mark that says a record link LEAVES (the session serves its own origin). Faint
+    /// and small: it is a signpost, not a second status.
+    let recordLinkMark = "text-code text-ink-faint ml-1 align-[1px]"
+
     /// A button with nothing to do YET — composed over one of the faces above, never used
     /// alone. It stays in the layout and in focus order (its work is coming, and a control
     /// that appears mid-sentence moves everything under the reader's hand); the BORDER carries
