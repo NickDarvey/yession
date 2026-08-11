@@ -78,6 +78,11 @@ type ProcessManager =
       WithdrawMcpServer : McpServerName -> McpAudience -> unit
       /// Every declaration, in the order they were made — the management surface's read.
       McpServers : unit -> McpDeclaration list
+      /// What a session subscribing to the reverse control leg RIGHT NOW would be handed:
+      /// the hub's retained value, not a fresh `resolve` of the declarations. The two can
+      /// disagree — that gap is a bug, and the only way to see it is to ask the hub — so
+      /// this reads the delivered answer rather than recomputing the intended one.
+      McpSetFor : SessionId -> McpServerSet
       /// Users the Manager verified into the session's live launch at ID-token
       /// issuance (Plan 06). Empty for a stopped session or before any login —
       /// bindings die with the launch.
@@ -520,6 +525,19 @@ let createWithUi
     let publishMcpServers () : unit =
         for record in state.Sessions do
             mcp.Publish record.SessionId (ManagerState.mcpServersFor record.SessionId state)
+
+    // Seed the hub from the state file at BOOT, not merely on the next change. A restart is
+    // the one moment when a declaration that is already DURABLE has never been published:
+    // `state` is loaded above with the operator's declarations in it, while every session's
+    // retained value is still the empty set this hub was created with. Without this, a
+    // session that reconnects after a Manager restart is handed that empty set, drops the
+    // server it had, and stays without it — while the declaration is still in the file and
+    // still on the management page, so nothing anywhere looks wrong — until somebody
+    // declares or withdraws something and the republish above happens to sweep it up.
+    //
+    // Observed exactly that way: a serial provider declared, working, and gone after an
+    // ordinary version promotion restarted the Manager under it.
+    publishMcpServers ()
 
     // Declare an MCP server. Durable before visible, like every other registry write, and
     // refused rather than resolved when the name would collide — the operator is standing
@@ -1046,6 +1064,7 @@ let createWithUi
           DeclareMcpServer = declareMcpServer
           WithdrawMcpServer = withdrawMcpServer
           McpServers = fun () -> state.McpServers
+          McpSetFor = fun sessionId -> mcp.Current sessionId
           UsersOf = usersOf
           PeersOf = peersOf
           LocalOf = localOf
