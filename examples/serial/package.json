@@ -1,0 +1,15 @@
+{
+  "name": "serial-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An example MCP server that lends the host's serial devices to an agent.",
+  "type": "module",
+  "bin": {
+    "serial-provider": "dist/main.js"
+  },
+  "files": ["dist/"],
+  "engines": { "node": ">=24" },
+  "optionalDependencies": {
+    "serialport": "^13.0.0"
+  }
+}

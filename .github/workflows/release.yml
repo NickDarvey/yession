@@ -91,8 +91,8 @@ jobs:
           name: dist-npm
           path: dist/*.tgz
 
-  # The other parallel channel: the reproducible Nix package. Build it and boot-smoke every
-  # wrapped bin, so `nix profile install github:NickDarvey/yession` stays green. (Add a
+  # The other parallel channel: the reproducible Nix package. Build it and boot-smoke the two
+  # wrapped bins, so `nix profile install github:NickDarvey/yession` stays green. (Add a
   # `cachix/cachix-action` push here to serve binaries and spare consumers the source build.)
   package-nix:
     name: "package:nix"
@@ -111,16 +111,12 @@ jobs:
       # than tasks.fsx's boot-smoke verb: run each built bin with ephemeral ports and assert it
       # announces itself. (`nix build .#yession` above is pure — it never touches the devenv
       # input — so this job proves the real `nix profile install` path.)
-      - name: Boot smoke (every wrapped bin serves)
+      - name: Boot smoke (both surfaces serve)
         run: |
-          smoke() {
-            out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=0 \
-              YESSION_SERIAL_PORT=0 timeout 30 "./result/bin/$1" 2>&1 || true)"
-            echo "$out" | grep -q "$2" \
-              || { echo "$1 did not boot:"; echo "$out"; exit 1; }
-          }
-          smoke yession-manager "management UI at"
-          smoke yession-serial "MCP at"
+          out="$(YESSION_DATA_DIR="$(mktemp -d)" YESSION_PORT=0 YESSION_MANAGER_PORT=0 \
+            timeout 30 ./result/bin/yession-manager 2>&1 || true)"
+          echo "$out" | grep -q "management UI at" \
+            || { echo "the Nix package did not boot:"; echo "$out"; exit 1; }
           echo "nix package boot smoke passed"
 
   release:

@@ -231,6 +231,7 @@ let private admissionTests =
 
 open Fable.Core
 open Yession.Host
+open SerialProvider
 
 type private Provider =
     abstract port : int
@@ -612,11 +613,11 @@ let private fakePort : SerialPortInfo =
       Manufacturer = Some "loopback" }
 
 /// An engine over an in-memory port that echoes. Enough to prove bytes go both ways and that
-/// the provider closes the stream when the device does; the real one is `SerialPorts.real`.
+/// the provider closes the stream when the device does; the real one is `Ports.real`.
 let private fakeEngine (ports: SerialPortInfo list) =
     let written = System.Text.StringBuilder ()
     let mutable closer : (string -> unit) option = None
-    let engine : SerialPorts.SerialEngine =
+    let engine : Ports.SerialEngine =
         { List = fun () -> async { return Ok ports }
           Open =
             fun _ _ onData onClose ->
@@ -632,9 +633,9 @@ let private fakeEngine (ports: SerialPortInfo list) =
         }
     engine, written, (fun () -> closer)
 
-let private startProviderServer (engine: SerialPorts.SerialEngine) =
+let private startProviderServer (engine: Ports.SerialEngine) =
     async {
-        let provider = ref Unchecked.defaultof<SerialProvider.SerialProvider>
+        let provider = ref Unchecked.defaultof<Provider.SerialProvider>
         let server =
             Interop.createServer (fun req res ->
                 if provider.Value.TryHandle req res then ()
@@ -643,7 +644,7 @@ let private startProviderServer (engine: SerialPorts.SerialEngine) =
                     |> ignore
                     res.``end`` "not found")
         let mutable bound = 0
-        provider.Value <- SerialProvider.create engine (fun () -> sprintf "ws://127.0.0.1:%d" bound)
+        provider.Value <- Provider.create engine (fun () -> sprintf "ws://127.0.0.1:%d" bound) "test"
         provider.Value.Serve server
         let! listening =
             Async.FromContinuations (fun (cont, _, _) ->

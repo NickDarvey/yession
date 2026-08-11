@@ -7,9 +7,8 @@
 // The verbs are the dispatch at the bottom of this file; each has its own section below. A
 // bare version (`dotnet fsi tasks.fsx 1.2.3`) is shorthand for `package`.
 //
-// Yession ships as ONE npm package with three bins: `yession` (the Manager),
-// `yession-session` (a Session Process), and `yession-serial` (the serial device provider).
-// Every entry is esbuild-bundled to a single ESM file
+// Yession ships as ONE npm package with two bins: `yession` (the Manager) and
+// `yession-session` (a Session Process). Each is esbuild-bundled to a single ESM file
 // with the native / self-resolving deps kept EXTERNAL — node-datachannel loads its addon and
 // the Agent SDK resolves its native `claude` sibling via import.meta.url, neither of which
 // works bundled. Assets are copied in and read package-relative at runtime.
@@ -302,13 +301,12 @@ let dev () =
 // helper binaries beside its own module. zod is a dynamic import shared with the SDK; dockerode
 // is pure JS but pulls ssh2 (with an optional native addon), so it resolves from node_modules
 // too. Everything else (yjs, lib0, Thoth, prosemirror, …) inlines.
-// `serialport` joins them for the same reason and one more: it is OPTIONAL. The provider
-// lazily imports it and degrades to "no devices" when it is absent, which is what lets the
-// package install on a box with no hardware — and what lets this repo's own dev tree, whose
-// npm dependencies are a Nix fixed-output derivation, not carry it at all.
+//
+// `serialport` is NOT here: it belongs to the example provider, which has its own bundle and
+// its own externals (see the `example` verb). The product neither imports it nor declares it.
 let private externals =
     [ "node-datachannel"; "@anthropic-ai/claude-agent-sdk"; "@anthropic-ai/sandbox-runtime"
-      "zod"; "dockerode"; "@napi-rs/keyring"; "serialport" ]
+      "zod"; "dockerode"; "@napi-rs/keyring" ]
     |> List.map (sprintf "--external:%s")
 
 // The OTel SDK does a dynamic `require('util')`; esbuild's ESM output can't satisfy a runtime
@@ -349,10 +347,6 @@ let private yessionSessionBinJs = """#!/usr/bin/env node
 import('../session.js')
 """
 
-let private yessionSerialBinJs = """#!/usr/bin/env node
-import('../serial.js')
-"""
-
 // package.json — runtime deps are exactly the externals; npm resolves their platform-native
 // optionalDependencies (node-datachannel's addon, the SDK's native `claude`) on install.
 let private packageJson (version: string) =
@@ -363,10 +357,9 @@ let private packageJson (version: string) =
   "type": "module",
   "bin": {
     "yession-manager": "bin/yession-manager.js",
-    "yession-session": "bin/yession-session.js",
-    "yession-serial": "bin/yession-serial.js"
+    "yession-session": "bin/yession-session.js"
   },
-  "files": ["bin/", "manager.js", "session.js", "serial.js", "assets/", "README.md"],
+  "files": ["bin/", "manager.js", "session.js", "assets/", "README.md"],
   "engines": { "node": ">=24" },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "%s",
@@ -375,9 +368,6 @@ let private packageJson (version: string) =
     "dockerode": "%s",
     "node-datachannel": "%s",
     "zod": "%s"
-  },
-  "optionalDependencies": {
-    "serialport": "^13.0.0"
   }
 }
 """
@@ -399,7 +389,7 @@ let stage (version: string) =
     printfn "staging yession %s (npm, one package / two bins) -> dist/npm" version
 
     for required in
-        [ "app/out/Main.js"; "app/SessionMain.js"; "app/SerialMain.js"
+        [ "app/out/Main.js"; "app/SessionMain.js"
           "app/out/public/client.js"; "app/out/public/app.css" ] do
         if not (File.Exists (Path.Combine (repoRoot, required))) then
             failwithf "missing %s after compile" required
@@ -411,7 +401,6 @@ let stage (version: string) =
 
     bundle version "app/out/Main.js" "manager.js"
     bundle version "app/SessionMain.js" "session.js"
-    bundle version "app/SerialMain.js" "serial.js"
 
     // Assets (read package-relative at runtime by Interop.readAsset).
     File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
@@ -421,7 +410,6 @@ let stage (version: string) =
     // in one install), so it spawns `node session.js` with no PATH assumptions.
     File.WriteAllText (Path.Combine (pkg, "bin/yession-manager.js"), managerBinJs)
     File.WriteAllText (Path.Combine (pkg, "bin/yession-session.js"), yessionSessionBinJs)
-    File.WriteAllText (Path.Combine (pkg, "bin/yession-serial.js"), yessionSerialBinJs)
     File.WriteAllText (Path.Combine (pkg, "package.json"), packageJson version)
     File.Copy (Path.Combine (repoRoot, "README.md"), Path.Combine (pkg, "README.md"), true)
 
@@ -445,10 +433,10 @@ let managerSmokeArgs = [ "--secrets"; "ephemeral" ]
 // an ephemeral data dir + port 0, and assert it prints `ready` before a deadline. A bin that
 // cannot boot never passes the gate.
 //
-// The readiness line is a PARAMETER because the bins do not announce the same thing: the
-// Manager serves the management UI, the serial provider serves an MCP endpoint and names
-// itself. Asserting the Manager's line against every bin would have made the serial wrapper
-// unsmokeable, which is how it went unwrapped in the first place.
+// The readiness line is a PARAMETER because not everything bootable announces the same thing:
+// the Manager serves the management UI, an example provider serves an MCP endpoint and names
+// itself. Hard-coding the Manager's line once made a bin unsmokeable, and an unsmokeable bin
+// is how one of them shipped unwrapped.
 let bootSmoke (ready: string) (command: string) (arguments: string list) =
     let dataDir = Path.Combine (Path.GetTempPath (), "yession-boot-" + Guid.NewGuid().ToString "N")
     Directory.CreateDirectory dataDir |> ignore
@@ -486,7 +474,6 @@ let package (version: string) =
     // Boot the packaged bin shim (it self-sets YESSION_SESSION_MAIN); externals resolve from the
     // repo node_modules two levels up from dist/npm.
     bootSmoke managerReady "node" ([ Path.Combine (pkg, "bin/yession-manager.js") ] @ managerSmokeArgs)
-    bootSmoke serialReady "node" [ Path.Combine (pkg, "bin/yession-serial.js") ]
     let packed = runIn pkg "npm" [ "pack"; "--pack-destination"; dist ] |> fun out -> out.Split('\n') |> Array.last
     printfn "packaged dist/%s" (Path.GetFileName (packed.Trim ()))
 
@@ -512,8 +499,52 @@ let installSmoke (tgz: string) =
         failwith "install-smoke: node-datachannel addon was not built"
 
     bootSmoke managerReady "node" ([ Path.Combine (prefix, "node_modules/.bin/yession-manager") ] @ managerSmokeArgs)
-    bootSmoke serialReady "node" [ Path.Combine (prefix, "node_modules/.bin/yession-serial") ]
     printfn "install-smoke: native deps resolved and the installed package booted"
+
+// --- example: build a standalone example integration -----------------------------------------
+
+// The examples are NOT part of the product: `stage` never sees them, the npm package does not
+// carry them, and the Nix installable does not wrap them. That separation is the whole point —
+// an example that quietly rides the product's build is not demonstrating anything a reader
+// could reproduce.
+//
+// They are built here anyway, because an example that does not compile is worse than none, and
+// because the suite drives one of them. The bundle keeps `serialport` external for the same
+// reason the product's does: a native addon cannot be bundled, it resolves at run time.
+let example (name: string) =
+    let dir = Path.Combine (repoRoot, "examples", name)
+    if not (Directory.Exists dir) then
+        let available =
+            Directory.GetDirectories (Path.Combine (repoRoot, "examples"))
+            |> Array.map Path.GetFileName
+            |> String.concat ", "
+        failwithf "no example called '%s' (have: %s)" name available
+    let project = Directory.GetFiles (dir, "*.fsproj") |> Array.exactlyOne
+    restore ()
+    printfn "building example %s" name
+    run "dotnet" [ "build"; project ] |> ignore
+    let out = Path.Combine (dir, "out")
+    fable true project out
+    // Fable mirrors the project's own source layout under `-o`, so the entry is wherever
+    // `Main.fs` sat rather than at the root — found rather than assumed, so an example is free
+    // to lay its sources out however reads best. `fable_modules` is excluded because the
+    // copied packages have `Main.js` files of their own.
+    let entry =
+        Directory.GetFiles (out, "Main.js", SearchOption.AllDirectories)
+        |> Array.filter (fun path -> not (path.Contains "fable_modules"))
+        |> function
+            | [| one |] -> one
+            | [||] -> failwithf "example %s: no Main.js under %s — is the entry module called Main?" name out
+            | many -> failwithf "example %s: %d candidate entries under %s" name many.Length out
+    Directory.CreateDirectory (Path.Combine (dir, "dist")) |> ignore
+    let outFile = Path.Combine (dir, "dist/main.js")
+    run esbuild
+        [ entry; "--bundle"; "--platform=node"; "--format=esm"
+          "--external:serialport"; sprintf "--outfile=%s" outFile ]
+    |> ignore
+    // A build is not a boot, here for the same reason it is not one for the product's bins.
+    bootSmoke serialReady "node" [ outFile ]
+    printfn "built examples/%s/dist/main.js" name
 
 // --- check: capability-gated test orchestration ----------------------------------------------
 
@@ -670,7 +701,6 @@ let private buildNixPackage () =
     // Every bin the package declares gets booted — a wrapper the derivation forgot to make is a
     // missing file here, and a wrapper that cannot find its addon is a dead process.
     bootSmoke managerReady (Path.Combine (outPath, "bin/yession-manager")) managerSmokeArgs
-    bootSmoke serialReady (Path.Combine (outPath, "bin/yession-serial")) []
 
 // A full `verify` spends its first ~80 seconds in restore, build, Fable and stage — tools that
 // are either silent or so chatty their own progress reads as scrollback, so the run looks
@@ -881,6 +911,10 @@ match arg 1 with
     match rest 2 with
     | ready :: cmd :: cmdArgs -> bootSmoke ready cmd cmdArgs
     | _ -> failwith "boot-smoke <ready-line> <command…>"
+| Some "example" ->
+    match arg 2 with
+    | Some name -> example name
+    | None -> failwith "example <name>   (see examples/)"
 | Some "clean" -> clean ()
 | Some "clean-docker" -> cleanDocker ()
 | Some version -> package version // backwards compat: `tasks.fsx <version>` == `package <version>`

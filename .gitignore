@@ -21,6 +21,11 @@ tests/**/out/
 app/**/*.js
 src/**/*.js
 tests/**/*.js
+# Examples build the same way, into their own tree. `dist/` above is anchored to the repo
+# root, so an example's bundle needs naming here too.
+examples/**/out/
+examples/**/dist/
+examples/**/*.js
 
 # Local env / secrets
 .env

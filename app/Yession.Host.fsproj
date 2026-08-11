@@ -52,14 +52,6 @@
     <!-- The session as an MCP client (Plan 17, step 3). After Sse.fs (it reuses the frame
          parser) and after Version.fs (its clientInfo says which build is asking). -->
     <Compile Include="McpClient.fs" />
-    <!-- The serial device provider (Plan 16, part E): a separate bin that owns some ttys and
-         speaks the two protocols a session already knows. `McpServer` is the other end of
-         `McpClient`, written independently on purpose; `WsServer` is the other end of
-         `AttachWs`, for the same reason. -->
-    <Compile Include="McpServer.fs" />
-    <Compile Include="WsServer.fs" />
-    <Compile Include="SerialPorts.fs" />
-    <Compile Include="SerialProvider.fs" />
     <Compile Include="ClaudeConnection.fs" />
     <Compile Include="GitHubConnection.fs" />
     <Compile Include="Spawn.fs" />
@@ -70,7 +62,6 @@
     <Compile Include="SessionMain.fs" />
     <!-- The provider's entry. Last, like the other two: an entry has top-level effects, and
          nothing may depend on one. -->
-    <Compile Include="SerialMain.fs" />
   </ItemGroup>
 
   <ItemGroup>

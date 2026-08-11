@@ -1,4 +1,4 @@
-module Yession.Host.SerialPorts
+module SerialProvider.Ports
 
 // The engine behind the serial provider (Plan 16, part E): enumerate the host's ports, and
 // open one as a byte stream.
@@ -19,7 +19,7 @@ module Yession.Host.SerialPorts
 // so an ordinary `npm install` of the published package gets a working engine everywhere.
 
 open Fable.Core
-open Yession.Domain
+open SerialProvider
 
 /// An open port. Deliberately the same shape as everything else that streams bytes in this
 /// repo — write, close, and a callback for what arrives — so the provider's WebSocket side
