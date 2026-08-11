@@ -10,6 +10,13 @@ data + UI, zero Manager changes.
 
 ## Decisions
 
+> Decisions 1 and 2 are superseded in part by
+> [2026-08-10-local-scope](../decisions/2026-08-10-local-scope.md): an unattributed
+> deployment now owns "all my sessions" credentials as `LocalScope` — itself — rather than
+> by witnessed browser peer, which was pinned to origin-partitioned localStorage and kept
+> stranding the credential behind it. Decision 2's rule survives (no pseudo-user is
+> introduced); its conclusion about peer ownership does not.
+
 1. **Sign-in scope, chosen at connect time.** *This session only* → the credential is
    stored under `SessionScope` of that session. *All my sessions* → under the signing
    actor's own scope (`UserScope` / `PeerScope`), usable from — and replaceable by —

@@ -78,6 +78,11 @@ type ProcessManager =
       WithdrawMcpServer : McpServerName -> McpAudience -> unit
       /// Every declaration, in the order they were made — the management surface's read.
       McpServers : unit -> McpDeclaration list
+      /// What a session subscribing to the reverse control leg RIGHT NOW would be handed:
+      /// the hub's retained value, not a fresh `resolve` of the declarations. The two can
+      /// disagree — that gap is a bug, and the only way to see it is to ask the hub — so
+      /// this reads the delivered answer rather than recomputing the intended one.
+      McpSetFor : SessionId -> McpServerSet
       /// Users the Manager verified into the session's live launch at ID-token
       /// issuance (Plan 06). Empty for a stopped session or before any login —
       /// bindings die with the launch.
@@ -86,6 +91,10 @@ type ProcessManager =
       /// issuance (docs/plans/07): the browser's peer id rode the authorize bounce.
       /// Same lifetime as UsersOf.
       PeersOf : SessionId -> Set<PeerId>
+      /// Has the session's live launch had an UNATTRIBUTED login — the strategy naming a
+      /// subject with nobody behind it? What makes `LocalScope` readable there. Same
+      /// lifetime as UsersOf; false under every attributed strategy.
+      LocalOf : SessionId -> bool
       /// The Manager's own HTTP endpoint (control RPC + management UI), when started.
       EndpointPort : int option
       /// How this deployment is reached from outside (docs/plans/09). The management UI
@@ -140,14 +149,40 @@ type Options =
       /// come back on the new one without the Manager having to restart.
       IdleTimeout : TimeSpan option }
 
-/// How the secret store is keyed on this host.
+/// How the secret store is keyed on this host — the RESOLVED outcome, after the host has
+/// been probed for a credential manager.
 and SecretsBacking =
     /// A usable OS credential manager holds the KEK; the encrypted store lives at
     /// <DataDir>/secrets.json.
     | DurableSecrets of KeyStore.KeyStore
-    /// No credential manager: the store runs in memory under a per-boot random key
-    /// and dies with the Manager. Loudly logged at boot; never a plaintext key file.
-    | EphemeralSecrets
+    /// The store runs in memory under a per-boot random key and dies with the Manager.
+    /// Never a plaintext key file. Carries WHY, because the two ways here deserve
+    /// different boot records: one is a deliberate posture, the other a degraded host.
+    | EphemeralSecrets of reason: EphemeralReason
+
+/// Why a store is in memory.
+and EphemeralReason =
+    /// `--secrets ephemeral`.
+    | OperatorChose
+    /// No usable OS credential manager on this host, and no `--secrets durable` demanding
+    /// one — the KEK has nowhere to live, so persistence is refused rather than degraded.
+    | NoCredentialManager
+
+/// What the OPERATOR asked for (`--secrets`), before the host is probed. A separate type
+/// from `SecretsBacking` because it has a case that outcome deliberately cannot represent:
+/// "I made no choice, use whatever this host can do".
+and SecretsMode =
+    /// No `--secrets`: durable where a credential manager answers, in-memory (loudly)
+    /// where none does.
+    | AutoSecrets
+    /// Persistence is REQUIRED. A host with no usable credential manager refuses the boot
+    /// rather than silently running a store that dies — asking for a capability this box
+    /// cannot host is an error, not a downgrade.
+    | RequireDurable
+    /// In-memory only, even where a credential manager is available. The posture for a
+    /// deployment whose credentials should not outlive the Manager — see
+    /// `docs/deployment.md` on `--auth localhost`.
+    | ForceEphemeral
 
 module Options =
     let defaults (dataDir: string) (sessionCommand: string) (sessionArgs: string list) : Options =
@@ -162,6 +197,51 @@ module Options =
           Strategy = None
           Secrets = None
           IdleTimeout = None }
+
+module SecretsMode =
+
+    /// Resolve a `--secrets` argument. None (no argument) is `AutoSecrets`; an unknown
+    /// name is an error the boot must fail loudly on, never a silent default — the same
+    /// rule, and the same shape, as `Strategy.ofName`.
+    ///
+    /// There is deliberately no `auto` spelling: absence already says "I made no choice",
+    /// and a word for it would let an operator believe they had chosen a posture when
+    /// they had inherited the host's accident.
+    let ofName (name: string option) : Result<SecretsMode, string> =
+        match name with
+        | None -> Ok AutoSecrets
+        | Some "durable" -> Ok RequireDurable
+        | Some "ephemeral" -> Ok ForceEphemeral
+        | Some other -> Error (sprintf "unknown secrets mode '%s' (expected durable or ephemeral)" other)
+
+    /// Is the credential-manager probe worth running for this mode? Only whether to spend
+    /// the probe — `forMode` still decides the outcome, and answers the same thing for
+    /// `ForceEphemeral` with or without a key store, so the two cannot disagree.
+    ///
+    /// Worth asking because the probe is not free: reaching for the platform credential
+    /// store can be slow, and on a desktop it can prompt. An operator who asked for an
+    /// in-memory store has already said not to use one.
+    let needsCredentialManager (mode: SecretsMode) : bool =
+        match mode with
+        | AutoSecrets | RequireDurable -> true
+        | ForceEphemeral -> false
+
+module SecretsBacking =
+
+    /// What a mode resolves to on a host that offered `keyStore` (None = no usable
+    /// credential manager). Pure — the probe happens at the boundary and its result is
+    /// passed in — so the whole matrix is testable without a keyring.
+    let forMode (mode: SecretsMode) (keyStore: KeyStore.KeyStore option) : Result<SecretsBacking, string> =
+        match mode, keyStore with
+        | ForceEphemeral, _ -> Ok (EphemeralSecrets OperatorChose)
+        | (AutoSecrets | RequireDurable), Some store -> Ok (DurableSecrets store)
+        | AutoSecrets, None -> Ok (EphemeralSecrets NoCredentialManager)
+        | RequireDurable, None ->
+            Error
+                "--secrets durable, but no OS credential manager answered on this host — the \
+                 secrets KEK has nowhere to live. Make one available (unlock the keychain, \
+                 start a Secret Service daemon), or pass --secrets ephemeral to accept a \
+                 store that dies with this Manager."
 
 [<Fable.Core.Emit("setTimeout($1, $0)")>]
 let private setTimeout (ms: int) (callback: unit -> unit) : obj = Fable.Core.Util.jsNative
@@ -195,7 +275,7 @@ let secretsApiFor
     : Control.SecretsApi =
     let authorize (caller: Control.ControlCaller) (action: SecretAction) (resource: AuthzResource) =
         let request =
-            { Subject = { Session = Some caller.SessionId; Users = caller.Users; Peers = caller.Peers }
+            { Subject = { Session = Some caller.SessionId; Users = caller.Users; Peers = caller.Peers; Local = caller.Local }
               Action = SecretAction action
               Resource = resource }
         match Policy.authorize request with
@@ -264,7 +344,7 @@ let connectionsApiFor
     : Control.ConnectionsApi =
     let authorize (caller: Control.ControlCaller) (action: ConnectionAction) (target: SecretId) =
         let request =
-            { Subject = { Session = Some caller.SessionId; Users = caller.Users; Peers = caller.Peers }
+            { Subject = { Session = Some caller.SessionId; Users = caller.Users; Peers = caller.Peers; Local = caller.Local }
               Action = ConnectionAction action
               Resource = SecretResource target }
         match Policy.authorize request with
@@ -324,9 +404,14 @@ let connectionsApiFor
       Status =
         fun caller ->
             // Every connection in the caller's own readable scopes (its session, its
-            // bound users, its witnessed peers) — the same walk injection uses. Entries
-            // that do not decode as broker envelopes are generic secrets and stay out.
-            SecretStore.SecretResolution.scopesFor caller.SessionId caller.Users caller.Peers
+            // bound users, its witnessed peers, and — where the deployment attributes
+            // nobody — its own) — the same walk injection uses. Entries that do not decode
+            // as broker envelopes are generic secrets and stay out.
+            //
+            // This list is also what lets a session name `LocalScope` on every turn
+            // without knowing the auth strategy: an attributed launch never sees one here,
+            // so the session's candidate filter drops it before anything is resolved.
+            SecretStore.SecretResolution.scopesFor caller.SessionId caller.Users caller.Peers caller.Local
             |> List.collect (fun scope -> store.List scope |> List.map (fun m -> m.Id))
             |> broker.StatusOf }
 
@@ -373,6 +458,11 @@ let createWithUi
     // rides the authorize bounce and is recorded at ID-token issuance, exactly like
     // launchUsers — keyed by the per-launch control secret, dying with the launch.
     let mutable launchPeers : Map<string, Set<PeerId>> = Map.empty
+    // Launches the Manager granted UNATTRIBUTED access to: an ID token whose strategy
+    // named a subject with no user behind it (`--auth localhost`). Keyed and revoked like
+    // the two above, and for the same reason — access is per-login, not per-installation.
+    // What makes `LocalScope` readable, and empty under every attributed strategy.
+    let mutable launchLocal : Set<string> = Set.empty
 
     // Manager→Session notifications (the reverse leg): live subscriber sinks keyed by the
     // same per-launch secret, so a session's stream dies exactly when its launch does.
@@ -435,6 +525,19 @@ let createWithUi
     let publishMcpServers () : unit =
         for record in state.Sessions do
             mcp.Publish record.SessionId (ManagerState.mcpServersFor record.SessionId state)
+
+    // Seed the hub from the state file at BOOT, not merely on the next change. A restart is
+    // the one moment when a declaration that is already DURABLE has never been published:
+    // `state` is loaded above with the operator's declarations in it, while every session's
+    // retained value is still the empty set this hub was created with. Without this, a
+    // session that reconnects after a Manager restart is handed that empty set, drops the
+    // server it had, and stays without it — while the declaration is still in the file and
+    // still on the management page, so nothing anywhere looks wrong — until somebody
+    // declares or withdraws something and the republish above happens to sweep it up.
+    //
+    // Observed exactly that way: a serial provider declared, working, and gone after an
+    // ordinary version promotion restarted the Manager under it.
+    publishMcpServers ()
 
     // Declare an MCP server. Durable before visible, like every other registry write, and
     // refused rather than resolved when the name would collide — the operator is standing
@@ -523,8 +626,8 @@ let createWithUi
     let audit : SecretStore.Audit.Sink = SecretStore.Audit.stdout
 
     // The secret store (Plan 06). A corrupt durable store fails the boot loudly — it
-    // must never look empty. The ephemeral mode warns loudly and leaves any durable
-    // file from a previous run untouched (inaccessible, never deleted).
+    // must never look empty. The ephemeral mode says so at boot and leaves any durable
+    // file from a previous run untouched (unread, never deleted).
     let secretsPath = sprintf "%s/secrets.json" options.DataDir
     let! secretStore =
         async {
@@ -538,8 +641,8 @@ let createWithUi
                 | Error e ->
                     audit (SecretStore.Audit.storeOpenFailed (SecretStore.OpenError.kind e) (SecretStore.OpenError.describe e))
                     return failwithf "secrets store: %s" (SecretStore.OpenError.describe e)
-            | Some EphemeralSecrets ->
-                audit SecretStore.Audit.storeEphemeral
+            | Some (EphemeralSecrets reason) ->
+                audit (SecretStore.Audit.storeEphemeral (reason = OperatorChose))
                 if Fs.exists secretsPath then
                     audit (SecretStore.Audit.storeInaccessible secretsPath)
                 match! SecretStore.openStore None (KeyStore.random ()) with
@@ -560,6 +663,11 @@ let createWithUi
             let existing = Map.tryFind controlSecret launchUsers |> Option.defaultValue Set.empty
             launchUsers <- Map.add controlSecret (Set.add subject existing) launchUsers
             claims |> Option.iter (fun c -> userClaims <- Map.add subject c userClaims)
+            // No claims = the strategy granted ACCESS without naming anyone behind it, so
+            // this launch can read the deployment's own credential. Read off the same
+            // value `yession_attribution` is derived from, so the two cannot disagree
+            // about whether a login was attributed.
+            if claims.IsNone then launchLocal <- Set.add controlSecret launchLocal
             peer
             |> Option.iter (fun p ->
                 let witnessed = Map.tryFind controlSecret launchPeers |> Option.defaultValue Set.empty
@@ -580,7 +688,8 @@ let createWithUi
         |> Option.map (fun sessionId ->
             { Control.ControlCaller.SessionId = sessionId
               Users = Map.tryFind secret launchUsers |> Option.defaultValue Set.empty
-              Peers = Map.tryFind secret launchPeers |> Option.defaultValue Set.empty })
+              Peers = Map.tryFind secret launchPeers |> Option.defaultValue Set.empty
+              Local = Set.contains secret launchLocal })
 
     // The connection broker (Plan 08): exists exactly when the secret store does — its
     // envelopes are ordinary encrypted entries. Standards-only; its one owned constant
@@ -646,6 +755,13 @@ let createWithUi
                 else acc)
             Set.empty
 
+    // Has ANY live launch of this session had an unattributed login? Same fold as the two
+    // above, and `any` for the same reason their union is: one launch's access is the
+    // session's access.
+    let localOf (sessionId: SessionId) : bool =
+        secretSessions
+        |> Map.exists (fun secret sid -> sid = sessionId && Set.contains secret launchLocal)
+
     // Session-scoped secret resolution (Plan 06): store-backed precedence (session
     // scope, then bound users' scopes, then the Manager's process env) when a store is
     // configured; bare process env otherwise. Serves the `/control/secrets/resolve`
@@ -654,7 +770,7 @@ let createWithUi
     let resolveSecret : SecretStore.ResolveSecret =
         match secretStore with
         | Some store ->
-            SecretStore.SecretResolution.compose (SecretStore.Audit.injectObserver audit) store usersOf peersOf SecretStore.SecretResolution.processEnv
+            SecretStore.SecretResolution.compose (SecretStore.Audit.injectObserver audit) store usersOf peersOf localOf SecretStore.SecretResolution.processEnv
         | None -> SecretStore.SecretResolution.processEnv
 
     let secretsApi : Control.SecretsApi option =
@@ -817,6 +933,7 @@ let createWithUi
                          provider.RevokeByControlSecret secret
                          launchUsers <- Map.remove secret launchUsers
                          launchPeers <- Map.remove secret launchPeers
+                         launchLocal <- Set.remove secret launchLocal
                      | None -> ())
                 // Plan 11: the idle clock starts BEFORE the spawn, not after it resolves.
                 //
@@ -947,8 +1064,10 @@ let createWithUi
           DeclareMcpServer = declareMcpServer
           WithdrawMcpServer = withdrawMcpServer
           McpServers = fun () -> state.McpServers
+          McpSetFor = fun sessionId -> mcp.Current sessionId
           UsersOf = usersOf
           PeersOf = peersOf
+          LocalOf = localOf
           EndpointPort = controlServer |> Option.map Interop.serverPort
           Public = options.Public
           StopAll =

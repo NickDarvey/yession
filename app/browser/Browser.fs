@@ -453,23 +453,28 @@ let private urlEncode (value: string) : string = jsNative
 
 // --- Claude connection panel round-trips (Plan 08) --------------------------------------
 // Thin fetches against the session's /claude* routes; the same-origin auth cookie rides
-// each one. Failures land as `ok: false` with the response text — the panel shows it.
+// each one, and IS the whole identity — the browser asserts nothing about who it is.
+// Failures land as `ok: false` with the response text — the panel shows it.
+//
+// These used to carry the peer id, and the credential was owned by it. A peer id lives in
+// origin-partitioned localStorage, so it changed under the person holding it and stranded
+// the credential behind every new one; ownership now comes off the cookie, Manager-side.
 
-[<Emit("""fetch($0 + '?peer_id=' + encodeURIComponent($1), { cache: 'no-store' })
-  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine, agent: !!s.agent })) : Promise.resolve({ ok: false, session: null, mine: null, agent: false }))
-  .catch(() => ({ ok: false, session: null, mine: null, agent: false }))""")>]
-let private fetchClaudeStatusAt (url: string) (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; agent: bool |}> = jsNative
+[<Emit("""fetch($0, { cache: 'no-store' })
+  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine, owner: s.owner, agent: !!s.agent })) : Promise.resolve({ ok: false, session: null, mine: null, owner: null, agent: false }))
+  .catch(() => ({ ok: false, session: null, mine: null, owner: null, agent: false }))""")>]
+let private fetchClaudeStatusAt (url: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; owner: string option; agent: bool |}> = jsNative
 
-let private fetchClaudeStatus (peerId: string) =
-    fetchClaudeStatusAt (SessionRoute.relative ClaudeStatus) peerId
+let private fetchClaudeStatus () =
+    fetchClaudeStatusAt (SessionRoute.relative ClaudeStatus)
 
 [<Emit("""fetch($0, { method: 'POST', headers: { 'content-type': 'application/json' }, body: $1 })
   .then(async r => ({ ok: r.ok, body: await r.text() }))
   .catch(e => ({ ok: false, body: String(e) }))""")>]
 let private postClaude (url: string) (body: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
 
-[<Emit("JSON.stringify({ scope: $0, peerId: $1, code: $2 || undefined, token: $3 || undefined })")>]
-let private claudeBody (scope: string) (peerId: string) (code: string) (token: string) : string = jsNative
+[<Emit("JSON.stringify({ scope: $0, code: $1 || undefined, token: $2 || undefined })")>]
+let private claudeBody (scope: string) (code: string) (token: string) : string = jsNative
 
 [<Emit("(() => { try { return JSON.parse($0).authorizeUrl || '' } catch { return '' } })()")>]
 let private parseAuthorizeUrl (body: string) : string = jsNative
@@ -481,16 +486,16 @@ let private panelInput (selector: string) : string = jsNative
 // Same fetch shapes as the Claude panel's; the flow differs (device code) so the two
 // extra parsers below read the begin/poll replies.
 
-[<Emit("""fetch($0 + '?peer_id=' + encodeURIComponent($1), { cache: 'no-store' })
+[<Emit("""fetch($0, { cache: 'no-store' })
   .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine })) : Promise.resolve({ ok: false, session: null, mine: null }))
   .catch(() => ({ ok: false, session: null, mine: null }))""")>]
-let private fetchGitHubStatusAt (url: string) (peerId: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
+let private fetchGitHubStatusAt (url: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
 
-let private fetchGitHubStatus (peerId: string) =
-    fetchGitHubStatusAt (SessionRoute.relative GitHubStatus) peerId
+let private fetchGitHubStatus () =
+    fetchGitHubStatusAt (SessionRoute.relative GitHubStatus)
 
-[<Emit("JSON.stringify({ scope: $0, peerId: $1, token: $2 || undefined })")>]
-let private githubBody (scope: string) (peerId: string) (token: string) : string = jsNative
+[<Emit("JSON.stringify({ scope: $0, token: $1 || undefined })")>]
+let private githubBody (scope: string) (token: string) : string = jsNative
 
 [<Emit("(() => { try { const o = JSON.parse($0); return { userCode: o.userCode || '', verificationUri: o.verificationUri || '', interval: o.interval || 5 } } catch { return { userCode: '', verificationUri: '', interval: 5 } } })()")>]
 let private parseDeviceBegin (body: string) : {| userCode: string; verificationUri: string; interval: int |} = jsNative
@@ -832,9 +837,9 @@ let private start () =
         let refreshClaude () =
             Async.StartImmediate (
                 async {
-                    let! status = fetchClaudeStatus (PeerId.value peerId) |> Async.AwaitPromise
+                    let! status = fetchClaudeStatus () |> Async.AwaitPromise
                     if status.ok then
-                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine; AgentAvailable = Some status.agent })
+                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine; Owner = status.owner; AgentAvailable = Some status.agent })
                 })
         let rec pollClaudeWhileAwaiting () =
             Async.StartImmediate (
@@ -865,7 +870,7 @@ let private start () =
             claudeAction
                 (fun () ->
                     async {
-                        let! reply = postClaude route (claudeBody scope (PeerId.value peerId) code token) |> Async.AwaitPromise
+                        let! reply = postClaude route (claudeBody scope code token) |> Async.AwaitPromise
                         if not reply.ok then return Error reply.body
                         elif expectUrl then
                             match parseAuthorizeUrl reply.body with
@@ -882,7 +887,7 @@ let private start () =
         let refreshGitHub () =
             Async.StartImmediate (
                 async {
-                    let! status = fetchGitHubStatus (PeerId.value peerId) |> Async.AwaitPromise
+                    let! status = fetchGitHubStatus () |> Async.AwaitPromise
                     if status.ok then
                         dispatchRef (GitHubStatusMsg { SessionCredential = status.session; MineCredential = status.mine })
                 })
@@ -899,7 +904,7 @@ let private start () =
                         let! reply =
                             postClaude
                                 (SessionRoute.relative (GitHub GitHubAction.Poll))
-                                (githubBody scope (PeerId.value peerId) "")
+                                (githubBody scope "")
                             |> Async.AwaitPromise
                         if not reply.ok then dispatchRef (GitHubFlowMsg (GitHubError reply.body))
                         else
@@ -1000,7 +1005,7 @@ let private start () =
                             let! reply =
                                 postClaude
                                     (SessionRoute.relative (GitHub GitHubAction.Begin))
-                                    (githubBody scope (PeerId.value peerId) "")
+                                    (githubBody scope "")
                                 |> Async.AwaitPromise
                             if not reply.ok then return Error reply.body
                             else
@@ -1020,7 +1025,7 @@ let private start () =
                                 let! reply =
                                     postClaude
                                         (SessionRoute.relative (GitHub GitHubAction.Token))
-                                        (githubBody scope (PeerId.value peerId) token)
+                                        (githubBody scope token)
                                     |> Async.AwaitPromise
                                 if not reply.ok then return Error reply.body else return Ok None
                             })
@@ -1031,7 +1036,7 @@ let private start () =
                             let! reply =
                                 postClaude
                                     (SessionRoute.relative (GitHub GitHubAction.Disconnect))
-                                    (githubBody scope (PeerId.value peerId) "")
+                                    (githubBody scope "")
                                 |> Async.AwaitPromise
                             if not reply.ok then return Error reply.body else return Ok None
                         })

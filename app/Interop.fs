@@ -232,11 +232,6 @@ let readAsset (assetName: string) (fallbackPath: string) (fs: obj) : string opti
 [<Emit("process.exit($0)")>]
 let exit (code: int) : unit = jsNative
 
-/// Was `--version` (or `-v`) passed? The two entries are otherwise configured from the
-/// environment; the Manager additionally reads `--auth` (see `argValue`).
-[<Emit("process.argv.slice(2).some(a => a === '--version' || a === '-v')")>]
-let versionFlag () : bool = jsNative
-
-/// The value of a `--name value` (or `--name=value`) argument; None when absent.
-[<Emit("(() => { const args = process.argv.slice(2); for (let i = 0; i < args.length; i++) { if (args[i] === '--' + $0) return args[i + 1] ?? null; if (args[i].startsWith('--' + $0 + '=')) return args[i].slice($0.length + 3); } return null })()")>]
-let argValue (name: string) : string option = jsNative
+// Command-line reading lives in `Cli`, over Node's own `parseArgs`. There used to be a
+// `versionFlag` and an `argValue` here that scanned `process.argv` by hand; they could not
+// tell an unknown option from an absent one, so a typo ran the bin with the option missing.

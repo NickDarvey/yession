@@ -81,11 +81,20 @@ let targetFor (sessionId: SessionId) (owner: CredentialOwner) (scopeChoice: stri
     | other -> Error (sprintf "unknown scope choice '%s' (expected 'session' or 'mine')" other)
 
 /// The per-turn credential targets, most specific first: the session's own explicit
-/// credential, then the turn actor's. Mirrors secret-injection precedence.
+/// credential, then the turn actor's own, then the deployment's. Mirrors secret-injection
+/// precedence.
+///
+/// `LocalScope` is named on EVERY turn, with no test of how this deployment authenticates
+/// — the session does not know and does not need to. A launch only ever sees a target in
+/// the Manager's status stream if the Manager holds it readable, and an attributed launch
+/// is never granted local access, so the candidate filter drops it before anything is
+/// resolved. The Manager's readable set is the single authority; a second copy of that
+/// judgement here could only drift from it.
 let turnTargets (sessionId: SessionId) (actor: ActorRef) : SecretId list =
     [ Some { SecretId.Scope = SessionScope sessionId; Name = secretName }
       CredentialOwner.ofActor actor
-      |> Option.map (fun owner -> { SecretId.Scope = CredentialOwner.scope owner; Name = secretName }) ]
+      |> Option.map (fun owner -> { SecretId.Scope = CredentialOwner.scope owner; Name = secretName })
+      Some { SecretId.Scope = LocalScope; Name = secretName } ]
     |> List.choose id
 
 /// A human label for a turn actor, for the "not connected" failure message.
@@ -99,20 +108,21 @@ let actorLabel (actor: ActorRef) : string =
 
 // --- the browser-facing /claude* routes -----------------------------------------------
 // Thin proxies over the Manager's broker, gated by the same cookie identity as /me.
-// The browser's scope choice + identity become a target; the Manager's policy is the
-// authority (a forged peer id outside the launch is denied there, exactly like the
-// /login bounce's self-asserted peer_id).
+// The browser's scope choice becomes a target; who owns it comes from the COOKIE, and the
+// Manager's policy is the authority (a launch that was never granted local access, or a
+// user never bound to it, is denied there).
+//
+// The browser asserts no identity here at all any more. It used to send its own peer id
+// and have the credential owned by it — see `ownerOf`.
 
 type private ClaudeRequestBody =
     { Scope : string
-      PeerId : string option
       Code : string option
       Token : string option }
 
 let private bodyDecoder : Decoder<ClaudeRequestBody> =
     Decode.object (fun get ->
         { Scope = get.Optional.Field "scope" Decode.string |> Option.defaultValue "mine"
-          PeerId = get.Optional.Field "peerId" Decode.string
           Code = get.Optional.Field "code" Decode.string
           Token = get.Optional.Field "token" Decode.string })
 
@@ -131,15 +141,17 @@ let private respondText (res: ServerResponse) (status: int) (text: string) =
 
 let private jsonString (raw: string) : string = Encode.toString 0 (Encode.string raw)
 
-/// The credential owner behind a browser request: the cookie's Manager-verified user,
-/// or — for unattributed access — the browser's own stable peer id.
-let private ownerOf (identity: CookieIdentity) (peerIdRaw: string option) : Result<CredentialOwner, string> =
+/// The credential owner behind a browser request: the cookie's Manager-verified user, or
+/// — where this deployment attributes nobody — the deployment itself.
+///
+/// Total, and it asks the browser for nothing. It used to take the browser's self-asserted
+/// peer id and own the credential by that; a peer id lives in origin-partitioned
+/// localStorage, so it changed under the person holding it and stranded the credential
+/// behind every new one. The cookie's attribution is Manager-minted and is the whole input.
+let ownerOf (identity: CookieIdentity) : CredentialOwner =
     match identity.Attribution with
-    | AttributedUser user -> Ok (UserOwner user)
-    | UnattributedAccess ->
-        match peerIdRaw with
-        | Some raw -> PeerId.create raw |> Result.map PeerOwner
-        | None -> Error "peer id required for an unattributed connection"
+    | AttributedUser user -> UserOwner user
+    | UnattributedAccess -> LocalOwner
 
 /// Build the /claude* route handler. `statusOf` reads the session's live status cache
 /// (fed by the Manager's connection stream); `agentAvailable` is the agent gate's own
@@ -168,71 +180,70 @@ let routes
             | None -> respondText res 401 "unauthorized"
             | Some identity ->
                 let handle (body: ClaudeRequestBody) : unit =
-                    match ownerOf identity body.PeerId with
-                    | Error e -> respondText res 400 e
-                    | Ok owner ->
-                        let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
-                        match routeOf () with
-                        | Some ClaudeStatus ->
-                            let statusJson (target: SecretId) =
-                                match statusOf target with
-                                | Some kind -> jsonString (kindLabel kind)
-                                | None -> "null"
-                            let sessionTarget : SecretId = { Scope = SessionScope sessionId; Name = secretName }
-                            let mineTarget : SecretId = { Scope = CredentialOwner.scope owner; Name = secretName }
-                            let ownerLabel =
-                                match owner with
-                                | UserOwner _ -> "user"
-                                | PeerOwner _ -> "peer"
-                            respondJson res 200
-                                (sprintf """{"session":%s,"mine":%s,"owner":"%s","agent":%b}"""
-                                    (statusJson sessionTarget) (statusJson mineTarget) ownerLabel (agentAvailable ()))
-                        | Some (Claude action) ->
-                            match targetFor sessionId owner body.Scope with
-                            | Error e -> respondText res 400 e
-                            | Ok target ->
-                                let respondOutcome (outcome: Result<string, string>) =
-                                    match outcome with
-                                    | Ok json -> respondJson res 200 json
-                                    | Error e -> respondText res 400 e
-                                Async.StartImmediate (
-                                    async {
-                                        match action with
-                                        | ClaudeAction.Begin ->
-                                            let! outcome = connections.Begin (beginRequest target)
-                                            respondOutcome (
-                                                outcome
-                                                |> Result.map (fun r ->
-                                                    sprintf """{"authorizeUrl":%s,"state":%s}"""
-                                                        (jsonString r.AuthorizeUrl) (jsonString r.State)))
-                                        | ClaudeAction.Complete ->
-                                            match body.Code with
-                                            | None -> respondText res 400 "missing code"
-                                            | Some code ->
-                                                let! outcome = connections.Complete target code
-                                                respondOutcome (outcome |> Result.map (fun () -> """{"ok":true}"""))
-                                        | ClaudeAction.Token ->
-                                            match body.Token |> Option.map classifyPasted with
-                                            | None -> respondText res 400 "missing token"
-                                            | Some (Error e) -> respondText res 400 e
-                                            | Some (Ok token) ->
-                                                let! outcome = connections.Put target token
-                                                respondOutcome (outcome |> Result.map (fun () -> """{"ok":true}"""))
-                                        | ClaudeAction.Disconnect ->
-                                            let! outcome = connections.Disconnect target
-                                            respondOutcome (
-                                                outcome
-                                                |> Result.map (fun existed ->
-                                                    sprintf """{"disconnected":%b}""" existed))
-                                    })
-                        // Unreachable: this handler only runs for the two cases above.
-                        | Some _
-                        | None -> respondText res 404 "not found"
+                    let owner = ownerOf identity
+                    let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
+                    match routeOf () with
+                    | Some ClaudeStatus ->
+                        let statusJson (target: SecretId) =
+                            match statusOf target with
+                            | Some kind -> jsonString (kindLabel kind)
+                            | None -> "null"
+                        let sessionTarget : SecretId = { Scope = SessionScope sessionId; Name = secretName }
+                        let mineTarget : SecretId = { Scope = CredentialOwner.scope owner; Name = secretName }
+                        // What "mine" MEANS here, so the panel can say it honestly:
+                        // one person's credential, or this whole deployment's.
+                        let ownerLabel =
+                            match owner with
+                            | UserOwner _ -> "user"
+                            | LocalOwner -> "local"
+                        respondJson res 200
+                            (sprintf """{"session":%s,"mine":%s,"owner":"%s","agent":%b}"""
+                                (statusJson sessionTarget) (statusJson mineTarget) ownerLabel (agentAvailable ()))
+                    | Some (Claude action) ->
+                        match targetFor sessionId owner body.Scope with
+                        | Error e -> respondText res 400 e
+                        | Ok target ->
+                            let respondOutcome (outcome: Result<string, string>) =
+                                match outcome with
+                                | Ok json -> respondJson res 200 json
+                                | Error e -> respondText res 400 e
+                            Async.StartImmediate (
+                                async {
+                                    match action with
+                                    | ClaudeAction.Begin ->
+                                        let! outcome = connections.Begin (beginRequest target)
+                                        respondOutcome (
+                                            outcome
+                                            |> Result.map (fun r ->
+                                                sprintf """{"authorizeUrl":%s,"state":%s}"""
+                                                    (jsonString r.AuthorizeUrl) (jsonString r.State)))
+                                    | ClaudeAction.Complete ->
+                                        match body.Code with
+                                        | None -> respondText res 400 "missing code"
+                                        | Some code ->
+                                            let! outcome = connections.Complete target code
+                                            respondOutcome (outcome |> Result.map (fun () -> """{"ok":true}"""))
+                                    | ClaudeAction.Token ->
+                                        match body.Token |> Option.map classifyPasted with
+                                        | None -> respondText res 400 "missing token"
+                                        | Some (Error e) -> respondText res 400 e
+                                        | Some (Ok token) ->
+                                            let! outcome = connections.Put target token
+                                            respondOutcome (outcome |> Result.map (fun () -> """{"ok":true}"""))
+                                    | ClaudeAction.Disconnect ->
+                                        let! outcome = connections.Disconnect target
+                                        respondOutcome (
+                                            outcome
+                                            |> Result.map (fun existed ->
+                                                sprintf """{"disconnected":%b}""" existed))
+                                })
+                    // Unreachable: this handler only runs for the two cases above.
+                    | Some _
+                    | None -> respondText res 404 "not found"
                 match req.``method`` with
                 | "GET" ->
                     handle
                         { Scope = "mine"
-                          PeerId = Interop.queryParamOf req.url "peer_id"
                           Code = None
                           Token = None }
                 | _ ->

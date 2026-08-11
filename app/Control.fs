@@ -54,7 +54,11 @@ open Yession.Host.Interop
 type ControlCaller =
     { SessionId : SessionId
       Users : Set<UserId>
-      Peers : Set<PeerId> }
+      Peers : Set<PeerId>
+      /// Was any login into this launch UNATTRIBUTED — the strategy naming a subject with
+      /// no user behind it (`--auth localhost`)? What makes `LocalScope` readable, and
+      /// false under every attributed strategy.
+      Local : bool }
 
 /// A secrets-route failure: a policy Deny (403, with the policy's reason) or a store
 /// failure (500). Distinct so the route arms stay thin and policy-free — only the

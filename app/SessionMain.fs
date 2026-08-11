@@ -12,11 +12,11 @@ open Yession.Domain
 open Yession.SessionProcess
 open Yession.Host
 
-// `--version` answers before any configuration is read: no data directory, no ports, no
-// Manager. It is the one thing a Session Process will do without a session.
-if Interop.versionFlag () then
-    printfn "%s" Version.current
-    Interop.exit 0
+// This bin takes no options of its own — everything it needs arrives in the environment the
+// Manager spawns it with. `--version` and `--help` still answer, before any configuration is
+// read: no data directory, no ports, no Manager. They are the only things a Session Process
+// will do without a session.
+Cli.parseOrExit (Cli.spec "yession-session" []) Version.current |> ignore
 
 let private expect =
     function
@@ -595,7 +595,17 @@ let private credentialProbe (credential: (string * string) option) : RunAgent =
 // is live. Without either the session still works as a human-only collaborative
 // session — messages drain to `MessageSent` with no turn.
 let private connectedSomewhere () =
-    connectionStatus |> Map.exists (fun target _ -> target.Name = ClaudeConnection.secretName)
+    // Only scopes a TURN can actually reach. A pre-`LocalScope` deployment can still hold
+    // peer-scoped claude entries, and they remain readable (the peer is witnessed) — but
+    // nothing dispatches on them any more, so counting them here would open the gate on a
+    // credential every turn then fails to find. The gate has to promise what the
+    // dispatcher can deliver.
+    connectionStatus
+    |> Map.exists (fun target _ ->
+        target.Name = ClaudeConnection.secretName
+        && (match target.Scope with
+            | PeerScope _ -> false
+            | SessionScope _ | UserScope _ | LocalScope -> true))
 
 let private runAgent () : RunAgent option =
     match Interop.envOr "YESSION_AGENT" "" with

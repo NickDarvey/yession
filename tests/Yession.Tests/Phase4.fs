@@ -325,7 +325,7 @@ let private startControlServer (secrets: (string * SessionId) list) : Async<Inte
         let table =
             secrets
             |> List.map (fun (secret, sessionId) ->
-                let caller : Control.ControlCaller = { SessionId = sessionId; Users = Set.empty; Peers = Set.empty }
+                let caller : Control.ControlCaller = { SessionId = sessionId; Users = Set.empty; Peers = Set.empty; Local = false }
                 secret, caller)
             |> Map.ofList
         let hub = NotificationHub.create ()
@@ -1229,6 +1229,41 @@ let private mcpStreamTests =
                 Expect.equal (List.length received) settled "after cancel, no further sets arrive"
 
                 server.close ignore
+            }
+
+        // The declarations are durable and the hub is not, so a restart is the one moment
+        // the two can disagree — and they did: a provider declared, working, and silently
+        // gone after a version promotion restarted the Manager under it. The declaration was
+        // still in the state file and still on the management page the whole time, which is
+        // what made it invisible. Asserted against the hub's retained value, because that is
+        // what a reconnecting session is HANDED; resolving the declarations again here would
+        // pass with the bug in place.
+        testCaseAsync "a Manager restarted over a declaration hands a session that declaration, not an empty set" <|
+            async {
+                let dataDir =
+                    sprintf
+                        "tests/Yession.Tests/out/.data/mcp-restart-%d"
+                        (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+                let options =
+                    { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                        Strategy = Some Strategy.localhost }
+
+                let! pm = ProcessManager.create options
+                let record = pm.CreateSession "mcp-restart" "MCP restart" |> expect
+                pm.DeclareMcpServer { Server = serialServer; Audience = AnySession } |> expect
+                Expect.equal
+                    (pm.McpSetFor record.SessionId)
+                    { Servers = [ serialServer ] }
+                    "declaring publishes to the session's retained set"
+                do! pm.StopAll ()
+
+                // A restart: same data dir, nothing declared this time round.
+                let! restarted = ProcessManager.create options
+                Expect.equal
+                    (restarted.McpSetFor record.SessionId)
+                    { Servers = [ serialServer ] }
+                    "the durable declaration is waiting for the session, without anyone re-declaring it"
+                do! restarted.StopAll ()
             }
     ]
 

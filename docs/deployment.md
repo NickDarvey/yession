@@ -1,8 +1,9 @@
 # Deployment
 
-Two things must be settled before Yession is reachable from anywhere but the machine it runs
-on: **who** the humans at this Manager are, and **where** the Manager and its sessions answer.
-Both are configured on the Manager; sessions inherit what they need by plain env inheritance.
+Three things must be settled before Yession is reachable from anywhere but the machine it runs
+on: **who** the humans at this Manager are, **where** the Manager and its sessions answer, and
+**how long** the credentials they connect live. All three are configured on the Manager;
+sessions inherit what they need by plain env inheritance.
 
 The interfaces below are what Yession asks of whatever sits in front of it. The integrations
 are worked examples of one thing satisfying them.
@@ -27,11 +28,55 @@ yession-manager --auth trusted-headers   # an authenticating proxy in front
 | `localhost` | Any loopback request is the single unattributed subject `local`. |
 | `trusted-headers` | The proxy in front asserts the user in canonical `x-yession-*` headers, trusted verbatim. |
 
-An unknown name fails the boot loudly rather than defaulting to anything.
+An unknown name fails the boot loudly rather than defaulting to anything — as does an
+unknown OPTION, which matters more than it sounds: `--auht localhost` used to be ignored,
+and an ignored `--auth` is deny-everything, so a typo presented as a Manager that refused
+everyone. Every bin answers `--help` with what it accepts.
 
 `trusted-headers` **replaces** `localhost` and must never compose with it. Behind a
 loopback-terminating proxy every request arrives over loopback, so composing them would
 authenticate a header-less request as `local` — the bypass the proxy exists to prevent.
+
+#### What the trust rule decides about credentials
+
+The rule does not only name subjects for the audit trail. It decides **who owns** a Claude or
+GitHub account connected from inside a session for "all my sessions":
+
+| `--auth` | "All my sessions" means |
+|---|---|
+| `trusted-headers` | That user. Nobody else's turn can run on it, in any session. |
+| `localhost` | **This deployment.** Every visitor is the same unattributed subject, so one connection serves every session, browser and device that reaches this Manager. |
+
+Under `localhost` that is not a leak, it is the trust rule stated honestly: anyone who can
+reach the Manager can already open and drive every session on it. It also has a cost worth
+seeing before you choose it — see [below](#what---auth-localhost-costs-here).
+
+### Credentials
+
+How long a connected credential lives, chosen once at Manager start:
+
+```sh
+yession-manager --secrets ephemeral   # dies with this Manager
+yession-manager --secrets durable     # persistence required, or refuse to boot
+```
+
+| `--secrets` | Behaviour |
+|---|---|
+| *(absent)* | Durable where the OS credential manager answers; in-memory, with a warning, where none does. |
+| `durable` | Persistence is required. A host with no usable credential manager **refuses the boot** rather than quietly running a store that dies. |
+| `ephemeral` | In-memory only, even where a credential manager is available. Any existing `secrets.json` is left untouched and unread. |
+
+An unknown name fails the boot loudly, exactly like `--auth`.
+
+Durable secrets ride the OS credential manager: the store's master key lives in the macOS
+Keychain / Windows Credential Manager / Linux Secret Service, and the secrets themselves in one
+AES-256-GCM-encrypted file in the Manager's data directory. There is deliberately no plaintext
+key file and no environment-variable key — a host without a credential manager refuses
+persistence instead of degrading it.
+
+`--secrets ephemeral` is the compensating control for the `localhost` row above: it bounds a
+deployment-wide credential to the life of the Manager process, so a connection is something a
+human did during this boot rather than something the installation carries forever.
 
 #### The header scheme
 
@@ -187,6 +232,21 @@ is attributed to one shared identity.
 On a personal tailnet that is coherent — there is one human, and `local` is their name. On a
 tailnet with anyone else on it, it means the audit trail says `local` for work several people
 did, and there is no way to tell afterwards which of them did what.
+
+It costs more than the audit trail. Because every visitor is that one subject, a Claude account
+connected for "all my sessions" belongs to the **deployment**: any tailnet visitor's agent turn
+runs on it, and spends against it. That is the same boundary as the rest of the rule — they
+could already open your sessions and read everything in them — but it is worth deciding rather
+than discovering.
+
+Two ways to bound it, and they answer different questions:
+
+- **`--secrets ephemeral`** — keep `localhost`, but tie the credential to the Manager process.
+  Someone has to have connected it during this boot; a reboot or a redeploy means connecting
+  again. Use this when the sharing is fine and the permanence is not.
+- **`--auth trusted-headers`** — remove the sharing outright. Each human owns their own
+  credential, and nobody else's turn can run on it. Use this the moment a second person is on
+  the tailnet.
 
 #### Addressing
 
