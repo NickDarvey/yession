@@ -44,6 +44,13 @@ Items are roughly ordered by how much they matter.
   The provider narrows this by refusing to list ports it does not recognise (an
   unrecognised tty is usually the machine's own console), which is a policy, not a
   boundary. Its control leg is unauthenticated and must stay on loopback.
+- **A second local address, unauthenticated, beside the provider**
+  ([Plan 18](plans/18-jumpstarter.md)): the jumpstarter example talks to an exporter that
+  serves gRPC with `--tls-grpc-insecure` and no passphrase, so its claim arbitrates the
+  provider's clients and nothing else — any process on the box can dial the exporter
+  directly and take the hardware out from under a holder. One host, one operator and
+  loopback make that acceptable; a shared machine would need the passphrase upstream
+  already supports, and a controller would replace the claim with a lease outright.
 - **A provider's lifecycle is nobody's** ([Plan 16](plans/16-serial-devices.md)): who
   starts a provider — systemd, launchd, an operator, nothing — is unsettled, and "the
   Manager only declares" argues for nothing. Softened by Plan 17's poll, which retries a

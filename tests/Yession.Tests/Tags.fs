@@ -43,6 +43,7 @@ type Need =
     | Srt         // OS-level confinement: bubblewrap + socat on Linux, Seatbelt on macOS
     | Pty         // the native `node-pty` addon — a real pseudo-terminal, not a pipe
     | Serial      // a real serial engine: the `serialport` addon, `udevadm`, and socat for a PTY pair
+    | Jumpstarter // uv, and a resolvable Python environment for the jumpstarter example
 
 // process.env under Node; the CLR reads it through System.Environment below. Guarded so this
 // branch is dead-code-eliminated out of the .NET build path — jsNative would throw there.
@@ -55,7 +56,7 @@ let private getEnv (name: string) : string =
         match System.Environment.GetEnvironmentVariable name with null -> "" | v -> v
     else jsEnv name
 
-let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix; Srt; Pty; Serial ]
+let private allNeeds = [ Browser; Ports; Native; Docker; LiveAgent; Keyring; Nix; Srt; Pty; Serial; Jumpstarter ]
 
 let private parseNeed (s: string) : Need option =
     match s.Trim().ToLowerInvariant () with
@@ -69,6 +70,7 @@ let private parseNeed (s: string) : Need option =
     | "srt"       -> Some Srt
     | "pty"       -> Some Pty
     | "serial"    -> Some Serial
+    | "jumpstarter" -> Some Jumpstarter
     | _           -> None
 
 /// The capabilities THIS run declares it has. `YESSION_TEST_CAPS` is the primary API (a

@@ -1,0 +1,41 @@
+[project]
+name = "jumpstarter-provider"
+version = "0.1.0"
+description = "An example MCP server that lends a Jumpstarter exporter to an agent."
+requires-python = ">=3.11"
+
+# Jumpstarter is pinned EXACTLY. Its driver clients are imported by name out of the
+# exporter's own report (`JMP_DRIVERS_ALLOW`), so a minor release that renames one is a
+# runtime failure, not a type error — and this example is deployed by resolving these
+# ranges fresh (`uv tool run --from git+…`), which never sees the lock below.
+#
+# The MCP and ASGI halves are ordinary libraries and take ordinary ranges.
+dependencies = [
+    "jumpstarter==0.8.1",
+    "jumpstarter-driver-composite==0.8.1",
+    "jumpstarter-driver-power==0.8.1",
+    "jumpstarter-driver-pyserial==0.8.1",
+    "mcp>=2.0,<3",
+    "pexpect>=4.9",
+    "uvicorn>=0.34",
+]
+
+[project.scripts]
+jumpstarter-provider = "jumpstarter_provider.main:main"
+
+[dependency-groups]
+# The exporter the suite runs against is the real one, spawned as `jmp run`.
+dev = [
+    "jumpstarter-cli==0.8.1",
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jumpstarter_provider"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

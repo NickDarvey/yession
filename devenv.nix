@@ -42,8 +42,12 @@ in
   # systemd because it is the standalone udev — its `udevadm info` answers from sysfs with no
   # daemon running, which a container has none of. socat is what makes the rest testable with
   # no hardware: a PTY pair is a serial port at both ends.
+  # uv + a CPython back the `Jumpstarter` capability: the jumpstarter example is a uv project,
+  # and the suite that drives it runs `uv run --project`. UV_PYTHON_DOWNLOADS=never below is
+  # what makes this interpreter the one it uses — otherwise uv fetches an interpreter of its
+  # own, which is a second, unpinned toolchain arriving over the network mid-run.
   packages =
-    [ pkgs.git pkgs.actionlint ]
+    [ pkgs.git pkgs.actionlint pkgs.uv pkgs.python312 ]
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux
          [ pkgs.dbus pkgs.gnome-keyring pkgs.bubblewrap pkgs.socat pkgs.ripgrep pkgs.eudev ];
 
@@ -57,6 +61,9 @@ in
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.socat}/bin/socat";
   env.YESSION_RIPGREP_PATH =
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.ripgrep}/bin/rg";
+
+  env.UV_PYTHON = "${pkgs.python312}/bin/python3.12";
+  env.UV_PYTHON_DOWNLOADS = "never";
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";

@@ -30,6 +30,7 @@
     <Compile Include="Tools.fs" />
     <Compile Include="Mcp.fs" />
     <Compile Include="SerialEngine.fs" />
+    <Compile Include="Jumpstarter.fs" />
     <Compile Include="OtlpStub.fs" />
     <Compile Include="Sync.fs" />
     <Compile Include="Terminals.fs" />
