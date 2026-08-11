@@ -1,0 +1,18 @@
+# The exporter the suite runs against: no hardware, and nothing mocked that matters.
+#
+# `MockPower` is upstream's own stand-in, and `loop://` is pyserial's loopback — whatever is
+# written to the console comes back from it. Between them, a test can prove the whole path
+# (MCP → claim → SDK → gRPC → driver → back) without a board on the desk, which is the same
+# trick the serial example plays with a pty pair.
+apiVersion: jumpstarter.dev/v1alpha1
+kind: ExporterConfig
+metadata:
+  namespace: default
+  name: suite
+export:
+  power:
+    type: jumpstarter_driver_power.driver.MockPower
+  serial:
+    type: jumpstarter_driver_pyserial.driver.PySerial
+    config:
+      url: "loop://"

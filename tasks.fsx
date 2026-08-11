@@ -417,7 +417,9 @@ let stage (version: string) =
 
 // What each bin says when it is up, quoted once so a caller cannot smoke the wrong line.
 let managerReady = "management UI at"
-let serialReady = "MCP at"
+// Both examples are MCP servers, and both announce their control url the same way. One
+// string, because "the provider is up" is one fact however the provider was written.
+let providerReady = "MCP at"
 
 // The Manager's smoke arguments. `--secrets ephemeral` matches the throwaway data dir: a smoke
 // boot has no business minting a KEK in the developer's real Keychain, and it makes the boot
@@ -451,6 +453,7 @@ let bootSmoke (ready: string) (command: string) (arguments: string list) =
     psi.EnvironmentVariables.["YESSION_DATA_DIR"] <- dataDir
     psi.EnvironmentVariables.["YESSION_MANAGER_PORT"] <- "0"
     psi.EnvironmentVariables.["YESSION_SERIAL_PORT"] <- "0"
+    psi.EnvironmentVariables.["JUMPSTARTER_PROVIDER_PORT"] <- "0"
     let p = Process.Start psi
 
     try
@@ -511,6 +514,22 @@ let installSmoke (tgz: string) =
 // They are built here anyway, because an example that does not compile is worse than none, and
 // because the suite drives one of them. The bundle keeps `serialport` external for the same
 // reason the product's does: a native addon cannot be bundled, it resolves at run time.
+//
+// An example is built the way ITS OWN ecosystem builds one, which is the point of the
+// examples at all: the F# one goes through Fable and esbuild, the Python one through uv. What
+// they owe this verb is identical and small — compile, and then BOOT, because an example that
+// does not start is worse than none.
+let private pythonExample (dir: string) (name: string) =
+    // `uv sync` against the committed lock, so the suite runs the resolution the author had
+    // rather than whatever PyPI holds today. (The DEPLOYMENT resolves fresh from the ranges
+    // in pyproject.toml — uvx from a git ref never sees a lock — which is why those ranges
+    // are pinned where the API is not stable.)
+    exec "uv" [ "sync"; "--project"; dir; "--all-groups" ]
+    printfn "testing example %s" name
+    exec "uv" [ "run"; "--project"; dir; "pytest"; "-q" ]
+    bootSmoke providerReady "uv" [ "run"; "--project"; dir; name + "-provider" ]
+    printfn "built and tested examples/%s" name
+
 let example (name: string) =
     let dir = Path.Combine (repoRoot, "examples", name)
     if not (Directory.Exists dir) then
@@ -519,6 +538,8 @@ let example (name: string) =
             |> Array.map Path.GetFileName
             |> String.concat ", "
         failwithf "no example called '%s' (have: %s)" name available
+    if File.Exists (Path.Combine (dir, "pyproject.toml")) then pythonExample dir name else
+
     let project = Directory.GetFiles (dir, "*.fsproj") |> Array.exactlyOne
     restore ()
     printfn "building example %s" name
@@ -543,7 +564,7 @@ let example (name: string) =
           "--external:serialport"; sprintf "--outfile=%s" outFile ]
     |> ignore
     // A build is not a boot, here for the same reason it is not one for the product's bins.
-    bootSmoke serialReady "node" [ outFile ]
+    bootSmoke providerReady "node" [ outFile ]
     printfn "built examples/%s/dist/main.js" name
 
 // --- check: capability-gated test orchestration ----------------------------------------------
@@ -568,7 +589,11 @@ let private runNodeSuite (target: string) (timeoutMs: int) =
 
 // Ask the box whether it really has a capability, by running the cheapest command that can
 // only succeed if it does. A missing binary, a non-zero exit and a hang all answer false.
-let private probeSucceeds (command: string) (arguments: string list) =
+//
+// The deadline is a parameter because one probe is not cheap: resolving a Python environment
+// fetches wheels the first time, and thirty seconds would make `check Jumpstarter` refuse on a
+// cold cache and pass on a warm one — a capability that depends on what you did yesterday.
+let private probeWithin (timeoutMs: int) (command: string) (arguments: string list) =
     try
         let psi = ProcessStartInfo command
         arguments |> List.iter psi.ArgumentList.Add
@@ -576,11 +601,13 @@ let private probeSucceeds (command: string) (arguments: string list) =
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
         use p = Process.Start psi
-        if p.WaitForExit 30000 then p.ExitCode = 0
+        if p.WaitForExit timeoutMs then p.ExitCode = 0
         else
             p.Kill true
             false
     with _ -> false
+
+let private probeSucceeds (command: string) (arguments: string list) = probeWithin 30000 command arguments
 
 // `docker info` talks to the daemon over the same socket / DOCKER_HOST the dockerode backend
 // uses, so it answers the question the suites care about (not merely "is the socket file
@@ -648,6 +675,14 @@ let private serialAvailable () =
               "import('serialport').then(m => m.SerialPort.list()).then(() => process.exit(0), () => process.exit(1))" ]
     probeSucceeds socat [ "-V" ] && listed
 
+// uv, an interpreter it can resolve, and every dependency the jumpstarter example locked —
+// probed by BUILDING that environment, because each of those three is a way for this to be
+// absent and only the last one is visible from outside. `--frozen` makes it the lock's
+// resolution or nothing: a probe that quietly re-resolved would answer a different question
+// from the one the suite goes on to ask.
+let private jumpstarterAvailable () =
+    probeWithin 600000 "uv" [ "sync"; "--project"; "examples/jumpstarter"; "--all-groups"; "--frozen" ]
+
 // ASKING FOR A CAPABILITY IS REQUIRING IT. A run names the capabilities it wants; anything it
 // named and cannot host is an ERROR, with the reason, before a single test runs.
 //
@@ -674,6 +709,10 @@ let private requireCapabilities (caps: string list) =
           if List.contains "Serial" caps && not (serialAvailable ()) then
             "Serial: no working serial engine (needs the `serialport` addon, `udevadm` for "
             + "enumeration, and socat for a PTY pair — `devenv shell` provides all three on Linux)"
+          if List.contains "Jumpstarter" caps && not (jumpstarterAvailable ()) then
+            "Jumpstarter: the example's Python environment would not resolve (needs `uv` and a "
+            + "CPython >= 3.11 it can find, plus a network on the first run — try "
+            + "`uv sync --project examples/jumpstarter --all-groups`)"
           if List.contains "Srt" caps && not (srtAvailable ()) then
             "Srt: no working confinement (bubblewrap, socat, ripgrep, and — under the strict "
             + "profile — a nested user namespace; an unprivileged container needs "
@@ -830,7 +869,9 @@ let check (caps: string list) =
     runCheckOnce caps
 
 let verify () =
-    check [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt"; "Pty"; "Serial" ]
+    check
+        [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt"; "Pty"; "Serial"
+          "Jumpstarter" ]
 
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 

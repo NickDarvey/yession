@@ -96,9 +96,16 @@ shipped bin reaching into `Yession.Host.Interop` and the Domain's tool vocabular
 and it demonstrated a path no reader could reproduce. If an example needs something the
 product has, it copies it and owns the copy; the duplication is the point, not a smell.
 
+An example is written in whatever the thing it integrates is written in, and the verb follows
+it: `examples/serial` is F# through Fable and esbuild, `examples/jumpstarter` is a uv project
+with its own pytest suite, and `example <name>` dispatches on which it finds. A provider is a
+server, not a plugin — an examples directory that could only hold this repository's language
+would be arguing the opposite.
+
 The suite still tests them (the serial provider's own tests are the reason `Serial` exists as
-a capability), via a ProjectReference from `tests/Yession.Tests`. That reference goes ONE way:
-nothing in the product may reference an example.
+a capability, and the jumpstarter provider's the reason `Jumpstarter` does), via a
+ProjectReference from `tests/Yession.Tests` for the F# one and a spawned process for the
+Python one. Both go ONE way: nothing in the product may reference an example.
 
 ## UI baseline
 
@@ -207,8 +214,10 @@ check Srt                    # + the sandbox escape probes: read/write/egress de
                              #   real bubblewrap. See Srt below for this container's profile.
 check Nix                    # + the build-source contract, then builds the installable from
                              #   the WORKING TREE and boots it. Minutes; the only gate on it.
-verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix Srt.
-                             #    Release gate; what CI runs on master.
+check Jumpstarter            # + our MCP client driven against the Python example's provider,
+                             #   over two real child processes. Needs uv and a CPython.
+verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix Srt
+                             #    Pty Serial Jumpstarter. Release gate; what CI runs on master.
 lint                         # actionlint over .github/workflows. Runs first in the PR gate.
 ```
 
@@ -249,6 +258,11 @@ Capabilities:
   run here only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, `check Srt` refuses to
   start. Never set that variable to make a session pass — weaker confinement is the
   operator's decision, and production defaults to strict.
+- `Jumpstarter` — uv, and an interpreter it can resolve the `examples/jumpstarter` lock
+  against. Probed by BUILDING that environment (`uv sync --frozen`), because "uv is on PATH"
+  and "this box can assemble that environment" are different questions and only the second
+  one is the suite's. devenv provides uv and a CPython, and pins the interpreter through
+  `UV_PYTHON`/`UV_PYTHON_DOWNLOADS=never` so uv never fetches a second, unpinned toolchain.
 - `Nix` — the nix CLI (probed like Docker). Covers the ONE thing no CI job can: the
   derivations built against the WORKING TREE.
   Every CI route (`nix build .#yession`, darwin-package, package-nix) evaluates a flake, whose

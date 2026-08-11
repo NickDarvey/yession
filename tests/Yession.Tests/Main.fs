@@ -48,6 +48,9 @@ let all =
         // The half the provider's E2E substitutes away: the engine itself, against a socat
         // PTY pair. Needs the `serialport` addon, udevadm and socat — see `Serial`.
         Tag.needs "The serial engine" [ Tag.Serial ] (fun () -> SerialEngine.tests)
+        // The same loop, closed around a provider written in another language on somebody
+        // else's SDK: our client, their server, two real processes — see `Jumpstarter`.
+        Tag.needs "The jumpstarter provider" [ Tag.Jumpstarter ] (fun () -> Jumpstarter.tests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
         Tag.needs "Terminals" [] (fun () -> Terminals.tests)

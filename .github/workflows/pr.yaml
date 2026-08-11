@@ -59,8 +59,13 @@ jobs:
       # `Serial` for the same reason and at the same price: the dev shell brings socat and
       # udevadm on Linux, and the engine suite is under a second. A tier that only runs after
       # a merge is a tier nobody fixes before one.
-      - name: Cheap tier + browser + native WebRTC/host E2E + sandbox escape probes + serial
-        run: devenv shell -- check Browser Ports Native Srt Serial
+      # `Jumpstarter` on the same argument, at a higher price: it resolves the example's
+      # locked Python environment (a wheel fetch on a cold runner) and then runs two child
+      # processes per test. Worth it — that suite is the only place our MCP client is driven
+      # against a server nobody here wrote, and a break in it is a break in the contract the
+      # whole examples directory advertises.
+      - name: Cheap tier + browser + native WebRTC/host E2E + sandbox escape probes + serial + jumpstarter
+        run: devenv shell -- check Browser Ports Native Srt Serial Jumpstarter
 
   # The installable package, built on macOS. flake.nix advertises aarch64-darwin and
   # x86_64-darwin and nix/node-datachannel.nix claims platforms.unix, but every other job

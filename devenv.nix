@@ -42,8 +42,12 @@ in
   # systemd because it is the standalone udev — its `udevadm info` answers from sysfs with no
   # daemon running, which a container has none of. socat is what makes the rest testable with
   # no hardware: a PTY pair is a serial port at both ends.
+  # uv + a CPython back the `Jumpstarter` capability: the jumpstarter example is a uv project,
+  # and the suite that drives it runs `uv run --project`. UV_PYTHON_DOWNLOADS=never below is
+  # what makes this interpreter the one it uses — otherwise uv fetches an interpreter of its
+  # own, which is a second, unpinned toolchain arriving over the network mid-run.
   packages =
-    [ pkgs.git pkgs.actionlint ]
+    [ pkgs.git pkgs.actionlint pkgs.uv pkgs.python312 ]
     ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux
          [ pkgs.dbus pkgs.gnome-keyring pkgs.bubblewrap pkgs.socat pkgs.ripgrep pkgs.eudev ];
 
@@ -57,6 +61,9 @@ in
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.socat}/bin/socat";
   env.YESSION_RIPGREP_PATH =
     lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.ripgrep}/bin/rg";
+
+  env.UV_PYTHON = "${pkgs.python312}/bin/python3.12";
+  env.UV_PYTHON_DOWNLOADS = "never";
 
   env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
   env.DOTNET_NOLOGO = "1";
@@ -98,6 +105,19 @@ in
       ln -s ${yession.nodeModules}/node_modules node_modules
     fi
     export PATH="$PWD/node_modules/.bin:$PATH"
+${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+    # The jumpstarter example installs manylinux wheels, and `grpcio`'s extension is compiled
+    # against the system C++ runtime. Nix's loader does not search /usr/lib, so inside this
+    # shell `import grpc` dies with "libstdc++.so.6: cannot open shared object file" — on a
+    # box where that library is right there in /usr/lib and every non-Nix Python finds it.
+    # Naming it from this nixpkgs keeps the interpreter pinned instead of handing resolution
+    # back to whatever the host happens to ship.
+    #
+    # APPENDED here rather than declared as `env.LD_LIBRARY_PATH`, because devenv's own dotnet
+    # module already owns that option (it puts icu4c on it) and two definitions of one env
+    # option is an evaluation error, not a merge.
+    export LD_LIBRARY_PATH="''${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}"
+''}
     # The task list orients someone who just landed in the shell. In front of a one-off
     # `devenv shell -- <task>` it is pure noise, printed above every check, build and CI log.
     # devenv says which this is: DEVENV_CMDLINE is a bare `shell` interactively, `shell -- …`

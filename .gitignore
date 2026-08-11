@@ -27,6 +27,12 @@ examples/**/out/
 examples/**/dist/
 examples/**/*.js
 
+# Python examples: uv builds the environment from the committed lock, and pytest and the
+# interpreter leave their caches beside it.
+.venv/
+__pycache__/
+.pytest_cache/
+
 # Local env / secrets
 .env
 .env.local
