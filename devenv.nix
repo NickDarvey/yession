@@ -105,6 +105,19 @@ in
       ln -s ${yession.nodeModules}/node_modules node_modules
     fi
     export PATH="$PWD/node_modules/.bin:$PATH"
+${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+    # The jumpstarter example installs manylinux wheels, and `grpcio`'s extension is compiled
+    # against the system C++ runtime. Nix's loader does not search /usr/lib, so inside this
+    # shell `import grpc` dies with "libstdc++.so.6: cannot open shared object file" — on a
+    # box where that library is right there in /usr/lib and every non-Nix Python finds it.
+    # Naming it from this nixpkgs keeps the interpreter pinned instead of handing resolution
+    # back to whatever the host happens to ship.
+    #
+    # APPENDED here rather than declared as `env.LD_LIBRARY_PATH`, because devenv's own dotnet
+    # module already owns that option (it puts icu4c on it) and two definitions of one env
+    # option is an evaluation error, not a merge.
+    export LD_LIBRARY_PATH="''${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}"
+''}
     # The task list orients someone who just landed in the shell. In front of a one-off
     # `devenv shell -- <task>` it is pure noise, printed above every check, build and CI log.
     # devenv says which this is: DEVENV_CMDLINE is a bare `shell` interactively, `shell -- …`
