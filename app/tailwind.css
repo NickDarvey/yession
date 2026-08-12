@@ -79,6 +79,14 @@
   --text-code: 12px;     --text-code--line-height: 16px;
   --text-code-sm: 11px;  --text-code-sm--line-height: 16px;
 
+  /* Not a step on the ramp — a BROWSER CONSTANT, and the only reason it is here is that a
+     class has to compose it. iOS zooms the page in when it focuses a text control set below
+     16px, and it does not zoom back out; the pane is left magnified and offset, which is why
+     tapping a 12px command line moved the whole column. Worn on a phone by everything you
+     type into (`Style.touchType`), size only — each field keeps the line box its own step
+     gave it. */
+  --text-touch: 16px;
+
   /* The caps voice's one tracking (labels, statuses, buttons, authors). */
   --tracking-caps: 0.16em;
 

@@ -338,6 +338,7 @@ let page
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>Yession Manager</title>"
         Style.headTags styleSheetUrl
+        WebApp.managerHeadTags (SessionRoute.relative Icon)
         sprintf "</head><body class=\"%s\">" Style.app
         Ssr.render (bodyTemplate access views declarations)
         sprintf "<script>%s</script>" script
@@ -364,6 +365,11 @@ let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
 let private css = readAsset "app.css" cssPath fs
 
 let private cssUrl = SessionRoute.relative (AppCss (contentDigest css))
+
+/// The icon's constant is base64 (it lives in source); the wire wants the PNG. Same decode
+/// the session server does, for the same reason — `res.end` takes what Node's `end` takes.
+[<Fable.Core.Emit("Buffer.from($0, 'base64')")>]
+let private decodeBase64 (encoded: string) : string = Fable.Core.Util.jsNative
 
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
@@ -479,6 +485,15 @@ let tryHandle
                 match css with
                 | Some body -> respondWith res 200 "text/css; charset=utf-8" CachePolicy.asset body
                 | None -> respond res 404 "text/plain" "stylesheet not built (run: build)")
+        | "GET", path when path = "/" + SessionRoute.relative Icon ->
+            // The same mark the session shells wear, from the same constant — the Manager
+            // sits at its origin root, so the relative address the page emits is this path.
+            Some (fun () ->
+                res.writeHead (
+                    200,
+                    createObj [ "content-type", box "image/png"; "cache-control", box CachePolicy.shell ])
+                |> ignore
+                res.``end`` (decodeBase64 WebApp.iconPngBase64))
         | "POST", "/sessions" ->
             Some (fun () ->
                 readBody req (fun body ->

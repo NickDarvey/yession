@@ -1028,6 +1028,29 @@ let mountedTests =
                     let! baseHref = await (page.EvaluateAsync<string> "() => document.querySelector('base')?.getAttribute('href')")
                     Expect.equal baseHref (sprintf "/s/%s/" MOUNT_SESSION) "the shell declares its mount"
 
+                    // Installable, and installable AS ITSELF. The manifest is addressed
+                    // relatively like every other route here, and the URLs INSIDE it resolve
+                    // against its own address — so the app a person adds to their home screen
+                    // launches at this session rather than at whatever sits on the origin's
+                    // root. Resolved by the browser rather than compared as text, because the
+                    // resolution is the property; the icon is fetched for the same reason a
+                    // manifest naming an icon nobody serves would still parse.
+                    let! installed =
+                        await (page.EvaluateAsync<string>
+                                """async () => {
+                                     const href = document.querySelector('link[rel=manifest]').href
+                                     const manifest = await (await fetch(href)).json()
+                                     const icon = await fetch(new URL(manifest.icons[0].src, href))
+                                     return [new URL(manifest.start_url, href).pathname,
+                                             new URL(icon.url).pathname,
+                                             icon.status,
+                                             icon.headers.get('content-type')].join(' ')
+                                   }""")
+                    Expect.equal
+                        installed
+                        (sprintf "/s/%s/ /s/%s/icon.png 200 image/png" MOUNT_SESSION MOUNT_SESSION)
+                        "the installed app starts at this session, and its mark is served under the same mount"
+
                     // No assertion here that the bundle was fetched under the mount: reaching
                     // `connected` above already required it. The bundle IS the client, and a
                     // root-anchored URL would have hit the proxy's root and 404'd, so nothing

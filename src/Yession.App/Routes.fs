@@ -43,6 +43,13 @@ type SessionRoute =
     | ClientBundle of digest: string
     /// The locally built stylesheet (no CDN), addressed the same way.
     | AppCss of digest: string
+    /// The web manifest, which is what makes the shell installable — and, once installed,
+    /// what makes it launch without the browser's chrome (`WebApp`). NOT fingerprinted: a
+    /// browser re-reads it by the address the document names, and the document names this.
+    | Manifest
+    /// The app icon the manifest and the head both point at. Constant bytes in the binary,
+    /// so a session with no assets directory beside it still has a mark.
+    | Icon
     /// WebRTC offer in, answer out. The only interactive HTTP surface.
     | Signal
     /// The auth probe: mints the peer token a data channel's `PeerHello` needs.
@@ -131,6 +138,8 @@ module SessionRoute =
         | Shell -> ""
         | ClientBundle digest -> fingerprinted "client" "js" digest
         | AppCss digest -> fingerprinted "app" "css" digest
+        | Manifest -> "manifest.webmanifest"
+        | Icon -> "icon.png"
         | Signal -> "signal"
         | Me -> "me"
         | Login -> "login"
@@ -161,6 +170,8 @@ module SessionRoute =
         | "GET", [ "" ] -> Some Shell
         | "POST", [ "signal" ] -> Some Signal
         | "GET", [ "me" ] -> Some Me
+        | "GET", [ "manifest.webmanifest" ] -> Some Manifest
+        | "GET", [ "icon.png" ] -> Some Icon
         | "GET", [ "login" ] -> Some Login
         | "GET", [ "callback" ] -> Some Callback
         | "GET", [ "events"; index ] ->
