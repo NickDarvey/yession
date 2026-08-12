@@ -38,6 +38,9 @@ let all =
         Tag.needs "Query stream routes" [ Tag.Ports ] (fun () -> Queries.portsTests)
         Tag.needs "Tools" [] (fun () -> Tools.tests)
         Tag.needs "Mcp" [] (fun () -> Mcp.tests)
+        // The contract a provider implements to get a terminal (Plan 19). Pure: what an
+        // offer means, what this session will dial, and what a turn may be given.
+        Tag.needs "ToolStreams" [] (fun () -> ToolStreams.tests)
         // The lifecycle IS the thing being tested, against a provider written by hand —
         // there is no in-memory stand-in for headers the protocol turns on.
         Tag.needs "Declared MCP servers" [ Tag.Ports ] (fun () -> Mcp.portsTests)

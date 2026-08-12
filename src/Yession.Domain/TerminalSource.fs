@@ -57,6 +57,99 @@ type AttachTicket =
       /// say "USB serial /dev/ttyACM0" rather than an id.
       Label : string }
 
+/// A stream a provider OFFERED, in the answer to a tool call (Plan 19).
+///
+/// The ticket says where the bytes are; this says what the session may do about getting
+/// another one. Together they are the whole of the extension point: a provider that wants
+/// its resource to become a terminal hangs one of these off a tool result, and nothing in
+/// this repository has to know what the resource is.
+type StreamOffer =
+    { Ticket : AttachTicket
+      /// May the call that produced this be made AGAIN to get another stream, and is doing
+      /// so safe? An attach token is usually spent on use, so a terminal that ends cannot be
+      /// resumed — re-attaching means asking the provider again, and only the provider knows
+      /// whether asking again power-cycles a board. Default `false`, because the cost of
+      /// guessing wrong is somebody's hardware.
+      Renewable : bool }
+
+module StreamOffer =
+
+    /// The `_meta` key an offer rides under, on a `tools/call` result.
+    ///
+    /// `_meta` and not `structuredContent`, twice over: `structuredContent` is validated
+    /// against the tool's own `outputSchema`, so this would become part of every provider's
+    /// declared contract; and it goes to the MODEL, which would put a socket address in
+    /// reach of anything that can talk the model into repeating it. An offer is for the
+    /// client.
+    ///
+    /// Reverse-DNS prefixed because it IS an extension: if MCP grows a standard streaming
+    /// affordance, the decoder learns that one, reads both for a release, and this is
+    /// deleted. A bare `stream` would make that a flag day.
+    let metaKey = "dev.yession/stream"
+
+    /// The host of an absolute url, lowercased, with any port and userinfo removed. `None`
+    /// when there is no authority to read — which every caller treats as "not admissible"
+    /// rather than as a wildcard.
+    let private hostOf (url: string) : string option =
+        match url.IndexOf "://" with
+        | -1 -> None
+        | scheme ->
+            let rest = url.Substring (scheme + 3)
+            let authority =
+                match rest.IndexOfAny [| '/'; '?'; '#' |] with
+                | -1 -> rest
+                | cut -> rest.Substring (0, cut)
+            let afterUserInfo =
+                match authority.LastIndexOf '@' with
+                | -1 -> authority
+                | at -> authority.Substring (at + 1)
+            // A bracketed IPv6 literal keeps its colons; everything else loses its port.
+            let host =
+                if afterUserInfo.StartsWith "[" then
+                    match afterUserInfo.IndexOf ']' with
+                    | -1 -> afterUserInfo
+                    | close -> afterUserInfo.Substring (0, close + 1)
+                else
+                    match afterUserInfo.IndexOf ':' with
+                    | -1 -> afterUserInfo
+                    | colon -> afterUserInfo.Substring (0, colon)
+            if host = "" then None else Some (host.ToLowerInvariant ())
+
+    /// Give an unlabelled offer a name. A provider that says nothing about what its stream
+    /// IS still ends up with a titled panel, and the fallback names the call it came from —
+    /// which is the most a client can honestly say about somebody else's resource.
+    let named (fallback: string) (offer: StreamOffer) : StreamOffer =
+        if offer.Ticket.Label.Trim () <> "" then offer
+        else { offer with Ticket = { offer.Ticket with Label = fallback } }
+
+    /// Whether this session may dial what a server offered it.
+    ///
+    /// Same HOST as the server the operator declared, and nothing else. Same host and a
+    /// different PORT is ordinary — the stream leg need not share the control leg's
+    /// listener — but a tool result that points the session at another machine is a
+    /// declaration, and declarations are the operator's (Plan 17). Credentials in the url
+    /// are refused outright rather than carried into a connect.
+    ///
+    /// A refusal is a string because it is going into the tool's answer: the model finds out
+    /// that the stream did not open, instead of the terminal silently never appearing.
+    let admit (declaredUrl: string) (offer: StreamOffer) : Result<StreamOffer, string> =
+        let url = offer.Ticket.Url
+        let scheme = url.ToLowerInvariant ()
+        if not (scheme.StartsWith "ws://" || scheme.StartsWith "wss://") then
+            Error (sprintf "a stream url must be ws:// or wss://, and this one is '%s'" url)
+        elif url.Contains "@" then
+            Error "a stream url may not carry credentials"
+        else
+            match hostOf url, hostOf declaredUrl with
+            | Some offered, Some declared when offered = declared -> Ok offer
+            | Some offered, Some declared ->
+                Error (
+                    sprintf
+                        "this server is declared at %s and offered a stream on %s; a stream from another host is an operator's declaration, not a tool's answer"
+                        declared
+                        offered)
+            | _ -> Error (sprintf "'%s' is not a url this session can dial" url)
+
 /// Where one terminal's bytes come from.
 type TerminalSource =
     /// A shell in one of this session's named WorkSandboxes — instrumentable, resizable,

@@ -29,6 +29,9 @@
     <!-- The agent's tools as data (Plan 16, part A). Depends on nothing but Thoth: a
          descriptor is a name, a schema and a namespace, and knows nothing of sessions. -->
     <Compile Include="Tools.fs" />
+    <!-- A stream a provider offers becomes a terminal (Plan 19). After Tools and
+         TerminalSource, because it is exactly the join between them. -->
+    <Compile Include="ToolStreams.fs" />
     <Compile Include="Conversation.fs" />
     <Compile Include="Repos.fs" />
     <!-- The read half of the imperative session API (Plan 15). Depends on nothing but

@@ -29,6 +29,7 @@
     <Compile Include="CommandGates.fs" />
     <Compile Include="Tools.fs" />
     <Compile Include="Mcp.fs" />
+    <Compile Include="ToolStreams.fs" />
     <Compile Include="SerialEngine.fs" />
     <Compile Include="Jumpstarter.fs" />
     <Compile Include="OtlpStub.fs" />

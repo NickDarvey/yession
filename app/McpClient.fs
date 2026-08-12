@@ -227,7 +227,22 @@ let create () : McpConnections =
             // A tool that RAN and went badly is `Ok` with text saying so — the model is
             // meant to read it and choose differently. Only a call that never reached a
             // tool is an `Error`.
-            | Ok answer -> Ok (ToolAnswer.text answer.Text)
+            | Ok answer ->
+                // A stream the provider offered (Plan 19). Admitted HERE because this is
+                // where the server's declared url is known — the thing an offered url has
+                // to agree with — and never in the terminal manager, which would have to be
+                // told which server an offer came from to ask the same question.
+                match answer.Meta |> Option.bind Codec.streamOffer with
+                | None -> Ok (ToolAnswer.text answer.Text)
+                | Some offer ->
+                    let fallback = sprintf "%s/%s" (McpServerName.value connection.Server.Name) name
+                    match StreamOffer.admit (McpTransport.describe connection.Server.Transport) (StreamOffer.named fallback offer) with
+                    | Ok admitted -> Ok { ToolAnswer.text answer.Text with Stream = Some admitted }
+                    | Error reason ->
+                        // Said in the answer rather than logged: a stream that will not open
+                        // is a fact the model has to act on, and silence would read as a
+                        // terminal that simply has not appeared yet.
+                        Ok (ToolAnswer.text (answer.Text + "\n\nThis session refused the stream that was offered: " + reason))
         async {
             match! request connection "tools/call" (Some parameters) with
             | Ok result -> return read result

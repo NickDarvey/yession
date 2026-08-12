@@ -450,6 +450,18 @@ let startFull
                         return ()
                     } }
 
+        /// A stream a provider offers becomes a terminal (Plan 19). Session-scoped, because
+        /// a provider polled across two turns is offering one stream and not two; the
+        /// per-turn ceiling lives inside `Decorate`, which the turn calls.
+        ///
+        /// Opened as the AGENT, which is the truth: the call that produced the offer was the
+        /// agent's, and the terminal it became is attributed to whoever caused it — the same
+        /// rule an agent's block already follows.
+        let streamAttacher =
+            ToolStreams.create
+                { Open = fun ticket -> terminals.Open ActorRef.Agent (Attached ticket) ticket.Label
+                  IsOpen = terminals.IsOpen }
+
         let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
             { ExecuteCommand = terminalCommands.Execute
               CheckPending = checkPending
@@ -488,8 +500,11 @@ let startFull
               StopWorkSandbox = AgentCapabilities.none.StopWorkSandbox
               RecordToolUse = toolUseLogFor turnId
               // Snapshotted HERE, which is what makes a turn's tool list stable: a set
-              // change mid-turn lands on the next turn, never underneath the model.
-              ForeignTools = mcpConnections.Registries () }
+              // change mid-turn lands on the next turn, never underneath the model. Each is
+              // decorated so a stream a provider offers becomes a terminal (Plan 19) — over
+              // the REGISTRY rather than inside the client, so the seam sits where every
+              // call already passes, beside the audit's.
+              ForeignTools = mcpConnections.Registries () |> List.map streamAttacher.Decorate }
 
         // The queue drain and turn scheduler (Phase 3) — the real machinery lives in
         // `Scheduler` (shared with the property harness); the Host wires it to this
