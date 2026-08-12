@@ -1176,8 +1176,20 @@ module SessionTerminals =
                     sources.[TerminalId.value id] <- TerminalSource.capabilities source
                     match source with
                     | SandboxShell name -> do! openShell id terminal name
-                    | Attached ticket -> do! openAttached id terminal ticket
-                    do! appendAs openedBy (SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = openedBy; Title = title; Sandbox = sandbox })
+                    | Attached offer -> do! openAttached id terminal offer.Ticket
+                    let renewable =
+                        match source with
+                        | Attached offer -> offer.Renewable
+                        | SandboxShell _ -> false
+                    do!
+                        appendAs
+                            openedBy
+                            (SessionEvent.TerminalOpened
+                                { TerminalId = id
+                                  OpenedBy = openedBy
+                                  Title = title
+                                  Sandbox = sandbox
+                                  Renewable = renewable })
                     return Ok id
             }
 

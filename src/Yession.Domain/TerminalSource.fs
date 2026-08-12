@@ -157,16 +157,21 @@ type TerminalSource =
     /// the case rather than a parallel argument, because "which sandbox" is only a question
     /// a shell has: an attached stream is somebody else's process and has no answer.
     | SandboxShell of SandboxName
-    /// A stream somebody else is producing. It does NOT ensure the sandbox: a session that
-    /// only talks to a serial port should not start a container.
-    | Attached of AttachTicket
+    /// A stream somebody else OFFERED (Plan 19). It does NOT ensure the sandbox: a session
+    /// that only talks to a serial port should not start a container.
+    ///
+    /// The whole offer rather than its ticket, because "can this be asked for again" is a
+    /// fact about the terminal that outlives the attach: a person whose stream ended is
+    /// looking at a closed terminal, and whether there is a way back is exactly what the
+    /// panel has to know.
+    | Attached of StreamOffer
 
 module TerminalSource =
 
     let capabilities =
         function
         | SandboxShell _ -> SourceCapabilities.shell
-        | Attached ticket -> ticket.Capabilities
+        | Attached offer -> offer.Ticket.Capabilities
 
     /// Which WorkSandbox opening this needs, if any.
     let needsSandbox =

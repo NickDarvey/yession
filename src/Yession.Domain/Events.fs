@@ -231,7 +231,15 @@ and TerminalOpened =
       /// saying an attached serial port is in `default` would be inventing a fact — and the
       /// two consumers both need the difference: the panel says where a terminal is, and
       /// the block runner picks an environment by it.
-      Sandbox : SandboxName option }
+      Sandbox : SandboxName option
+      /// Can this terminal's stream be asked for again (Plan 19, step 4)?
+      ///
+      /// The provider's claim about its own tool, recorded here because a person meets this
+      /// question at the WORST moment to go looking for the answer: the stream has ended,
+      /// the terminal is closed, and what they want to know is whether there is a way back.
+      /// False for a shell, which has no provider to ask, and for a log written before this
+      /// field existed.
+      Renewable : bool }
 
 and TerminalClosed =
     { TerminalId : TerminalId

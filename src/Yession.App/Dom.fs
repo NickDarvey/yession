@@ -151,6 +151,8 @@ module Dom =
         /// 2f), and the control that types the instrumentation in again.
         let terminalLost = "data-terminal-lost"
         let terminalRearm = "data-terminal-rearm"
+        /// Ask the provider for a closed terminal's stream again (Plan 19, step 4).
+        let terminalReattach = "data-terminal-reattach"
         /// The replay of a CLOSED terminal (Plan 13, stage 3e): the mount the player attaches
         /// to, the tab that reaches a closed terminal at all, and the banner shown instead
         /// when retention has deleted the recording.

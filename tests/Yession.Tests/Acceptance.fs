@@ -107,6 +107,7 @@ let private representativeModel : ClientModel =
                 Title = "build"
                 OpenedBy = PeerRef ada
                 Sandbox = Some SandboxName.defaultName
+                Renewable = false
                 IsOpen = true
                 ClosedReason = None
                 Lease = None
@@ -243,6 +244,15 @@ let private closedTerminalModel : ClientModel =
                 representativeModel.Terminals.Terminals
                 |> List.map (fun t -> { t with IsOpen = false; ClosedReason = Some "closed by a peer" }) }
         PaneChoice = Some (TerminalTab terminalId) }
+
+/// A closed terminal whose bytes came from a provider that said its stream can be asked for
+/// again (Plan 19, step 4) — the one case where a closed terminal has a way back.
+let private renewableTerminalModel : ClientModel =
+    { closedTerminalModel with
+        Terminals =
+            { Terminals =
+                closedTerminalModel.Terminals.Terminals
+                |> List.map (fun t -> { t with Sandbox = None; Renewable = true }) } }
 
 /// …and after the per-terminal output cap ate its recording (stage 3d): the blocks survive
 /// in the projection, the transcript does not, and the byte count is the only trace of what
@@ -392,6 +402,20 @@ let private uiChecklistTests =
             Expect.isFalse
                 (html.Contains (Dom.attr "data-terminal-close" (TerminalId.value terminalId)))
                 "and no offer to close what is already closed"
+            // Nor a way back, for a terminal whose bytes came from this session's own
+            // sandbox: there is no provider to ask (Plan 19, step 4).
+            Expect.isFalse
+                (html.Contains (Dom.attr Dom.Hooks.terminalReattach (TerminalId.value terminalId)))
+                "and no offer to attach a stream that never was one"
+
+        // A control that mostly refuses teaches people not to press it, so this one is
+        // offered exactly where it works: a closed stream whose provider said asking again is
+        // safe. Both halves are the invariant — offered there, absent everywhere else.
+        testCase "a closed stream offers a way back when its provider said there is one" <| fun () ->
+            let html = Support.render renewableTerminalModel
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.terminalReattach (TerminalId.value terminalId)))
+                "the control that asks the provider again"
 
         testCase "terminal work sits in the chat WHERE it happened, not at the end" <| fun () ->
             // Plan 14, stage 1. The fixture's block is anchored at offset 2, between the two

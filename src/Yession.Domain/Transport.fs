@@ -34,6 +34,14 @@ type SessionCommand =
     /// shell stopped emitting marks. Any peer may: it repairs a terminal rather than taking
     /// anything from anyone. Rejected when the terminal is not in that state.
     | RearmTerminal of TerminalId
+    /// Ask the provider for this terminal's stream again (Plan 19, step 4), when the stream
+    /// it was attached to has ended.
+    ///
+    /// The peer names a TERMINAL and never a url, which is what keeps `OpenTerminal`'s rule
+    /// intact: a peer does not choose what this session connects to. What is replayed is the
+    /// tool call that produced the stream in the first place, and only when the provider
+    /// declared that asking again is safe. A new terminal arrives as `TerminalOpened`.
+    | ReattachTerminal of TerminalId
 
 type SessionCommandResult =
     | CommandAccepted
