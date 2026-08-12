@@ -32,6 +32,27 @@ joined **one way** by the attach ticket: `acquire_device` answers with a url and
 opens it. Nothing flows back, so a terminal closing does not disturb the control leg, and the
 control leg dropping does not close a terminal already streaming.
 
+**Say it twice, to two audiences.** The url is in the prose, because a model reads prose. It
+is also in the result's `_meta`, because a *client* is what dials it:
+
+```json
+"_meta": {
+  "dev.yession/stream": {
+    "url": "ws://127.0.0.1:7333/attach/8f2c…",
+    "label": "QinHeng CH340 /dev/ttyACM0",
+    "renewable": true
+  }
+}
+```
+
+That object is the whole of what a provider implements to have its stream become a terminal
+somebody can watch and type into. `_meta` rather than `structuredContent` because the ticket
+is for the client and not the model; capabilities left out entirely because the default is
+"bytes and nothing else", which is what a serial line honestly is; `renewable` because
+acquiring a device you already hold mints a fresh token once the last stream has ended — so
+"ask again" really does get you another one. A client that has never heard of the key ignores
+it and still gets the prose.
+
 **A claim needs a lifetime.** MCP sessions are the lifetime: a claim dies with the session
 that took it, which is what stops a crashed client holding hardware forever. That is why this
 server is stateful — `Mcp.OnSessionEnded` is where the device goes back.

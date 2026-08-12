@@ -20,6 +20,13 @@ module SerialProvider.Provider
 
 open System
 open System.Collections.Generic
+
+#if FABLE_COMPILER
+open Thoth.Json
+#else
+open Thoth.Json.Net
+#endif
+
 open SerialProvider
 open SerialProvider.Interop
 
@@ -150,23 +157,50 @@ let create (engine: Ports.SerialEngine) (origin: unit -> string) (version: strin
                     |> String.concat "\n"
         }
 
-    let acquire (holder: string) (deviceId: string) : Async<string> =
+    /// The stream a claim's token reaches, as a client reads it: a `_meta` object under the
+    /// key Yession's session client looks for (Plan 19).
+    ///
+    /// Nothing about it is Yession-shaped except the key. It says where the bytes are, what
+    /// the source can do — nothing, which is what a serial line honestly is, and so the
+    /// capability object is left out entirely rather than spelled with three `false`s — and
+    /// that asking again is safe, which is true because acquiring a device you already hold
+    /// mints a fresh token when the last one has been spent.
+    let offer (originUrl: string) (device: SerialDevice) (token: string) : string =
+        Encode.object
+            [ "dev.yession/stream",
+              Encode.object
+                  [ "url", Encode.string (sprintf "%s/attach/%s" originUrl token)
+                    "label", Encode.string (sprintf "%s %s %s" device.Make device.Model device.Port.Path)
+                    "renewable", Encode.bool true ] ]
+        |> Encode.toString 0
+
+    let acquire (holder: string) (deviceId: string) : Async<Mcp.ToolReply> =
         async {
             let! found = devices ()
             match found |> List.tryFind (fun d -> d.DeviceId = deviceId) with
-            | None -> return sprintf "no device '%s' is attached — call list_devices" deviceId
+            | None -> return Mcp.ToolReply.text (sprintf "no device '%s' is attached — call list_devices" deviceId)
             | Some device ->
                 match claimed.TryGetValue deviceId with
                 | true, claim when claim.Holder <> holder ->
                     // Naming the holder is the whole point of this branch.
-                    return sprintf "%s is already held by %s — it is in use, not broken" deviceId claim.Holder
-                | true, claim ->
                     return
-                        sprintf
-                            "you already hold %s — attach it at %s/attach/%s"
-                            deviceId
-                            (origin ())
-                            claim.Token
+                        Mcp.ToolReply.text (
+                            sprintf "%s is already held by %s — it is in use, not broken" deviceId claim.Holder)
+                // Yours, and already streaming. A second token would be a second client on a
+                // line the claim says is exclusive, so this hands back nothing to attach.
+                | true, claim when claim.Port.IsSome ->
+                    return Mcp.ToolReply.text (sprintf "you hold %s, and its stream is already attached" deviceId)
+                // Yours, not streaming: a FRESH token, because the last one was spent on the
+                // attach that has since ended and a spent token reaches nothing. This is what
+                // makes the offer's `renewable` true rather than a hopeful claim.
+                | true, claim ->
+                    tokens.Remove claim.Token |> ignore
+                    let token = mintToken ()
+                    claim.Token <- token
+                    tokens.[token] <- deviceId
+                    return
+                        { Text = sprintf "you already hold %s — attach it at %s/attach/%s" deviceId (origin ()) token
+                          Meta = Some (offer (origin ()) device token) }
                 | _ ->
                     let token = mintToken ()
                     claimed.[deviceId] <-
@@ -177,11 +211,13 @@ let create (engine: Ports.SerialEngine) (origin: unit -> string) (version: strin
                           Port = None }
                     tokens.[token] <- deviceId
                     return
-                        sprintf
-                            "%s is yours. Attach its byte stream at %s/attach/%s — the stream is live-only, so it has no exit codes and nothing there reports whether a command succeeded."
-                            deviceId
-                            (origin ())
-                            token
+                        { Text =
+                            sprintf
+                                "%s is yours. Attach its byte stream at %s/attach/%s — the stream is live-only, so it has no exit codes and nothing there reports whether a command succeeded."
+                                deviceId
+                                (origin ())
+                                token
+                          Meta = Some (offer (origin ()) device token) }
         }
 
     let configure (holder: string) (deviceId: string) (settings: SerialSettings) : Async<string> =
@@ -225,8 +261,9 @@ let create (engine: Ports.SerialEngine) (origin: unit -> string) (version: strin
                 return sprintf "released %s" deviceId
         }
 
-    let invoke (holder: string) (call: Mcp.ToolCall) : Async<Result<string, string>> =
-        let ok (body: Async<string>) = async { let! text = body in return Ok text }
+    let invoke (holder: string) (call: Mcp.ToolCall) : Async<Result<Mcp.ToolReply, string>> =
+        let ok (body: Async<string>) = async { let! text = body in return Ok (Mcp.ToolReply.text text) }
+        let replied (body: Async<Mcp.ToolReply>) = async { let! reply = body in return Ok reply }
         let deviceOf (json: string) =
             match SerialWire.deviceId json with
             | Error e -> Error e
@@ -237,7 +274,7 @@ let create (engine: Ports.SerialEngine) (origin: unit -> string) (version: strin
             | "acquire_device" ->
                 match deviceOf call.Arguments with
                 | Error e -> return Error e
-                | Ok id -> return! ok (acquire holder id)
+                | Ok id -> return! replied (acquire holder id)
             | "release_device" ->
                 match deviceOf call.Arguments with
                 | Error e -> return Error e
