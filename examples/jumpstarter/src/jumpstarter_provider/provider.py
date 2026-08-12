@@ -221,7 +221,10 @@ class Provider:
                 result = await _off_loop(lambda: self.exporter.call(driver, method, list(args or [])))
             except ExporterError as error:
                 return str(error)
-            return f"{driver}.{method} returned {result!r}"
+            # `!r` is the exporter's job now, and it already did it: `call` answers with a
+            # STRING it shaped (a repr, or a drained stream). Repr-ing that again wrapped
+            # every answer in quotes, so a list of readings read as one long string.
+            return f"{driver}.{method} returned {result}"
 
         @mcp.tool()
         async def serial_send(ctx: Context, data: str) -> str:
