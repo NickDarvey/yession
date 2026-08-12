@@ -65,6 +65,12 @@ let private serveAsset
         res.writeHead (200, createObj [ "content-type", box contentType; "cache-control", box CachePolicy.asset ]) |> ignore
         res.``end`` body
 
+/// The app icon's bytes. The constant is base64 (`WebApp.iconPngBase64`) because it lives in
+/// source; the wire wants the PNG, and `res.end` is typed to the string case it is used with
+/// everywhere else — so the Buffer goes through `unbox`, which is what Node's `end` accepts.
+[<Fable.Core.Emit("Buffer.from($0, 'base64')")>]
+let private decodeBase64 (encoded: string) : string = Fable.Core.Util.jsNative
+
 let private readBody (req: IncomingMessage) (cont: string -> unit) =
     let mutable acc = ""
     req.on ("data", fun chunk -> acc <- acc + bufferToString chunk) |> ignore
@@ -287,6 +293,26 @@ let start
         | Some (AppCss digest) ->
             // The locally built Tailwind stylesheet (no CDN).
             serveAsset digest assets.Css css "text/css; charset=utf-8" "stylesheet" res
+        // The two an INSTALL reads (`WebApp`), and the only routes here served to nobody in
+        // particular: a browser fetches a manifest without credentials, and there is nothing
+        // in either that a person outside the session could not see from the login page.
+        // Neither is fingerprinted — the document names a fixed address and the manifest
+        // names the icon — so both revalidate on the shell's policy rather than being
+        // cached under an address whose bytes a release can change.
+        | Some Manifest ->
+            res.writeHead (
+                200,
+                createObj
+                    [ "content-type", box "application/manifest+json; charset=utf-8"
+                      "cache-control", box CachePolicy.shell ])
+            |> ignore
+            res.``end`` WebApp.manifest
+        | Some Icon ->
+            res.writeHead (
+                200,
+                createObj [ "content-type", box "image/png"; "cache-control", box CachePolicy.shell ])
+            |> ignore
+            res.``end`` (decodeBase64 WebApp.iconPngBase64)
         | Some (Events index) ->
             match events with
             | Some endpoint -> serveChunk endpoint req req.url index res

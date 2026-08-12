@@ -221,6 +221,20 @@ module Style =
     let navChevronBack = navChevronBase + " hover:-translate-x-0.5 active:-translate-x-1"
     let navChevronForward = navChevronBase + " hover:translate-x-0.5 active:translate-x-1"
 
+    /// Worn by every control you TYPE INTO, and nowhere else. iOS zooms the page in when it
+    /// focuses a text control whose type is under 16px and never zooms back out — tapping the
+    /// terminal's 12px command line left the whole column magnified and shifted, which is not
+    /// something a person can undo without pinching the page back themselves.
+    ///
+    /// The size is the fix. `maximum-scale=1` in the viewport tag stops the same zoom, and
+    /// stops a person zooming the page AT ALL — a WCAG 1.4.4 failure, and the UI baseline
+    /// (AGENTS.md) is a floor rather than a preference. So the phone gets 16px in the places
+    /// where a keyboard is coming, and the ramp is the ramp everywhere else.
+    ///
+    /// `--text-touch` carries no line-height pair, so this sets the SIZE alone and each field
+    /// keeps the line box its own step gave it.
+    let private touchType = "max-md:text-touch"
+
     // --- Fields: ONE face, worn by every input in the product ----------------------------
     // A field is the surface tone inside a hairline ring that brightens on hover and goes
     // blue while focused. The settings inputs, the terminal command line and the queued
@@ -234,11 +248,11 @@ module Style =
 
     /// A settings field (input/select): the body scale, never the title's, full width in
     /// the column it sits in.
-    let field = cls [ fieldFace; "w-full font-light text-small leading-5 text-ink placeholder:text-ink-faint" ]
+    let field = cls [ fieldFace; "w-full font-light text-small leading-5 text-ink placeholder:text-ink-faint"; touchType ]
 
     /// The same field in mono, sized by the flex row that holds it — a command line is a
     /// field, not a terminal.
-    let fieldMono = cls [ fieldFace; "flex-1 min-w-0 font-mono text-code text-ink placeholder:text-ink-faint" ]
+    let fieldMono = cls [ fieldFace; "flex-1 min-w-0 font-mono text-code text-ink placeholder:text-ink-faint"; touchType ]
 
     /// The chrome-LESS field: an input whose CONTAINER already carries the stroke (the
     /// composer's box, a listed row's leading edge), so the control itself must draw
@@ -254,7 +268,7 @@ module Style =
     /// an edged card, is what made a queued COMMAND look like a different kind of thing from
     /// a queued MESSAGE, which is the one thing they are not.
     let fieldMonoBare =
-        cls [ "flex-1 min-w-0"; fieldBare; "font-mono text-code text-ink placeholder:text-ink-faint" ]
+        cls [ "flex-1 min-w-0"; fieldBare; "font-mono text-code text-ink placeholder:text-ink-faint"; touchType ]
 
     // --- Listed rows: the leading edge says what the row IS ------------------------------
     // Every row in a list — a queued message, a queued command, a peer's collapsed draft —
@@ -427,8 +441,15 @@ module Style =
 
     let mainColumn = "flex-1 flex flex-col min-w-0 h-full"
 
+    /// The phone's band is a COMPRESSED one, not a different anatomy — but it has to hold what
+    /// the desktop's does not: the session id, which is out of flow above `md` and in flow
+    /// below it (see `titleId`). At 64px it did not. The 28/32 title plus its 16px id line is
+    /// 51px, and 51 + the 12px foot left the heading's box starting at y=0 — the title's own
+    /// top edge on the viewport's, which on a phone reads as a heading sliced off by the
+    /// browser (measured live at 390: `top: 0`). 80px is the smallest step that seats that
+    /// stack with air above it.
     let header =
-        "relative h-band shrink-0 flex items-end gap-4 px-8 pb-5 max-md:h-16 max-md:px-4 max-md:pb-3 " + Stroke.dividerBottom
+        "relative h-band shrink-0 flex items-end gap-4 px-8 pb-5 max-md:h-20 max-md:px-4 max-md:pb-3 " + Stroke.dividerBottom
 
     /// Indent the heading one avatar column (20px + 12px gutter) so its left edge sits
     /// exactly on the message-text column below.
@@ -615,7 +636,7 @@ module Style =
     /// so `focus:` on the host never fires and the brightening never happened.
     let queueInput =
         cls [ "flex-1 min-w-0 self-center h-5"; fieldBare
-              "font-sans font-light text-small leading-5 text-ink-dim focus-within:text-ink" ]
+              "font-sans font-light text-small leading-5 text-ink-dim focus-within:text-ink"; touchType ]
 
     let queueTools =
         "flex gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 transition-opacity"
@@ -650,7 +671,7 @@ module Style =
     /// the focus signal is the gradient edge plus the box's lift.
     let draftInput =
         cls [ "block w-full"; fieldBare
-              "font-sans font-light text-body text-ink placeholder:text-ink-faint px-4 pt-3 pb-1" ]
+              "font-sans font-light text-body text-ink placeholder:text-ink-faint px-4 pt-3 pb-1"; touchType ]
 
     let draftActions = "flex items-center gap-2 pl-4 pr-2 pb-2"
 
@@ -937,7 +958,20 @@ module Style =
 
     /// Classes for the `#app` wrapper (served once in `View.page`; the browser only ever
     /// swaps its innerHTML, so these persist untouched across re-renders).
-    let app = "flex h-screen overflow-hidden bg-bg text-ink font-sans antialiased"
+    ///
+    /// `h-dvh`, never `h-screen`. `100vh` is the LARGE viewport — the height the page WOULD
+    /// have with the browser's toolbars hidden — so on a phone showing its toolbars the shell
+    /// is ~140px taller than anything that can be seen, and the whole document pans inside the
+    /// visible area. Every symptom of that is a chrome one: the header slides up under the
+    /// address bar and loses the top of the title, the composer sits behind the bottom bar,
+    /// and the timeline is cut by an edge that is off screen (photographed on iOS Safari;
+    /// desktop never shows it, because a desktop's viewport does not move).
+    ///
+    /// `100dvh` is what is visible NOW, so the shell fills exactly that and nothing pans —
+    /// which is what the layout below already assumes, every region being sized off this one
+    /// height. On a viewport that never changes (every desktop, and the test harnesses) the
+    /// two units are the same number.
+    let app = "flex h-dvh overflow-hidden bg-bg text-ink font-sans antialiased"
 
     /// Tailwind, built locally into a stylesheet and served by both the Session Process and
     /// the Manager UI — never a CDN (local first). The utilities and the theme tokens come

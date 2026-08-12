@@ -718,6 +718,23 @@ let editorTests =
                     await (page.EvaluateAsync<bool> "() => document.documentElement.scrollWidth > window.innerWidth + 1")
                 Expect.isFalse overflows "no horizontal overflow a phone user cannot scroll away"
 
+                // Nor is the header cut off vertically. The phone's band is a compressed one
+                // and it carries something the desktop's does not — the session id, in flow
+                // below the title — so it is the one place the heading can outgrow its band.
+                // At 64px it did: the title's box started ON the band's top edge, which on a
+                // phone reads as a heading sliced off by the browser. What is asserted is the
+                // containment, not the number: whatever the band becomes, what it holds has
+                // to fit inside it.
+                let! headerFits =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const band = document.querySelector('#shell header').getBoundingClientRect()
+                                 const title = document.querySelector('#shell [data-session-title]').getBoundingClientRect()
+                                 const id = document.querySelector('#shell [data-session-id]').getBoundingClientRect()
+                                 return title.top > band.top && id.bottom <= band.bottom
+                               }""")
+                Expect.isTrue headerFits "the header's title and id sit inside the band, not on its edges"
+
                 // And the way back to the chat is a control, not a dismissal: it returns
                 // focus to the chip that opened the pane.
                 do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='hide']")
@@ -1010,6 +1027,29 @@ let mountedTests =
 
                     let! baseHref = await (page.EvaluateAsync<string> "() => document.querySelector('base')?.getAttribute('href')")
                     Expect.equal baseHref (sprintf "/s/%s/" MOUNT_SESSION) "the shell declares its mount"
+
+                    // Installable, and installable AS ITSELF. The manifest is addressed
+                    // relatively like every other route here, and the URLs INSIDE it resolve
+                    // against its own address — so the app a person adds to their home screen
+                    // launches at this session rather than at whatever sits on the origin's
+                    // root. Resolved by the browser rather than compared as text, because the
+                    // resolution is the property; the icon is fetched for the same reason a
+                    // manifest naming an icon nobody serves would still parse.
+                    let! installed =
+                        await (page.EvaluateAsync<string>
+                                """async () => {
+                                     const href = document.querySelector('link[rel=manifest]').href
+                                     const manifest = await (await fetch(href)).json()
+                                     const icon = await fetch(new URL(manifest.icons[0].src, href))
+                                     return [new URL(manifest.start_url, href).pathname,
+                                             new URL(icon.url).pathname,
+                                             icon.status,
+                                             icon.headers.get('content-type')].join(' ')
+                                   }""")
+                    Expect.equal
+                        installed
+                        (sprintf "/s/%s/ /s/%s/icon.png 200 image/png" MOUNT_SESSION MOUNT_SESSION)
+                        "the installed app starts at this session, and its mark is served under the same mount"
 
                     // No assertion here that the bundle was fetched under the mount: reaching
                     // `connected` above already required it. The bundle IS the client, and a

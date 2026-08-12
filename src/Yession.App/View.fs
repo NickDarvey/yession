@@ -425,7 +425,8 @@ module View =
                 html $"""
                     <a class="{Style.btnPrimary}" href="{url}" target="_blank" rel="noreferrer" data-claude-authorize>Approve on claude.ai</a>
                     <label class="{Style.label}" for="claude-code">code from claude.ai</label>
-                    <input id="claude-code" type="text" class="{Style.field}" data-claude-code placeholder="code#state" />
+                    <input id="claude-code" type="text" class="{Style.field}" data-claude-code placeholder="code#state"
+                           autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" />
                     <div class="flex gap-2">
                       <button type="button" class="{Style.btnPrimary}" data-claude-complete @click={Ev(fun _ -> actions.ClaudeComplete ())}>Complete</button>
                       <button type="button" class="{Style.btn}" data-claude-cancel @click={Ev(fun _ -> dispatch (ClaudeFlowMsg ClaudeIdle))}>Cancel</button>
@@ -812,6 +813,7 @@ module View =
               <button type="button" class="{Style.cls [ Style.navChevronForward; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle="show" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.right}</button>
               <div class="{Style.cls [ Style.titleWrap; Style.headerTitle ]}">
                 <input type="text" class="{Style.titleInput}" data-session-title aria-label="Session title" placeholder="session"
+                       autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
                        value="{titleStr}"
                        .value={titleStr}
                        @input={EvVal(fun v -> dispatch (EditTitleMsg (Ylmish.Text.edit v model.Synced.Title)))}
@@ -1267,6 +1269,7 @@ module View =
                     <div class="{Style.terminalQueuedRow}">
                       <span class="{Style.terminalPrompt}">$</span>
                       <input type="text" class="{Style.fieldMonoBare}" aria-label="Queued command"
+                             autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
                              data-terminal-input="{BodyKey.terminalQueued id}">
                     </div>"""
             | CommandCall (_, _, summary) ->
@@ -1462,8 +1465,15 @@ module View =
                       {others |> List.map peerDraft}
                       <div class="{Style.terminalQueuedRow}">
                         <span class="{Style.terminalPrompt}">$</span>
+                        <!-- A phone keyboard treats a text input as prose unless told
+                             otherwise: it capitalises the first word, autocorrects the rest,
+                             and underlines what it does not know. A command line is none of
+                             those things — `Git` is not `git`, and `ls -la` is not a typo. The
+                             four attributes are written out at each command surface rather
+                             than composed: lit interpolates VALUES, not attribute names. -->
                         <input type="text" class="{Style.fieldMono}" aria-label="Command"
                                placeholder="a command to run here"
+                               autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
                                data-terminal-input="{BodyKey.terminalDraft terminal mine}">
                         <span class="{Style.terminalEditors}">{editors mine}</span>
                         <button type="button" class="{Style.btnPrimary}" aria-keyshortcuts="Enter"
