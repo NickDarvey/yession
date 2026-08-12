@@ -150,6 +150,9 @@ def test_a_streaming_method_answers_with_what_it_streamed(provider: str):
     assert "PowerReading" in answer
     assert "voltage" in answer and "current" in answer
     assert "generator object" not in answer
+    # And the readings are readings, not one quoted string: the exporter shapes the answer,
+    # so repr-ing it a second time here wrapped the whole stream in quotes.
+    assert "returned 'PowerReading" not in answer
 
 
 def test_releasing_hands_the_console_back_clean(provider: str):
