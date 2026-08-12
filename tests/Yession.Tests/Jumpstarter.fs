@@ -125,15 +125,34 @@ let private declared (url: string) : McpServerSet =
 let private toolNames (registries: ToolRegistry list) =
     registries |> List.collect ToolRegistry.allowedTools
 
-let private call (registries: ToolRegistry list) (tool: string) (args: string) =
+let private answer (registries: ToolRegistry list) (tool: string) (args: string) =
     match registries |> List.tryFind (fun r -> ToolRegistry.namespaces r = [ "jumpstarter" ]) with
     | None -> failwith "the session has no registry for the jumpstarter namespace"
     | Some registry ->
         async {
             match! registry.Invoke { Namespace = "jumpstarter"; Name = tool; Arguments = args } with
-            | Ok answer -> return answer.Text
+            | Ok answer -> return answer
             | Error e -> return failwithf "the call never reached the tool: %s" e
         }
+
+let private call (registries: ToolRegistry list) (tool: string) (args: string) =
+    async {
+        let! answered = answer registries tool args
+        return answered.Text
+    }
+
+/// Poll rather than sleep: what is being waited on is a round trip through two processes and
+/// a device, and a fixed sleep is either flaky or slow.
+let private until (predicate: unit -> bool) : Async<bool> =
+    let rec loop (remaining: int) =
+        async {
+            if predicate () then return true
+            elif remaining <= 0 then return false
+            else
+                do! Async.Sleep 50
+                return! loop (remaining - 50)
+        }
+    loop 30000
 
 let tests =
     testList "The jumpstarter provider (Plan 18)" [
@@ -181,6 +200,50 @@ let tests =
                     let! _ = call registries "serial_send" """{"data":"ping over the wire\n"}"""
                     let! heard = call registries "serial_read" """{"timeout_seconds":2}"""
                     Expect.stringContains heard "ping over the wire" "the console carried bytes both ways"
+                })
+
+        // The loop Plan 19 closes, across two languages: THEIR provider offers a stream in
+        // MCP's `_meta`, OUR client reads it, and OUR WebSocket attach opens it. Neither end
+        // has ever seen the other's code, which is the only reason this proves anything.
+        testCaseAsync "the console arrives as a stream this session can open" <|
+            withStack (fun stack ->
+                async {
+                    let mcp = McpClient.create ()
+                    do! mcp.Apply (declared stack.url)
+                    let registries = mcp.Registries ()
+
+                    let! acquired = answer registries "acquire" "{}"
+                    let offer =
+                        match acquired.Stream with
+                        | Some offer -> offer
+                        | None -> failwithf "acquire offered no stream: %s" acquired.Text
+                    Expect.isFalse
+                        offer.Ticket.Capabilities.CanInstrument
+                        "a console is bytes: no blocks, no exit codes, nothing claimed that is not true"
+                    Expect.isTrue offer.Renewable "and asking again is how you get another one"
+
+                    let heard = System.Text.StringBuilder ()
+                    let! attached = AttachWs.attach offer.Ticket 80 24 (fun text -> heard.Append text |> ignore)
+                    let handle = attached |> expect
+
+                    // Both ways, over the exporter's loopback line.
+                    handle.Write "over the stream\r"
+                    let! echoed = until (fun () -> heard.ToString().Contains "over the stream")
+                    Expect.isTrue echoed "what a person types reaches the device and comes back"
+
+                    // One drain, two readers: a terminal being open must not blind the agent
+                    // that still holds the claim.
+                    let! read = call registries "serial_read" """{"timeout_seconds":2}"""
+                    Expect.stringContains read "over the stream" "the tools read what the stream read"
+
+                    // One writer: with a terminal attached, the provider sends the agent
+                    // there rather than opening a second door onto one console.
+                    let! sent = call registries "serial_send" """{"data":"second door\n"}"""
+                    Expect.stringContains sent "attached to a terminal" "the provider says where writes go"
+
+                    handle.Kill ()
+                    let! ending = handle.Exited
+                    Expect.equal ending (SandboxExited 0) "the stream ends in band, not by an abrupt close"
                 })
 
         testCaseAsync "a second session is refused, and told who has it" <|

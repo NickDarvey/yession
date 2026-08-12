@@ -81,8 +81,17 @@ def provider(exporter: str) -> str:
     # Short enough that a test can watch a claim expire without sleeping for minutes, and
     # comfortably longer than the slowest single call (a power cycle pauses for two
     # seconds): liveness is refreshed when a request ARRIVES, so a claim must outlast one.
-    built = create(host=exporter, console="serial", ttl_seconds=5.0, version="test")
     port = _free_port()
+    # The provider's own stream address, which it cannot work out for itself: it is served
+    # here rather than by `main`, and a data leg with no address would offer a url nobody
+    # can open.
+    built = create(
+        host=exporter,
+        console="serial",
+        ttl_seconds=5.0,
+        version="test",
+        origin=lambda: f"ws://127.0.0.1:{port}",
+    )
     config = uvicorn.Config(built.app(), host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -158,9 +167,15 @@ class Client:
         return [tool["name"] for tool in self.call("tools/list")["result"]["tools"]]
 
     def tool(self, name: str, **arguments) -> str:
+        return self.result(name, **arguments)[0]
+
+    def result(self, name: str, **arguments) -> tuple[str, dict]:
+        """(the prose a model reads, the `_meta` a client reads). Two audiences, and this
+        suite is the only place both are checked against one wire."""
         answer = self.call("tools/call", {"name": name, "arguments": arguments})
-        content = answer["result"]["content"]
-        return "\n".join(part.get("text", "") for part in content)
+        result = answer["result"]
+        text = "\n".join(part.get("text", "") for part in result["content"])
+        return text, result.get("_meta") or {}
 
     def end(self) -> int:
         request = urllib.request.Request(

@@ -18,6 +18,11 @@ dependencies = [
     "mcp>=2.0,<3",
     "pexpect>=4.9",
     "uvicorn>=0.34",
+    # The data leg is a WebSocket, and uvicorn only speaks one when a protocol library is
+    # installed. Declared rather than left to a transitive dependency: a deployment resolves
+    # these ranges fresh, and "it worked because something else pulled it in" is how a
+    # provider ends up serving 404s on its own stream url.
+    "websockets>=13",
 ]
 
 [project.scripts]
