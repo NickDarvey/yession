@@ -79,6 +79,14 @@
   --text-code: 12px;     --text-code--line-height: 16px;
   --text-code-sm: 11px;  --text-code-sm--line-height: 16px;
 
+  /* Not a step on the ramp — a BROWSER CONSTANT, and the only reason it is here is that a
+     class has to compose it. iOS zooms the page in when it focuses a text control set below
+     16px, and it does not zoom back out; the pane is left magnified and offset, which is why
+     tapping a 12px command line moved the whole column. Worn on a phone by everything you
+     type into (`Style.touchType`), size only — each field keeps the line box its own step
+     gave it. */
+  --text-touch: 16px;
+
   /* The caps voice's one tracking (labels, statuses, buttons, authors). */
   --tracking-caps: 0.16em;
 
@@ -107,6 +115,28 @@
    composer's focus edge, `Style.fs`) is defined explicitly. */
 @utility bg-grad {
   background-image: linear-gradient(180deg, var(--color-blue), var(--color-green));
+}
+
+/* The document ground. Both shells mount their own black surface (`Style.app`), but the
+   CANVAS behind them is the browser's, and its default is WHITE — which is what shows in the
+   couple of pixels a phone leaves over when its toolbars animate, and in the rubber band at
+   the end of a scroll (photographed on iOS Safari as a white line under the composer). The
+   ground has to be said on the document itself; a class on `<main>` cannot reach it.
+
+   `color-scheme` rides along because it is the same statement to the same audience — the
+   browser's own paintwork: scrollbars, form-control defaults, and the ground it flashes
+   during navigation. It is declared HERE and nowhere else (the Manager page used to carry a
+   `<meta name="color-scheme">` saying it a second time, for one of the two pages).
+
+   `overscroll-behavior` is what stops the rubber band happening at all: without it a flick
+   that runs the timeline off its end chains to the document and bounces the whole app. An
+   app shell that fills the viewport has nowhere to bounce TO. */
+@layer base {
+  html {
+    background-color: var(--color-bg);
+    color-scheme: dark;
+    overscroll-behavior: none;
+  }
 }
 
 /* Presence carets in a body editor (widget decorations built in `Editor.buildBodyDecorations`;
