@@ -671,6 +671,11 @@ module SessionTerminals =
           /// add is exactly what the terminal deliberately did not display — a password at an
           /// `ssh` prompt. See "Durable capture" in the plan.
           Input : TerminalId -> ActorRef -> string -> bool
+          /// Type into an UNINSTRUMENTED terminal, taking the lease first (Plan 19). The
+          /// agent's hand in a source that has no blocks — and the reason a provider's own
+          /// write tool can be refused while its stream is attached, which is what keeps one
+          /// device to one door.
+          Write : TerminalId -> ActorRef -> string -> Async<Result<unit, string>>
           /// The lease holder's viewport size, applied to the pty and the emulator. `false`
           /// when dropped, on the same terms as `Input`.
           Resize : TerminalId -> ActorRef -> int -> int -> bool
@@ -722,6 +727,7 @@ module SessionTerminals =
           Release = fun _ _ -> async { return Error "this session has no terminals" }
           PeerGone = fun _ -> async { return () }
           Input = fun _ _ _ -> false
+          Write = fun _ _ _ -> async { return Error "this session has no terminals" }
           Resize = fun _ _ _ _ -> false
           ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
@@ -1436,6 +1442,29 @@ module SessionTerminals =
                 true
             | None -> false
 
+        /// Type into a terminal whose source cannot be instrumented, taking the lease first
+        /// (Plan 19).
+        ///
+        /// One verb rather than "take, then input", because the two together are the
+        /// invariant: an actor that could write without holding the lease would be a second
+        /// writer on a device the lease exists to arbitrate. Taking it is a STEAL, on the
+        /// record, exactly as a peer's is — collaborators are trusted, and what matters is
+        /// that whoever was typing can see it happened and take it straight back.
+        ///
+        /// Refused on an instrumented terminal: there, a command is a block, blocks are what
+        /// people approve, and typing raw bytes into one would be the door around that gate.
+        let write (id: TerminalId) (by: ActorRef) (data: string) : Async<Result<unit, string>> =
+            async {
+                let key = TerminalId.value id
+                if not (isOpen id) then return Error "terminal is not open"
+                elif canInstrument key then
+                    return Error "this terminal runs commands as blocks — run it with execute_command, where people can approve it"
+                else
+                    match! take id by with
+                    | Error reason -> return Error reason
+                    | Ok () -> return (if input id by data then Ok () else Error "this terminal has nothing to type into")
+            }
+
         let resize (id: TerminalId) (by: ActorRef) (cols: int) (rows: int) : bool =
             // A source that declared no size is not resized and does not pretend to have
             // been: a serial line has no rows, and telling it it has 24 would be inventing a
@@ -1519,6 +1548,7 @@ module SessionTerminals =
           PeerGone = peerGone
           Input = input
           Resize = resize
+          Write = write
           ApplySize = applySize
           Busy = fun () -> busy
           Leased = fun () -> TerminalLeases.held leases

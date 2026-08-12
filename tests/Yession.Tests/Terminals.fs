@@ -2074,6 +2074,45 @@ let private sourceTests =
                 Expect.isOk taken "a device can still be typed at — the lease is what arbitrates"
                 Expect.isFalse (terminals.Resize id (PeerRef ada) 132 43) "but it has no size to set"
             }
+
+        // The agent's hand in a source with no blocks (Plan 19). What matters is not that
+        // bytes moved — it is that they moved THROUGH the lease, so a human watching sees
+        // who is typing and can take it straight back.
+        testCaseAsync "the agent types into a live-only terminal by holding it, like anyone else" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _ = recordingTranscripts ()
+                let attach, written = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let id = opened |> expect
+
+                let! wrote = terminals.Write id ActorRef.Agent "AT\r"
+                Expect.isOk wrote "the agent can talk to a device it was given"
+                Expect.isTrue (written |> Seq.exists (fun w -> w.Contains "AT")) "the bytes reached the stream"
+                Expect.equal (terminals.Leased ()) (Set.ofList [ TerminalId.value id ]) "and it holds the terminal"
+
+                // Stealable, both ways: the lease means the same thing whoever is holding it.
+                let! stolen = terminals.Take id (PeerRef ada)
+                Expect.isOk stolen "a person takes it back without asking"
+                Expect.isFalse (terminals.Input id ActorRef.Agent "more") "and the agent stops being able to type"
+            }
+
+        testCaseAsync "on an instrumented terminal it is refused, because that is what blocks are for" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _ = recordingTranscripts ()
+                let attach, written = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript []
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                match! terminals.Write id ActorRef.Agent "rm -rf /\r" with
+                | Ok () -> failwith "raw bytes into a shell would be the door around the approval gate"
+                | Error reason -> Expect.stringContains reason "execute_command" "and it says where to go instead"
+                Expect.isFalse (written |> Seq.exists (fun w -> w.Contains "rm -rf")) "nothing was typed"
+            }
     ]
 
 let tests =

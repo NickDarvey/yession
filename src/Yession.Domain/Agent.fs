@@ -190,6 +190,20 @@ type PendingOutcome =
 /// is one type.
 type CheckPending = QueueId -> Async<Result<PendingOutcome, string>>
 
+/// Type into a terminal whose source cannot be instrumented (Plan 19).
+///
+/// The agent's second hand, and it exists to keep the FIRST rule intact rather than to add a
+/// second one. A device stream has no prompt to bootstrap, so it has no blocks — which means
+/// `execute_command` has nothing to do there, and an agent that needs to talk to the thing on
+/// the other end would otherwise have to use the provider's own write tool. That is a second
+/// door onto one device, past the lease that arbitrates who is typing.
+///
+/// So this one takes the lease, exactly as a person does: the agent shows up in the holder
+/// field a human shows up in, a human can steal it back mid-sentence, and every byte is in
+/// the transcript everyone reads. Refused on an instrumented terminal, where the answer is
+/// `execute_command` and the approval gate that comes with it.
+type WriteTerminal = TerminalId -> string -> Async<Result<string, string>>
+
 /// The read-only repo verbs (Plan 14): clone-and-orient, NO mutation of history and NO
 /// push — everything irreversible goes through `ExecuteCommand` in the WorkSandbox,
 /// where the approval gate and the transcript already are. Git runs confined beside the
@@ -265,6 +279,9 @@ type AgentCapabilities =
       ExecuteCommand : ExecuteCommand
       /// Resume a handle `ExecuteCommand` yielded.
       CheckPending : CheckPending
+      /// Type into a terminal that has no blocks to run a command in (Plan 19), under the
+      /// same lease a person types under.
+      WriteTerminal : WriteTerminal
       RunGated : RunGatedCommand
       SetSecret : SetSessionSecret
       ListSecrets : ListSessionSecrets
@@ -314,6 +331,7 @@ module AgentCapabilities =
     let none : AgentCapabilities =
         { ExecuteCommand = fun _ _ -> async { return Error "no terminal capability" }
           CheckPending = fun _ -> async { return Error "no terminal capability" }
+          WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
           // A denial that still RUNS the command: the gate is a wrapper, and a session with
           // no collaborative state to park an act in must not lose the act.
           RunGated =

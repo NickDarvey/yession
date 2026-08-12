@@ -465,6 +465,17 @@ let startFull
         let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
             { ExecuteCommand = terminalCommands.Execute
               CheckPending = checkPending
+              // The agent's hand in a terminal that has no blocks (Plan 19). It takes the
+              // lease like a peer, so a human watching sees who is typing and can take it
+              // back — which is the whole reason this is a terminal verb rather than a
+              // provider's own write tool.
+              WriteTerminal =
+                fun id data ->
+                    async {
+                        match! terminals.Write id ActorRef.Agent data with
+                        | Ok () -> return Ok (sprintf "typed into terminal %s; you now hold it" (TerminalId.value id))
+                        | Error reason -> return Error reason
+                    }
               RunGated = commandGate.Run
               SetSecret =
                 match secretsCapabilities with
