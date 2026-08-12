@@ -473,7 +473,12 @@ Items are roughly ordered by how much they matter.
   gap: leases are human-only until there is a reason to change that. The drain gate that
   accompanies them shipped with live mode (stage 2e) — a leased terminal holds its queue
   rather than typing into a session someone else owns.
-- **Live mode has no browser viewport.** The Session Process side is complete — lease,
-  detected flip, `TerminalInput`/`TerminalResize` frames, idle reclaim — and the panel
-  renders blocks and the lease bar, not a live screen. A lease can be taken and watched;
-  typing into one is not yet drivable from a browser.
+- **The live viewport is proven host-free, never against a real pty end to end**
+  ([Plan 14](plans/14-terminal-replay-in-chat.md), stage 6 — which closed the older
+  "no browser viewport" gap: the panel renders a live screen, the holder's copy takes
+  keystrokes, and the client composes it with the same emulator the Session Process uses).
+  What no suite drives is the whole loop at once. Stage 6's own note says so: the keystroke
+  translation is answered host-free under `Browser`, because a `KeyboardEvent` is the part
+  only a real browser can answer, and the Process half is pinned separately in the pty
+  suite. Two peers sharing one real pty, one of them typing into it, is covered by neither
+  end.
