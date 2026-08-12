@@ -598,9 +598,10 @@ module Codec =
         { Encode =
             fun (r: McpCallResult) ->
                 Encode.object
-                    [ "content",
-                      Encode.list [ Encode.object [ "type", Encode.string "text"; "text", Encode.string r.Text ] ]
-                      "isError", Encode.bool r.IsError ]
+                    ([ "content",
+                       Encode.list [ Encode.object [ "type", Encode.string "text"; "text", Encode.string r.Text ] ]
+                       "isError", Encode.bool r.IsError ]
+                     @ (r.Meta |> Option.map (fun m -> [ "_meta", rawJson.Encode m ]) |> Option.defaultValue []))
           Decode =
             Decode.object (fun get ->
                 { McpCallResult.Text =
@@ -608,7 +609,38 @@ module Codec =
                     |> Option.defaultValue []
                     |> String.concat "\n"
                   McpCallResult.IsError =
-                    get.Optional.Field "isError" Decode.bool |> Option.defaultValue false }) }
+                    get.Optional.Field "isError" Decode.bool |> Option.defaultValue false
+                  McpCallResult.Meta = get.Optional.Field "_meta" rawJson.Decode }) }
+
+    /// The stream a provider offered, out of a result's `_meta` (Plan 19).
+    ///
+    /// TOTAL, and deliberately: `_meta` is a place anyone may put anything, so a key that is
+    /// missing, a value of the wrong shape, or an offer with no url all read as "no offer"
+    /// rather than as a failed tool call. The only thing a provider must get right to be
+    /// heard is the url.
+    ///
+    /// Every other field defaults to the conservative reading — `byteStream` capabilities,
+    /// no label, not renewable — so the smallest conforming provider adds one string.
+    let streamOffer (meta: string) : StreamOffer option =
+        let capabilities : Decoder<SourceCapabilities> =
+            Decode.object (fun get ->
+                { CanInstrument = get.Optional.Field "instrument" Decode.bool |> Option.defaultValue false
+                  CanResize = get.Optional.Field "resize" Decode.bool |> Option.defaultValue false
+                  HasExitCode = get.Optional.Field "exitCode" Decode.bool |> Option.defaultValue false })
+        let offer : Decoder<StreamOffer> =
+            Decode.object (fun get ->
+                { Ticket =
+                    { Url = get.Required.Field "url" Decode.string
+                      Capabilities =
+                        get.Optional.Field "capabilities" capabilities
+                        |> Option.defaultValue SourceCapabilities.byteStream
+                      Label = get.Optional.Field "label" Decode.string |> Option.defaultValue "" }
+                  Renewable = get.Optional.Field "renewable" Decode.bool |> Option.defaultValue false })
+        let container : Decoder<StreamOffer option> =
+            Decode.object (fun get -> get.Optional.Field StreamOffer.metaKey offer)
+        match Decode.fromString container meta with
+        | Ok found -> found
+        | Error _ -> None
 
     /// One `/control/mcp` frame: the whole resolved set for THIS session, every time. The
     /// AUDIENCE is deliberately absent — resolution already happened, and a session that

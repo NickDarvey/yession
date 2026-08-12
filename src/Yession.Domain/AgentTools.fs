@@ -158,7 +158,7 @@ module AgentTools =
             | Error e -> return ToolAnswer.text (sprintf "not a sandbox name: %s" e)
             | Ok target ->
                 match! capabilities.ExecuteCommand target command with
-                | Ok outcome -> return { Text = renderOutcome outcome; Block = outcome.Block }
+                | Ok outcome -> return { Text = renderOutcome outcome; Block = outcome.Block; Stream = None }
                 | Error reason -> return ToolAnswer.text (sprintf "could not run the command: %s" reason)
         }
 
@@ -197,7 +197,7 @@ module AgentTools =
             | Error e -> return ToolAnswer.text (sprintf "not a command handle: %s" e)
             | Ok handle ->
                 match! capabilities.CheckPending handle with
-                | Ok (PendingTerminal outcome) -> return { Text = renderOutcome outcome; Block = outcome.Block }
+                | Ok (PendingTerminal outcome) -> return { Text = renderOutcome outcome; Block = outcome.Block; Stream = None }
                 | Ok (PendingCommand outcome) -> return ToolAnswer.text (renderCommandOutcome outcome)
                 | Error reason -> return ToolAnswer.text (sprintf "could not read that command: %s" reason)
         }

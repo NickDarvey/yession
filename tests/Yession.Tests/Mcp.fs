@@ -256,6 +256,9 @@ type private Provider =
 ///   `/restarts`    — forgets its session id once, answering one 404, then behaves.
 ///   `/amnesiac`    — forgets it every single time: 404 forever.
 ///   `/ancient`     — answers `initialize` with a protocol version we do not speak.
+///   `/streams`     — two more tools, which offer a byte stream in the result's `_meta`
+///                    (Plan 19): `attach` offers one on this server's own host, `elsewhere`
+///                    offers one on somebody else's.
 [<Emit("""(async () => {
   const http = await import('node:http')
   let initializes = 0
@@ -263,12 +266,17 @@ type private Provider =
   let sessions = new Set()
   let restartsBurned = false
   let plugged = false
-  const TOOLS = () => [
+  const STREAM_TOOLS = [
+    { name: 'attach', description: 'hand back a stream', inputSchema: { type: 'object', properties: {} } },
+    { name: 'elsewhere', description: 'hand back somebody else\'s stream', inputSchema: { type: 'object', properties: {} } }
+  ]
+  const TOOLS = (path) => [
     { name: 'echo', description: 'say it back', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
     { name: 'boom', description: 'always fails', inputSchema: { type: 'object', properties: {} } },
     // A tool that exists only while a device is attached — how a provider expresses
     // plug-and-play through the one mechanism MCP gives it.
-    ...(plugged ? [{ name: 'read_ttyACM0', description: 'the device that just appeared', inputSchema: { type: 'object', properties: {} } }] : [])
+    ...(plugged ? [{ name: 'read_ttyACM0', description: 'the device that just appeared', inputSchema: { type: 'object', properties: {} } }] : []),
+    ...(path === '/streams' ? STREAM_TOOLS : [])
   ]
   const server = http.createServer((req, res) => {
     let body = ''
@@ -319,11 +327,21 @@ type private Provider =
 
       if (rpc.method === 'tools/list') {
         if (path === '/strict' && !initialized) { failure(-32002, 'not initialized'); return }
-        result({ tools: TOOLS() }); return
+        result({ tools: TOOLS(path) }); return
       }
       if (rpc.method === 'tools/call') {
         const name = rpc.params && rpc.params.name
         const args = (rpc.params && rpc.params.arguments) || {}
+        // A stream offered in `_meta` (Plan 19) — client metadata, deliberately not in the
+        // content the model reads.
+        if (name === 'attach' || name === 'elsewhere') {
+          const host = name === 'attach' ? '127.0.0.1:' + server.address().port : '10.0.0.9:7333'
+          result({
+            content: [{ type: 'text', text: 'ttyACM0 is yours.' }],
+            _meta: { 'dev.yession/stream': { url: 'ws://' + host + '/attach/tok', label: 'USB serial', renewable: true } }
+          })
+          return
+        }
         if (name === 'echo' && args.text === 'explode') { failure(-32000, 'the port is busy'); return }
         if (name === 'echo') { result({ content: [{ type: 'text', text: 'echo:' + (args.text || '') }] }); return }
         if (name === 'boom') { result({ content: [{ type: 'text', text: 'it went badly' }], isError: true }); return }
@@ -586,6 +604,46 @@ let portsTests =
                     (ToolRegistry.allowedTools merged)
                     [ "mcp__yession__execute_command"; "mcp__serial__echo" ]
                     "both namespaces reach the model, under distinct wire names"
+                do! provider.stop () |> Async.AwaitPromise
+            }
+
+        // A stream a provider offers (Plan 19), off a REAL result's `_meta` — the half of
+        // the contract a hand-written decoder cannot prove on its own, because what is being
+        // tested is that the field survives the whole `tools/call` round trip.
+        testCaseAsync "a stream offered in `_meta` crosses the wire and is admitted" <|
+            async {
+                let! provider = startProvider McpProtocol.Version |> Async.AwaitPromise
+                let mcp = connections ()
+                do! mcp.Apply { Servers = [ at provider.port "/streams" "serial" ] }
+
+                match! call (mcp.Registries ()) "serial" "attach" "{}" with
+                | Error e -> failwithf "the call should have reached the tool: %s" e
+                | Ok answer ->
+                    Expect.equal answer.Text "ttyACM0 is yours." "the model reads the provider's prose, and no url"
+                    match answer.Stream with
+                    | None -> failwith "the offer did not survive the round trip"
+                    | Some offer ->
+                        Expect.stringContains offer.Ticket.Url "/attach/tok" "the address the session will dial"
+                        Expect.equal offer.Ticket.Label "USB serial" "named by the provider"
+                        Expect.isTrue offer.Renewable "and it says asking again is safe"
+                        Expect.isFalse
+                            offer.Ticket.Capabilities.CanInstrument
+                            "a provider that claimed nothing gets the least a source can be"
+                do! provider.stop () |> Async.AwaitPromise
+            }
+
+        testCaseAsync "a stream on somebody else's host is refused, in the answer the model reads" <|
+            async {
+                let! provider = startProvider McpProtocol.Version |> Async.AwaitPromise
+                let mcp = connections ()
+                do! mcp.Apply { Servers = [ at provider.port "/streams" "serial" ] }
+
+                match! call (mcp.Registries ()) "serial" "elsewhere" "{}" with
+                | Error e -> failwithf "a refused stream is not a failed call: %s" e
+                | Ok answer ->
+                    Expect.isNone answer.Stream "nothing to attach"
+                    Expect.stringContains answer.Text "ttyACM0 is yours." "the tool still answered"
+                    Expect.stringContains answer.Text "10.0.0.9" "and the model is told what was refused"
                 do! provider.stop () |> Async.AwaitPromise
             }
     ]

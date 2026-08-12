@@ -155,11 +155,15 @@ type ToolCall =
 /// second chip beside the block's own.
 type ToolAnswer =
     { Text : string
-      Block : BlockId option }
+      Block : BlockId option
+      /// A byte stream the provider offered along with its answer (Plan 19), already
+      /// admitted by whoever decoded it. `None` for every in-process tool: the session's own
+      /// verbs run in the session, and a stream is by definition somebody else's.
+      Stream : StreamOffer option }
 
 module ToolAnswer =
 
-    let text (value: string) : ToolAnswer = { Text = value; Block = None }
+    let text (value: string) : ToolAnswer = { Text = value; Block = None; Stream = None }
 
 /// Invoke a tool. ONE function, so an in-process tool and a proxied one are
 /// indistinguishable to the caller — which is what makes a single audit seam possible

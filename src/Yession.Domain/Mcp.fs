@@ -189,7 +189,12 @@ type McpHandshake =
 /// a JSON-RPC error, which means the call never reached a tool at all.
 type McpCallResult =
     { Text : string
-      IsError : bool }
+      IsError : bool
+      /// The result's `_meta`, verbatim, when it had one — raw JSON text, carried the way
+      /// `McpTool.InputSchema` is carried, so a boundary type does not have to know what
+      /// every key in it means. Exactly one key is read (Plan 19's stream offer); the rest
+      /// crosses and is ignored.
+      Meta : string option }
 
 /// How one declared server is actually doing, from the process that is actually connected
 /// to it. What the `mcp_servers` query reports, and the reason there is no add-time
