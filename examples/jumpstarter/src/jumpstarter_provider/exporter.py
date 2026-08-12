@@ -14,14 +14,18 @@ with. The provider never touches the SDK; it asks this.
 
 from __future__ import annotations
 
+import inspect
 import os
 import queue
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import pexpect
+
+from . import introspect
 
 
 class ExporterError(Exception):
@@ -140,7 +144,17 @@ class Exporter:
         try:
             ok, value = command.reply.get(timeout=timeout)
         except queue.Empty:
-            raise ExporterError("the exporter did not answer in time") from None
+            # The thread is still inside that call — a driver method that never returns, or a
+            # stream whose next item never arrives. Abandon it rather than queue behind it,
+            # so the next call gets a fresh connection instead of inheriting the wedge. The
+            # abandoned thread is a daemon and holds one SDK client until the process ends,
+            # which is the honest cost of not being able to interrupt somebody else's library.
+            self._thread = None
+            self._ready = queue.Queue()
+            raise ExporterError(
+                "the exporter did not answer in time — that connection was dropped, "
+                "so the next call reconnects"
+            ) from None
         if not ok:
             raise ExporterError(str(value))
         return value
@@ -167,38 +181,28 @@ class Exporter:
         return self._do(run)
 
     def methods(self, driver: str) -> list[str]:
-        """What this driver offers, as opposed to what every driver client inherits.
-
-        `dir()` on a driver client is thirty names, and twenty-five of them are the SDK's
-        own plumbing (`call_async`, `stream`, `wait_for_lease_ready`). Subtracting the base
-        class leaves what the exporter is actually offering, which is the question.
-        """
+        """What this driver offers — see `introspect.offered` for what that excludes."""
 
         def run(connection: _Connection) -> list[str]:
-            from jumpstarter.client import DriverClient
-
-            target = _resolve(connection.client, driver)
-            inherited = set(dir(DriverClient))
-            return sorted(
-                name
-                for name in dir(target)
-                if name not in inherited
-                and not name.startswith("_")
-                and callable(getattr(target, name, None))
-            )
+            return introspect.offered(type(_resolve(connection.client, driver)))
 
         return self._do(run)
 
-    def call(self, driver: str, method: str, args: list[Any]) -> Any:
-        def run(connection: _Connection) -> Any:
+    def call(self, driver: str, method: str, args: list[Any]) -> str:
+        """Call a driver method and describe what came back.
+
+        The answer is a STRING rather than the value, because what came back is not always a
+        value: a streaming method hands over a generator, and a caller shown
+        `<generator object …>` has been told nothing. Shaping it here keeps the tool layer
+        free of SDK shapes.
+        """
+
+        def run(connection: _Connection) -> str:
             target = _resolve(connection.client, driver)
-            function = getattr(target, method, None)
-            if function is None or not callable(function):
-                raise ExporterError(
-                    f"driver '{driver}' has no method '{method}' — "
-                    f"it has {', '.join(sorted(n for n in dir(target) if not n.startswith('_')))}"
-                )
-            return function(*args)
+            found = introspect.resolve(type(target), method, driver)
+            if isinstance(found, introspect.Refusal):
+                raise ExporterError(found.reason)
+            return _describe(getattr(target, method)(*args))
 
         return self._do(run)
 
@@ -248,6 +252,46 @@ class Exporter:
         if self._thread is None or not self._thread.is_alive():
             return
         self._commands.put(_Command(run=lambda connection: connection.close_console()))
+
+
+# How much of a stream is an answer. A power line samples forever, so "drain it" has to mean
+# "take enough to see, then stop": whichever of these comes first, and the caller is told when
+# it was the cap rather than the end.
+MAX_ITEMS = 10
+DRAIN_SECONDS = 5.0
+
+
+def _describe(result: Any) -> str:
+    """What a driver method returned, in a form a model can read.
+
+    A generator is the case that matters: `power.read()` is the only measurement jumpstarter's
+    power interface offers, and it arrives as a stream. Draining it here is what turns "the
+    board's power state" from `<generator object …>` into volts and amps.
+    """
+    if inspect.iscoroutine(result):
+        # Close it rather than leak it: an un-awaited coroutine warns at garbage-collection
+        # time, in a log nobody is reading, long after the call that made it.
+        result.close()
+        return "that method is asynchronous, and this provider calls synchronous ones — nothing was run"
+    if inspect.isasyncgen(result):
+        return "that method streams asynchronously, which this provider cannot drain — nothing was read"
+    if inspect.isgenerator(result):
+        taken: list[Any] = []
+        deadline = time.monotonic() + DRAIN_SECONDS
+        truncated = False
+        try:
+            for item in result:
+                taken.append(item)
+                if len(taken) >= MAX_ITEMS or time.monotonic() >= deadline:
+                    truncated = True
+                    break
+        finally:
+            result.close()
+        if not taken:
+            return "the stream ended without yielding anything"
+        body = ", ".join(repr(item) for item in taken)
+        return f"{body} (still going — first {len(taken)})" if truncated else body
+    return repr(result)
 
 
 def _resolve(client: Any, path: str) -> Any:

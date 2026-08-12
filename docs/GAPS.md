@@ -51,6 +51,13 @@ Items are roughly ordered by how much they matter.
   directly and take the hardware out from under a holder. One host, one operator and
   loopback make that acceptable; a shared machine would need the passphrase upstream
   already supports, and a controller would replace the claim with a lease outright.
+- **A driver method that never returns wedges one connection**
+  ([Plan 18](plans/18-jumpstarter.md)): the jumpstarter example calls the SDK on a thread of
+  its own, and nothing can interrupt a library call from outside. A method that blocks
+  forever — or a stream whose next item never arrives — is answered with a timeout and that
+  connection is dropped so later calls reconnect, but the thread stays parked on it, holding
+  one SDK client until the process ends. Bounded (one thread per wedge, and only a driver
+  that misbehaves can cause one) and visible in the answer, rather than fixed.
 - **A provider's lifecycle is nobody's** ([Plan 16](plans/16-serial-devices.md)): who
   starts a provider — systemd, launchd, an operator, nothing — is unsettled, and "the
   Manager only declares" argues for nothing. Softened by Plan 17's poll, which retries a

@@ -107,6 +107,54 @@ def test_driver_call_is_the_general_case(provider: str):
     assert "no driver" in client.tool("driver_call", driver="hdmi", method="capture")
 
 
+def test_a_refusal_offers_what_the_listing_offers(provider: str):
+    client = Client(provider)
+    client.tool("acquire")
+    listing = client.tool("driver_call", driver="power", method="")
+    refusal = client.tool("driver_call", driver="power", method="definitely_not_a_method")
+    # One answer to "what does this driver offer". Two of them is how a caller ends up
+    # invoking the SDK's own plumbing: the refusal used to advertise every name on the
+    # object, including the async ones the listing deliberately hides.
+    for name in ("on", "off", "read"):
+        assert name in refusal, name
+    for plumbing in ("call_async", "stream", "wait_for_lease_ready"):
+        assert plumbing not in refusal, plumbing
+    assert listing.split(": ", 1)[-1].strip() in refusal
+
+
+def test_a_property_is_refused_as_a_property(provider: str):
+    client = Client(provider)
+    client.tool("acquire")
+    # `status` is a property on the SDK's client — asking for it as a method used to answer
+    # "no method 'status'" and then list `status` among what the driver has.
+    answer = client.tool("driver_call", driver="power", method="status")
+    assert "property" in answer
+    assert "no method 'status'" not in answer
+
+
+def test_an_async_method_is_refused_rather_than_half_called(provider: str):
+    client = Client(provider)
+    client.tool("acquire")
+    answer = client.tool("driver_call", driver="power", method="get_status_async")
+    assert "asynchronous" in answer
+    # Not a coroutine object handed back as text, which is what a caller used to receive.
+    assert "coroutine" not in answer
+
+
+def test_a_streaming_method_answers_with_what_it_streamed(provider: str):
+    client = Client(provider)
+    client.tool("acquire")
+    # `read` is the only measurement jumpstarter's power interface offers, and it arrives as
+    # a generator — which is what makes it the answer to "what is the board's power state".
+    answer = client.tool("driver_call", driver="power", method="read")
+    assert "PowerReading" in answer
+    assert "voltage" in answer and "current" in answer
+    assert "generator object" not in answer
+    # And the readings are readings, not one quoted string: the exporter shapes the answer,
+    # so repr-ing it a second time here wrapped the whole stream in quotes.
+    assert "returned 'PowerReading" not in answer
+
+
 def test_releasing_hands_the_console_back_clean(provider: str):
     first = Client(provider, name="first")
     first.tool("acquire")
