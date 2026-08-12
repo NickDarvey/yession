@@ -297,8 +297,8 @@ let mcpSection (views: ProcessManager.SessionView list) (declarations: McpDeclar
 
 // The page keeps the workspace anatomy: the shared 88px header band (wordmark on the
 // common baseline, hairline below), then labelled sections on one left rail. The body
-// shell is `Style.app` (h-screen, overflow-hidden), so <main> owns the scrolling — a
-// long registry scrolls under a fixed viewport instead of clipping.
+// shell is `Style.app` (the visible viewport's height, overflow-hidden), so <main> owns the
+// scrolling — a long registry scrolls under a fixed viewport instead of clipping.
 let private bodyTemplate
     (access: PublicAccess)
     (views: ProcessManager.SessionView list)
@@ -336,7 +336,6 @@ let page
     String.concat "" [
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        "<meta name=\"color-scheme\" content=\"dark\">"
         "<title>Yession Manager</title>"
         Style.headTags styleSheetUrl
         sprintf "</head><body class=\"%s\">" Style.app

@@ -427,8 +427,15 @@ module Style =
 
     let mainColumn = "flex-1 flex flex-col min-w-0 h-full"
 
+    /// The phone's band is a COMPRESSED one, not a different anatomy — but it has to hold what
+    /// the desktop's does not: the session id, which is out of flow above `md` and in flow
+    /// below it (see `titleId`). At 64px it did not. The 28/32 title plus its 16px id line is
+    /// 51px, and 51 + the 12px foot left the heading's box starting at y=0 — the title's own
+    /// top edge on the viewport's, which on a phone reads as a heading sliced off by the
+    /// browser (measured live at 390: `top: 0`). 80px is the smallest step that seats that
+    /// stack with air above it.
     let header =
-        "relative h-band shrink-0 flex items-end gap-4 px-8 pb-5 max-md:h-16 max-md:px-4 max-md:pb-3 " + Stroke.dividerBottom
+        "relative h-band shrink-0 flex items-end gap-4 px-8 pb-5 max-md:h-20 max-md:px-4 max-md:pb-3 " + Stroke.dividerBottom
 
     /// Indent the heading one avatar column (20px + 12px gutter) so its left edge sits
     /// exactly on the message-text column below.
@@ -937,7 +944,20 @@ module Style =
 
     /// Classes for the `#app` wrapper (served once in `View.page`; the browser only ever
     /// swaps its innerHTML, so these persist untouched across re-renders).
-    let app = "flex h-screen overflow-hidden bg-bg text-ink font-sans antialiased"
+    ///
+    /// `h-dvh`, never `h-screen`. `100vh` is the LARGE viewport — the height the page WOULD
+    /// have with the browser's toolbars hidden — so on a phone showing its toolbars the shell
+    /// is ~140px taller than anything that can be seen, and the whole document pans inside the
+    /// visible area. Every symptom of that is a chrome one: the header slides up under the
+    /// address bar and loses the top of the title, the composer sits behind the bottom bar,
+    /// and the timeline is cut by an edge that is off screen (photographed on iOS Safari;
+    /// desktop never shows it, because a desktop's viewport does not move).
+    ///
+    /// `100dvh` is what is visible NOW, so the shell fills exactly that and nothing pans —
+    /// which is what the layout below already assumes, every region being sized off this one
+    /// height. On a viewport that never changes (every desktop, and the test harnesses) the
+    /// two units are the same number.
+    let app = "flex h-dvh overflow-hidden bg-bg text-ink font-sans antialiased"
 
     /// Tailwind, built locally into a stylesheet and served by both the Session Process and
     /// the Manager UI — never a CDN (local first). The utilities and the theme tokens come

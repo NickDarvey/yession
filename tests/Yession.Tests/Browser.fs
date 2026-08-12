@@ -718,6 +718,23 @@ let editorTests =
                     await (page.EvaluateAsync<bool> "() => document.documentElement.scrollWidth > window.innerWidth + 1")
                 Expect.isFalse overflows "no horizontal overflow a phone user cannot scroll away"
 
+                // Nor is the header cut off vertically. The phone's band is a compressed one
+                // and it carries something the desktop's does not — the session id, in flow
+                // below the title — so it is the one place the heading can outgrow its band.
+                // At 64px it did: the title's box started ON the band's top edge, which on a
+                // phone reads as a heading sliced off by the browser. What is asserted is the
+                // containment, not the number: whatever the band becomes, what it holds has
+                // to fit inside it.
+                let! headerFits =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const band = document.querySelector('#shell header').getBoundingClientRect()
+                                 const title = document.querySelector('#shell [data-session-title]').getBoundingClientRect()
+                                 const id = document.querySelector('#shell [data-session-id]').getBoundingClientRect()
+                                 return title.top > band.top && id.bottom <= band.bottom
+                               }""")
+                Expect.isTrue headerFits "the header's title and id sit inside the band, not on its edges"
+
                 // And the way back to the chat is a control, not a dismissal: it returns
                 // focus to the chip that opened the pane.
                 do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='hide']")

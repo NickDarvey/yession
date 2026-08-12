@@ -140,6 +140,31 @@ let private timelineScroll () : float option = jsNative
 })()""")>]
 let private restoreTimelineScroll (position: float) : unit = jsNative
 
+// A RENDER is not the only thing that moves the end of the conversation away from the
+// reader — a RESIZE does it too, and on a phone the viewport is not a constant: the
+// browser's toolbars come and go, the device turns. The shell is the visible viewport's
+// height (`Style.app`), so each of those shortens the timeline's box while its `scrollTop`
+// stays exactly where it was, and somebody who was at the end of the conversation is left a
+// line and a half short of it — the last thing said, cut in half, just above the composer.
+//
+// Whether they were at the end has to be sampled BEFORE the box changes (by the time the
+// resize handler runs the measurement would always say "no"), so it rides the scroll event —
+// captured, because scroll does not bubble, and the element is Lit's to replace.
+[<Emit("""(() => {
+  const sel = '[data-conversation]'
+  const atEnd = el => el.scrollTop + el.clientHeight >= el.scrollHeight - 4
+  let pinned = true
+  document.addEventListener('scroll', e => {
+    const el = e.target
+    if (el instanceof Element && el.matches(sel)) pinned = atEnd(el)
+  }, true)
+  window.addEventListener('resize', () => {
+    const el = document.querySelector(sel)
+    if (el && pinned) el.scrollTop = el.scrollHeight
+  })
+})()""")>]
+let private keepTimelinePinned () : unit = jsNative
+
 // A native <input> has no per-character DOM geometry, so we measure the pixel offset of a
 // substring with a canvas using the input's own font. Given a peer's decoded selection
 // (`anchor`,`head` indices), size its highlight span to `lo..hi` and offset the caret bar to
@@ -1115,6 +1140,10 @@ let private start () =
         App.makeProgram doc initial
         |> Program.withSetState setState
         |> Program.run
+
+        // Renders keep the reader's place (`setState`); this keeps it across the other thing
+        // that moves it, a viewport that changed size under a laid-out conversation.
+        keepTimelinePinned ()
 
         // The local peer's draft slot follows its body: published on the first keystroke,
         // retracted when the composer empties. Watches the body itself, so a keystroke and a
