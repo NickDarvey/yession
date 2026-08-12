@@ -30,6 +30,16 @@ requests. So the SDK lives on a thread of its own with a command queue
 and exited once, and the tools hand it work. That is the whole trick, and it is the part
 worth stealing for any provider wrapping a library that was not written for a server.
 
+**Introspection has to be honest, or it sends the caller somewhere worse.** A driver client
+carries thirty names and six of them are the driver's; the rest is the SDK's plumbing. So one
+function ([src/jumpstarter_provider/introspect.py](src/jumpstarter_provider/introspect.py))
+answers *what does this offer* for both the listing and every refusal, and it answers from the
+CLASS — because `getattr(client, "status")` runs the getter, and `status` is a property. A
+refusal that says only "no such method" and then lists names the listing hides is how a caller
+ends up invoking `get_status_async` and being handed an un-awaited coroutine. Streaming methods
+are drained to their first few items rather than described as `<generator object …>`, which is
+what makes `driver_call power read` the answer to "what is the board doing".
+
 **A request/response protocol can still hold a conversation.** Bytes do not ride tool calls:
 the console is a stream. Rather than a second transport, the stream stays open for the life of
 the claim and three tools drain it — `serial_send`, `serial_read`, and `serial_expect`, which
@@ -44,7 +54,7 @@ though the console is not.
 | `acquire` | takes it | claim the exporter |
 | `release` | yes | give it back, closing the console |
 | `power` | yes | `on`, `off`, or `cycle` |
-| `driver_call` | yes | any method on any driver in the tree — the general case |
+| `driver_call` | yes | any method on any driver in the tree — the general case. Call it with no method to be told what that driver offers |
 | `serial_send` | yes | write to the console |
 | `serial_read` | yes | everything it has said, up to a pause |
 | `serial_expect` | yes | wait for a pattern; on a timeout, say what WAS seen |

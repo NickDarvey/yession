@@ -190,7 +190,7 @@ class Provider:
 
         @mcp.tool()
         async def power(ctx: Context, action: str) -> str:
-            """Power the device under test on, off, or cycle it (off, a pause, then on) — the usual way to recover a board that has stopped responding. Needs the claim. Anything on the console at the time is lost; re-read it after."""
+            """Power the device under test on, off, or cycle it (off, a pause, then on) — the usual way to recover a board that has stopped responding. Needs the claim. Anything on the console at the time is lost; re-read it after. There is no way to ASK whether the board is on: jumpstarter's power drivers take commands and report measurements, so read the volts and amps with driver_call power read instead."""
             refusal = self._refusal(ctx)
             if refusal:
                 return refusal
@@ -210,7 +210,7 @@ class Provider:
 
         @mcp.tool()
         async def driver_call(ctx: Context, driver: str, method: str, args: list[Any] | None = None) -> str:
-            """Call any method on any driver this exporter exports — the general case behind the power and console tools. `driver` is a name from status (dotted for a nested one, like "bench.power"), `method` is one of its methods, `args` are positional. Call with no method to be told what the driver offers. Needs the claim."""
+            """Call any method on any driver this exporter exports — the general case behind the power and console tools. `driver` is a name from status (dotted for a nested one, like "bench.power"), `method` is one of its methods, `args` are positional. Call with no method to be told exactly what that driver offers, which is the reliable way to find out — a method that streams (like power read) is drained to its first few items and says so. Needs the claim."""
             refusal = self._refusal(ctx)
             if refusal:
                 return refusal
