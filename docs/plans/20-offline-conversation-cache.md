@@ -6,8 +6,9 @@
 > already immutable, already chunked, already addressed by a cache key. None of it reaches the
 > screen.
 >
-> This plan makes durable history a thing the client OWNS, the way the doc already is
-> ([`Browser.fs:1157`](../../app/browser/Browser.fs)), and then fetches only what happened since.
+> This plan finishes the idea the chunks started — an address that names its own bounds, and a
+> link to the next one — so a client reads from the start of time out of its own cache and
+> fetches only what happened since.
 
 ## What is actually broken, in four places
 
@@ -27,92 +28,142 @@ nothing at all.
 
 ## The extension point is one sentence
 
-**A client keeps the events it has consumed, and asks only for what came after.**
+**An address that names its own bounds is immutable, so a client reads from the start of time
+and follows links.**
 
-Not a cache — a cache is something you hope is there. A replica of a prefix of an append-only
-log, which is a thing you can enumerate, resume from, and reason about offline. The log is
-append-only and the Session Process is its only writer (design.md §5), so a client's copy of
-offsets `0..n` can never be wrong; it can only be short. That is the entire correctness
-argument, and it is the same one that made the chunks immutable in the first place.
+Not a cache — a cache is something you hope is there. A chain of immutable resources, walked
+from a fixed origin, which is a thing you can enumerate, resume from, and reason about offline.
+The log is append-only and the Session Process is its only writer (design.md §5), so a resource
+that names offsets `[a, b]` returns the same bytes for ever; it can only be joined by later
+ones. That is the entire correctness argument, and it is the one that made the chunks immutable
+in the first place — applied to an address that can carry the tail.
 
-## The store
+## The chain
 
-One IndexedDB database per session, beside the doc store and keyed the same way
-(`yession/session/<id>`, read from the shell's `<meta name="yession-session">` — a
-pre-connection identity, [`Browser.fs:410`](../../app/browser/Browser.fs)):
+`/events/{index}` is mutable because "chunk 3" means *whatever chunk 3 holds now*, and what it
+holds now grows. `/events/{from}-{to}` is not: offsets 300–336 are those 37 events for ever,
+including after the log reaches 500. The mutability does not disappear, it compresses into a
+single pointer — where the log ends *right now* — and everything reachable from that pointer is
+cacheable for ever.
 
-```text
-events   key: offset (int64)     value: the envelope's JSONL line, verbatim
+```http
+GET /events/0-99                       → 100 lines
+                                         Cache-Control: private, max-age=31536000, immutable
+                                         Link: </events/100-136>; rel="next"
+
+GET /events/100-136                    → 37 lines, immutable, no `next` (it was the end)
+
+GET /events/head                       → no lines
+                                         Cache-Control: no-store
+                                         Link: </events/137-212>; rel="next"
 ```
 
-**Verbatim lines, keyed by offset** — not the decoded envelope, and not the chunk. Three things
-follow, and each is the reason:
+Three rules, and each one is load-bearing:
 
-- The line is what the server served, so replay runs the *same* `Codec.sessionEventEnvelope`
-  decode the network path runs ([`App.fs:303`](../../src/Yession.App/App.fs)). One decoder, one
-  set of failure modes. A stored decoded object would be a second wire format that only this
-  client can write and only this client can read.
-- Keying by offset rather than by chunk index makes the tail storable. A chunk is the *fetch*
-  granularity because that is what an HTTP cache key needs; the store has no such constraint,
-  and the partial chunk is exactly the history that matters most.
-- The conversation stays a projection. Nothing persists `ConversationProjection` — the model is
-  rebuilt by folding events, so a projection change ships without a migration and without a
-  store that disagrees with the log.
+- **A range is served only if the log reaches its end**, else 404. The URL is guessable, and a
+  guess answered with a *short* body would write a truncated answer into an `immutable` entry
+  at a full range's address — wrong for a year and unfixable from the server. That is exactly
+  the hazard `serveAsset` 404s to avoid ([`Signalling.fs:49`](../../app/Signalling.fs)); same
+  argument, same answer.
+- **The server mints every link**, capped at `EventChunk.size` events, so a chain step is
+  bounded and a client never has to choose a range. Client-minted ranges are validated against
+  the same cap.
+- **`Link: rel=next` is a header**, so the body stays pure JSONL and the pointer is cached with
+  the bytes it belongs to. One decoder, unchanged.
 
-`navigator.storage.persist()` is requested once, best-effort: both stores are evictable
-otherwise, and the doc store already carries that exposure.
+The walk is disjoint by construction: each fetch begins where the last cached one ended, so an
+event is stored in exactly one entry. That is what separates this from prefix addressing
+(`/events/0-99`, `/events/0-136`, `/events/0-137` …), which is also immutable and costs
+fiftyfold duplication for it.
+
+`/events/head` is the one mutable resource and the one that has to be fetched: it makes the
+HTTP leg self-sufficient. Today the feed cannot start without an `EventsAvailable` hint over
+the data channel, which is why nothing asks when there is no transport
+([`App.fs:436`](../../src/Yession.App/App.fs)). With a head pointer the hint becomes an
+optimisation — it says *there is more now* — rather than the only way to begin.
+
+## Where the bytes live, and the one thing the cache cannot do
+
+The chain makes the browser's HTTP cache a workable event store: the tail is cacheable at the
+length it was seen, enumeration is the chain rather than a guess, and a failed step names
+exactly the offsets that are missing — so a dead feed is still distinguishable from an empty
+one, which the guess-walk could not manage.
+
+What it cannot do is survive eviction gracefully, and the chain makes that sharper rather than
+softer: the next URL is only learnable from the entry that carries it, so an evicted *middle*
+entry costs not that entry but everything after it. An offset-keyed store degrades to a hole;
+a chain degrades to a truncation.
+
+The proportionate answer is to keep the *index* rather than the bytes — the URLs walked, in
+`localStorage`, a few hundred bytes per session, keyed by session id like the doc store
+([`Browser.fs:410`](../../app/browser/Browser.fs)):
+
+```text
+yession/session/<id>/chain   ["events/0-99", "events/100-136", "events/137-212"]
+```
+
+A missing entry is then skippable: the walk continues at the next known URL, the gap is a
+`FeedFault` naming its offsets, and the model shows a hole instead of a truncation. It is a
+fraction of an events store's cost and it holds no session content.
+
+**Decision, and it is the plan's one open one:** ship the chain plus the index, and treat a
+full IndexedDB event store as the fallback if measurement shows the HTTP cache evicting under
+real use. The cache cannot be asked to persist (`navigator.storage.persist()` reaches
+script-writable storage, not it), so this is an empirical question, not an argument — and the
+chain is worth having under either answer, because it is the fetch protocol, not the storage.
 
 ## Where it composes, and what stays ignorant
 
-Per "composition at the top": the store is a port, wired in `app/browser/Browser.fs`, and no
-application code learns that storage exists.
+Per "composition at the top": the walk is wired in `app/browser/Browser.fs`, and no application
+code learns where bytes come from — `EventFeed` is unchanged in shape.
 
 ```fsharp
-/// A client's replica of a prefix of the log. Total, like the feed: a store that
-/// cannot be opened is `None` and the client is exactly as it is today.
-type EventStore =
-    { Read  : unit -> Async<EventEnvelope<SessionEvent> list>
-      Write : EventEnvelope<SessionEvent> list -> Async<unit> }
+/// The chain this client has walked, oldest step first. Total, like the feed: an
+/// index that cannot be read is empty, and the client walks from `head` instead.
+type ChainIndex =
+    { Read   : unit -> Async<string list>
+      Append : string -> Async<unit> }
 ```
 
 Two seams use it, and they are deliberately separate:
 
-**1. A write-through decorator on the feed.** `App.EventFetch.storing : EventStore -> EventFeed
--> EventFeed` — pass the page through, write its envelopes, return it. It composes *inside* the
-resilience policy's guard, so only settled pages are stored:
+**1. The feed follows links instead of computing addresses.** `EventFetch.overHttp` currently
+turns an offset into `/events/{EventChunk.indexOf n}` ([`App.fs:291`](../../src/Yession.App/App.fs));
+it instead follows the `next` link the last response carried, falling back to a client-minted
+range when it has none (a resume, or a `head` it has just read). The chain index is written as
+each step settles, *inside* the resilience guard, so only settled steps are recorded.
 
-```fsharp
-let feed =
-    App.EventFetch.overHttp httpGet SessionRoute.relative None
-    |> Resilience.Policy.guard (App.EventFetch.policy …)
-    |> App.EventFetch.storing store
-```
+**2. A replay pump, before and independent of the transport.** Walk the chain from
+`events/0-…`, dispatch each step as a page, stop at the first URL that is neither cached nor
+reachable. It is not part of the read loop and must not be: the read loop chases a moving
+remote end, and a replay has no remote end to chase.
 
-**2. A hydration pump, before and independent of the transport.** Read the store, dispatch the
-events as a page, done. It is not part of the read loop and must not be: the read loop's job is
-to chase a moving remote end, and this has no remote end to chase.
+The replay runs *unconditionally at boot*, before the `/me` probe and regardless of its
+outcome. That is the fix for the third broken thing: the probe decides whether this client may
+*connect*, not whether it may read what it has already been given.
 
-Hydration runs *unconditionally at boot*, before the `/me` probe and regardless of its outcome.
-That is the fix for the third broken thing: the probe decides whether this client can *connect*,
-not whether it may read what it already has.
+Note what this does to the fetches themselves — they are the same fetches, hitting the same
+cache, so `cache: 'force-cache'` on a range URL is a hit or an honest miss and never a
+revalidation the network has to answer.
 
 ## Fetching from the last message onwards falls out
 
 Nothing new is needed for the resume. `ConnectOptions.ReadPosition` is already the model's
 `LastProcessedOffset` ([`Browser.fs:1217`](../../app/browser/Browser.fs)), and the read loop
 already asks the model rather than its own bookkeeping — for precisely this class of reason
-([`App.fs:236`](../../src/Yession.App/App.fs)). Hydrate first, and the first request the loop
-makes when a transport finally opens is `after = <last stored offset>`. One chunk, the tail,
-usually partial, usually small.
+([`App.fs:236`](../../src/Yession.App/App.fs)). Replay first, and the first *network* request
+the loop makes is the range beginning one past where the chain ended — from `/events/head`, or
+from the `EventsAvailable` hint if a transport got there first. One step, usually small.
 
 That ordering is the only new invariant, and it is worth a test of its own: **a client that
-hydrated must never re-fetch what it hydrated.**
+replayed must never re-fetch what it replayed.**
 
 ## One fold, two things to say about the feed
 
 `EventsPageMsg` sets `Feed = FeedLive`, because a page arriving over HTTP *is* the feed working
-([`Model.fs:993`](../../src/Yession.App/Model.fs)). A page off the local store is not, and must
-not claim to be — an offline client would report a live history feed.
+([`Model.fs:993`](../../src/Yession.App/Model.fs)). A step served out of the cache with no
+network behind it is not, and must not claim to be — an offline client would report a live
+history feed.
 
 So: `LocalHistoryMsg of EventPage<SessionEvent>`, folding through the same offset-gated
 projection code as `EventsPageMsg` (extract the fold, keep the two cases differing only in what
@@ -120,65 +171,57 @@ they conclude about `FeedHealth`). It leaves `Feed` untouched and does not advan
 `LatestKnownOffset` beyond its own high-water mark — offline, "how far does the log go" is
 genuinely unknown, and the model should say so rather than assert that it is up to date.
 
-## What this deletes
+## What the chunk index was for, and why it goes
 
-Per "no belt-and-braces": once the browser holds its own replica, ask who is left reading
-`Cache-Control: private, max-age=259200, immutable` on a full chunk.
+`/events/{index}` and its `EventChunk.indexOf` / `firstOffset` arithmetic exist to give the log
+cacheable addresses. A range does that strictly better, so the index is deleted rather than kept
+beside it — per "no belt-and-braces", the redundant spare is the one that hides which path is
+live. `EventChunk.size` survives as what it always was underneath: the cap on how much one step
+carries.
 
-- Not the browser: it now requests only offsets it does not have, so the request that would hit
-  the cache is the request it no longer makes.
-- Not a shared cache: `private` excludes them, deliberately.
-- Not Node clients or tests: no HTTP cache in that path.
+Three consequences worth stating before they are discovered:
 
-**Recommendation: drop the `max-age`, and let every chunk response be `no-store`.** The chunk
-*bounds* stay fixed forever — that is the fetch granularity and the store's read-through
-argument — but the header stops describing a mechanism nobody uses. A header that satisfies
-nothing is the redundant spare the rule is about, and leaving it in place would leave two
-answers to "where does this client's history live" with only one of them true.
+- **`SessionRoute.Events of index: int` becomes `Events of from: int64 * until: int64`**, with
+  the parse rejecting an inverted or over-long range. `TerminalTranscript` keeps its index until
+  the transcript follow-up gives it the same treatment.
+- **`Cache-Control` becomes one policy, not two.** Every range response is
+  `private, max-age=31536000, immutable`, because every range response *is* immutable — the
+  `isFull` branch that made the tail `no-store` ([`EventLog.fs:40`](../../src/Yession.Domain/EventLog.fs))
+  has nothing left to distinguish. `/events/head` is the only `no-store` response the surface
+  has, and it carries no events.
+- **The session id has to reach the address.** An HTTP cache keys on origin + path, and the
+  zero-config default addresses a session as `http://127.0.0.1:{port}` with the port moving per
+  launch (Plan 12) — so a recycled port would serve the *previous* session's `/events/0-99`,
+  for a year. Path-mounted deployments already scope it; the default must too, or the year-long
+  entry is a correctness bug rather than a saving. This is not optional and it is not a
+  follow-up.
 
-This is the one reversible-but-load-bearing call in the plan, so it is called out rather than
-buried: it means a browser whose IndexedDB is denied (private mode) re-fetches history on every
-reload. That is the same degradation the doc store already has there, and it is the honest one —
-today that browser gets an empty conversation instead.
+## Why not just raise `max-age` and leave the rest
 
-`TranscriptChunk` keeps its policy until the transcript follow-up gives it the same treatment.
+Worth recording, because it is the first thing anyone will ask and two thirds of it is right.
+Raising the full chunk's `max-age` and fetching `force-cache` genuinely does serve history
+offline — a fresh cache entry needs no network — and it costs one constant.
 
-## Why not just cache the chunks forever
+What it cannot do is the tail: a partial chunk grows, so caching it pins a truncated log at a
+live address for a year, unfixable from the server. A session that has not reached 100 events
+lives entirely in chunk 0, partial for ever, cached never — which is most sessions, and exactly
+the one somebody opens and finds empty. And a cache cannot be enumerated, so an offline client
+would guess-walk `0, 1, 2 …` and read a miss as a network error, indistinguishable from a
+genuine fault — collapsing the distinction the feed was deliberately built to keep (design.md
+§2.3).
 
-The cheaper plan is one constant: raise the full chunk's `max-age` to a year and fetch with
-`cache: 'force-cache'`. It is a real option — a browser serves a *fresh* cache entry without
-touching the network, so full chunks already replay offline today, for three days. It is
-rejected for three reasons, in descending order of how badly they bite.
+The chain answers both, which is why it is the plan rather than the header bump: a range is
+immutable *including* when it ends mid-chunk, and a link is an enumeration. The third objection
+— cache keys are not session-scoped — the chain does *not* answer, which is why the address
+change above is part of it.
 
-**The tail, which is the symptom.** A partial chunk is not immutable; it grows. Caching it
-pins a truncated log at that address for a year, unfixable from the server — the same failure
-`serveAsset` 404s to avoid ([`Signalling.fs:49`](../../app/Signalling.fs)). So the newest
-events are never cached, and a session that has not reached 100 events lives entirely in chunk
-0, partial forever, cached never. That is most sessions, and it is precisely the session
-somebody opens and finds empty.
+The rejected alternative is prefix addressing (`/events/0-99`, `/events/0-136`, `/events/0-137`
+…), also immutable, and duplicating every event once per length at which it was ever observed.
+Disjoint ranges cost each event exactly once.
 
-**A cache cannot be enumerated.** Offline, a client must guess-walk `0, 1, 2 …` until a fetch
-fails, and a miss is a network error — indistinguishable from a genuine fault. That collapses
-the one distinction the feed was deliberately built to keep (design.md §2.3: never an empty
-page standing in for a failure). A store answers "what do I have" directly, which is the whole
-difference between a replica and a cache.
-
-**Cache keys are not session-scoped.** The zero-config default addresses a session as
-`http://127.0.0.1:{port}` and the port moves per launch (Plan 12). An HTTP cache keys on
-origin + path, so a recycled port serves the *previous* session's `/events/0`. That hazard
-exists today, bounded by three days; a year-long `immutable` entry makes it permanent. A store
-keyed by the session id cannot express it. Eviction is opaque either way, but only one of the
-two can ask to be kept.
-
-What would make cache-only work is fixed-bounds sub-chunk addressing (`/events/{n}/{count}` —
-every prefix immutable by construction). It is correct, and it costs a cache entry per length
-ever observed plus roughly fiftyfold byte duplication inside a chunk. Shrinking
-`EventChunk.size` only narrows the gap and multiplies round trips. Neither is less work than
-the store.
-
-Note what this argument does *not* buy back: causes 2 and 3 above — nothing asks, and the feed
-is constructed inside the probe's success branch — have to be fixed for either design. The
-store is the small part of PR 1, not the expensive one.
+Note what none of this buys back: causes 2 and 3 above — nothing asks, and the feed is
+constructed inside the probe's success branch — have to be fixed under any addressing scheme.
+That is PR 2, and it is where most of the client work is.
 
 **If value is wanted before PR 1 lands**, the `max-age` bump plus `force-cache` plus the boot
 walk is an honest interim that helps long sessions, and PR 1 deletes it. It does nothing at all
@@ -201,10 +244,11 @@ relative, docs/plans/09). Two rules, and nothing else:
   Their address pins their bytes, which is the same argument that already gives them
   `max-age=31536000, immutable`.
 
-It caches **nothing else**. Not `/events/*` — that is the store's job, and a service worker
-holding history too would be exactly the redundant spare deleted one section above. Not `/me`,
-`/signal`, `/claude*`, `/queries` — those are liveness questions, and a cached answer to
-"can I reach this session" is a wrong answer.
+It caches **nothing else**. Not `/events/*` — the ranges are immutable and the browser's own
+cache already holds them, so a service worker copy would be the redundant spare, and one that
+answers `/events/head` from cache would be actively wrong. Not `/me`, `/signal`, `/claude*`,
+`/queries` — those are liveness questions, and a cached answer to "can I reach this session" is
+a wrong answer.
 
 Old caches are dropped on `activate`, keyed by the digests the shell names, so a build's assets
 do not accumulate.
@@ -250,23 +294,29 @@ been read, and the SSR'd page is the one case where that lasts long enough to se
 
 Cheap tier — no capability, runs on every PR:
 
-- The store's read-through: a page fetched once is stored; a hydration then yields the same
-  envelopes through the same decoder; a corrupt stored line fails the page as `FeedCorrupt`
-  rather than silently dropping an event (the rule the network path already holds).
-- **Resume**: hydrate a store holding `0..41`, connect a fake transport advertising latest `47`,
-  assert the feed was asked for `after = 41` and nothing below it — the plan's central promise,
-  pinned as a contract on the feed rather than as an observation about the UI.
+- **A range is served only when the log reaches its end.** Ask for `100-136` against a log of
+  120 and get a 404, not 21 lines — the property that keeps a truncated answer out of an
+  `immutable` cache entry. Regressed to red by serving the short body and watching it pass
+  everything else.
+- **The chain is disjoint and total**: following `next` from `0-…` yields every offset exactly
+  once, and the last step of a chain walked against a growing log is the one `head` points past.
+- **Resume**: replay a chain covering `0..41`, then a transport advertising latest `47`, and
+  assert the network was asked for `42-47` and nothing below it — the plan's central promise,
+  pinned on the feed rather than observed through the UI.
+- A missing middle entry is a `FeedFault` naming its offsets and the walk continues from the
+  index, rather than the chain truncating there.
 - `LocalHistoryMsg` folds the conversation without reporting `FeedLive`, and does not assert a
   `LatestKnownOffset` it has no evidence for.
-- Fold idempotence across hydration + a network page covering the same offsets (the offset gate
-  already guarantees it; this pins that hydration goes through the gate).
+- Fold idempotence across a replayed step and a network page covering the same offsets (the
+  offset gate already guarantees it; this pins that replay goes through the gate).
 
 `Browser` tier — Chromium only, no host machinery:
 
 - **Availability under fault**: a session with messages, reloaded with the network cut, still
-  shows those messages and still has a working composer. Scoped to the timeline element, and
-  regressed-to-red before it is believed — a bare page-level `Contains` would pass off the
-  roster while the timeline stayed empty.
+  shows those messages — *including ones in the partial tail*, which is the case the old chunk
+  policy could not hold — and still has a working composer. Scoped to the timeline element, and
+  regressed-to-red before it is believed: a bare page-level `Contains` would pass off the roster
+  while the timeline stayed empty.
 - The shell loads cold with no network (service worker), and the retry affordance is present and
   keyboard-operable.
 
@@ -280,35 +330,44 @@ next, and the reverse is not true.
 
 | | | |
 |---|---|---|
-| 1 | **The store and hydration.** `EventStore`, the write-through decorator, the boot-time pump, `LocalHistoryMsg`, hydration moved above the `/me` probe. Drops the chunk `max-age`. | A session unreachable with the network up (asleep, reaped) reads back in full. |
-| 2 | **Retrying that does not give up.** `online` re-arm, supervised reconnect, manual retry, GAPS entry closed. | Recovery without a reload. |
-| 3 | **The loader.** `HistoryRestore`, the empty-timeline split, the strip's restoring state. | The empty screen stops lying. |
-| 4 | **The service worker.** Shell and fingerprinted assets, scoped to the mount. | A cold open with no network at all. |
+| 1 | **Ranges, links, and a head.** `Events of from * until`, one immutable cache policy, the 404 on an unreached range, `/events/head`, the session id in the address. Server and route only — the existing client keeps working by minting the ranges it used to mint indices. | The tail becomes cacheable, which is the whole symptom. |
+| 2 | **The walk.** Follow `next`, keep the chain index, replay from zero at boot above the `/me` probe, `LocalHistoryMsg`. | A session unreachable with the network up (asleep, reaped) reads back in full. |
+| 3 | **Retrying that does not give up.** `online` re-arm, supervised reconnect, manual retry, GAPS entry closed. | Recovery without a reload. |
+| 4 | **The loader.** `HistoryRestore`, the empty-timeline split, the strip's restoring state. | The empty screen stops lying. |
+| 5 | **The service worker.** Shell and fingerprinted assets, scoped to the mount. | A cold open with no network at all. |
 
-Docs ride the PR that makes them true: design.md §2.3 says the browser's HTTP cache is the event
-store and stops being true in PR 1; the GAPS entries for the missing shell and the missing manual
-retry close in PRs 4 and 2.
+Splitting 1 from 2 is deliberate: the wire change is testable on its own (the 404 property, the
+chain's disjointness, the single cache policy) and lands without touching the client's read
+loop, so a regression in either half is attributable.
+
+Docs ride the PR that makes them true: design.md §2.3 describes the chunk-index scheme and stops
+being true in PR 1; the GAPS entries for the missing shell and the missing manual retry close in
+PRs 5 and 3.
 
 ## Risks & open questions
 
-- **Unbounded growth.** The replica is the whole prefix. Envelope lines are small and the
-  Session Process already holds the same JSONL on disk, but a long-lived session has no ceiling.
-  Measure on a real session before adding a prune policy; if one is needed, it is "keep the last
-  *k* chunks and the first" and it is a follow-up, not a guess made now.
-- **Stale stores outlive their sessions.** A deleted session leaves its database behind. Small
-  and per-session, but it is durable conversation content sitting in a browser profile — worth a
-  sweep (drop stores for sessions the Manager no longer lists) once there is a surface that knows.
-- **Ephemeral deployments strand it, exactly as they already strand the doc.** Storage is
-  origin-partitioned, so a session that reopens on a new port gets a new store. No new problem
-  and no new promise: `EphemeralStorage` already changes what the degraded strip says.
+- **Eviction is the open question, and it is empirical.** The HTTP cache cannot be asked to
+  persist. If measurement shows real-use eviction, the fallback is an IndexedDB store holding
+  the envelope lines keyed by offset, replayed by the same pump — the chain stays either way,
+  because it is the fetch protocol and not the storage. Do not build both.
+- **A chain step is a fetch.** Replaying 5 000 events is 50 cache hits rather than one scan.
+  Fine at that size, and bounded by the same thing the model is; worth a number before anyone
+  assumes it stays fine.
+- **Cache entries accumulate per session** and nothing drops them when a session is deleted. The
+  browser evicts on its own terms, which is the one place eviction is a feature — but it means
+  history sits in a profile with no sweep, exactly as it does today.
+- **Ephemeral deployments strand it, exactly as they already strand the doc.** Caches and
+  storage are both origin-partitioned, so a session that reopens on a new port starts cold. No
+  new problem and no new promise: `EphemeralStorage` already changes what the degraded strip
+  says.
 - **`online` lies sometimes.** It reports a link, not reachability. It is a *trigger* for an
   attempt that can fail, never a claim that the session is back.
 
 ## Later, deliberately not now
 
-- **Terminal transcripts**, which are the same shape one level over: chunked, immutable,
-  `no-store` at the tail, and lost on reload. Same store, same decorator, same argument — after
-  the event log has proven it.
+- **Terminal transcripts**, which are the same shape one level over: chunk-indexed, `no-store`
+  at the tail, and lost on reload. Same ranges, same links, same argument — after the event log
+  has proven it.
 - **Writing offline.** Out of scope by design: drafts and the queue are CRDT state in the local
   doc and already work offline; a *sent* message is a durable event, and the Session Process is
   the only writer of those.
