@@ -164,9 +164,13 @@ Two seams use it, and they are deliberately separate:
 
 **1. The feed follows links instead of computing addresses.** `EventFetch.overHttp` currently
 turns an offset into `/events/{EventChunk.indexOf n}` ([`App.fs:291`](../../src/Yession.App/App.fs));
-it instead follows the `next` link the last response carried, falling back to a client-minted
-range when it has none (a resume, or a `head` it has just read). Each step is written to the
-cache as it settles, *inside* the resilience guard, so only settled steps are kept.
+it instead follows the `next` link the last response carried. Each step is written to the cache
+as it settles, *inside* the resilience guard, so only settled steps are kept.
+
+> **This is the plan's open decision — see "Links or arithmetic" below.** An earlier draft had
+> the feed follow the link *and* fall back to a client-minted range when it had none. That is a
+> fallback beside a primary, which is precisely the shape the no-belt-and-braces rule names. One
+> of them has to go, and which one is not obvious.
 
 **2. A replay pump, before and independent of the transport.** Read `Steps ()`, walk them in
 order, dispatch each as a page. It is not part of the read loop and must not be: the read loop
@@ -266,9 +270,10 @@ Note what none of this buys back: causes 2 and 3 above — nothing asks, and the
 constructed inside the probe's success branch — have to be fixed under any addressing scheme.
 That is PR 2, and it is where most of the client work is.
 
-**If value is wanted before PR 1 lands**, the `max-age` bump plus `force-cache` plus the boot
-walk is an honest interim that helps long sessions, and PR 1 deletes it. It does nothing at all
-for a session under 100 events.
+An earlier draft of this plan offered the header bump as an interim to ship before PR 1, "which
+PR 1 then deletes". That is the redundant spare arriving by the front door: a second caching
+path, justified by a promise to remove it, and promises like that are not kept. PR 1 is a route
+and a 404 rule. Ship it instead.
 
 ## The shell, offline
 
@@ -285,7 +290,12 @@ relative, docs/plans/09). Two rules, and nothing else:
   is what makes the offline open possible at all.
 - **Fingerprinted assets** (`client.<digest>.js`, `app.<digest>.css`): cache-first, forever.
   Their address pins their bytes, which is the same argument that already gives them
-  `max-age=31536000, immutable`.
+  `max-age=31536000, immutable` — and the two are NOT the same mechanism, though they look it.
+  The header serves the load *before* a worker is installed and nothing else; the worker's copy
+  is the one that has to survive, because an offline open against an evicted asset is a blank
+  page. The worker populates from the network with the HTTP cache bypassed, so there is one
+  durable copy and one transient one rather than two of each. If that distinction ever stops
+  being true — say the worker installs on first load — the header goes.
 
 It caches **nothing else**, and in particular it does not touch `/events/*`: the page owns that
 cache directly (`window.caches` needs no worker), so a worker copy would be the redundant
@@ -311,18 +321,20 @@ four attempts and dispatches `ConnectFailedMsg`; the feed's policy spends five a
 GAPS already records the missing half ("recovery waits for the next availability hint or
 reconnect … that peer must reload").
 
-Three changes, smallest first:
+**One supervised loop, poked by two triggers.** That distinction is the whole design, because
+"keep trying", "the network came back" and "the person pressed the button" are three ways to
+want the same thing, and building them as three retry paths is how a client ends up with three
+schedules racing each other:
 
-1. **Re-arm on `online`.** The browser knows when the network came back; listen for it and
-   retry the transport immediately. One event listener, and it turns the common case (laptop
-   lid closed on a train) from "reload the tab" into "it just comes back".
-2. **Supervise rather than surrender.** After a settled `ConnectFailedMsg`, keep trying on a
-   capped schedule (the existing `Resilience.Schedule` values, ceiling raised to a minute) with
-   the attempt count reported. The lifecycle's existing rule is untouched and is the reason this
-   cannot spin: a *rejected* peer still stops for good, because reconnecting would only be
-   rejected again ([`App.fs:697`](../../src/Yession.App/App.fs)).
-3. **A manual retry**, on the strip. The affordance GAPS asks for, and the only recovery a peer
-   with a permanently-401'd token has short of a reload.
+- **The loop.** After a settled `ConnectFailedMsg`, keep trying on a capped schedule (the
+  existing `Resilience.Schedule` values, ceiling raised to a minute), reporting the attempt
+  count. The lifecycle's existing rule is untouched and is why this cannot spin: a *rejected*
+  peer still stops for good, because reconnecting would only be refused again
+  ([`App.fs:697`](../../src/Yession.App/App.fs)).
+- **`online` pokes it**, so the common case (laptop lid closed on a train) comes back at once
+  instead of after a backoff. A trigger, not a second schedule.
+- **The button pokes it**, and is the only recovery for the one peer the loop deliberately will
+  not carry — a permanently-401'd token, which GAPS records as "must reload".
 
 The visual vocabulary already exists and is not being reinvented: `statusDotPulse` beside a
 status word, with the degraded strip over the timeline and the header status
@@ -338,6 +350,12 @@ The timeline renders the loader when it is empty AND history is not `Restored`; 
 means what it has always meant, and now only ever means it. `Pending` is the initial model, so
 the server-rendered shell paints the loader too — at first paint the history genuinely has not
 been read, and the SSR'd page is the one case where that lasts long enough to see.
+
+**Said once.** The strip gets no restoring state of its own. Three surfaces already report the
+same health (strip, header, sidebar line), and this repo has been here before — Plan 12 found
+the local-first promise stated twice on the one screen where it mattered, and both copies were
+wrong. The loader is not another health report; it replaces a mark that is actively lying, and
+it belongs where the lie is.
 
 ## Test gating (`Tag.needs`)
 
@@ -372,29 +390,25 @@ Cheap tier — no capability, runs on every PR:
 `[Browser; Native]` — a real Session Process, in the existing path-mounted fixture
 ([`Browser.fs:1071`](../../tests/Yession.Tests/Browser.fs)), which already kills the host, wipes
 its data directory, restarts it and reloads to prove a *draft* could only have come from the
-browser. History is that same test one level over, and it is the plan's acceptance criterion in
-two halves:
+browser. **One case, and it is the plan's acceptance criterion**: send messages, kill the host
+and *leave it dead*, reload. The page loads at all, the timeline shows the messages, and the
+client says it is retrying rather than saying the conversation is empty.
 
-- **The session's history is the client's (PR 2).** Send messages, kill the host, delete its
-  data directory, restart it, reload. The messages are still in the timeline — and they can only
-  have come from the client, because the server's copy was deleted. The same argument the draft
-  case already makes, applied to durable events, which today vanish. It runs before the service
-  worker exists because the restarted host still serves the shell.
-- **The session is down and the history is still there (PR 5).** Send messages, kill the host,
-  and *leave it dead*. Reload. The page loads at all (the worker's cached shell), the timeline
-  shows the history, and the client says it is retrying rather than saying the conversation is
-  empty. This is the bug report, verbatim, and it cannot go green before PR 5 — the shell is
-  `no-cache` and a dead host cannot answer a revalidation, so until the worker lands there is no
-  page to assert about.
+That is the bug report verbatim, and it says the whole thing in one assertion — the client
+loads offline, with its messages. It asserts into `[data-conversation]` rather than the page (a
+page-level match is satisfied by the roster while the timeline sits empty) and is regressed to
+red before it is believed.
 
-Both assert into `[data-conversation]` rather than the page, and both are regressed to red
-first: a bare page-level `Contains` is satisfied by the roster while the timeline sits empty,
-which is the exact failure mode a loosened UI assertion produces.
+**It merges with PR 5, not before.** It cannot go green earlier: the shell is `no-cache` and a
+dead host cannot answer a revalidation, so until the worker lands there is no page to assert
+about. Writing it earlier and merging it skipped or red would put a test in master that nobody
+can act on and everybody learns to ignore. The earlier PRs are covered by the cheap tier above,
+which pins the same mechanics without needing a page.
 
-One more, cheap to add where the fixture already stands: **the store is the store** — after a
-load, the session's cache holds the chain and the HTTP cache holds none of it. Readable from
-`caches.keys()` and Resource Timing (`transferSize`), and it is what keeps a second copy from
-creeping back in.
+One assertion is cheap to add wherever the fixture already stands, once PR 2 has landed: **the
+store is the store** — after a load, the session's cache holds the chain and the HTTP cache
+holds none of it. Readable from `caches.keys()` and Resource Timing (`transferSize`), and it is
+what keeps a second copy from creeping back in.
 
 Not tested: which element the loader is, what the strip says, or any class token. Those are the
 design changing, which is what a design is for.
@@ -419,6 +433,36 @@ loop, so a regression in either half is attributable.
 Docs ride the PR that makes them true: design.md §2.3 describes the chunk-index scheme and says
 the browser's HTTP cache is the client-side event store — both stop being true across PRs 1 and
 2; the GAPS entries for the missing shell and the missing manual retry close in PRs 5 and 3.
+
+## Links or arithmetic — the open decision
+
+The chain has two halves, and once the store is the Cache API it is not obvious that both earn
+their place. `cache.keys()` already enumerates what this client holds, and `PeerAccepted`
+already carries `LatestOffset` ([`App.fs:544`](../../src/Yession.App/App.fs)). So:
+
+**A. Server-driven (as written).** `Link: rel=next` on every range, `/events/head` as the entry
+point. The server chooses every boundary, the client never computes one, and the HTTP leg can
+begin without the data channel.
+
+**B. Client-driven.** No `Link`, no `head`. Ranges are cap-aligned (`0-99`, `100-199`, …, plus
+whatever tail was asked for), so "the next one" is arithmetic; `cache.keys()` drives the replay;
+`LatestOffset` off the handshake says where to stop. The wire shrinks to the range URL and the
+404 rule.
+
+B is smaller by a route, a header, and the only mutable resource on the surface. What it gives
+up is the HTTP leg's self-sufficiency: a client can then only learn the log's end from the data
+channel, so a peer whose WebRTC is blocked but whose HTTP works reads no history. **No such
+client exists today** — that peer currently gets nothing at all — so under "do not build the
+spare", B is the honest default and A is a capability we would be inventing a requirement for.
+
+The counter-argument for A is boundary agreement: with the server minting, every client's cache
+entries line up, and a client can never ask for a range the log has not reached (the 404 path
+stays theoretical rather than routine). Under B a stale `LatestOffset` produces a 404 the client
+has to narrow and retry — a real code path that A does not have.
+
+**Recommendation: B**, and treat the 404-narrow-retry as the price. It is one branch, it is
+testable in the cheap tier, and it is cheaper than a route plus a header plus a mutable
+resource that exist for a client nobody has asked for.
 
 ## Risks & open questions
 
