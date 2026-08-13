@@ -250,3 +250,6 @@ do
         | Ok terminal -> screens.Snapshot terminal seq screen
         | Error _ -> ())
     render ()
+    // The shell harness drives the real view, so it gets the real shell plumbing too — a
+    // splitter that only worked in the app is a splitter no browser-tier test could reach.
+    PaneShell.installPaneResize ()

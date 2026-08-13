@@ -23,7 +23,7 @@ open Yession.Domain
 ///
 ///   Strokes — every border in the product is composed from the `Stroke` vocabulary
 ///   below (width, tone, and what interaction does to it) into a handful of phrases —
-///   `field`/`fieldMono`/`fieldBare`, `rowBase`/`rowLift`, `focusRing` — and those
+///   `field`/`fieldSelect`/`fieldBare`, `rowBase`/`rowLift`, `focusRing` — and those
 ///   phrases are what surfaces wear. No bare `border-*` utility is written outside
 ///   `Stroke`, and none at all in the views. The two remaining literals are variant-
 ///   PREFIXED (`md:[.nav-alt_&]:border-r-0`), undoing a column's divider while it is
@@ -276,10 +276,6 @@ module Style =
     /// deaf to the pointer, so the whole rectangle still opens the menu.
     let fieldSelectWrap = "relative w-full"
     let fieldSelectMark = "pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint"
-
-    /// The same field in mono, sized by the flex row that holds it — a command line is a
-    /// field, not a terminal.
-    let fieldMono = cls [ fieldFace; "flex-1 min-w-0 font-mono text-code text-ink placeholder:text-ink-faint"; touchType ]
 
     /// The chrome-LESS field: an input whose CONTAINER already carries the stroke (the
     /// composer's box, a listed row's leading edge), so the control itself must draw
@@ -669,42 +665,58 @@ module Style =
         "flex gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 transition-opacity"
 
     // --- Composer: the one gradient in the product lives on its focus edge --------------------
+    // A COMPOSER IS A BAND, not a box on a ground. It used to be a bordered box inside a padded
+    // section inside a bordered column — a box in a box in a box, of which only the innermost
+    // one could be typed in, and each nested rectangle bought nothing but another edge to
+    // notice. The band runs the full width of its column and is told apart from what is above
+    // it the way any two surfaces here are: a tone, and a rule.
 
-    let composer = "shrink-0 flex flex-col gap-3 px-8 pt-4 pb-6 max-md:px-4 max-md:pb-4"
-    /// The box lifts a tone while anything inside it has focus, so "this is where I am typing"
-    /// is legible at a glance and not only from the 2px edge below.
+    /// The band a message is written in. Lifts a tone while anything inside it has focus, so
+    /// "this is where I am typing" is legible at a glance and not only from the 2px rule.
+    let composer =
+        "group relative shrink-0 flex flex-col bg-surface focus-within:bg-surface-2 transition-colors"
+
+    /// The band's top rule, in two parts — because it is doing two jobs and one element could
+    /// only ever do one of them.
     ///
+    /// The gradient used to be scaled to NOTHING until focus, so an untouched session was a
+    /// black column containing a black box: `#111` barely separates from the `#000` canvas, and
+    /// the edge — the one thing marking "this is where you type" — appeared only once you had
+    /// already found it and clicked. Leaving it up at rest instead would spend the focus
+    /// gesture. So: a dim white hairline that is always there (the marker), and the gradient
+    /// growing over it on focus (the gesture).
+    ///
+    /// It is the same pair that used to run down the composer's LEFT edge, turned ninety
+    /// degrees to become the band's separator from the column above. Same 2px, same
+    /// blue→green — Zune's orange→pink signature, recast — still spent exactly once in the
+    /// product. Worn by the message composer and the terminal's command band alike, because
+    /// they are the same object on two surfaces.
+    let bandRail = "absolute inset-x-0 top-0 h-0.5 bg-ink/15"
+    let bandEdge =
+        "absolute inset-x-0 top-0 h-0.5 bg-grad scale-x-0 origin-left transition-transform "
+        + "duration-300 ease-out group-focus-within:scale-x-100 motion-reduce:transition-none"
+
     /// A ROW, since the actions moved into it: the box was 56px of which 40 was a strip under
     /// the text holding a 93px bordered rectangle that said Send and then drew an arrow saying
     /// it again. The verb belongs at the trailing edge of the line you just wrote, which is
     /// where it now is — the same shape the terminal's command line takes, so a person moving
     /// between the two columns meets one object twice instead of two conventions.
-    let draftBox = "group relative flex items-end bg-surface focus-within:bg-surface-2 transition-colors"
-
-    /// The composer's left edge, in two parts — because it was doing two jobs as one element
-    /// and could only ever do one of them.
     ///
-    /// The edge used to be scaled to NOTHING until focus, so an untouched session was a black
-    /// column containing a black box: the composer's `#111` barely separates from the `#000`
-    /// canvas, and the edge — the one thing marking "this is where you type" — appeared only
-    /// once you had already found it and clicked. But simply leaving it up at rest would spend
-    /// the focus gesture, and "grows from the top" is a named part of this design language.
+    /// Carries no fill and no edge of its own any more: the band it sits in is the surface.
+    let draftBox = "relative flex items-end"
+
+    /// Chrome-less by construction (`fieldBare`): the band carries the tone and the rule, and
+    /// the focus signal is the gradient growing across it.
     ///
-    /// So: a dim rail that is always there (the marker), and the gradient growing over it on
-    /// focus (the gesture). Same 2px column, same gradient, spent exactly once in the product.
-    let draftRail = "absolute left-0 inset-y-0 w-0.5 bg-grad opacity-25"
-
-    /// The focus edge: grows top-to-bottom over the rail in the blue→green gradient —
-    /// Zune's orange→pink signature, recast.
-    let draftEdge =
-        "absolute left-0 inset-y-0 w-0.5 bg-grad scale-y-0 origin-top transition-transform "
-        + "duration-300 ease-out group-focus-within:scale-y-100 motion-reduce:transition-none"
-
-    /// Chrome-less by construction (`fieldBare`): the box around it carries the stroke, and
-    /// the focus signal is the gradient edge plus the box's lift. It takes the row and the
-    /// actions sit at its trailing edge, so one line of message is one line tall.
+    /// ONE LINE at rest, growing upward on focus. A composer that is 96px of empty box for
+    /// most of a session is spending the conversation's height on the promise of a message
+    /// rather than on the messages; it takes the room when it is being used and gives it back
+    /// when it is not. `max-height` rather than `height` so the growth is animatable and so a
+    /// long draft still scrolls inside rather than pushing the timeline off the top.
     let draftInput =
-        cls [ "block w-full"; fieldBare
+        cls [ "block w-full max-h-10 overflow-hidden transition-[max-height] duration-200 ease-out"
+              "group-focus-within:max-h-64 group-focus-within:overflow-y-auto motion-reduce:transition-none"
+              fieldBare
               "font-sans font-light text-body text-ink placeholder:text-ink-faint px-4 py-2"; touchType ]
 
     /// The writing side of the box: whose message it is, then the message. A column only
@@ -748,7 +760,7 @@ module Style =
 
     /// Starts your own draft, collapsing whoever's is open — the escape hatch from joining.
     let draftNew =
-        "self-end bg-transparent border-0 cursor-pointer " + caps
+        "self-end bg-transparent border-0 cursor-pointer px-4 py-2 " + caps
         + " text-ink-faint hover:text-blue transition-colors " + focusRing
 
     // --- Settings ------------------------------------------------------------------------------
@@ -803,16 +815,34 @@ module Style =
     /// chat is a back-swipe away rather than an overlay to dismiss, and desktop and phone
     /// stay the same mental model. The old 92vw left a sliver of chat showing beside it,
     /// which reads as a dialog: something you get rid of rather than somewhere you are.
+    /// On desktop the width is a CUSTOM PROPERTY the shell root carries, not the token — the
+    /// token is its default. 420px was picked as "the width the content actually has" and is
+    /// 20 columns short of the 80 a terminal prints; rather than guess a better number for
+    /// everybody, the split is draggable and remembered (`PaneShell.installPaneResize`). The
+    /// transition is suppressed while dragging, or the column chases the pointer a frame late.
     let terminalPanel =
-        "relative w-term shrink-0 bg-panel h-full overflow-hidden z-40 flex flex-col " + Stroke.dividerLeft + " "
-        + "md:transition-[width] md:duration-200 md:ease-out "
+        "relative w-term md:w-[var(--term-w,var(--spacing-term))] shrink-0 bg-panel h-full overflow-hidden z-40 flex flex-col "
+        + Stroke.dividerLeft + " "
+        + "md:transition-[width] md:duration-200 md:ease-out md:[.term-resizing_&]:transition-none "
         + "md:[.term-closed_&]:w-0 md:[.term-closed_&]:border-l-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-full max-md:border-l-0 "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out "
         + "max-md:[.term-closed_&]:translate-x-[101%] motion-reduce:transition-none"
 
     /// Held at the column's full width so nothing reflows while the column animates shut.
-    let terminalPane = "absolute inset-0 w-term max-md:w-full flex flex-col"
+    let terminalPane = "absolute inset-0 md:w-[var(--term-w,var(--spacing-term))] w-term max-md:w-full flex flex-col"
+
+    /// The split between the chat and this column, made draggable — a real `separator`, so it
+    /// answers to the arrow keys as well as the pointer. Desktop only: on a phone the pane IS
+    /// the column and there is nothing to divide.
+    ///
+    /// Inside the panel rather than straddling the divider, because the panel clips its
+    /// overflow — which also rules out an outline for focus, so focus is the same blue the
+    /// hover shows, at full strength.
+    let terminalResize =
+        cls [ "max-md:hidden absolute left-0 inset-y-0 w-1.5 z-50 cursor-col-resize"
+              "bg-transparent hover:bg-blue/50 focus-visible:bg-blue focus-visible:outline-none"
+              "transition-colors motion-reduce:transition-none" ]
 
     /// The column's head: a PROPERTIES BAR, not a title.
     ///
@@ -1011,10 +1041,21 @@ module Style =
     /// float over — this is the positioned region the way back hangs in.
     let terminalReplayRegion = "relative flex-1 min-h-0 flex flex-col"
 
-    /// The composer area beneath the blocks: the command line, whatever is queued against
-    /// this terminal, and nothing else. The approval control that used to head it is a
-    /// property of the terminal and now says so from the bar.
-    let terminalComposer = "shrink-0 flex flex-col gap-2 px-3 py-3 " + Stroke.dividerTop
+    /// The command band beneath the blocks: the command line, whatever is queued against this
+    /// terminal, and nothing else. The approval control that used to head it is a property of
+    /// the terminal and now says so from the bar.
+    ///
+    /// The message composer's band exactly — same tone, same top rule, same gradient on focus
+    /// — because typing a command here and typing a message there are the same act, and the
+    /// pane was built out of the composer's parts for that reason. It carries no gutter of its
+    /// own: what is in it runs edge to edge, and the rows that are not the command line bring
+    /// their own padding (`terminalBandRow`).
+    let terminalComposer =
+        "group relative shrink-0 flex flex-col bg-surface focus-within:bg-surface-2 transition-colors"
+
+    /// A row in the band that is not the command line — the lease bar, the "not marking"
+    /// notice. They used to inherit the section's padding; the band has none.
+    let terminalBandRow = "flex items-center gap-2 px-3 py-2"
 
     /// The command line: the row IS the field.
     ///
@@ -1030,10 +1071,11 @@ module Style =
     /// shorter; the field keeps its `aria-label`, because a placeholder is not a name.
     let terminalCommandWrap = "relative w-full"
     let terminalCommand =
-        cls [ fieldFace; "w-full font-mono text-code text-ink pr-10 placeholder:text-green"; touchType ]
+        cls [ "w-full"; fieldBare
+              "font-mono text-code text-ink px-3 py-2.5 pr-10 placeholder:text-green"; touchType ]
     /// What sits at the field's trailing edge, inside its border: whoever else has a caret in
     /// this slot, and the verb.
-    let terminalCommandTrail = "absolute right-0 inset-y-0 flex items-center gap-1"
+    let terminalCommandTrail = "absolute right-1 inset-y-0 flex items-center gap-1"
 
     // Run itself is `btnSendInField` / `btnSendInFieldWaiting` — the message composer's Send,
     // unchanged. Queueing a command and sending a message are the same act, which is why the

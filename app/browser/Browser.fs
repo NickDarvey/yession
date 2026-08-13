@@ -1166,6 +1166,8 @@ let private start () =
         // Renders keep the reader's place (`setState`); this keeps it across the other thing
         // that moves it, a viewport that changed size under a laid-out surface.
         keepSurfacesPinned PinnedSurfaces
+        // And the split between the two columns is the reader's to set, not the theme's.
+        PaneShell.installPaneResize ()
 
         // The local peer's draft slot follows its body: published on the first keystroke,
         // retracted when the composer empties. Watches the body itself, so a keystroke and a

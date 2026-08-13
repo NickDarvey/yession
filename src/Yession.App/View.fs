@@ -932,8 +932,6 @@ module View =
                 else html $"""<span class="{Style.draftAuthor}">{ClientModel.nameOf target model}'s message</span>"""
             html $"""
                 <article class="{Style.draftBox}" data-draft-id="{PeerId.value target}" data-draft-author="{PeerId.value target}">
-                  <span class="{Style.draftRail}"></span>
-                  <span class="{Style.draftEdge}"></span>
                   <div class="{Style.draftBody}">
                     {author}
                     <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft target}" data-rich-readonly="false" data-draft-input="{PeerId.value target}"></div>
@@ -956,6 +954,8 @@ module View =
                             @click={Ev(fun _ -> dispatch StartDraftMsg)}>+ New message</button>"""
         html $"""
             <section class="{Style.composer}" data-draft-editor>
+              <span class="{Style.bandRail}"></span>
+              <span class="{Style.bandEdge}"></span>
               {ClientModel.collapsedDrafts model |> List.map summary}
               {open'}
               {startMine}
@@ -1418,7 +1418,7 @@ module View =
                     <button type="button" class="{Style.btn}" data-terminal-take="{TerminalId.value terminal}"
                             @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take over</button>"""
         html $"""
-            <div class="{Style.terminalQueuedRow}" data-terminal-lease="{label}" aria-live="polite">
+            <div class="{Style.terminalBandRow}" data-terminal-lease="{label}" aria-live="polite">
               <span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>live</span>
               <span class="{Style.cls [ Style.avatarSm; authorAvatar holder ]}"></span>
               <span class="{Style.small}">{who}</span>
@@ -1541,7 +1541,7 @@ module View =
             if not integrationLost then Lit.nothing
             else
                 html $"""
-                    <div class="{Style.terminalQueuedRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
+                    <div class="{Style.terminalBandRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
                       <span class="{Style.statusErr}">not marking</span>
                       <span class="{Style.small}">queued commands held</span>
                       <div class="ml-auto flex items-center gap-2">
@@ -1554,6 +1554,8 @@ module View =
         // of the terminal, and states itself from the bar.
         html $"""
             <section class="{Style.terminalComposer}">
+              <span class="{Style.bandRail}"></span>
+              <span class="{Style.bandEdge}"></span>
               {lostBanner}
               {terminalQueue actions dispatch model terminal}
               {commandLines}
@@ -1584,7 +1586,8 @@ module View =
             // a fact that is wrong.
             html $"""
                 <section class="{Style.terminalComposer}" data-terminal-replay-gone="{TerminalId.value view.TerminalId}">
-                  <div class="{Style.terminalQueuedRow}">
+                  <span class="{Style.bandRail}"></span>
+                  <div class="{Style.terminalBandRow}">
                     <span class="{Style.statusFaint}">{closedFor}</span>
                     <span class="{Style.statusErr}">recording not kept</span>
                   </div>
@@ -1595,7 +1598,8 @@ module View =
             // closed.
             html $"""
                 <section class="{Style.terminalComposer}">
-                  <div class="{Style.terminalQueuedRow}">
+                  <span class="{Style.bandRail}"></span>
+                  <div class="{Style.terminalBandRow}">
                     <span class="{Style.statusFaint}">{closedFor}</span>
                   </div>
                   <div class="{Style.terminalBlocks}" role="region" aria-label="Terminal recording"
@@ -2010,6 +2014,12 @@ module View =
             | None -> "terminals"
         html $"""
             <aside class="{Style.terminalPanel}" data-terminal-panel>
+              <!-- The split, as a real separator: `aria-valuenow` and the arrow keys are what
+                   make a splitter reachable without a pointer, and the shell keeps the value
+                   in step (`PaneShell.installPaneResize`). -->
+              <div class="{Style.terminalResize}" data-term-resize role="separator" tabindex="0"
+                   aria-orientation="vertical" aria-label="Resize the terminals column"
+                   aria-valuemin="320" aria-valuenow="420" aria-valuemax="1080"></div>
               <div class="{Style.terminalPane}">
                 <div class="{Style.terminalHead}">
                   <span class="{Style.terminalHeadName}">{paneName}</span>
