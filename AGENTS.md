@@ -84,6 +84,40 @@ locations, a fallback beside a primary), keep ONLY the one verified working here
 the other. A redundant spare hides which path is live, rots unverified, and turns the next
 failure into an archaeology dig.
 
+## Colocation
+
+**A rule lives with the state it governs.** An invariant that holds only because a CALLER
+remembered to ask first is not an invariant — it is a convention with a good reputation, and
+the next caller has not read it.
+
+`design.md` §1 says composition happens at the top. This is the other half of that sentence:
+what composes at the top must have nothing left to DECIDE. A composition root that computes —
+a bound, a fallback, a refusal, a subtraction — has taken a decision out of the only place it
+could be tested cheaply and put it where no test can reach.
+
+The tell is a member exported for no local reason. `SessionTerminals` briefly grew an
+`Instrumented` predicate that nothing inside it used: it existed so `Host.fs` could ask "does
+this terminal have blocks?", subtract a line window, and cap the answer. Meanwhile the WRITE
+half of that same feature was one verb on the manager with its refusal inside it. Two halves of
+one story in two shapes — and the half that had drifted upward was carrying arithmetic no cheap
+test could see. A bug was living in it: closing a terminal forgot what its source had been, so
+a closed device answered "this runs commands as blocks" about a recording sitting right there.
+
+Three questions, and any `no` means it is in the wrong place:
+
+- **Can a caller break it by not calling something first?** Then those calls are one verb.
+  Take-then-write is `Write`, because an actor that could write without the lease is the second
+  writer the lease exists to prevent.
+- **Would testing it mean building the composition root?** Then move it down to where the state
+  is. The cheap tier is the measure: a rule the cheap tier cannot reach is a rule nobody
+  re-checks.
+- **Does a sibling operation on the same state live somewhere else?** Then one of them has
+  moved. `Write` and `Tail` sit together because the rule that admits one admits the other.
+
+The corollary is that a seam belongs where it is USED. The terminal manager takes a transcript
+reader because `Tail` needs one — not because a layer above it offered to read on its behalf.
+Passing state downward is colocation; reaching upward for it is not.
+
 ## Examples
 
 `examples/` holds integrations built the way somebody OUTSIDE this repository would build
