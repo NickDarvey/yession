@@ -120,16 +120,30 @@ Four properties, and each one deletes something this plan previously had to carr
 Under it sits the same fetch, so a step that is not in the cache goes to the network and an
 offline miss is `HttpUnreachable` naming the range it wanted.
 
-**One deployment loses this**: `caches` requires a secure context, so a session served over
-plain HTTP at a LAN address has neither the Cache API nor a service worker (IndexedDB, which
-needs no secure context, would still work). That is the trigger for the fallback below, and the
-only one.
+**One deployment loses this, and the answer is a certificate rather than a second store.**
+`caches` requires a secure context. Loopback is one, so the zero-config default
+(`http://127.0.0.1:{port}`) is fine, and so is every `https://` mount. What is left is a
+session reached over plain HTTP at a non-loopback address — which deployment.md documents, as
+the tailnet example (`http://host.example.ts.net:8321`).
+
+There, the transport genuinely is encrypted; the browser simply cannot verify it, and withholds
+the API on principle. So the fix is the one deployment.md already names — `--https` with a
+tailnet certificate — and the plan's job is to stop that configuration failing *silently*. A
+client in an insecure context keeps no history and cannot say why, which is indistinguishable
+from a bug. It should say so: one line in the settings pane naming the missing capability and
+the switch that restores it, gated on `window.isSecureContext`.
+
+What that deployment keeps is most of it: IndexedDB (so the doc store, drafts, queue and title
+persist exactly as now), the WebRTC transport, and every part of this plan except the store and
+the service worker. What it can never have is the offline cold open — a service worker needs a
+secure context and there is no way around that, which is worth saying out loud rather than
+leaving as a puzzle.
 
 **Decision:** ship the chain over the Cache API. An IndexedDB store keyed by offset stays the
-documented fallback — a *replacement* for this port, never an addition beside it — if
-measurement shows eviction under real use, or if insecure-context deployments turn out to
-matter. The chain holds under either answer, because it is the fetch protocol and not the
-storage.
+documented fallback — a *replacement* for this port, never an addition beside it — and the
+trigger for building it is **measured eviction, and nothing else**. Insecure contexts are
+explicitly not a trigger: a store that only that deployment exercises is the spare that rots
+unverified, and it would buy back one PR for a configuration whose real remedy is one flag.
 
 ## Where it composes, and what stays ignorant
 
@@ -370,7 +384,7 @@ next, and the reverse is not true.
 | | | |
 |---|---|---|
 | 1 | **Ranges, links, and a head.** `Events of from * until`, the 404 on an unreached range, `/events/head`, `no-store` everywhere. Server and route only — the existing client keeps working by minting the ranges it used to mint indices. | The tail becomes fetchable at a stable address, which is the whole symptom. |
-| 2 | **The walk and the store.** `HistoryCache` over the Cache API, follow `next`, replay from zero at boot above the `/me` probe, `LocalHistoryMsg`, gaps named. | A session unreachable with the network up (asleep, reaped) reads back in full. |
+| 2 | **The walk and the store.** `HistoryCache` over the Cache API, follow `next`, replay from zero at boot above the `/me` probe, `LocalHistoryMsg`, gaps named, and the insecure-context line that says why there is no store. | A session unreachable with the network up (asleep, reaped) reads back in full. |
 | 3 | **Retrying that does not give up.** `online` re-arm, supervised reconnect, manual retry, GAPS entry closed. | Recovery without a reload. |
 | 4 | **The loader.** `HistoryRestore`, the empty-timeline split, the strip's restoring state. | The empty screen stops lying. |
 | 5 | **The service worker.** Shell and fingerprinted assets, scoped to the mount. Nothing else depends on it. | A cold open with no network at all. |
@@ -393,10 +407,12 @@ the browser's HTTP cache is the client-side event store — both stop being true
   it: a walk knows how many steps it served locally and how many went to the network, and that
   ratio belongs on the OTel resource. If it says the store is not holding, the replacement is an
   IndexedDB store keyed by offset behind the same `HistoryCache` port. Do not build both.
-- **No secure context, no store.** `window.caches` (and service workers) require one, so a
-  session served over plain HTTP at a LAN address keeps today's behaviour exactly. The port is
-  total — no cache reads empty — so this degrades rather than breaks, and IndexedDB is the
-  fallback that would cover it.
+- **No secure context, no store — but it is a flag, not a fallback.** Loopback and every
+  `https://` mount are secure contexts; a non-loopback plain-HTTP session (deployment.md's
+  tailnet example) is not, and keeps today's behaviour exactly. The port is total, so this
+  degrades rather than breaks, and the remedy is `--https` with a tailnet certificate. What is
+  irreducible there is the cold offline open: no service worker without a secure context, no
+  exceptions.
 - **A chain step is a fetch.** Replaying 5 000 events is 50 local reads rather than one scan.
   Fine at that size, and bounded by the same thing the model is; worth a number before anyone
   assumes it stays fine.
