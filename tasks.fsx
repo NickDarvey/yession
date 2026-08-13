@@ -268,74 +268,47 @@ let private fable (quiet: bool) (project: string) (outDir: string) =
     else exec "dotnet" [ "fable"; project; "-o"; outDir ]
     declareEsm outDir
 
-// The conversation's typefaces (`app/fonts`, named by the @font-face `url()`s in
-// app/tailwind.css) are emitted BESIDE the built stylesheet, each under a name carrying a
-// digest of its own bytes, and the `url()` rewritten to match. Separate files rather than data
-// URIs inside the sheet, so the browser fetches only the weights a page renders and none of
-// them before it paints — the stylesheet is render-blocking and the faces are not.
+// The asset set a build ships: one directory, everything in it, served by path and named by
+// nobody (`app/Assets.fs`, `SessionRoute.Asset`). Adding an asset to the product means putting
+// a file in here — no route, no case, no line in `stage`.
 //
-// Fingerprinting happens HERE rather than at boot, unlike every other asset the servers
-// address, because the address is written into the stylesheet: the server only has to
-// recognise the name, and a name it does not hold is a 404 rather than a stale byte.
+// The directory is rebuilt from empty every time, which is what keeps it EXACTLY this build:
+// the whole set is addressed by one digest of its contents, so a file left behind from an
+// earlier build would be staged, packaged and served under an address that claims to describe
+// what the build contains.
 //
-// Tailwind passes the `url()`s through untouched apart from quoting and path rewriting, so a
-// face is matched by FILENAME rather than by the path it was written as. A reference with no
-// vendored face fails the build — the alternative is a 404 in a stylesheet cached for a year.
-let private cssFontUrl = Regex (@"url\(\s*['""]?([^)'""]+\.woff2)['""]?\s*\)", RegexOptions.IgnoreCase)
-
-/// The same content address the servers give the assets they read (`Interop.contentDigest`):
-/// SHA-256, base64url, first 12 characters.
-let private digestOf (bytes: byte array) =
-    Convert
-        .ToBase64String(Security.Cryptography.SHA256.HashData bytes)
-        .Replace('+', '-')
-        .Replace('/', '_')
-        .TrimEnd('=')
-        .Substring (0, 12)
-
-let private emitFonts (stylesheet: string) =
-    let path = Path.Combine (repoRoot, stylesheet)
-    let fontsDir = Path.Combine (Path.GetDirectoryName path, "fonts")
-    Directory.CreateDirectory fontsDir |> ignore
-    let emitted = Collections.Generic.HashSet<string> ()
-    let rewritten =
-        cssFontUrl.Replace (
-            File.ReadAllText path,
-            fun m ->
-                let face = Path.GetFileName m.Groups.[1].Value
-                let source = Path.Combine (repoRoot, "app/fonts", face)
-                if not (File.Exists source) then
-                    failwithf "%s references %s, which is not vendored in app/fonts" stylesheet face
-                let bytes = File.ReadAllBytes source
-                let name = sprintf "%s.%s.woff2" (Path.GetFileNameWithoutExtension face) (digestOf bytes)
-                File.WriteAllBytes (Path.Combine (fontsDir, name), bytes)
-                emitted.Add name |> ignore
-                // `SessionRoute.fontsPrefix`, which is where both servers look. Relative, like
-                // every other address the app emits: it resolves against the STYLESHEET's URL,
-                // so a path-mounted session gets its own prefix for free.
-                sprintf "url(fonts/%s)" name)
-    File.WriteAllText (path, rewritten)
-    // A face left from an earlier build is one no stylesheet names any more, and it would be
-    // staged, packaged and served forever. Sweep, so the directory is exactly this build.
-    for stale in Directory.GetFiles (fontsDir, "*.woff2") do
-        if not (emitted.Contains (Path.GetFileName stale)) then File.Delete stale
-
-/// The stylesheets the app serves, built locally (no CDN): the shell's — which scans the F#
-/// sources for composed class names, and carries its faces beside it — and the replay player's,
-/// which is its own artefact because the shell defers it (see `app/player.css`).
-let private buildStyles (outDir: string) (minify: bool) =
+// Nothing rewrites the stylesheet. Tailwind passes `url()` through verbatim, so the `url(fonts/
+// x.woff2)` written in `app/tailwind.css` resolves against wherever the sheet is served — which
+// is inside this directory, next to `fonts/`.
+let private buildAssets (outDir: string) (minify: bool) =
+    let assets = Path.Combine (repoRoot, outDir, "assets")
+    if Directory.Exists assets then Directory.Delete (assets, true)
+    Directory.CreateDirectory assets |> ignore
+    let out (name: string) = outDir + "/assets/" + name
     let extra = if minify then [ "--minify" ] else []
-    run tailwind ([ "-i"; "app/tailwind.css"; "-o"; outDir + "/app.css" ] @ extra) |> ignore
-    emitFonts (outDir + "/app.css")
-    run tailwind ([ "-i"; "app/player.css"; "-o"; outDir + "/player.css" ] @ extra) |> ignore
+
+    run esbuild
+        ([ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--outfile=" + out "client.js" ]
+         @ (if minify then [ "--minify" ] else []))
+    |> ignore
+
+    // The shell's stylesheet (scans the F# sources for composed class names) and the replay
+    // player's, which is its own file because the shell defers it (see `app/player.css`).
+    run tailwind ([ "-i"; "app/tailwind.css"; "-o"; out "app.css" ] @ extra) |> ignore
+    run tailwind ([ "-i"; "app/player.css"; "-o"; out "player.css" ] @ extra) |> ignore
+
+    // The vendored faces the stylesheet names, at the address it names them by.
+    let faces = Path.Combine (assets, "fonts")
+    Directory.CreateDirectory faces |> ignore
+    for face in Directory.GetFiles (Path.Combine (repoRoot, "app/fonts"), "*.woff2") do
+        File.Copy (face, Path.Combine (faces, Path.GetFileName face), true)
 
 let compile () =
     printfn "compiling F# -> JS"
     run "dotnet" [ "build"; "Yession.slnx" ] |> ignore
     fable true "app/main/Yession.Host.Main.fsproj" "app/out"
     fable true "app/browser/Yession.Browser.fsproj" "app/out/browser"
-    run esbuild [ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--minify"; "--outfile=app/out/public/client.js" ] |> ignore
-    buildStyles "app/out/public" true
+    buildAssets "app/out/public" true
 
 let build () =
     restore ()
@@ -450,7 +423,7 @@ let stage (version: string) =
 
     for required in
         [ "app/out/Main.js"; "app/SessionMain.js"
-          "app/out/public/client.js"; "app/out/public/app.css"; "app/out/public/player.css" ] do
+          "app/out/public/assets/client.js"; "app/out/public/assets/app.css" ] do
         if not (File.Exists (Path.Combine (repoRoot, required))) then
             failwithf "missing %s after compile" required
 
@@ -462,17 +435,17 @@ let stage (version: string) =
     bundle version "app/out/Main.js" "manager.js"
     bundle version "app/SessionMain.js" "session.js"
 
-    // Assets (read package-relative at runtime by Interop.readAsset).
-    File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
-    File.Copy (Path.Combine (repoRoot, "app/out/public/app.css"), Path.Combine (pkg, "assets/app.css"), true)
-    File.Copy (Path.Combine (repoRoot, "app/out/public/player.css"), Path.Combine (pkg, "assets/player.css"), true)
+    // The asset set, copied whole (read package-relative at runtime by `Assets.load`). A
+    // directory rather than a list of files, because which files a build ships is the BUILD's
+    // business — `stage` is the last place that should have an opinion about it.
+    let rec copyInto (source: string) (target: string) =
+        Directory.CreateDirectory target |> ignore
+        for file in Directory.GetFiles source do
+            File.Copy (file, Path.Combine (target, Path.GetFileName file), true)
+        for dir in Directory.GetDirectories source do
+            copyInto dir (Path.Combine (target, Path.GetFileName dir))
 
-    // The faces app.css names, under the digest-bearing names it names them by. A directory
-    // rather than a listed file each, because which faces exist is the stylesheet's business:
-    // `emitFonts` already swept it down to exactly what this build references.
-    Directory.CreateDirectory (Path.Combine (pkg, "assets/fonts")) |> ignore
-    for face in Directory.GetFiles (Path.Combine (repoRoot, "app/out/public/fonts"), "*.woff2") do
-        File.Copy (face, Path.Combine (pkg, "assets/fonts", Path.GetFileName face), true)
+    copyInto (Path.Combine (repoRoot, "app/out/public/assets")) (Path.Combine (pkg, "assets"))
 
     // Bin shims. `yession-manager` points the Manager at the packaged session bundle (both live
     // in one install), so it spawns `node session.js` with no PATH assumptions.
@@ -853,7 +826,7 @@ let private runCheckOnce (requested: string list) =
         // The harness renders the REAL shell (Plan 14), so it needs the real stylesheet:
         // without it every Tailwind class is inert, and any layout the browser tier measures
         // there — a phone viewport most of all — is a layout nobody will ever get.
-        buildStyles "tests/browser/out" false
+        buildAssets "tests/browser/out" false
         progress "running the browser suite (.NET CLR)"
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 

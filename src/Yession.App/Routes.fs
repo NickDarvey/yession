@@ -38,25 +38,24 @@ type GitHubAction =
 type SessionRoute =
     /// The client shell itself — the served page IS the app.
     | Shell
-    /// The browser client bundle, addressed by a digest of the bytes served. A build is a
-    /// new address, which is what lets those bytes be cached forever.
-    | ClientBundle of digest: string
-    /// The locally built stylesheet (no CDN), addressed the same way.
-    | AppCss of digest: string
-    /// The replay player's stylesheet, split out of `AppCss` and addressed the same way.
-    /// Its own file because it is needed only once somebody opens a recording, and a
-    /// stylesheet in the head is render-blocking: the shell links it inert (`media="not
-    /// all"`) and `Replay.mount` turns it on. Nothing else in the product is deferred like
-    /// this, because nothing else is both sizeable and used by a minority of sessions.
-    | PlayerCss of digest: string
-    /// One typeface the stylesheet asks for, by the exact file name the build emitted —
-    /// `<face>.<digest>.woff2`, fingerprinted at build time rather than at boot, because the
-    /// address is written into the stylesheet and the server only has to recognise it.
+    /// Any static file this build ships — `assets/<build>/<path>`, where `<build>` is a
+    /// digest over the WHOLE asset set and `<path>` is the file's place inside it.
     ///
-    /// The faces are separate files rather than data URIs inside the stylesheet (which is
-    /// what they were when they landed) so the browser fetches only the weights a page
-    /// actually renders, and fetches none of them before first paint.
-    | Font of file: string
+    /// One case, deliberately. This used to be four — the bundle, the stylesheet, the replay
+    /// player's stylesheet, a typeface — and every asset added to the product cost a case
+    /// here, a rendering, a parse, a case in each of the two servers, and a line in `stage`.
+    /// That is a build serving what the ROUTER knows about, and it is backwards: a session
+    /// upgraded on its own can bring a typeface, a sheet, an image that this Manager's
+    /// binary has never heard of, and it must be able to serve them. So the route names a
+    /// path and nothing else, and the server answers from whatever its own build left in the
+    /// asset directory (`Assets`).
+    ///
+    /// The digest is on the DIRECTORY rather than on each file, which is what lets a
+    /// stylesheet reference a face by a plain relative name: `url(fonts/x.woff2)` inside
+    /// `assets/<build>/app.css` resolves to `assets/<build>/fonts/x.woff2` with no build-time
+    /// rewriting, and immutability still holds because any change to any file changes
+    /// `<build>` and so changes every address in the set.
+    | Asset of build: string * path: string
     /// The web manifest, which is what makes the shell installable — and, once installed,
     /// what makes it launch without the browser's chrome (`WebApp`). NOT fingerprinted: a
     /// browser re-reads it by the address the document names, and the document names this.
@@ -105,48 +104,21 @@ type SessionRoute =
 
 module SessionRoute =
 
-    /// `<name>.<digest>.<ext>`, or the bare `<name>.<ext>` for the empty digest.
-    ///
-    /// The empty digest is NOT a second caching policy — it is the only address a shell has
-    /// when the build output is missing, which is what keeps the "not built (run: build)"
-    /// 404 reachable in development instead of rendering a page that asks for a hash of
-    /// nothing.
-    let private fingerprinted (name: string) (ext: string) (digest: string) : string =
-        if digest = "" then sprintf "%s.%s" name ext
-        else sprintf "%s.%s.%s" name digest ext
+    /// Where every static file sits, relative to whatever the session is mounted at.
+    /// Public because the Manager serves its own set from its own origin root and has to
+    /// recognise the same addresses — the two servers agreeing by inspection is exactly what
+    /// this type exists to prevent.
+    let assetsPrefix = "assets/"
 
-    /// The digest in `<name>.<digest>.<ext>`; `Some ""` for the bare `<name>.<ext>`; None for
-    /// anything else. An EMPTY middle (`client..js`) is None deliberately: it would render
-    /// back as `client.js`, and `relative` and `parse` are exact inverses.
-    ///
-    /// Splitting on `.` is safe because a digest is base64url, whose alphabet has no dot.
-    let private fingerprintOf (name: string) (ext: string) (segment: string) : string option =
-        let prefix = name + "."
-        let suffix = "." + ext
-        if segment = prefix + ext then Some ""
-        elif segment.StartsWith prefix
-             && segment.EndsWith suffix
-             && segment.Length > prefix.Length + suffix.Length
-        then Some (segment.Substring (prefix.Length, segment.Length - prefix.Length - suffix.Length))
-        else None
-
-    /// Where the faces live, relative to the stylesheet that names them. Public because the
-    /// Manager serves that same stylesheet from its own origin root and has to recognise the
-    /// addresses inside it — the two servers agreeing by inspection is exactly what this type
-    /// exists to prevent.
-    let fontsPrefix = "fonts/"
-
-    /// A face's file name as the build emits it. The character set is fixed by the build, so
-    /// anything outside it is simply not a route — which is also what keeps a segment the
-    /// server may look up on disk from ever carrying a separator or a dot-segment.
-    let private isFaceFile (segment: string) =
-        let ok c =
+    /// A path inside the asset set, as a build emits it. Segments are ordinary file names, so
+    /// anything outside that shape is simply not a route — which is also what keeps a path
+    /// the server may look up from carrying a dot-segment.
+    let private isAssetPath (segments: string list) =
+        let ok (c: char) =
             (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
             || c = '.' || c = '-' || c = '_'
-        segment.EndsWith ".woff2"
-        && segment.Length > ".woff2".Length
-        && not (segment.Contains "..")
-        && segment |> Seq.forall ok
+        not segments.IsEmpty
+        && segments |> List.forall (fun s -> s <> "" && not (s.Contains "..") && Seq.forall ok s)
 
     let private claudeSegment (action: ClaudeAction) =
         match action with
@@ -168,10 +140,7 @@ module SessionRoute =
     let relative (route: SessionRoute) : string =
         match route with
         | Shell -> ""
-        | ClientBundle digest -> fingerprinted "client" "js" digest
-        | AppCss digest -> fingerprinted "app" "css" digest
-        | PlayerCss digest -> fingerprinted "player" "css" digest
-        | Font file -> fontsPrefix + file
+        | Asset (build, path) -> assetsPrefix + build + "/" + path
         | Manifest -> "manifest.webmanifest"
         | Icon -> "icon.png"
         | Signal -> "signal"
@@ -206,7 +175,9 @@ module SessionRoute =
         | "GET", [ "me" ] -> Some Me
         | "GET", [ "manifest.webmanifest" ] -> Some Manifest
         | "GET", [ "icon.png" ] -> Some Icon
-        | "GET", [ "fonts"; file ] when isFaceFile file -> Some (Font file)
+        // Everything static, by path, with no opinion about what is in there.
+        | "GET", "assets" :: build :: path when isAssetPath (build :: path) ->
+            Some (Asset (build, String.concat "/" path))
         | "GET", [ "login" ] -> Some Login
         | "GET", [ "callback" ] -> Some Callback
         | "GET", [ "events"; index ] ->
@@ -232,15 +203,6 @@ module SessionRoute =
         | "POST", [ "github"; "token" ] -> Some (GitHub GitHubAction.Token)
         | "POST", [ "github"; "disconnect" ] -> Some (GitHub GitHubAction.Disconnect)
         | "GET", [ "queries" ] -> Some Queries
-        // Last among the single-segment GETs, because a fingerprinted name is matched by
-        // shape rather than by literal and would otherwise shadow the fixed paths above.
-        | "GET", [ segment ] ->
-            match fingerprintOf "client" "js" segment with
-            | Some digest -> Some (ClientBundle digest)
-            | None ->
-                match fingerprintOf "app" "css" segment with
-                | Some digest -> Some (AppCss digest)
-                | None -> fingerprintOf "player" "css" segment |> Option.map PlayerCss
         | _ -> None
 
     /// The route a request is for when this session is served under `mount` (`""` at an
@@ -254,12 +216,28 @@ module SessionRoute =
         elif path.StartsWith (mount + "/") then parse method (path.Substring mount.Length)
         else None
 
-/// The digests a shell needs to address its own assets, carried together so a renderer cannot
-/// take them in the wrong order — two bare strings would be silently swappable.
-type AssetDigests =
-    { Bundle: string
-      Css: string
-      Player: string }
+/// Which build's asset set a document should name: a digest over every static file this
+/// process ships. It used to be one digest per asset, which meant a renderer had to be handed
+/// each of them and a new asset changed the type. A set has one address, so a document that
+/// has this can name ANY file in it — including one this code has never heard of.
+type AssetBuild =
+    | AssetBuild of digest: string
+
+module AssetBuild =
+
+    /// Where `path` is served for this build — the URL a document should name. Relative, like
+    /// every route: it resolves against the shell's `<base href>`, and the stylesheet's own
+    /// relative `url()`s then resolve against IT.
+    let url (AssetBuild digest) (path: string) : string = SessionRoute.relative (Asset (digest, path))
+
+/// The files a DOCUMENT names, as the build emits them. Not routes — `Asset` is deliberately
+/// ignorant of these — but a stylesheet spelled one way in the session shell and another in
+/// the Manager page is the same hazard `SessionRoute` exists to remove, one level down.
+module AssetFile =
+
+    let clientJs = "client.js"
+    let appCss = "app.css"
+    let playerCss = "player.css"
 
 /// What the two static surfaces may be cached for, stated once because the session server and
 /// the Manager UI both serve them and the pair only works together: the shell is the document

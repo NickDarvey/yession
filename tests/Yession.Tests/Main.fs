@@ -25,6 +25,7 @@ let all =
     testList "Yession" [
         Tag.needs "Domain" [] (fun () -> Domain.tests)
         Tag.needs "Routes" [] (fun () -> Routes.tests)
+        Tag.needs "Static assets" [] (fun () -> Assets.tests)
         Tag.needs "Idle reaping" [] (fun () -> Reaper.tests)
         Tag.needs "Cli" [] (fun () -> Cli.tests)
         Tag.needs "Secrets" [] (fun () -> Secrets.tests)

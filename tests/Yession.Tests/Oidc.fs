@@ -481,11 +481,11 @@ let private flowTests =
                 Expect.equal shell.Status 200 "the shell serves without auth"
                 Expect.equal shell.CacheControl "no-cache" "the shell is revalidated before every use"
 
-                // The other half of the pair: what the shell names is addressed by a digest of
-                // its own bytes, so those bytes can be kept forever. Fresh document, immutable
-                // assets — neither works without the other.
+                // The other half of the pair: what the shell names sits under an address that
+                // is a digest of the whole asset set, so those bytes can be kept forever.
+                // Fresh document, immutable assets — neither works without the other.
                 let bundleUrl =
-                    System.Text.RegularExpressions.Regex.Match(shell.Body, "src=\"(client\\.[^\"]+\\.js)\"").Groups.[1].Value
+                    System.Text.RegularExpressions.Regex.Match(shell.Body, "src=\"(assets/[^\"]+/client\\.js)\"").Groups.[1].Value
                 Expect.notEqual bundleUrl "" "the shell names a fingerprinted bundle"
                 let! bundle = OidcHttp.getWithJar shellJar (sessionUrl + "/" + bundleUrl)
                 Expect.equal bundle.Status 200 "the fingerprinted bundle serves"
@@ -494,7 +494,7 @@ let private flowTests =
                 // An address this build does not serve is refused, not answered with current
                 // bytes: those would land in an `immutable` cache entry under the stale
                 // address and be wrong there for a year, unfixable from the server.
-                let! stale = OidcHttp.getWithJar shellJar (sessionUrl + "/client.0000notreal.js")
+                let! stale = OidcHttp.getWithJar shellJar (sessionUrl + "/assets/0000notreal/client.js")
                 Expect.equal stale.Status 404 "a stale asset address is a 404, never a redirect to current bytes"
 
                 // The data surfaces are gated bare.

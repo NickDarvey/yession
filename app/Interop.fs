@@ -165,12 +165,11 @@ let sha256Base64Url (input: string) : string = sha256B64u nodeCrypto input
 /// enough to read in a network panel. 72 bits; a collision needs two builds whose hashes agree
 /// there, which no real edit produces.
 ///
-/// `None` — the build output is missing — has nothing to address. The empty string renders as
-/// the bare `client.js`/`app.css`, so a developer meets the "not built (run: build)" 404
-/// rather than a 404 on a hash of nothing.
+/// `None` has nothing to address, and renders as the empty string.
 ///
-/// Used for the two static assets and for the shell's `ETag`, which is the same question
-/// ("are these the bytes you already have?") asked of a document instead of a file.
+/// Used for the shell's `ETag` — "are these the bytes you already have?", asked of a document.
+/// The static files are addressed by `Assets`, which asks the same question of a whole
+/// directory at once so that a stylesheet and the faces it names can never answer differently.
 let contentDigest (content: string option) : string =
     match content with
     | Some text -> (sha256Base64Url text).Substring (0, 12)
@@ -217,65 +216,6 @@ let envOr (name: string) (fallback: string) : string = jsNative
 /// build its OAuth redirect URI and to know the path it is mounted under.
 let publicAccess () : Result<Yession.Domain.PublicAccess, string> =
     Yession.Domain.PublicAccess.create (envOr "YESSION_MANAGER_URL" "") (envOr "YESSION_SESSION_URL" "")
-
-/// Read a bundled asset: from the npm package's `assets/` directory (next to the
-/// bundled entry — the packaged case), else from the dev filesystem fallback path.
-/// None when neither exists. `import.meta.url` resolves to the running module, which is
-/// the package-root bundle once esbuild has flattened everything into one file.
-[<Emit("""(() => {
-  try { return $2.readFileSync(new URL('./assets/' + $0, import.meta.url), 'utf8') } catch {}
-  try { return $2.readFileSync($1, 'utf8') } catch { return null }
-})()""")>]
-let readAsset (assetName: string) (fallbackPath: string) (fs: obj) : string option = jsNative
-
-/// Every file in a bundled asset DIRECTORY, as `(name, bytes)` — the same two-place lookup
-/// `readAsset` does (the npm package's `assets/`, else the dev filesystem), for the one asset
-/// family whose members are not known until the build has run: the typefaces, each named with
-/// a digest of its own bytes. Empty when the directory is absent, which is the un-built case
-/// and reads as "this server serves no faces" rather than as a crash at boot.
-///
-/// Bytes, not text: a woff2 is binary, and `readAsset`'s `utf8` would mangle it.
-[<Emit("""(() => {
-  try {
-    const base = new URL('./assets/' + $0 + '/', import.meta.url)
-    return $2.readdirSync(base).map(name => [name, $2.readFileSync(new URL(name, base))])
-  } catch {}
-  try { return $2.readdirSync($1).map(name => [name, $2.readFileSync($1 + '/' + name)]) } catch { return [] }
-})()""")>]
-let readAssetDir (assetDir: string) (fallbackPath: string) (fs: obj) : (string * obj) array = jsNative
-
-/// A sibling of the built stylesheet: `fonts/` (the faces its `url()`s name) and
-/// `player.css` (the sheet it no longer carries) both sit beside `app.css`, and all three are
-/// one build. Derived rather than each getting an environment variable of its own — a
-/// deployment that could point them at different builds is one that could serve a stylesheet
-/// whose faces do not match it.
-let besideCss (cssPath: string) (name: string) : string =
-    let cut = cssPath.LastIndexOf '/'
-    (if cut < 0 then "." else cssPath.Substring (0, cut)) + "/" + name
-
-/// The typefaces a built stylesheet asks for, keyed by the file name it asks for them under.
-/// Read once at boot, like every other static asset here, and looked up by EXACT name: the
-/// build wrote a digest of the bytes into the name, so a name this map does not hold is not a
-/// face this build has. That is also what makes the lookup safe — nothing derived from a
-/// request path ever reaches the file system.
-let readFonts (cssPath: string) (fs: obj) : Map<string, obj> =
-    readAssetDir "fonts" (besideCss cssPath "fonts") fs |> Map.ofArray
-
-/// Serve one face, to whichever of the two servers was asked for it — both hand out the same
-/// stylesheet, so both must be able to answer everything it names. Immutable at its own
-/// address, like the fingerprinted assets beside it; `res.end` takes the Buffer the same way
-/// it takes the icon's decoded bytes.
-let serveFont (file: string) (fonts: Map<string, obj>) (res: ServerResponse) =
-    match Map.tryFind file fonts with
-    | Some bytes ->
-        res.writeHead (
-            200,
-            createObj [ "content-type", box "font/woff2"; "cache-control", box Yession.App.CachePolicy.asset ])
-        |> ignore
-        res.``end`` (unbox bytes)
-    | None ->
-        res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-        res.``end`` "no such face"
 
 /// Terminate the Node process with an exit code.
 [<Emit("process.exit($0)")>]

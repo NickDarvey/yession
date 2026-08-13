@@ -12,13 +12,11 @@ open Yession.App
 /// this list is what makes it also fail these tests until it is listed.
 let private every =
     [ Shell
-      // Both forms of a fingerprinted asset: the digested address a built server emits, and
-      // the bare one it falls back to when the build output is missing. The properties below
-      // hold for each, which is what keeps `relative` and `parse` exact inverses.
-      ClientBundle "K3nR7pQx2wL0"
-      ClientBundle ""
-      AppCss "8fZs1mVb4tHc"
-      AppCss ""
+      // A static file, at the depth a build actually emits: one at the top of the set and one
+      // in a directory, because the route carries the whole tail and `relative` and `parse`
+      // have to stay exact inverses over both.
+      Asset ("K3nR7pQx2wL0", "client.js")
+      Asset ("8fZs1mVb4tHc", "fonts/monaspace-neon-latin-300-normal.woff2")
       Signal
       Me
       Login
@@ -37,8 +35,6 @@ let private every =
       Claude ClaudeAction.Complete
       Claude ClaudeAction.Token
       Claude ClaudeAction.Disconnect
-      // A single-segment GET, so it shares the shape the fingerprinted-asset fallback
-      // matches — the round trip below is what pins that the literal still wins.
       Queries ]
 
 let private methodOf (route: SessionRoute) =
@@ -116,19 +112,19 @@ let private mountTests =
     let mount = "/s/01hx"
     testList "A path-mounted session" [
         testCase "claims its own prefix and nothing outside it" <| fun () ->
-            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/client.abc123.js") (Some (ClientBundle "abc123")) "its bundle"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/assets/abc123/client.js") (Some (Asset ("abc123", "client.js"))) "its bundle"
             Expect.equal (SessionRoute.parseUnder mount "POST" "/s/01hx/signal") (Some Signal) "its signalling"
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/events/4") (Some (Events 4)) "its event chunks"
-            Expect.equal (SessionRoute.parseUnder mount "GET" "/client.js") None "the origin root is not its own"
-            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/other/client.js") None "a sibling's prefix is not its own"
-            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hxtra/client.js") None "a prefix it merely starts with is not its own"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/assets/abc123/client.js") None "the origin root is not its own"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/other/assets/abc123/client.js") None "a sibling's prefix is not its own"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hxtra/assets/abc123/client.js") None "a prefix it merely starts with is not its own"
 
         testCase "is reached at its mount with or without a trailing slash" <| fun () ->
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/") (Some Shell) "the usual form"
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx") (Some Shell) "and the bare mount"
 
         testCase "an unmounted session is unchanged" <| fun () ->
-            Expect.equal (SessionRoute.parseUnder "" "GET" "/client.abc123.js") (Some (ClientBundle "abc123")) "an origin-root session claims the path as written"
+            Expect.equal (SessionRoute.parseUnder "" "GET" "/assets/abc123/client.js") (Some (Asset ("abc123", "client.js"))) "an origin-root session claims the path as written"
             Expect.equal (SessionRoute.parseUnder "" "GET" "/") (Some Shell) "including its shell"
 
         testCase "what the browser asks for is what the session claims" <| fun () ->

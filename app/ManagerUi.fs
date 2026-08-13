@@ -353,23 +353,17 @@ let private pathnameOf (url: string) : string = Fable.Core.Util.jsNative
 [<Fable.Core.Emit("Object.fromEntries(new URLSearchParams($0))[$1] ?? ''")>]
 let private formField (body: string) (name: string) : string = Fable.Core.Util.jsNative
 
-[<Fable.Core.ImportAll("node:fs")>]
-let private fs : obj = Fable.Core.Util.jsNative
+/// Where the built asset set lives when this is not an installed package. One variable for
+/// the whole directory (`Assets`), which is also why this page can link a stylesheet whose
+/// faces this file has never heard of.
+let private assetsDir = envOr "YESSION_ASSETS" "app/out/public/assets"
 
-let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
+/// The same static asset service the Session Process runs, over this process's OWN set — read
+/// and addressed once at boot rather than per request, so every render of this page (it is
+/// rendered per request) names the same bytes.
+let private assets = Assets.load assetsDir
 
-/// The same stylesheet the session shell serves, read and addressed once at boot rather than
-/// per request — the Manager page is rendered per request, so this is what keeps every render
-/// naming the same bytes. Addressed by `Interop.contentDigest`, the same function the session
-/// uses, so one stylesheet never has two spellings.
-let private css = readAsset "app.css" cssPath fs
-
-let private cssUrl = SessionRoute.relative (AppCss (contentDigest css))
-
-/// The typefaces that stylesheet names. The Manager's own chrome does not wear the
-/// conversation's voices today, so a browser here fetches none of them — but this process
-/// hands out the sheet, and a server that serves a stylesheet answers for what is in it.
-let private fonts = readFonts cssPath fs
+let private cssUrl = Assets.url assets AssetFile.appCss
 
 /// The icon's constant is base64 (it lives in source); the wire wants the PNG. Same decode
 /// the session server does, for the same reason — `res.end` takes what Node's `end` takes.
@@ -479,23 +473,18 @@ let tryHandle
         match req.``method``, path with
         | "GET", "/" ->
             Some (fun () -> html res (page cssUrl pm.Public (pm.Sessions ()) (pm.McpServers ())))
-        | "GET", path when path = "/" + cssUrl ->
-            // The same locally built stylesheet the session shell uses — shared style, no CDN
-            // — and the one management response that is cacheable, because it is addressed by
-            // a digest of its own bytes. An address that is not the current one is never
-            // served: see `Signalling.serveAsset` for why answering it would be worse than a
-            // 404. The Manager has no `<base href>` and always sits at its origin root, so the
-            // relative URL the page emits resolves to exactly this path.
-            Some (fun () ->
-                match css with
-                | Some body -> respondWith res 200 "text/css; charset=utf-8" CachePolicy.asset body
-                | None -> respond res 404 "text/plain" "stylesheet not built (run: build)")
-        | "GET", path when path.StartsWith ("/" + SessionRoute.fontsPrefix) ->
-            // A typeface the shared stylesheet asked for. Its `url()`s are relative to the
-            // sheet, and the Manager sits at its origin root, so they land here. The face is
-            // looked up by exact name — the build put a digest in it — which is both the
-            // validation and the reason nothing from the path reaches the file system.
-            Some (fun () -> serveFont (path.Substring ("/" + SessionRoute.fontsPrefix).Length) fonts res)
+        | "GET", path when path.StartsWith ("/" + SessionRoute.assetsPrefix) ->
+            // Everything static this build ships, served by path and by nothing else — the
+            // same service the Session Process runs, over this process's own set. The Manager
+            // page links the stylesheet, and the stylesheet names its own faces; neither this
+            // route nor this file knows what those are, which is the point: a build that adds
+            // an asset adds a file, not a case.
+            //
+            // The Manager has no `<base href>` and always sits at its origin root, so the
+            // relative addresses the page and the stylesheet emit resolve to exactly here.
+            match SessionRoute.parse "GET" path with
+            | Some (Asset (build, file)) -> Some (fun () -> Assets.serve assets build file res)
+            | _ -> None
         | "GET", path when path = "/" + SessionRoute.relative Icon ->
             // The same mark the session shells wear, from the same constant — the Manager
             // sits at its origin root, so the relative address the page emits is this path.
