@@ -1,5 +1,7 @@
 namespace Yession.App
 
+open Yession.Domain
+
 /// The HTTP contract of a Session Process: every path it serves, declared once. The
 /// server matches on these, the shell emits them, and the browser client fetches them —
 /// the same role `Dom` plays for markup hooks, one level up. Before this, `/client.js`
@@ -58,10 +60,21 @@ type SessionRoute =
     | Login
     /// Land the bounce back here.
     | Callback
-    /// Immutable chunk `index` of the event log. Named `Events` after the path, not
+    /// The event log's cursor: "what has happened after this offset?", `None` meaning
+    /// from the beginning — the same `EventOffset option` the client's feed already takes.
+    /// It carries no events and is never cached; it answers with a redirect to the
+    /// `Events` range that does, or `204` when the caller is already current. This is the
+    /// ONLY thing a client has to know how to build (docs/plans/20).
+    | EventsAfter of after: EventOffset option
+    /// The events at offsets `[first, last]`, which is the same answer for ever: the log
+    /// is append-only and these bounds do not move. Named `Events` after the path, not
     /// after `EventChunk` — that module already exists in the domain, and one identifier
     /// meaning two things is what makes F# symbols hard to find.
-    | Events of index: int
+    ///
+    /// Only the server ever names one of these. A client receives the address in a
+    /// redirect and keeps what came back under it, so it never has to know that a range
+    /// has a size, a boundary, or an alignment.
+    | Events of first: int64 * last: int64
     /// Immutable chunk `index` of a terminal's transcript (Plan 13) — the history leg of
     /// the terminal feed, cacheable on exactly the same argument as `Events`. The terminal
     /// is carried as a raw string because a route is a PATH, and validating it into a
@@ -144,7 +157,9 @@ module SessionRoute =
         | Me -> "me"
         | Login -> "login"
         | Callback -> "callback"
-        | Events index -> sprintf "events/%d" index
+        | EventsAfter None -> "events"
+        | EventsAfter (Some after) -> sprintf "events/after/%d" (EventOffset.value after)
+        | Events (first, last) -> sprintf "events/%d-%d" first last
         | TerminalTranscript (terminal, index) -> sprintf "terminals/%s/%d" terminal index
         | TerminalKeyframe (terminal, seq) -> sprintf "terminals/%s/keyframes/%d" terminal seq
         | ClaudeStatus -> "claude"
@@ -174,9 +189,29 @@ module SessionRoute =
         | "GET", [ "icon.png" ] -> Some Icon
         | "GET", [ "login" ] -> Some Login
         | "GET", [ "callback" ] -> Some Callback
-        | "GET", [ "events"; index ] ->
-            match System.Int32.TryParse index with
-            | true, parsed when parsed >= 0 -> Some (Events parsed)
+        | "GET", [ "events" ] -> Some (EventsAfter None)
+        | "GET", [ "events"; "after"; offset ] ->
+            match System.Int64.TryParse offset with
+            | true, parsed ->
+                // An unparseable offset is not this route, and a negative one is not an
+                // offset at all — `EventOffset.create` owns that rule, so it is not
+                // restated here.
+                match EventOffset.create parsed with
+                | Ok o -> Some (EventsAfter (Some o))
+                | Error _ -> None
+            | _ -> None
+        | "GET", [ "events"; range ] ->
+            // `{first}-{last}`. Both bounds are required and the pair is validated here,
+            // because an inverted or over-long range is not an address this server has —
+            // and a request for one must 404 rather than be answered with something
+            // shorter, which a client would then keep for ever as if it were the whole
+            // range. (`serveAsset` refuses a stale digest for the same reason.)
+            match range.Split '-' with
+            | [| first; last |] ->
+                match System.Int64.TryParse first, System.Int64.TryParse last with
+                | (true, f), (true, l) when f >= 0L && l >= f && l - f < int64 EventChunk.size ->
+                    Some (Events (f, l))
+                | _ -> None
             | _ -> None
         | "GET", [ "terminals"; terminal; "keyframes"; seq ] ->
             match System.Int32.TryParse seq with
@@ -228,7 +263,10 @@ type AssetDigests =
 /// was rendered against — which is exactly the bug that produced these values (a 24-hour
 /// window on stable URLs made every release invisible for a day).
 ///
-/// Alongside `EventChunk.cacheControl`, which is the same idea for the event log.
+/// The event log is deliberately NOT here. Its answers are kept by the client itself, in a
+/// store it can enumerate and ask to persist, so every response on that surface is
+/// `no-store` — a header inviting a second copy into the HTTP cache would be the redundant
+/// spare, not a belt (docs/plans/20).
 module CachePolicy =
 
     /// A fingerprinted asset: the address changes whenever the bytes do, so a cache entry can

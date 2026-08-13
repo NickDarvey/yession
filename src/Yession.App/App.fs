@@ -258,13 +258,13 @@ module App =
               OnTerminalSnapshot = fun _ _ _ -> ()
               ReadPosition = None }
 
-    /// The HTTP event feed for `ConnectOptions.FetchEvents`: translates "events after
-    /// offset X" into the Session Process's immutable-chunk URL scheme (`/events/{n}`) and
-    /// decodes the JSONL envelopes. Because full chunks are served immutable, an HTTP cache
-    /// in front of `get` (the browser's) makes history replay local; only the growing tail
-    /// chunk hits the network. Also home to the shipped resilience policy for that feed —
-    /// the policy is a value here so the composition site is one line and the TEST runs the
-    /// same policy that ships.
+    /// The HTTP event feed for `ConnectOptions.FetchEvents`: sends "events after offset X"
+    /// as exactly that — a cursor (`/events/after/{n}`) — and decodes the JSONL envelopes
+    /// of whatever the server redirects it to. The address it lands on names its own
+    /// bounds and so never changes its bytes, which is what lets a client keep the answer
+    /// (docs/plans/20); this function does not keep anything itself. Also home to the
+    /// shipped resilience policy for that feed — the policy is a value here so the
+    /// composition site is one line and the TEST runs the same policy that ships.
     module EventFetch =
 
         /// Build a feed over the platform's HTTP GET. `urlOf` resolves a route for this
@@ -280,15 +280,15 @@ module App =
         let overHttp (get: HttpGet) (urlOf: SessionRoute -> string) (token: string option) : EventFeed =
             fun after ->
                 async {
-                    let nextOffset =
-                        match after with
-                        | Some o -> EventOffset.value o + 1L
-                        | None -> 0L
                     let tokenSuffix =
                         token
                         |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
                         |> Option.defaultValue ""
-                    let url = urlOf (Events (EventChunk.indexOf nextOffset)) + tokenSuffix
+                    // The cursor, and nothing else: the offset this client has folded
+                    // through, sent as-is. The server picks the bounds of the answer and
+                    // redirects to them, so no arithmetic here can address the wrong
+                    // events — there is none to get wrong.
+                    let url = urlOf (EventsAfter after) + tokenSuffix
                     match! get url with
                     | Error (HttpUnreachable detail) -> return Error (FeedUnreachable detail)
                     | Error (HttpStatus status) -> return Error (FeedRefused status)
@@ -316,8 +316,9 @@ module App =
                                 Ok
                                     { Events = fresh
                                       LastOffset = fresh |> List.tryLast |> Option.map (fun e -> e.Offset)
-                                      // A full chunk means more may exist beyond it; a partial
-                                      // chunk IS the log's current tail.
+                                      // A capped answer means the server had more to give;
+                                      // anything shorter — a `204` included, which arrives
+                                      // here as no lines at all — is the log's current tail.
                                       IsEnd = Array.length lines < EventChunk.size }
                 }
 

@@ -5,7 +5,13 @@ module Yession.Tests.Routes
 // cheapest tier covers it.
 
 open Fable.Pyxpecto
+open Yession.Domain
 open Yession.App
+
+let private offset (n: int64) =
+    match EventOffset.create n with
+    | Ok o -> o
+    | Error e -> failwith e
 
 /// Every route, so the properties below are checked against the whole surface rather than a
 /// remembered subset. A new case fails `relative`'s and `parse`'s matches until handled;
@@ -23,8 +29,14 @@ let private every =
       Me
       Login
       Callback
-      Events 0
-      Events 7
+      // The event log's two halves: the cursor a client sends (both forms — from the
+      // beginning, and from an offset it has folded through) and the range the server
+      // redirects it to, which is the only form that carries events.
+      EventsAfter None
+      EventsAfter (Some (offset 0L))
+      EventsAfter (Some (offset 4711L))
+      Events (0L, 99L)
+      Events (100L, 136L)
       // A terminal's transcript chunks (Plan 13) and the keyframes beside them (Plan 14):
       // deeper paths than anything else here, and the pair the router has to keep apart —
       // `terminals/<id>/<n>` and `terminals/<id>/keyframes/<n>` differ only by depth.
@@ -81,11 +93,27 @@ let private routeTests =
             Expect.equal (SessionRoute.parse "POST" "/claude") None "the status read is GET only"
             Expect.equal (SessionRoute.parse "GET" "/claude/begin") None "the panel actions are POST only"
 
-        testCase "an event chunk carries its index; a malformed one is not a route" <| fun () ->
-            Expect.equal (SessionRoute.parse "GET" "/events/12") (Some (Events 12)) "the index is parsed"
-            Expect.equal (SessionRoute.parse "GET" "/events/-1") None "a negative index is rejected"
-            Expect.equal (SessionRoute.parse "GET" "/events/x") None "a non-numeric index is rejected"
-            Expect.equal (SessionRoute.parse "GET" "/events") None "the collection itself is not served"
+        testCase "the cursor takes an offset, or none at all" <| fun () ->
+            Expect.equal (SessionRoute.parse "GET" "/events") (Some (EventsAfter None)) "no cursor reads from the beginning"
+            Expect.equal (SessionRoute.parse "GET" "/events/after/12") (Some (EventsAfter (Some (offset 12L)))) "the cursor is parsed"
+            Expect.equal (SessionRoute.parse "GET" "/events/after/-1") None "a negative offset is not an offset"
+            Expect.equal (SessionRoute.parse "GET" "/events/after/x") None "a non-numeric cursor is rejected"
+            Expect.equal (SessionRoute.parse "GET" "/events/after") None "the cursor needs its offset"
+
+        testCase "a range must name bounds this server could actually have" <| fun () ->
+            // The rule that keeps a partial answer from being kept for ever at an address
+            // that promises a whole range: a range the parse will not accept is a 404, and
+            // 404 is the only safe answer to an address whose bytes are not settled.
+            Expect.equal (SessionRoute.parse "GET" "/events/0-99") (Some (Events (0L, 99L))) "a range is parsed"
+            Expect.equal (SessionRoute.parse "GET" "/events/100-100") (Some (Events (100L, 100L))) "one event is a range"
+            Expect.equal (SessionRoute.parse "GET" "/events/9-8") None "an inverted range is not a route"
+            Expect.equal (SessionRoute.parse "GET" "/events/-1-4") None "a negative bound is not a route"
+            Expect.equal
+                (SessionRoute.parse "GET" (sprintf "/events/0-%d" EventChunk.size))
+                None
+                "a range longer than one answer carries is not a route"
+            Expect.equal (SessionRoute.parse "GET" "/events/0-") None "a half-written range is not a route"
+            Expect.equal (SessionRoute.parse "GET" "/events/x-y") None "a non-numeric range is rejected"
 
         testCase "an unknown path is not a route" <| fun () ->
             Expect.equal (SessionRoute.parse "GET" "/nope") None "unclaimed"
@@ -95,8 +123,8 @@ let private routeTests =
             // What a client outside a browser uses, having no document base to resolve
             // against — and where a caller could otherwise double or drop the separator.
             Expect.equal
-                (SessionRoute.at "https://example.com/s/abc" (Events 3))
-                "https://example.com/s/abc/events/3"
+                (SessionRoute.at "https://example.com/s/abc" (Events (300L, 336L)))
+                "https://example.com/s/abc/events/300-336"
                 "path-mounted"
             Expect.equal
                 (SessionRoute.at "http://127.0.0.1:54321/" Signal)
@@ -118,7 +146,8 @@ let private mountTests =
         testCase "claims its own prefix and nothing outside it" <| fun () ->
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/client.abc123.js") (Some (ClientBundle "abc123")) "its bundle"
             Expect.equal (SessionRoute.parseUnder mount "POST" "/s/01hx/signal") (Some Signal) "its signalling"
-            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/events/4") (Some (Events 4)) "its event chunks"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/events") (Some (EventsAfter None)) "its event cursor"
+            Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hx/events/0-99") (Some (Events (0L, 99L))) "its event ranges"
             Expect.equal (SessionRoute.parseUnder mount "GET" "/client.js") None "the origin root is not its own"
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/other/client.js") None "a sibling's prefix is not its own"
             Expect.equal (SessionRoute.parseUnder mount "GET" "/s/01hxtra/client.js") None "a prefix it merely starts with is not its own"

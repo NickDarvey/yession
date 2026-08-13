@@ -500,8 +500,8 @@ let private flowTests =
                 // The data surfaces are gated bare.
                 let! bareMe = headRequest (sessionUrl + "/me") |> Async.AwaitPromise
                 Expect.equal bareMe.status 401 "bare /me is unauthorized"
-                let! bareEvents = headRequest (sessionUrl + "/events/0") |> Async.AwaitPromise
-                Expect.equal bareEvents.status 401 "bare /events is unauthorized"
+                let! bareEvents = headRequest (sessionUrl + "/events") |> Async.AwaitPromise
+                Expect.equal bareEvents.status 401 "the bare event cursor is unauthorized"
 
                 // /login begins the bounce.
                 let probeJar = OidcHttp.newJar ()
@@ -517,8 +517,13 @@ let private flowTests =
                 // The full chain: login -> authorize -> callback -> cookie -> /me token.
                 let! opened = OidcHttp.openSession sessionUrl
                 Expect.isTrue (opened.PeerToken.Length > 0) "a peer token is minted for the authorized user"
-                let! events = OidcHttp.getWithJar opened.Jar (sessionUrl + "/events/0")
-                Expect.equal events.Status 200 "the cookie authorizes the event log"
+                // Followed, because the cursor answers with a redirect to the range it
+                // chose. What is under test here is authorization, not how much history a
+                // just-opened session has — so the assertion is that it is not refused,
+                // rather than which of the two success answers it is (`200` with events,
+                // `204` for a caller already current).
+                let! events = OidcHttp.followWithJar opened.Jar (sessionUrl + "/events")
+                Expect.notEqual events.Status 401 "the cookie authorizes the event log"
 
                 // The token issuance recorded the subject↔session binding (Plan 06):
                 // the composite identity is Manager-verified, never self-asserted.
