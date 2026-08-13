@@ -660,7 +660,8 @@ module Codec =
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "openedBy", actor.Encode p.OpenedBy
                       "title", Encode.string p.Title
-                      "sandbox", Encode.option sandboxName.Encode p.Sandbox ]
+                      "sandbox", Encode.option sandboxName.Encode p.Sandbox
+                      "renewable", Encode.bool p.Renewable ]
           Decode =
             Decode.object (fun get ->
                 // Three states in one field, and they are three different facts, so the
@@ -672,6 +673,10 @@ module Codec =
                 { TerminalOpened.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalOpened.OpenedBy = get.Required.Field "openedBy" actor.Decode
                   TerminalOpened.Title = get.Required.Field "title" Decode.string
+                  // Absent in a log written before Plan 19, and false is the honest reading:
+                  // nothing recorded a way back, so there is not one.
+                  TerminalOpened.Renewable =
+                    get.Optional.Field "renewable" Decode.bool |> Option.defaultValue false
                   TerminalOpened.Sandbox =
                     if written then get.Optional.Field "sandbox" sandboxName.Decode
                     else Some SandboxName.defaultName }) }
@@ -1336,7 +1341,9 @@ module Codec =
                     Encode.object
                         [ "kind", Encode.string "releaseTerminalLease"; "terminalId", terminalId.Encode id ]
                 | RearmTerminal id ->
-                    Encode.object [ "kind", Encode.string "rearmTerminal"; "terminalId", terminalId.Encode id ])
+                    Encode.object [ "kind", Encode.string "rearmTerminal"; "terminalId", terminalId.Encode id ]
+                | ReattachTerminal id ->
+                    Encode.object [ "kind", Encode.string "reattachTerminal"; "terminalId", terminalId.Encode id ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
@@ -1347,6 +1354,7 @@ module Codec =
                 | "releaseTerminalLease" ->
                     Decode.field "terminalId" terminalId.Decode |> Decode.map ReleaseTerminalLease
                 | "rearmTerminal" -> Decode.field "terminalId" terminalId.Decode |> Decode.map RearmTerminal
+                | "reattachTerminal" -> Decode.field "terminalId" terminalId.Decode |> Decode.map ReattachTerminal
                 | other -> Decode.fail (sprintf "Unknown session command: %s" other)) }
 
     let private sessionCommandResult : Codec<SessionCommandResult> =

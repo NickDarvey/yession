@@ -73,6 +73,9 @@ type TerminalView =
       /// `None` for a terminal attached to a stream somebody else produces (Plan 16, part
       /// D): it runs nowhere this session owns.
       Sandbox : SandboxName option
+      /// Can this terminal's stream be asked for again (Plan 19, step 4)? What decides
+      /// whether a closed device terminal offers a way back or merely its recording.
+      Renewable : bool
       /// A closed terminal keeps its blocks: the audit outlives the process.
       IsOpen : bool
       /// Why it closed, when it has.
@@ -120,6 +123,7 @@ module TerminalProjection =
                           Title = e.Title
                           OpenedBy = e.OpenedBy
                           Sandbox = e.Sandbox
+                          Renewable = e.Renewable
                           IsOpen = true
                           ClosedReason = None
                           Lease = None

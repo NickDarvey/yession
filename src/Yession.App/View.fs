@@ -86,6 +86,8 @@ type ViewActions =
       /// Type the shell instrumentation in again after the terminal stopped marking (Plan 13,
       /// stage 2f). Any peer may — it repairs rather than takes.
       RearmTerminal : TerminalId -> unit
+      /// Ask the provider for a closed terminal's stream again (Plan 19, step 4).
+      ReattachTerminal : TerminalId -> unit
       /// Send keystrokes to a terminal this peer holds (Plan 14, stage 6). Imperative
       /// because it is a frame, and deliberately not acknowledged: a keystroke that needed a
       /// reply would make typing a round trip. The Session Process checks the lease, which
@@ -139,6 +141,7 @@ module ViewActions =
           TakeTerminal = ignore
           ReleaseTerminal = ignore
           RearmTerminal = ignore
+          ReattachTerminal = ignore
           TypeIntoTerminal = fun _ _ -> ()
           ResizeTerminal = fun _ _ _ -> ()
           FocusPane = ignore
@@ -1908,6 +1911,13 @@ module View =
                     html $"""
                         <button type="button" class="{Style.cls [ Style.terminalTabClose; "ml-auto" ]}" data-terminal-close="{TerminalId.value view.TerminalId}"
                                 aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>close</button>"""
+                // A closed stream, and a provider that said asking again is safe (Plan 19).
+                // Shown ONLY when both are true: a control that mostly refuses teaches people
+                // not to press it, and this one has to work the time somebody needs it.
+                | Some view when view.Renewable ->
+                    html $"""
+                        <button type="button" class="{Style.cls [ Style.terminalTab; "ml-auto" ]}" data-terminal-reattach="{TerminalId.value view.TerminalId}"
+                                aria-label="Attach this stream again" @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>attach again</button>"""
                 | _ -> Lit.nothing
             | _ -> Lit.nothing
         html $"""

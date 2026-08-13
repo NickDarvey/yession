@@ -80,6 +80,7 @@ module App =
           ReleaseTerminal : TerminalId -> unit
           /// Type the shell instrumentation in again (Plan 13, stage 2f).
           RearmTerminal : TerminalId -> unit
+          ReattachTerminal : TerminalId -> unit
           /// Keystrokes for a terminal this peer holds (Plan 14, stage 6). A FRAME, not a
           /// command: there is no response by design, because a keystroke that needed an
           /// acknowledgement would make typing a round trip. The Session Process checks the
@@ -618,6 +619,9 @@ module App =
           RearmTerminal =
             fun terminalId ->
                 Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), RearmTerminal terminalId))))
+          ReattachTerminal =
+            fun terminalId ->
+                Async.StartImmediate (channel.Send (Command (Request (RequestId.fresh (), ReattachTerminal terminalId))))
           TypeIntoTerminal =
             fun terminalId data ->
                 Async.StartImmediate (channel.Send (Terminal (TerminalInput (terminalId, data))))

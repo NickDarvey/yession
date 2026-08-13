@@ -157,9 +157,9 @@ type private Panel () =
     member _.Close (id: string) = closed.Add id |> ignore
     member this.Attach : StreamAttach =
         { Open =
-            fun ticket ->
+            fun offer ->
                 async {
-                    openedFor.Add ticket.Url
+                    openedFor.Add offer.Ticket.Url
                     return TerminalId.create (sprintf "term-%d" openedFor.Count) |> Result.mapError (sprintf "%A")
                 }
           IsOpen = fun id -> not (closed.Contains (TerminalId.value id)) }
@@ -174,7 +174,7 @@ let private decoratorTests =
             async {
                 let panel = Panel ()
                 let registry, _ = serving [ None ]
-                let decorated = (ToolStreams.create panel.Attach).Decorate registry
+                let decorated = (ToolStreams.create (fun () -> []) panel.Attach).Decorate registry
                 let! answer = invoke decorated
                 Expect.equal (expect answer).Text "ttyACM0 is yours." "the provider's own prose, unaltered"
                 Expect.isEmpty panel.Opened "and nothing was opened"
@@ -184,7 +184,7 @@ let private decoratorTests =
             async {
                 let panel = Panel ()
                 let registry, _ = serving [ Some (offer "ws://127.0.0.1:7333/attach/one") ]
-                let decorated = (ToolStreams.create panel.Attach).Decorate registry
+                let decorated = (ToolStreams.create (fun () -> []) panel.Attach).Decorate registry
                 let! answer = invoke decorated
                 let text = (expect answer).Text
                 Expect.stringContains text "ttyACM0 is yours." "the provider's answer survives"
@@ -199,7 +199,7 @@ let private decoratorTests =
                 let panel = Panel ()
                 let url = "ws://127.0.0.1:7333/attach/one"
                 let registry, _ = serving [ Some (offer url); Some (offer url) ]
-                let attacher = ToolStreams.create panel.Attach
+                let attacher = ToolStreams.create (fun () -> []) panel.Attach
                 let decorated = attacher.Decorate registry
                 let! _ = invoke decorated
                 // A LATER turn, which is the case the session-scoped map exists for.
@@ -213,7 +213,7 @@ let private decoratorTests =
                 let panel = Panel ()
                 let url = "ws://127.0.0.1:7333/attach/one"
                 let registry, _ = serving [ Some (offer url); Some (offer url) ]
-                let attacher = ToolStreams.create panel.Attach
+                let attacher = ToolStreams.create (fun () -> []) panel.Attach
                 let! _ = invoke (attacher.Decorate registry)
                 panel.Close "term-1"
                 let! second = invoke (attacher.Decorate registry)
@@ -226,7 +226,7 @@ let private decoratorTests =
                 let panel = Panel ()
                 let offers = [ for i in 1..ToolStreams.perTurnLimit + 2 -> Some (offer (sprintf "ws://127.0.0.1:7333/attach/%d" i)) ]
                 let registry, _ = serving offers
-                let decorated = (ToolStreams.create panel.Attach).Decorate registry
+                let decorated = (ToolStreams.create (fun () -> []) panel.Attach).Decorate registry
                 let mutable last = ""
                 for _ in offers do
                     let! answer = invoke decorated
@@ -243,7 +243,7 @@ let private decoratorTests =
                 let url = "ws://127.0.0.1:7333/attach/one"
                 let repeated = [ for _ in 1..ToolStreams.perTurnLimit + 2 -> Some (offer url) ]
                 let registry, _ = serving (repeated @ [ Some (offer "ws://127.0.0.1:7333/attach/two") ])
-                let decorated = (ToolStreams.create panel.Attach).Decorate registry
+                let decorated = (ToolStreams.create (fun () -> []) panel.Attach).Decorate registry
                 for _ in repeated do
                     let! _ = invoke decorated
                     ()
@@ -258,10 +258,85 @@ let private decoratorTests =
                 let attach : StreamAttach =
                     { Open = fun _ -> async { return Error "the provider is not listening" }
                       IsOpen = fun _ -> false }
-                let decorated = (ToolStreams.create attach).Decorate registry
+                let decorated = (ToolStreams.create (fun () -> []) attach).Decorate registry
                 let! answer = invoke decorated
                 Expect.stringContains (expect answer).Text "the provider is not listening" "the reason reaches the model"
             }
     ]
 
-let tests = testList "ToolStreams (Plan 19)" [ decodeTests; admissionTests; decoratorTests ]
+// --- asking again -------------------------------------------------------------------------
+
+let private renewable (url: string) : StreamOffer = { Ticket = ticket url; Renewable = true }
+
+let private reattachTests =
+    testList "asking a provider for a stream again" [
+
+        // A person who closed a device panel should not have to ask the agent to say the
+        // magic word again — but the magic word is a tool name this session learned at
+        // runtime, so what it replays is the CALL, not a url somebody typed.
+        testCaseAsync "replays the call that produced the stream, with its own arguments" <|
+            async {
+                let panel = Panel ()
+                let calls = ResizeArray<ToolCall> ()
+                let registry =
+                    ToolRegistry.ofNamespace
+                        "serial"
+                        [ ToolDescriptor.create "serial" "acquire" "claim a device" ToolSchema.none ]
+                        (fun call ->
+                            async {
+                                calls.Add call
+                                let url = sprintf "ws://127.0.0.1:7333/attach/%d" calls.Count
+                                return Ok { ToolAnswer.text "ttyACM0 is yours." with Stream = Some (renewable url) }
+                            })
+                let attacher = ToolStreams.create (fun () -> [ registry ]) panel.Attach
+                let! _ = invoke (attacher.Decorate registry)
+                panel.Close "term-1"
+
+                match! attacher.Reattach (TerminalId.create "term-1" |> expect) with
+                | Error e -> failwithf "a renewable stream should be askable for again: %s" e
+                | Ok id ->
+                    Expect.equal (TerminalId.value id) "term-2" "a new terminal, because a spent ticket is spent"
+                    Expect.equal (List.ofSeq calls |> List.map (fun c -> c.Name, c.Arguments)) [ "acquire", "{}"; "acquire", "{}" ] "the same call, with the same arguments"
+            }
+
+        // The default, and the reason it is the default: replaying an unknown call could
+        // power-cycle somebody's board.
+        testCaseAsync "refuses when the provider never said asking again was safe" <|
+            async {
+                let panel = Panel ()
+                let registry, _ = serving [ Some (offer "ws://127.0.0.1:7333/attach/one") ]
+                let attacher = ToolStreams.create (fun () -> [ registry ]) panel.Attach
+                let! _ = invoke (attacher.Decorate registry)
+                match! attacher.Reattach (TerminalId.create "term-1" |> expect) with
+                | Ok _ -> failwith "a stream nobody said was renewable was asked for again anyway"
+                | Error reason -> Expect.stringContains reason "again" "and it says what is missing"
+            }
+
+        testCaseAsync "a provider that has nothing to give answers in its own words" <|
+            async {
+                let panel = Panel ()
+                let answers = ResizeArray<Result<ToolAnswer, string>> ()
+                answers.Add (Ok { ToolAnswer.text "yours." with Stream = Some (renewable "ws://h/s") })
+                answers.Add (Ok (ToolAnswer.text "ttyACM0 is held by somebody else — it is in use, not broken"))
+                let mutable next = 0
+                let registry =
+                    ToolRegistry.ofNamespace
+                        "serial"
+                        [ ToolDescriptor.create "serial" "acquire" "claim a device" ToolSchema.none ]
+                        (fun _ ->
+                            async {
+                                let answer = answers.[min next (answers.Count - 1)]
+                                next <- next + 1
+                                return answer
+                            })
+                let attacher = ToolStreams.create (fun () -> [ registry ]) panel.Attach
+                let! _ = invoke (attacher.Decorate registry)
+                panel.Close "term-1"
+                match! attacher.Reattach (TerminalId.create "term-1" |> expect) with
+                | Ok _ -> failwith "there was no stream to attach"
+                | Error reason -> Expect.stringContains reason "in use, not broken" "the provider's words survive"
+            }
+    ]
+
+let tests =
+    testList "ToolStreams (Plan 19)" [ decodeTests; admissionTests; decoratorTests; reattachTests ]

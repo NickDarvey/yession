@@ -190,6 +190,40 @@ type PendingOutcome =
 /// is one type.
 type CheckPending = QueueId -> Async<Result<PendingOutcome, string>>
 
+/// Type into a terminal whose source cannot be instrumented (Plan 19).
+///
+/// The agent's second hand, and it exists to keep the FIRST rule intact rather than to add a
+/// second one. A device stream has no prompt to bootstrap, so it has no blocks — which means
+/// `execute_command` has nothing to do there, and an agent that needs to talk to the thing on
+/// the other end would otherwise have to use the provider's own write tool. That is a second
+/// door onto one device, past the lease that arbitrates who is typing.
+///
+/// So this one takes the lease, exactly as a person does: the agent shows up in the holder
+/// field a human shows up in, a human can steal it back mid-sentence, and every byte is in
+/// the transcript everyone reads. Refused on an instrumented terminal, where the answer is
+/// `execute_command` and the approval gate that comes with it.
+type WriteTerminal = TerminalId -> string -> Async<Result<string, string>>
+
+/// The tail of what a terminal has said, and how much of it was left out.
+///
+/// `Elided` is stated rather than silently dropped, for `TerminalCommandOutcome`'s reason: a
+/// model that cannot tell a short output from a truncated one will confidently describe the
+/// wrong thing.
+type TerminalTail = { Text : string; Elided : int }
+
+/// Read what a terminal with no blocks has said (Plan 19).
+///
+/// `write_terminal`'s other half, and it exists because the two halves are not symmetrical.
+/// A WRITE has to be arbitrated — the lease is the whole point — but a read is not a second
+/// writer, so this takes nothing and blocks nobody: a person typing keeps the terminal while
+/// the agent reads over their shoulder, which is what sharing a device means.
+///
+/// Refused on an instrumented terminal, where a command IS a block: what a block printed
+/// comes back from `execute_command`, and every block since the last turn is already in the
+/// context pack. A second way to read the same bytes would be a second answer to one
+/// question.
+type ReadTerminal = TerminalId -> Async<Result<TerminalTail, string>>
+
 /// The read-only repo verbs (Plan 14): clone-and-orient, NO mutation of history and NO
 /// push — everything irreversible goes through `ExecuteCommand` in the WorkSandbox,
 /// where the approval gate and the transcript already are. Git runs confined beside the
@@ -265,6 +299,11 @@ type AgentCapabilities =
       ExecuteCommand : ExecuteCommand
       /// Resume a handle `ExecuteCommand` yielded.
       CheckPending : CheckPending
+      /// Type into a terminal that has no blocks to run a command in (Plan 19), under the
+      /// same lease a person types under.
+      WriteTerminal : WriteTerminal
+      /// Read what such a terminal has said. Takes no lease: a reader is not a writer.
+      ReadTerminal : ReadTerminal
       RunGated : RunGatedCommand
       SetSecret : SetSessionSecret
       ListSecrets : ListSessionSecrets
@@ -314,6 +353,8 @@ module AgentCapabilities =
     let none : AgentCapabilities =
         { ExecuteCommand = fun _ _ -> async { return Error "no terminal capability" }
           CheckPending = fun _ -> async { return Error "no terminal capability" }
+          WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
+          ReadTerminal = fun _ -> async { return Error "no terminal capability" }
           // A denial that still RUNS the command: the gate is a wrapper, and a session with
           // no collaborative state to park an act in must not lose the act.
           RunGated =

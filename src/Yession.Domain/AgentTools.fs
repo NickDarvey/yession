@@ -202,6 +202,29 @@ module AgentTools =
                 | Error reason -> return ToolAnswer.text (sprintf "could not read that command: %s" reason)
         }
 
+    /// Type into a live-only terminal (Plan 19). A refusal is an ANSWER rather than an error,
+    /// like every other tool here: the model is meant to read "use execute_command there" and
+    /// do that, not to see a protocol failure and try a third thing.
+    let private writeTerminal (capabilities: AgentCapabilities) (id: TerminalId) (data: string) : Async<string> =
+        async {
+            match! capabilities.WriteTerminal id data with
+            | Ok answer -> return answer
+            | Error reason -> return sprintf "could not type into terminal %s: %s" (TerminalId.value id) reason
+        }
+
+    /// Read a live-only terminal (Plan 19). Same rendering as a block's output, because it is
+    /// the same question — what did this print — and a model should not have to learn two
+    /// shapes for one answer.
+    let private readTerminal (capabilities: AgentCapabilities) (id: TerminalId) : Async<string> =
+        async {
+            match! capabilities.ReadTerminal id with
+            | Error reason -> return sprintf "could not read terminal %s: %s" (TerminalId.value id) reason
+            | Ok tail when tail.Text = "" -> return sprintf "terminal %s has said nothing" (TerminalId.value id)
+            | Ok tail when tail.Elided > 0 ->
+                return sprintf "[%d earlier characters omitted]\n%s" tail.Elided tail.Text
+            | Ok tail -> return tail.Text
+        }
+
     let private setSecret (capabilities: AgentCapabilities) (name: string) (value: string) : Async<string> =
         async {
             match SecretName.create name with
@@ -335,6 +358,35 @@ module AgentTools =
                       match ToolArgs.string "handle" args with
                       | Error e -> return Error e
                       | Ok handle -> return! answered (checkPending capabilities handle)
+                  })
+
+          tool
+              "write_terminal"
+              "Type into a terminal that is streaming something live — a device, a console, anything whose bytes come from outside this session — where execute_command does not apply because there are no commands to run. Send exactly the bytes you mean, including \"\\r\" if the thing on the other end expects a newline. Taking it makes you the terminal's holder, which everyone here can see and take back, so type what you meant to and hand it over. Refused on an ordinary shell terminal: use execute_command there."
+              [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream"
+                ToolField.required "data" "string" "the bytes to type, e.g. \"AT\\r\"" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.two "terminal" "data" args with
+                      | Error e -> return Error e
+                      | Ok (terminal, data) ->
+                          match TerminalId.create terminal with
+                          | Error e -> return Error (sprintf "not a terminal id: %s" e)
+                          | Ok id -> return! ok (writeTerminal capabilities id data)
+                  })
+
+          tool
+              "read_terminal"
+              "Read what a terminal that is streaming something live has said — a device, a console, anything whose bytes come from outside this session. This is how you see the answer to what write_terminal typed. Returns the tail of it, saying how much it left out. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on an ordinary shell terminal, where what a command printed comes back from execute_command instead."
+              [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.string "terminal" args with
+                      | Error e -> return Error e
+                      | Ok terminal ->
+                          match TerminalId.create terminal with
+                          | Error e -> return Error (sprintf "not a terminal id: %s" e)
+                          | Ok id -> return! ok (readTerminal capabilities id)
                   })
 
           tool

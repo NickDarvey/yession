@@ -43,7 +43,7 @@ let private merge (events: EventEnvelope<SessionEvent> list) : TimelineItem list
     TimelineProjection.items conversation timeline
 
 let private opened (id: TerminalId) (title: string) =
-    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxName.defaultName }
+    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxName.defaultName; Renewable = false }
 
 let private sent (n: string) (body: string) =
     MessageSent { MessageId = message n; QueueId = None; Author = PeerRef ada; Body = body }
