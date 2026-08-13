@@ -787,14 +787,23 @@ let editorTests =
                                  document.querySelector('#shell [data-terminal-toggle="show"]').click()
                                  return true
                                }""")
-                // The column animates open, so let it arrive before measuring what it is.
-                let! _ =
-                    await (page.WaitForFunctionAsync
-                        "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width > 100")
-
+                // The column ANIMATES, so every width here is read once it has stopped
+                // moving. A number taken from the middle of a 200ms transition is a number
+                // the next assertion then races, and the failure that produces is a bare
+                // timeout that says nothing about which step went wrong.
+                let settled () =
+                    page.WaitForFunctionAsync
+                        """() => {
+                             const w = document.querySelector('#shell [data-terminal-panel]')
+                                         .getBoundingClientRect().width
+                             const still = window.__w === w && w > 100
+                             window.__w = w
+                             return still
+                           }"""
                 let width () =
                     page.EvaluateAsync<float>
                         "() => document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width"
+                let! _ = await (settled ())
                 let! before = await (width ())
 
                 // Focusable, and it says what it is: a separator with a value is the one
@@ -812,11 +821,21 @@ let editorTests =
                 Expect.isTrue isSeparator "the focused divider is a separator carrying its value"
 
                 // Left grows this column (its edge is what moves), right shrinks it again.
+                // Asserted rather than waited for, so a failure reports the widths it saw:
+                // "the column did not grow" and "something timed out" are the same red and
+                // only one of them tells you anything.
                 do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
-                let! _ = await (page.WaitForFunctionAsync (sprintf "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width > %f" before))
+                let! _ = await (settled ())
                 let! wider = await (width ())
+                Expect.isTrue
+                    (wider > before)
+                    (sprintf "ArrowLeft must widen the column (was %f, now %f)" before wider)
                 do! awaitU (page.Keyboard.PressAsync "ArrowRight")
-                let! _ = await (page.WaitForFunctionAsync (sprintf "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width < %f" wider))
+                let! _ = await (settled ())
+                let! back = await (width ())
+                Expect.isTrue
+                    (back < wider)
+                    (sprintf "ArrowRight must narrow it again (was %f, now %f)" wider back)
 
                 // And the value it reports follows the width it is actually at, or it is
                 // narrating something other than what happened.
