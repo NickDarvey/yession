@@ -2104,6 +2104,22 @@ let private sourceTests =
                 Expect.isFalse (terminals.Input id ActorRef.Agent "more") "and the agent stops being able to type"
             }
 
+        // Which of the two reading paths a caller belongs on is decided here, so it is worth
+        // one assertion of its own: a shell's output comes back from the command that ran it,
+        // and a device has only its transcript (Plan 19).
+        testCaseAsync "a terminal says whether its output resolves into blocks" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _ = recordingTranscripts ()
+                let attach, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript []
+                let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                Expect.isTrue (terminals.Instrumented (expect shell)) "a shell has blocks"
+                Expect.isFalse (terminals.Instrumented (expect device)) "a device has bytes"
+            }
+
         testCaseAsync "on an instrumented terminal it is refused, because that is what blocks are for" <|
             async {
                 let log = newLog ()

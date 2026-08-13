@@ -676,6 +676,11 @@ module SessionTerminals =
           /// write tool can be refused while its stream is attached, which is what keeps one
           /// device to one door.
           Write : TerminalId -> ActorRef -> string -> Async<Result<unit, string>>
+          /// Whether this terminal's source can carry the OSC 133 bootstrap — whether its
+          /// output resolves into blocks, in other words. What decides which of the two
+          /// reading paths a caller belongs on: a block's output comes back from the command
+          /// that ran it, and a live-only terminal has only its transcript.
+          Instrumented : TerminalId -> bool
           /// The lease holder's viewport size, applied to the pty and the emulator. `false`
           /// when dropped, on the same terms as `Input`.
           Resize : TerminalId -> ActorRef -> int -> int -> bool
@@ -728,6 +733,7 @@ module SessionTerminals =
           PeerGone = fun _ -> async { return () }
           Input = fun _ _ _ -> false
           Write = fun _ _ _ -> async { return Error "this session has no terminals" }
+          Instrumented = fun _ -> true
           Resize = fun _ _ _ _ -> false
           ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
@@ -1561,6 +1567,7 @@ module SessionTerminals =
           Input = input
           Resize = resize
           Write = write
+          Instrumented = fun id -> canInstrument (TerminalId.value id)
           ApplySize = applySize
           Busy = fun () -> busy
           Leased = fun () -> TerminalLeases.held leases
