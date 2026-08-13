@@ -916,11 +916,24 @@ module Style =
     /// tablist at all. `shrink-0` keeps the strip the thing that scrolls when the tabs
     /// outgrow it, exactly as when they were its direct children.
     let terminalTabList = "flex items-stretch gap-1 shrink-0"
+    /// A tab is marked by an UNDERLINE, not by a box.
+    ///
+    /// The selected one used to be a full blue rectangle — which in this design is the button
+    /// vocabulary, and specifically the primary one: `btnPrimary` is a blue-bordered rectangle
+    /// wearing blue text. So the strip's answer to "which terminal am I looking at" shouted at
+    /// exactly the weight of the page's one real call to action, next to the thing you actually
+    /// press. Nothing in a tab strip is a CTA; a tab is a statement about where you are.
+    ///
+    /// The mark is `Stroke.underline`, the same hairline the session title wears — an
+    /// established, chrome-light affordance in this vocabulary rather than a new width. Every
+    /// tab carries the border box (`Stroke.clear` when it is not the one), so selecting moves
+    /// no text, and the selection is said twice quietly instead of once loudly: ink rather than
+    /// faint, over a blue rule.
     let private tabBase =
         cls [ caps; "bg-transparent cursor-pointer px-2.5 py-1.5 max-w-40 truncate transition-colors"
-              Stroke.ring; focusRing ]
+              Stroke.underline; focusRing ]
     let terminalTab = cls [ tabBase; Stroke.clear; "text-ink-faint hover:text-ink" ]
-    let terminalTabActive = cls [ tabBase; Stroke.blue; "text-blue" ]
+    let terminalTabActive = cls [ tabBase; Stroke.blue; "text-ink" ]
     /// Adds a terminal. The one action in the strip that is not a selection — so it wears the
     /// strip's own quiet face and says `+`, rather than being the bordered rectangle that
     /// out-shouted every tab beside it. What it does is named for anyone not reading pixels.
