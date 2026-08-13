@@ -43,7 +43,12 @@ Items are roughly ordered by how much they matter.
   is more physical than a filesystem path — writing to the wrong tty can reflash a board.
   The provider narrows this by refusing to list ports it does not recognise (an
   unrecognised tty is usually the machine's own console), which is a policy, not a
-  boundary. Its control leg is unauthenticated and must stay on loopback.
+  boundary. Its control leg is unauthenticated and must stay on loopback. A stream it
+  OFFERS ([Plan 19](plans/19-provider-streams.md)) is admitted the same way: the url must
+  share the host the operator declared the server at, `ws`/`wss`, no credentials — which
+  stops a tool result pointing a session at another machine, and is again a policy rather
+  than a boundary. A declared server can still hand the session a socket to anything on the
+  box it already runs on.
 - **A second local address, unauthenticated, beside the provider**
   ([Plan 18](plans/18-jumpstarter.md)): the jumpstarter example talks to an exporter that
   serves gRPC with `--tls-grpc-insecure` and no passphrase, so its claim arbitrates the
@@ -476,10 +481,35 @@ Items are roughly ordered by how much they matter.
   (`env`), which after resolve-at-spawn includes secrets the session's spec references.
   This is not a new privilege — any peer could already ask the agent to run `env` — but a
   terminal makes it one keystroke, and a future per-user terminal gate would attach here.
-- **Agent commands cannot hold a live-mode lease.** A policy decision, not a mechanism
-  gap: leases are human-only until there is a reason to change that. The drain gate that
-  accompanies them shipped with live mode (stage 2e) — a leased terminal holds its queue
-  rather than typing into a session someone else owns.
+- **`renewable` is a provider's claim about its own tool, and nothing verifies it**
+  ([Plan 19](plans/19-provider-streams.md), step 4). A closed stream offers a way back when
+  the provider said asking again is safe; pressing it replays that tool call with its
+  original arguments. A provider that marks a destructive tool renewable makes the button
+  destructive. Default false, and the field is documented as a promise — the same standing
+  `SourceCapabilities` already has, and unverifiable for the same reason: only the thing on
+  the other end knows.
+- **A tool-use chip does not point at the terminal its call opened**
+  ([Plan 19](plans/19-provider-streams.md)). `ToolUseFinished` carries `Block` for exactly
+  this reason in the block case; the stream case has no equivalent, so the audit says a call
+  happened and the timeline says a terminal appeared, and nothing joins them. A
+  `Terminal : TerminalId option` beside `Block` is the obvious symmetry and was deliberately
+  not smuggled into the step that would have needed it.
+- **The jumpstarter console has an echo floor of one drain interval**
+  ([Plan 19](plans/19-provider-streams.md), step 5; `DRAIN_SECONDS` in
+  `examples/jumpstarter`). Its stream is a drain loop over a `pexpect` handle rather than
+  ownership of the fd, so a person typing sees their own echo up to ~200ms late. Inherent to
+  teeing a handle the SDK owns: the serial provider, which owns its fd, has no such floor.
+- **An agent holds a lease only where there are no blocks to hold instead.** This used to
+  read "agent commands cannot hold a live-mode lease — until there is a reason to change
+  that", and [Plan 19](plans/19-provider-streams.md) step 3 was the reason: a live-only
+  source has no blocks, so `execute_command` has nothing to do there and the alternative was
+  the provider's own write tool, past the lease entirely. `write_terminal` takes the lease
+  exactly as a peer does — visible in the holder field, stealable back mid-sentence, every
+  byte in the transcript. What has NOT changed is the shell case: on an instrumented
+  terminal the agent still runs blocks, which is what the approval gate is attached to, and
+  `write_terminal` is refused there. The drain gate that accompanies live mode (Plan 13,
+  stage 2e) is unchanged — a leased terminal holds its queue rather than typing into a
+  session someone else owns.
 - **The live viewport is proven host-free, never against a real pty end to end**
   ([Plan 14](plans/14-terminal-replay-in-chat.md), stage 6 — which closed the older
   "no browser viewport" gap: the panel renders a live screen, the holder's copy takes

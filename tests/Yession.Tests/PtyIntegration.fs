@@ -115,6 +115,16 @@ let private withLiveTerminal
                     log
                     (fun _ -> environment)
                     (fun _ _ -> transcript)
+                    // The reader over the same records the writer above appends to. This
+                    // fixture is about the pty, so it is the smallest honest one: a half-open
+                    // range over what was recorded.
+                    (fun _ fromSeq toSeq ->
+                        records
+                        |> Seq.indexed
+                        |> Seq.filter (fun (index, _) ->
+                            index >= fromSeq && (match toSeq with Some until -> index < until | None -> true))
+                        |> Seq.map snd
+                        |> List.ofSeq)
                     Yession.Host.Emulator.openEmulator
                     SessionTerminals.TerminalShell.bash
                     at
