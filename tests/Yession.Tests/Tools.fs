@@ -119,6 +119,12 @@ let private writeOnly (schema: string) : (string * bool) list =
         Decode.object (fun get -> get.Optional.Field "writeOnly" Decode.bool |> Option.defaultValue false)
     Decode.fromString (Decode.field "properties" (Decode.keyValuePairs property)) schema |> expect
 
+/// `read_terminal` against a capability that answers with exactly this tail.
+let private readingTerminal (tail: TerminalTail) =
+    let registry =
+        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ -> async { return Ok tail } }
+    registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
+
 let private sessionTests =
     testList "the yession namespace" [
 
@@ -193,31 +199,29 @@ let private sessionTests =
                     "the call happened; it is the command that did not"
             }
 
-        // Reading a terminal with no blocks (Plan 19). What matters is the SAME thing that
-        // matters for a block's output: a model that cannot tell a short answer from a
-        // truncated one describes the wrong thing confidently.
-        testCaseAsync "a live-only terminal's tail says how much it left out" <|
+        // Reading a terminal with no blocks (Plan 19).
+        testCaseAsync "a tail that left nothing out comes back as it came" <|
             async {
-                let reading (tail: TerminalTail) =
-                    AgentTools.registry
-                        { AgentCapabilities.none with ReadTerminal = fun _ -> async { return Ok tail } }
-                let read (registry: ToolRegistry) =
-                    registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
+                let! answer = readingTerminal { Text = "U-Boot 2024.01\n=> "; Elided = 0 }
+                Expect.equal answer (Ok (ToolAnswer.text "U-Boot 2024.01\n=> ")) "all of it, unannotated"
+            }
 
-                let! whole = read (reading { Text = "U-Boot 2024.01\n=> "; Elided = 0 })
-                Expect.equal whole (Ok (ToolAnswer.text "U-Boot 2024.01\n=> ")) "all of it, as it came"
-
-                let! capped = read (reading { Text = "=> "; Elided = 4096 })
+        // What matters is the SAME thing that matters for a block's output: a model that
+        // cannot tell a short answer from a truncated one describes the wrong thing
+        // confidently.
+        testCaseAsync "a tail that left something out says how much" <|
+            async {
+                let! answer = readingTerminal { Text = "=> "; Elided = 4096 }
                 Expect.equal
-                    capped
+                    answer
                     (Ok (ToolAnswer.text "[4096 earlier characters omitted]\n=> "))
-                    "and a tail says what is missing, in the words a block's output uses"
+                    "in the words a block's output already uses"
+            }
 
-                let! silent = read (reading { Text = ""; Elided = 0 })
-                Expect.equal
-                    silent
-                    (Ok (ToolAnswer.text "terminal t1 has said nothing"))
-                    "a device that has said nothing says so, rather than answering blank"
+        testCaseAsync "a terminal that has said nothing says so, rather than answering blank" <|
+            async {
+                let! answer = readingTerminal { Text = ""; Elided = 0 }
+                Expect.equal answer (Ok (ToolAnswer.text "terminal t1 has said nothing")) "silence is an answer"
             }
 
         // The refusal is the interesting half: it has to send the model somewhere that

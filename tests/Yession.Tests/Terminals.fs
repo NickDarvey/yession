@@ -2118,10 +2118,29 @@ let private sourceTests =
                 Expect.isFalse (terminals.Input id ActorRef.Agent "more") "and the agent stops being able to type"
             }
 
-        // The agent's eyes on a source with no blocks (Plan 19). It answers from the same
-        // transcript the panel renders, and it is refused where blocks already answer —
-        // which is the whole of the rule, so both halves are asserted together.
-        testCaseAsync "a live-only terminal reads back what it said; a shell sends you to its blocks" <|
+        // The agent's eyes on a source with no blocks (Plan 19): it answers from the same
+        // transcript the panel renders.
+        testCaseAsync "a live-only terminal reads back what it said" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+
+                match! terminals.Tail (expect device) with
+                | Error e -> failwithf "a device has nothing but its transcript to read: %s" e
+                | Ok tail ->
+                    // `loopback` greets with "ready\n" on attach, so there is something to read
+                    // without typing at it first.
+                    Expect.stringContains tail.Text "ready" "what the stream said comes back"
+                    Expect.equal tail.Elided 0 "and nothing was left out of a short one"
+            }
+
+        // The recording outlives the terminal — and so does the reason it is readable at all,
+        // which is that its source was never instrumented.
+        testCaseAsync "a closed terminal still reads back, because its recording outlived it" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
@@ -2130,25 +2149,23 @@ let private sourceTests =
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = expect device
-
-                match! terminals.Tail id with
-                | Error e -> failwithf "a device has nothing but its transcript to read: %s" e
-                | Ok tail ->
-                    // `loopback` greets with "ready\n" on attach, so there is something to read
-                    // without typing at it first.
-                    Expect.stringContains tail.Text "ready" "what the stream said comes back"
-                    Expect.equal tail.Elided 0 "and nothing was left out of a short one"
-
-                // Still readable once the stream has ended: a recording outlives the terminal,
-                // and the reason it is readable — the source was never instrumented — outlives
-                // it too.
                 let! closed = terminals.Close id "the device went away"
                 Expect.isOk closed "the terminal closes"
+
                 match! terminals.Tail id with
                 | Error e -> failwithf "a closed device still has a recording: %s" e
                 | Ok tail -> Expect.stringContains tail.Text "ready" "and it still reads"
+            }
 
+        testCaseAsync "reading a terminal that runs blocks is refused, and says where the answer is" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+
                 match! terminals.Tail (expect shell) with
                 | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
                 | Error reason -> Expect.stringContains reason "execute_command" "and it says where the answer is"

@@ -71,6 +71,11 @@ application boundary, not spread through domain code.
 Each implementation phase must include automated end-to-end tests. Manual testing is not
 a substitute for verification. There is no "one-shot" manual validation.
 
+A test pins one invariant and goes red only when that invariant breaks: arranged, acted,
+and asserted once, against what the system PROMISES rather than how it currently looks, is
+built, or is worded. A suite whose red can also mean "something moved" stops being read.
+Writing them: [AGENTS.md](../AGENTS.md#writing-tests).
+
 ---
 
 ## 2. System overview

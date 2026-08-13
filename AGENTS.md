@@ -316,8 +316,20 @@ window-size clamp makes naive mobile screenshots lie; the skill's CDP driver doe
 
 ### Writing tests
 
-High signal, non-brittle. A test earns its place by failing when behavior regresses — and only
-then:
+**A test pins one invariant, and goes red only when that invariant breaks.** Two promises, and
+a test earns its place by keeping both. The first is what it PROVES; the second is what its red
+MEANS. A suite whose red can also mean "something moved" is a suite people re-run instead of
+read.
+
+One invariant is one arrangement, one action, one assertion of the consequence — and a name
+that says which invariant. A case that asserts three things fails as one, so its red names
+none of them, and the two behaviours nobody touched get dragged into every revision of the
+third. Split it: three cases cost three names and buy three verdicts. What may repeat across
+them is the SETUP, hoisted into a helper — asserting that a call both succeeded and returned
+the right body is one invariant seen from two angles, but asserting that an open terminal reads
+back, a closed one still does, and a shell refuses, is three tests wearing one name.
+
+Then, so that red means what it says:
 
 - Assert observable behavior and contracts, not implementation detail (private state, call
   order, exact log text, incidental DOM structure). A refactor that preserves behavior must
