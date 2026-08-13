@@ -39,6 +39,22 @@ type ToolCall =
     { Name : string
       Arguments : string }
 
+/// What a tool answered. Two audiences, and they are not the same one.
+///
+/// `Text` is prose, because a model is what reads it. `Meta` is the result's `_meta` — the
+/// place MCP reserves for data meant for the CLIENT — and it is how this server hands over a
+/// stream a tool call cannot carry: the client dials it, the model never has to repeat a url
+/// back, and a client that does not know the key ignores it and still gets the prose.
+type ToolReply =
+    { Text : string
+      /// A JSON object, as text, or none. Raw because the keys in it belong to whoever reads
+      /// them; this type is the courier, not the reader.
+      Meta : string option }
+
+module ToolReply =
+
+    let text (value: string) : ToolReply = { Text = value; Meta = None }
+
 /// What a server offers. `Invoke` is handed the CALLER's session id, so a server that owns a
 /// resource can bind it to whoever is asking — which is exactly what this provider's device
 /// claim needs, and cannot get from anywhere else.
@@ -46,7 +62,7 @@ type ServerDef =
     { Name : string
       Version : string
       Tools : Tool list
-      Invoke : string -> ToolCall -> Async<Result<string, string>> }
+      Invoke : string -> ToolCall -> Async<Result<ToolReply, string>> }
 
 type ServerHandler =
     { /// Handle one request; `true` when it claimed the path.
@@ -214,15 +230,25 @@ let create (def: ServerDef) : ServerHandler =
                                 // not a JSON-RPC error: the model is meant to read it and
                                 // choose differently. Only a call that never reached a tool
                                 // is an error frame.
-                                | Ok text ->
+                                | Ok reply ->
                                     let payload =
                                         Encode.object
-                                            [ "content",
-                                              Encode.list
-                                                  [ Encode.object
-                                                        [ "type", Encode.string "text"
-                                                          "text", Encode.string text ] ]
-                                              "isError", Encode.bool false ]
+                                            ([ "content",
+                                               Encode.list
+                                                   [ Encode.object
+                                                         [ "type", Encode.string "text"
+                                                           "text", Encode.string reply.Text ] ]
+                                               "isError", Encode.bool false ]
+                                             // Embedded as a real JSON node rather than a
+                                             // quoted string. A `_meta` this server could
+                                             // not parse is dropped: the prose is the part
+                                             // the caller cannot do without.
+                                             @ (match reply.Meta with
+                                                | Some raw ->
+                                                    match Decode.fromString Decode.value raw with
+                                                    | Ok node -> [ "_meta", node ]
+                                                    | Error _ -> []
+                                                | None -> []))
                                     respond res 200 (result request.Id payload) []
                                 | Error reason -> respond res 200 (failure request.Id -32602 reason) []
                             })

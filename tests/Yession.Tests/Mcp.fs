@@ -729,6 +729,16 @@ let private textOf (answer: Result<ToolAnswer, string>) =
     | Ok answer -> answer.Text
     | Error e -> failwithf "the call should have reached the tool: %s" e
 
+/// The stream the provider offered (Plan 19) — the production path, where the session takes
+/// the address from `_meta` rather than reading it out of prose meant for a model.
+let private streamOf (answer: Result<ToolAnswer, string>) =
+    match answer with
+    | Error e -> failwithf "the call should have reached the tool: %s" e
+    | Ok answer ->
+        match answer.Stream with
+        | Some offer -> offer
+        | None -> failwithf "the answer offered no stream: %s" answer.Text
+
 let serialTests =
     testList "The serial provider (Plan 16, part E)" [
 
@@ -794,6 +804,15 @@ let serialTests =
                 Expect.stringContains ticket "live-only" "and says the stream reports no outcomes"
                 Expect.equal (List.length (provider.Claims ())) 1 "the claim is held"
 
+                // And the same address as a STREAM the session can act on (Plan 19), which
+                // is what makes the device a terminal rather than a url in some prose.
+                let offer = streamOf acquired
+                Expect.stringContains offer.Ticket.Url "ws://127.0.0.1" "the offer is the address, structured"
+                Expect.stringContains offer.Ticket.Label "/dev/ttyFAKE0" "a panel can say what it is looking at"
+                Expect.isFalse offer.Ticket.Capabilities.CanInstrument "a serial line has no prompt to bootstrap"
+                Expect.isFalse offer.Ticket.Capabilities.CanResize "and no size to be told"
+                Expect.isTrue offer.Renewable "asking again is how you get another stream"
+
                 let! refused = call (second.Registries ()) "serial" "acquire_device" (sprintf """{"device_id":"%s"}""" deviceId)
                 // The refusal has to NAME the holder, or a device in use reads as a hardware
                 // fault and the agent tries something else.
@@ -814,17 +833,13 @@ let serialTests =
                                 Description = "" } ] }
                 let! acquired =
                     call (mcp.Registries ()) "serial" "acquire_device" """{"device_id":"qinheng_ch340_fake_0001"}"""
-                let ticket = textOf acquired
-                // The url the PROVIDER chose, parsed out of what a model would read. The
-                // session does this from a structured answer in production; here the point is
-                // that the address is the provider's and nothing else invented it.
-                let url =
-                    ticket.Split ' '
-                    |> Array.find (fun word -> word.StartsWith "ws://")
+                // The ticket the PROVIDER offered, taken the way a session takes it: out of
+                // the result's `_meta`, with nothing parsed out of prose and nothing invented
+                // here.
                 let received = System.Text.StringBuilder ()
                 let! attached =
                     Yession.Host.AttachWs.attach
-                        { Url = url; Capabilities = SourceCapabilities.byteStream; Label = "usb serial" }
+                        (streamOf acquired).Ticket
                         80
                         24
                         (fun text -> received.Append text |> ignore)
@@ -858,8 +873,7 @@ let serialTests =
                                 Description = "" } ] }
                 let! acquired =
                     call (mcp.Registries ()) "serial" "acquire_device" """{"device_id":"qinheng_ch340_fake_0001"}"""
-                let url = (textOf acquired).Split ' ' |> Array.find (fun w -> w.StartsWith "ws://")
-                let ticket = { Url = url; Capabilities = SourceCapabilities.byteStream; Label = "usb serial" }
+                let ticket = (streamOf acquired).Ticket
                 let! first = Yession.Host.AttachWs.attach ticket 80 24 ignore
                 let firstHandle = first |> expect
 
@@ -872,6 +886,53 @@ let serialTests =
                     let! ending = replay.Exited
                     Expect.notEqual ending (SandboxExited 0) "a replayed token gets a refusal, not a stream"
                 firstHandle.Kill ()
+                server.close ignore
+            }
+
+        // `renewable` is a promise about what asking again does, and a spent token makes it
+        // one a provider can easily break: the second acquire has to hand back a token that
+        // actually reaches the device, or the offer was a hopeful claim.
+        testCaseAsync "a stream that ended can be asked for again, and the new one works" <|
+            async {
+                let engine, written, _ = fakeEngine [ fakePort ]
+                let! _, server, port = startProviderServer engine
+                let mcp = connections ()
+                do! mcp.Apply
+                        { Servers =
+                            [ { Name = McpServerName.create "serial" |> expect
+                                Transport = McpHttp (sprintf "http://127.0.0.1:%d/mcp" port)
+                                Description = "" } ] }
+                let acquire () =
+                    call (mcp.Registries ()) "serial" "acquire_device" """{"device_id":"qinheng_ch340_fake_0001"}"""
+
+                let! first = acquire ()
+                let! attached = Yession.Host.AttachWs.attach (streamOf first).Ticket 80 24 ignore
+                let handle = attached |> expect
+
+                // While it IS attached, asking again offers nothing: a second token would be
+                // a second client on a line the claim says is exclusive.
+                let! whileLive = acquire ()
+                match whileLive with
+                | Ok answer ->
+                    Expect.isNone answer.Stream "no second stream while the first one is open"
+                    Expect.stringContains answer.Text "already attached" "and the caller is told why"
+                | Error e -> failwithf "asking again is not a failed call: %s" e
+
+                handle.Kill ()
+                let! _ = handle.Exited
+
+                let! again = acquire ()
+                let renewed = streamOf again
+                Expect.notEqual renewed.Ticket.Url (streamOf first).Ticket.Url "a spent token is not handed back"
+                let received = System.Text.StringBuilder ()
+                let! reattached =
+                    Yession.Host.AttachWs.attach renewed.Ticket 80 24 (fun text -> received.Append text |> ignore)
+                let handle = reattached |> expect
+                handle.Write "AT\r"
+                let! echoed = until (fun () -> received.ToString().Contains "echo:AT")
+                Expect.isTrue echoed "the renewed stream reaches the same device"
+                Expect.stringContains (written.ToString ()) "AT" "which saw it"
+                handle.Kill ()
                 server.close ignore
             }
 
