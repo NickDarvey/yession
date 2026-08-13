@@ -1,0 +1,13 @@
+/* The asciinema player's own stylesheet (Plan 13, stage 3e), built by the Tailwind CLI into
+   its own artefact rather than imported into `app/tailwind.css`.
+
+   It used to ride inside the one served stylesheet, on the argument that one artefact beats
+   two. That argument holds for anything the page needs to paint — and this is the one thing
+   that isn't: a replay is mounted only when somebody opens a recording, and most sessions
+   never do. 16KB in the head, blocking first paint for everyone, to style a view a minority
+   reach. So the shell links it with `media="not all"` (`Style.deferredHeadTags`) and
+   `Replay.mount` turns it on.
+
+   No Tailwind directives here on purpose: this file is the vendored sheet and nothing else,
+   so the CLI's job is to resolve the import and minify. */
+@import "../node_modules/asciinema-player/dist/bundle/asciinema-player.css";

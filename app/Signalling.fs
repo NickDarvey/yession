@@ -21,7 +21,7 @@ open Yession.App
 /// randomly in the browser, so the server-rendered placeholder is left blank. The page
 /// embeds the serving session's id, so the browser can key its local doc store by
 /// session before (and without) any connection.
-let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) (ephemeralStorage: bool) (assets: AssetDigests) =
+let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) (ephemeralStorage: bool) (assets: AssetBuild) =
     let placeholderPeer =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
@@ -30,40 +30,11 @@ let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin:
     // browser re-learns it from `PeerAccepted` once connected).
     Ssr.page sessionId mount managerOrigin ephemeralStorage assets { ClientModel.init placeholderPeer with Session = Some sessionId }
 
-let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
-let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
-
-[<Fable.Core.ImportAll("node:fs")>]
-let private fs : obj = Fable.Core.Util.jsNative
-
-// From the package's assets/ when installed; from the build output in development.
-let private readBundle () : string option = readAsset "client.js" bundlePath fs
-let private readCss () : string option = readAsset "app.css" cssPath fs
-
-/// Serve a fingerprinted asset, but only at its own address.
-///
-/// A `requested` digest that is not `ours` is a stale shell asking for a build this process no
-/// longer is. Answering it with CURRENT bytes would write them into an `immutable` cache entry
-/// under the old address — wrong for a year, and unfixable from the server. The 404 sends the
-/// browser back to the shell, which revalidates and names the asset that does exist.
-let private serveAsset
-    (requested: string)
-    (ours: string)
-    (content: string option)
-    (contentType: string)
-    (what: string)
-    (res: ServerResponse)
-    =
-    match content with
-    | None ->
-        res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-        res.``end`` (sprintf "%s not built (run: build)" what)
-    | Some _ when requested <> ours ->
-        res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-        res.``end`` (sprintf "stale %s address (reload)" what)
-    | Some body ->
-        res.writeHead (200, createObj [ "content-type", box contentType; "cache-control", box CachePolicy.asset ]) |> ignore
-        res.``end`` body
+/// Where the built asset set lives when this is not an installed package (`Assets` looks
+/// beside the running bundle first). One variable for the whole directory, not one per file:
+/// a deployment that could point the stylesheet and its faces at different builds is a
+/// deployment that could serve a stylesheet its faces do not match.
+let private assetsDir = envOr "YESSION_ASSETS" "app/out/public/assets"
 
 /// The app icon's bytes. The constant is base64 (`WebApp.iconPngBase64`) because it lives in
 /// source; the wire wants the PNG, and `res.end` is typed to the string case it is used with
@@ -150,12 +121,10 @@ let start
     // Read and address the assets ONCE, here, rather than per request. Three things follow,
     // and all three are the point: the shell can name the exact bytes the server will hand
     // out (a per-request read could drift from the document that named it), the immutable
-    // URLs are stable for the life of the process, and the two static routes stop doing a
+    // URLs are stable for the life of the process, and the static route stops doing a
     // synchronous `readFileSync` on every hit.
-    let bundle = readBundle ()
-    let css = readCss ()
-    let assets = { Bundle = contentDigest bundle; Css = contentDigest css }
-    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin ephemeralStorage assets
+    let assets = Assets.load assetsDir
+    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin ephemeralStorage assets.Build
     // The shell is a pure function of the session id, the mount, the Manager origin, and the
     // assets it names — all fixed at boot — so its validator is too, and a reload costs a 304
     // instead of the whole document.
@@ -287,12 +256,11 @@ let start
                           "etag", box shellEtag ])
                 |> ignore
                 res.``end`` bootstrapHtml
-        | Some (ClientBundle digest) ->
-            // The browser client bundle, built by `build` (esbuild output).
-            serveAsset digest assets.Bundle bundle "text/javascript; charset=utf-8" "client bundle" res
-        | Some (AppCss digest) ->
-            // The locally built Tailwind stylesheet (no CDN).
-            serveAsset digest assets.Css css "text/css; charset=utf-8" "stylesheet" res
+        | Some (Asset (build, path)) ->
+            // Whatever this build left in its asset directory — the bundle, the stylesheet, a
+            // typeface, something added after this line was written. A `build` that is not
+            // ours holds nothing, so a stale shell gets a 404 and reloads.
+            Assets.serve assets build path res
         // The two an INSTALL reads (`WebApp`), and the only routes here served to nobody in
         // particular: a browser fetches a manifest without credentials, and there is nothing
         // in either that a person outside the session could not see from the login page.

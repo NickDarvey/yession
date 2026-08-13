@@ -32,6 +32,11 @@ module Dom =
     /// absence is the good deployment, exactly as with the Manager origin above.
     let ephemeralStorageMetaName = "yession-ephemeral-storage"
 
+    /// The attribute marking the replay player's deferred stylesheet in the head, so the
+    /// browser half can find it and turn it on (`Style.deferredHeadTags`, `Replay.mount`).
+    /// A hook rather than a selector spelled twice, for the same reason every other one is.
+    let playerStylesheetHook = "data-player-css"
+
     /// `data-*` hooks on the session client shell (`View`) and its browser delegation.
     module Hooks =
         // Header — the collaborative session title and its secondary id.

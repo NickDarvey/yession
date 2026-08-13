@@ -541,7 +541,7 @@ let private uiFlowTests =
                 // spelling of it, wrong the moment the stylesheet changes. Following the link
                 // is also the stronger assertion — it proves the page and the route agree.
                 let styleSheetUrl =
-                    System.Text.RegularExpressions.Regex.Match(page, "href=\"(app[^\"]*\\.css)\"").Groups.[1].Value
+                    System.Text.RegularExpressions.Regex.Match(page, "href=\"(assets/[^\"]+/app\\.css)\"").Groups.[1].Value
                 Expect.notEqual styleSheetUrl "" "the page names a stylesheet"
                 let! css = Interop.getText (baseUrl + "/" + styleSheetUrl) |> Async.AwaitPromise
                 Expect.isTrue (css.Length > 500) "the shared local stylesheet serves from the endpoint (no CDN)"

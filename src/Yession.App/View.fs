@@ -1053,6 +1053,7 @@ module View =
                 match item.Status with
                 | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
                 | _ -> Style.messageBody, Lit.nothing
+            let bodyClass = Style.cls [ bodyClass; Style.messageVoice isAgent ]
             html $"""
                 <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
                   <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
