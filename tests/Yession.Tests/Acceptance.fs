@@ -264,8 +264,58 @@ let private forgottenTerminalModel : ClientModel =
                 closedTerminalModel.Terminals.Terminals |> List.map (fun t -> { t with DroppedBytes = 4096 }) }
         TerminalFeeds = Map.empty }
 
+/// The buttons in a rendered page that a screen reader would announce as nothing but
+/// "button": no text between the tags once markup is stripped, and no `aria-label` /
+/// `aria-labelledby` on the tag. Returns their open tags, so a failure names the offender.
+///
+/// Hand-scanned rather than matched with a `Regex`, because this file runs on BOTH runtimes
+/// and string indexing is the one thing that behaves identically on each.
+let private namelessButtons (html: string) : string list =
+    let visibleText (inner: string) =
+        // What is left after every tag and comment: an inline SVG contributes nothing, which
+        // is exactly the case this test exists to catch. Angle brackets nest (a self-closing
+        // `<path/>` opens and closes; so does a `<!--lit-part-->` marker), so depth-count
+        // rather than assume one level.
+        let mutable depth = 0
+        let kept = System.Text.StringBuilder ()
+        for ch in inner do
+            if ch = '<' then depth <- depth + 1
+            elif ch = '>' then depth <- max 0 (depth - 1)
+            elif depth = 0 then kept.Append ch |> ignore
+        kept.ToString().Trim ()
+    let rec scan (from: int) (found: string list) =
+        let start = html.IndexOf ("<button", from)
+        if start < 0 then List.rev found
+        else
+            let openEnd = html.IndexOf (">", start)
+            let closeAt = html.IndexOf ("</button>", start)
+            if openEnd < 0 || closeAt < 0 || closeAt < openEnd then List.rev found
+            else
+                let tag = html.Substring (start, openEnd - start)
+                let named =
+                    tag.Contains "aria-label=" || tag.Contains "aria-labelledby="
+                    || visibleText (html.Substring (openEnd + 1, closeAt - openEnd - 1)) <> ""
+                scan (closeAt + 9) (if named then found else tag :: found)
+    scan 0 []
+
 let private uiChecklistTests =
     testList "UI checklist" [
+        // Pinned ONCE, over the whole shell, rather than remembered at each control: the
+        // verbs at the edge of a field are glyphs now (run, send, discard, the strip's `+`),
+        // which is the right shape for a verb you meet mid-sentence and the wrong shape for
+        // anyone who cannot see it. A label that is a picture is not a label, and the failure
+        // is silent — the control still works, still takes focus, and still announces itself
+        // as "button", saying nothing about which one.
+        testCase "no control is announced as nothing but \"button\"" <| fun () ->
+            let offenders =
+                [ representativeModel; joinedComposerModel; leasedTerminalModel; closedTerminalModel ]
+                |> List.collect (Support.render >> namelessButtons)
+            Expect.equal
+                offenders
+                []
+                (sprintf "every button needs a name, from its text or aria-label — these have neither: %s"
+                    (String.concat " | " offenders))
+
         testCase "every required Phase 1 UI element renders from the model" <| fun () ->
             let html = Support.render representativeModel
             let required =

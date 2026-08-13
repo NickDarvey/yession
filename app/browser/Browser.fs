@@ -147,12 +147,17 @@ let [<Literal>] private PinnedSurfaces = "[data-conversation],[data-terminal-scr
 })()""")>]
 let private surfaceScroll (selector: string) : obj = jsNative
 
+// A surface that was NOT on screen before this render starts at its end, which is the other
+// half of "content grows from the top and the viewport rides the tail": opening a terminal
+// with a history behind it, or switching to one, should show the newest lines and not the
+// oldest. It used to fall through to `scrollTop = 0` — invisible while the stream hugged the
+// bottom of a short box with `mt-auto`, and plainly wrong the moment the history was longer
+// than the box, which is exactly when the anchoring stopped applying.
 [<Emit("""(() => {
   const key = el => el.getAttribute('data-terminal-id') || 'chat'
   for (const el of document.querySelectorAll($0)) {
     const position = $1[key(el)]
-    if (position === undefined) continue
-    el.scrollTop = position < 0 ? el.scrollHeight : position
+    el.scrollTop = position === undefined || position < 0 ? el.scrollHeight : position
   }
 })()""")>]
 let private restoreSurfaceScroll (selector: string) (positions: obj) : unit = jsNative
