@@ -202,6 +202,16 @@ module AgentTools =
                 | Error reason -> return ToolAnswer.text (sprintf "could not read that command: %s" reason)
         }
 
+    /// Type into a live-only terminal (Plan 19). A refusal is an ANSWER rather than an error,
+    /// like every other tool here: the model is meant to read "use execute_command there" and
+    /// do that, not to see a protocol failure and try a third thing.
+    let private writeTerminal (capabilities: AgentCapabilities) (id: TerminalId) (data: string) : Async<string> =
+        async {
+            match! capabilities.WriteTerminal id data with
+            | Ok answer -> return answer
+            | Error reason -> return sprintf "could not type into terminal %s: %s" (TerminalId.value id) reason
+        }
+
     let private setSecret (capabilities: AgentCapabilities) (name: string) (value: string) : Async<string> =
         async {
             match SecretName.create name with
@@ -335,6 +345,21 @@ module AgentTools =
                       match ToolArgs.string "handle" args with
                       | Error e -> return Error e
                       | Ok handle -> return! answered (checkPending capabilities handle)
+                  })
+
+          tool
+              "write_terminal"
+              "Type into a terminal that is streaming something live — a device, a console, anything whose bytes come from outside this session — where execute_command does not apply because there are no commands to run. Send exactly the bytes you mean, including \"\\r\" if the thing on the other end expects a newline. Taking it makes you the terminal's holder, which everyone here can see and take back, so type what you meant to and hand it over. Refused on an ordinary shell terminal: use execute_command there."
+              [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream"
+                ToolField.required "data" "string" "the bytes to type, e.g. \"AT\\r\"" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.two "terminal" "data" args with
+                      | Error e -> return Error e
+                      | Ok (terminal, data) ->
+                          match TerminalId.create terminal with
+                          | Error e -> return Error (sprintf "not a terminal id: %s" e)
+                          | Ok id -> return! ok (writeTerminal capabilities id data)
                   })
 
           tool
