@@ -1070,9 +1070,12 @@ module Style =
     /// to the right of. The old placeholder said "a command to run here", which a `$` says
     /// shorter; the field keeps its `aria-label`, because a placeholder is not a name.
     let terminalCommandWrap = "relative w-full"
+    /// `py-3` is not a guess: 12 + 16 + 12 is exactly the 40px the message composer's band
+    /// stands at (`py-2` around a 24px line), and the two sit side by side on a desktop where
+    /// four pixels of disagreement between them reads as one of the columns being wrong.
     let terminalCommand =
         cls [ "w-full"; fieldBare
-              "font-mono text-code text-ink px-3 py-2.5 pr-10 placeholder:text-green"; touchType ]
+              "font-mono text-code text-ink px-3 py-3 pr-10 placeholder:text-green"; touchType ]
     /// What sits at the field's trailing edge, inside its border: whoever else has a caret in
     /// this slot, and the verb.
     let terminalCommandTrail = "absolute right-1 inset-y-0 flex items-center gap-1"

@@ -747,6 +747,70 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+        // The split between the two columns is the reader's to set. What is pinned is the
+        // PROMISE, not the geometry: that the divider can be moved without a pointer at all.
+        // A splitter that only answers a drag is a control a keyboard user cannot reach, and
+        // nothing else in this suite would notice — the column would still render, still
+        // scroll, and still be exactly the width somebody else chose for them.
+        //
+        // Deliberately not asserted: the default width, the step size, the bounds. Those are
+        // the design, and the design changing is not a regression.
+        testCaseAsync "the column divider moves from the keyboard, not only from a drag" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 8)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! ctx =
+                    await (br.NewContextAsync (
+                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 1440, Height = 900))))
+                let! page = await (ctx.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 8)))
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-term-resize]")
+
+                let width () =
+                    page.EvaluateAsync<float>
+                        "() => document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width"
+                let! before = await (width ())
+
+                // Focusable, and it says what it is: a separator with a value is the one
+                // shape assistive technology can report and move.
+                do! awaitU (page.FocusAsync "#shell [data-term-resize]")
+                let! isSeparator =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const h = document.activeElement
+                                 return h?.getAttribute('role') === 'separator'
+                                     && h.hasAttribute('aria-valuenow')
+                               }""")
+                Expect.isTrue isSeparator "the focused divider is a separator carrying its value"
+
+                // Left grows this column (its edge is what moves), right shrinks it again.
+                do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
+                let! _ = await (page.WaitForFunctionAsync (sprintf "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width > %f" before))
+                let! wider = await (width ())
+                do! awaitU (page.Keyboard.PressAsync "ArrowRight")
+                let! _ = await (page.WaitForFunctionAsync (sprintf "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width < %f" wider))
+
+                // And the value it reports follows the width it is actually at, or it is
+                // narrating something other than what happened.
+                let! reported =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const h = document.querySelector('#shell [data-term-resize]')
+                                 const said = Number(h.getAttribute('aria-valuenow'))
+                                 const is = document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width
+                                 return Math.abs(said - is) <= 1
+                               }""")
+                Expect.isTrue reported "the separator reports the width the column is actually at"
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
         // The live viewport (Plan 14, stage 6). What only a browser can answer here is the
         // KEYSTROKE TRANSLATION: a `KeyboardEvent` is not a byte stream, and turning one
         // into what a pty expects — printable characters as themselves, Ctrl-<key> as the
