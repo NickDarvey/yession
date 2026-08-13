@@ -905,9 +905,13 @@ module Style =
     /// The open-terminal strip: one chip per terminal, scrolling horizontally when there are
     /// more than fit rather than wrapping into a second band that shifts the whole column.
     ///
-    /// No bottom padding: the tabs run down to the strip's own divider so their marks can sit
-    /// ON it rather than above it (see `tabBase`).
-    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 pt-2 overflow-x-auto " + Stroke.dividerBottom
+    /// The tabs run down to the strip's own divider so their marks land on it rather than
+    /// drawing a second line above it (see `tabBase`). `pb-px` is the one pixel their pulled-up
+    /// borders occupy: this strip scrolls, and anything painted outside a scroll container's
+    /// padding box is something to scroll TO — a 1px overhang made the row scrollable on the
+    /// vertical axis (`overflow-x` forces `overflow-y` to `auto`) and Chromium drew a scrollbar
+    /// down the side of the tabs for it.
+    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 pt-2 pb-px overflow-x-auto " + Stroke.dividerBottom
     /// The tabs THEMSELVES, and nothing else. `role="tablist"` is a promise about what its
     /// children are, and the strip also holds two things that are not tabs — "+ new" and
     /// "close" — which a reader was told were tabs (four of them, in a list of two) and which
