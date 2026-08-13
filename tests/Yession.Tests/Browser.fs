@@ -787,23 +787,27 @@ let editorTests =
                                  document.querySelector('#shell [data-terminal-toggle="show"]').click()
                                  return true
                                }""")
-                // The column ANIMATES, so every width here is read once it has stopped
-                // moving. A number taken from the middle of a 200ms transition is a number
-                // the next assertion then races, and the failure that produces is a bare
-                // timeout that says nothing about which step went wrong.
-                let settled () =
+                // The column ANIMATES, so every width here is read once it has MOVED off the
+                // width it was at and then stopped. Both halves are load-bearing. "Stopped"
+                // alone is satisfied instantly by a column that has not started yet — the
+                // stability marker is still holding the previous reading — so the measurement
+                // lands before the keypress takes effect and the test reports that nothing
+                // happened while the column is, at that moment, moving.
+                let settledAwayFrom (from: float) =
                     page.WaitForFunctionAsync
-                        """() => {
+                        (sprintf """() => {
                              const w = document.querySelector('#shell [data-terminal-panel]')
                                          .getBoundingClientRect().width
-                             const still = window.__w === w && w > 100
+                             if (Math.abs(w - %f) < 0.5) return false
+                             const still = window.__w === w
                              window.__w = w
                              return still
-                           }"""
+                           }""" from)
                 let width () =
                     page.EvaluateAsync<float>
                         "() => document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width"
-                let! _ = await (settled ())
+                // A shut pane is zero wide, so "away from 0 and stopped" is "open and settled".
+                let! _ = await (settledAwayFrom 0.0)
                 let! before = await (width ())
 
                 // Focusable, and it says what it is: a separator with a value is the one
@@ -825,13 +829,13 @@ let editorTests =
                 // "the column did not grow" and "something timed out" are the same red and
                 // only one of them tells you anything.
                 do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
-                let! _ = await (settled ())
+                let! _ = await (settledAwayFrom before)
                 let! wider = await (width ())
                 Expect.isTrue
                     (wider > before)
                     (sprintf "ArrowLeft must widen the column (was %f, now %f)" before wider)
                 do! awaitU (page.Keyboard.PressAsync "ArrowRight")
-                let! _ = await (settled ())
+                let! _ = await (settledAwayFrom wider)
                 let! back = await (width ())
                 Expect.isTrue
                     (back < wider)
