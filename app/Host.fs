@@ -459,7 +459,11 @@ let startFull
         /// rule an agent's block already follows.
         let streamAttacher =
             ToolStreams.create
-                { Open = fun ticket -> terminals.Open ActorRef.Agent (Attached ticket) ticket.Label
+                // The registries as they stand NOW, for a reattach: a person pressing a
+                // button an hour later should reach whatever servers this session has, not
+                // the snapshot some turn was given.
+                (fun () -> mcpConnections.Registries ())
+                { Open = fun offer -> terminals.Open ActorRef.Agent (Attached offer) offer.Ticket.Label
                   IsOpen = terminals.IsOpen }
 
         let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
@@ -674,6 +678,7 @@ let startFull
                         terminals.Take
                         terminals.Release
                         terminals.Rearm
+                        streamAttacher.Reattach
                         actorFor
                   OnPresence = fun payload -> broadcastPresenceExcept connectionId payload
                   // Live-mode traffic (Plan 13, stage 2e). Only the two peer-authored frames

@@ -26,6 +26,10 @@ module SessionCommands =
         (takeLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
         (releaseLease: TerminalId -> ActorRef -> Async<Result<unit, string>>)
         (rearmTerminal: TerminalId -> Async<Result<unit, string>>)
+        // Ask the provider for a terminal's stream again (Plan 19, step 4). A function like
+        // the rest, so a session that was given no providers simply cannot: the composition
+        // decides, not a flag.
+        (reattachTerminal: TerminalId -> Async<Result<TerminalId, string>>)
         (actorFor: PeerId -> ActorRef)
         (peerId: PeerId)
         (command: SessionCommand)
@@ -70,6 +74,14 @@ module SessionCommands =
             | RearmTerminal terminalId ->
                 match! rearmTerminal terminalId with
                 | Ok () -> return CommandAccepted
+                | Error reason -> return CommandRejected reason
+            // Unattributed for `RearmTerminal`'s reason and then some: what it produces is a
+            // `TerminalOpened` carrying whoever this session opens attached streams as, and
+            // the provider's own refusal — "somebody else holds it now" — is what a rejection
+            // says, because nothing this session could add would be more useful.
+            | ReattachTerminal terminalId ->
+                match! reattachTerminal terminalId with
+                | Ok _ -> return CommandAccepted
                 | Error reason -> return CommandRejected reason
         }
 

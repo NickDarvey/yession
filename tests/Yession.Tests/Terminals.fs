@@ -260,7 +260,7 @@ let private drainTests =
 // --- The projection --------------------------------------------------------------------
 
 let private opened (id: TerminalId) (title: string) =
-    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxName.defaultName }
+    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxName.defaultName; Renewable = false }
 
 let private started (id: TerminalId) (b: string) (command: string) (fromSeq: int) =
     SessionEvent.TerminalBlockStarted
@@ -1095,6 +1095,11 @@ let private leaseCommandTests =
                             async {
                                 calls.Add (sprintf "rearm:%s" (TerminalId.value id))
                                 return Ok ()
+                            })
+                        (fun id ->
+                            async {
+                                calls.Add (sprintf "reattach:%s" (TerminalId.value id))
+                                return Ok id
                             })
                         PeerRef
                 let! taken = handle ada (TakeTerminalLease terminalA)
@@ -2013,7 +2018,7 @@ let private sourceTests =
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 Expect.isError shell "a shell terminal IS a need, so a refused sandbox refuses the open"
-                let! device = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 Expect.isOk device "an attached one needs nothing this session runs"
             }
 
@@ -2024,7 +2029,7 @@ let private sourceTests =
                 let openTranscript, linesOf, _, _ = recordingTranscripts ()
                 let attach, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
                 let printed =
                     linesOf id
@@ -2043,7 +2048,7 @@ let private sourceTests =
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let attach, written = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
                 do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "make" ignore
                 let! events = eventsOf log
@@ -2068,7 +2073,7 @@ let private sourceTests =
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let attach, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
                 let! taken = terminals.Take id (PeerRef ada)
                 Expect.isOk taken "a device can still be typed at — the lease is what arbitrates"
@@ -2085,7 +2090,7 @@ let private sourceTests =
                 let openTranscript, _, _, _ = recordingTranscripts ()
                 let attach, written = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript []
-                let! opened = terminals.Open (PeerRef ada) (Attached deviceTicket) "USB serial"
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
 
                 let! wrote = terminals.Write id ActorRef.Agent "AT\r"
