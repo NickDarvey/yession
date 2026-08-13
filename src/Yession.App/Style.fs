@@ -904,7 +904,10 @@ module Style =
 
     /// The open-terminal strip: one chip per terminal, scrolling horizontally when there are
     /// more than fit rather than wrapping into a second band that shifts the whole column.
-    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 py-2 overflow-x-auto " + Stroke.dividerBottom
+    ///
+    /// No bottom padding: the tabs run down to the strip's own divider so their marks can sit
+    /// ON it rather than above it (see `tabBase`).
+    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 pt-2 overflow-x-auto " + Stroke.dividerBottom
     /// The tabs THEMSELVES, and nothing else. `role="tablist"` is a promise about what its
     /// children are, and the strip also holds two things that are not tabs — "+ new" and
     /// "close" — which a reader was told were tabs (four of them, in a list of two) and which
@@ -929,8 +932,15 @@ module Style =
     /// tab carries the border box (`Stroke.clear` when it is not the one), so selecting moves
     /// no text, and the selection is said twice quietly instead of once loudly: ink rather than
     /// faint, over a blue rule.
+    ///
+    /// And it is the strip's OWN rule, not a second one. `-mb-px` pulls each tab's bottom
+    /// border down onto the divider the strip already draws, so there is one line under the
+    /// row and the selected tab paints its segment of it: an unselected tab's border is
+    /// transparent and the hairline shows straight through. Drawn at the tab's own height
+    /// instead, it was a second rule 23px above the first — two horizontal lines saying one
+    /// thing, which is the ornament this pass exists to remove.
     let private tabBase =
-        cls [ caps; "bg-transparent cursor-pointer px-2.5 py-1.5 max-w-40 truncate transition-colors"
+        cls [ caps; "bg-transparent cursor-pointer px-2.5 pt-1.5 pb-2 -mb-px max-w-40 truncate transition-colors"
               Stroke.underline; focusRing ]
     let terminalTab = cls [ tabBase; Stroke.clear; "text-ink-faint hover:text-ink" ]
     let terminalTabActive = cls [ tabBase; Stroke.blue; "text-ink" ]
