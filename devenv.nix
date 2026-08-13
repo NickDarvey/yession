@@ -118,6 +118,17 @@ ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
     # option is an evaluation error, not a merge.
     export LD_LIBRARY_PATH="''${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.zlib ]}"
 ''}
+    # Nothing in this repo talks to loopback through a proxy. Almost every tier does talk to
+    # loopback — an exporter's gRPC, a provider's MCP endpoint, a WebSocket attach, the
+    # session's own HTTP — and a box with `https_proxy` set but `no_proxy` unset sends all of
+    # it to the proxy, where it comes back 502. That is not hypothetical: it is what a proxied
+    # dev container does, and `check Jumpstarter` cannot pass in one without this.
+    #
+    # PREPENDED to whatever the developer already has, rather than replacing it: their list
+    # may name hosts this knows nothing about, and loopback is the only entry this repo has an
+    # opinion about.
+    export no_proxy="127.0.0.1,localhost,::1''${no_proxy:+,$no_proxy}"
+    export NO_PROXY="$no_proxy"
     # The task list orients someone who just landed in the shell. In front of a one-off
     # `devenv shell -- <task>` it is pure noise, printed above every check, build and CI log.
     # devenv says which this is: DEVENV_CMDLINE is a bare `shell` interactively, `shell -- …`
