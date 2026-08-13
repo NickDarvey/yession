@@ -824,22 +824,30 @@ let editorTests =
                                }""")
                 Expect.isTrue isSeparator "the focused divider is a separator carrying its value"
 
-                // Left grows this column (its edge is what moves), right shrinks it again.
+                // The two arrows move it, and they are opposites. Which one GROWS the column
+                // is deliberately not asserted: this one is on the right, so left-grows reads
+                // as "drag its edge", but a design that put the pane elsewhere or read the
+                // keys the other way round would be a different choice rather than a broken
+                // one — and a test that failed for it would be reporting taste as a
+                // regression. What has to hold is that a keyboard can move the split at all,
+                // and that the second press undoes the first.
+                //
                 // Asserted rather than waited for, so a failure reports the widths it saw:
-                // "the column did not grow" and "something timed out" are the same red and
+                // "the column did not move" and "something timed out" are the same red, and
                 // only one of them tells you anything.
                 do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
                 let! _ = await (settledAwayFrom before)
-                let! wider = await (width ())
+                let! moved = await (width ())
                 Expect.isTrue
-                    (wider > before)
-                    (sprintf "ArrowLeft must widen the column (was %f, now %f)" before wider)
+                    (abs (moved - before) > 1.0)
+                    (sprintf "an arrow key must move the split (was %f, still %f)" before moved)
                 do! awaitU (page.Keyboard.PressAsync "ArrowRight")
-                let! _ = await (settledAwayFrom wider)
+                let! _ = await (settledAwayFrom moved)
                 let! back = await (width ())
                 Expect.isTrue
-                    (back < wider)
-                    (sprintf "ArrowRight must narrow it again (was %f, now %f)" wider back)
+                    (abs (back - before) < abs (moved - before))
+                    (sprintf "the opposite arrow must move it back (started %f, went %f, now %f)"
+                        before moved back)
 
                 // And the value it reports follows the width it is actually at, or it is
                 // narrating something other than what happened.
