@@ -1,18 +1,34 @@
 # Plan 19 — A stream a provider offers, a terminal a person can use
 
-> **Status: proposed.** Closes the join [Plan 16](16-serial-devices.md) built one half of and
-> [Plan 18](18-jumpstarter.md) declined to build the other half of. Today
-> `TerminalSource.Attached` is constructed only by tests
-> ([`Terminals.fs:2016`](../../tests/Yession.Tests/Terminals.fs)), the serial provider serves a
-> WebSocket nothing opens, and the jumpstarter provider drains a console through tool calls
-> because there was no client for a second leg. All three facts have one cause: **a session
-> cannot learn a stream's address.**
+> **Status: shipped**, all five steps, one PR each. It closed the join
+> [Plan 16](16-serial-devices.md) built one half of and [Plan 18](18-jumpstarter.md) declined
+> to build the other half of: `TerminalSource.Attached` was constructed only by tests, the
+> serial provider served a WebSocket nothing opened, and the jumpstarter provider drained a
+> console through tool calls because there was no client for a second leg. All three had one
+> cause — **a session could not learn a stream's address.**
 >
-> This plan is the contract that lets it, and it is a contract rather than a case. Nothing in
+> The plan is the contract that lets it, and it is a contract rather than a case. Nothing in
 > the product learns what serial is, or what jumpstarter is, at build time or at any other
 > time. A provider says "here is a stream, and here is what it can do"; a terminal is what
-> Yession makes of it. Both examples then become ordinary consumers of a thing any third party
-> can implement in an afternoon.
+> Yession makes of it. Both examples are now ordinary consumers of a thing any third party can
+> implement in an afternoon.
+>
+> Four things landed differently from the text below, and each is called out where it happens:
+>
+> - **`TerminalSource.Attached` carries the whole OFFER, not its ticket**, and `TerminalOpened`
+>   records renewability — step 4 needed the answer to "is there a way back" at the worst
+>   moment to go looking for it: the stream has ended and the terminal is closed.
+> - **The decorator is `ToolStreams.create` + `Decorate`**, not one `offering` function: the
+>   url→terminal map is the SESSION's (a provider polled across two turns offers one stream)
+>   while the ceiling is a TURN's, and one function cannot hold both scopes.
+> - **`read_terminal` was not in the plan and is now half the story.** `write_terminal` gave
+>   the agent a hand and no eyes, which was tolerable only for a provider that kept its own
+>   read tools. Serial has none, so the agent could type at a board and never learn what it
+>   said. It lives beside `Write` in the terminal manager, takes no lease, and is refused
+>   where blocks already answer.
+> - **A terminal's SOURCE outlives it.** Closing used to forget it, so a closed device read
+>   back the default — "this runs commands as blocks" — which is a lie about a recording that
+>   is right there. The source is now kept, because the question is asked of the recording.
 
 ## The extension point is one sentence
 

@@ -606,6 +606,11 @@ module SessionTerminals =
     /// exits, hours later, correctly.
     let private integrationWindowMs = 2000
 
+    /// Transcript lines `Tail` counts back from the end of a live terminal (Plan 19). Lines
+    /// rather than characters because that is what a range read is addressed by; the
+    /// character bound is `TerminalDigest.tailCap`, applied after.
+    let private tailWindow = 500
+
     /// A command line, as bytes to type into a shell's line editor. Three things, and none of
     /// them is cosmetic.
     ///
@@ -676,11 +681,13 @@ module SessionTerminals =
           /// write tool can be refused while its stream is attached, which is what keeps one
           /// device to one door.
           Write : TerminalId -> ActorRef -> string -> Async<Result<unit, string>>
-          /// Whether this terminal's source can carry the OSC 133 bootstrap — whether its
-          /// output resolves into blocks, in other words. What decides which of the two
-          /// reading paths a caller belongs on: a block's output comes back from the command
-          /// that ran it, and a live-only terminal has only its transcript.
-          Instrumented : TerminalId -> bool
+          /// The tail of what such a terminal has SAID (Plan 19) — `Write`'s other half, and
+          /// beside it because the rule that admits one admits the other: blocks or bytes.
+          ///
+          /// Not its mirror image, though. A write has to be arbitrated, which is what the
+          /// lease is for; a reader is not a second writer, so this takes nothing and blocks
+          /// nobody — a person can be typing while the agent reads over their shoulder.
+          Tail : TerminalId -> Async<Result<TerminalTail, string>>
           /// The lease holder's viewport size, applied to the pty and the emulator. `false`
           /// when dropped, on the same terms as `Input`.
           Resize : TerminalId -> ActorRef -> int -> int -> bool
@@ -733,7 +740,7 @@ module SessionTerminals =
           PeerGone = fun _ -> async { return () }
           Input = fun _ _ _ -> false
           Write = fun _ _ _ -> async { return Error "this session has no terminals" }
-          Instrumented = fun _ -> true
+          Tail = fun _ -> async { return Error "this session has no terminals" }
           Resize = fun _ _ _ _ -> false
           ApplySize = fun _ _ -> ()
           Busy = fun () -> Set.empty
@@ -761,6 +768,10 @@ module SessionTerminals =
         // so there is no second way for a terminal to be told no.
         (environmentFor: SandboxName -> SessionEnvironment.SessionEnvironment)
         (openTranscript: OpenTranscript)
+        // Reading one back (Plan 19). The manager holds the WRITER for every live terminal
+        // and none of the readers, because the two have opposite shapes — see
+        // `ReadTranscript`. `Tail` is the one thing it does that needs both.
+        (readTranscript: ReadTranscript)
         (openEmulator: OpenEmulator)
         (shell: TerminalShell)
         (clock: unit -> DateTimeOffset)
@@ -1224,7 +1235,11 @@ module SessionTerminals =
                     lost <- Set.remove (TerminalId.value id) lost
                     sawCommandStart.Remove (TerminalId.value id) |> ignore
                     rearmers.Remove (TerminalId.value id) |> ignore
-                    sources.Remove (TerminalId.value id) |> ignore
+                    // The SOURCE stays. Everything else here is about a terminal that is
+                    // running and this is not: "did its output resolve into blocks" is asked
+                    // of the recording too, and answering the default (`true`, for the shells
+                    // that predate sources) would tell a reader of a closed DEVICE to go and
+                    // use execute_command on it.
                     do! append (SessionEvent.TerminalClosed { TerminalId = id; Reason = reason })
                     return Ok ()
             }
@@ -1483,6 +1498,33 @@ module SessionTerminals =
                     | Ok () -> return (if input id by data then Ok () else Error "this terminal has nothing to type into")
             }
 
+        /// The tail of what a live-only terminal has said (Plan 19).
+        ///
+        /// Bounded twice, because the two bounds answer different questions: the window keeps
+        /// the read off an hour of streaming, and the character cap is what fits in a context
+        /// window. A CLOSED terminal has no live length to count back from, so it reads what
+        /// the store still holds — already bounded by the per-terminal retention cap, and
+        /// still worth answering, because a device's recording outlives its stream.
+        let tail (id: TerminalId) : Async<Result<TerminalTail, string>> =
+            async {
+                let key = TerminalId.value id
+                if canInstrument key then
+                    return
+                        Error
+                            "this terminal's output comes back as blocks — run it with execute_command, whose answer carries what it printed"
+                else
+                    let from =
+                        match live.TryGetValue key with
+                        | true, terminal -> max 0 (terminal.Transcript.NextSeq () - tailWindow)
+                        | _ -> 0
+                    let printed = readTranscript id from None |> Transcript.printed
+                    let elided = max 0 (printed.Length - TerminalDigest.tailCap)
+                    return
+                        Ok
+                            { Text = (if elided > 0 then printed.Substring elided else printed)
+                              Elided = elided }
+            }
+
         let resize (id: TerminalId) (by: ActorRef) (cols: int) (rows: int) : bool =
             // A source that declared no size is not resized and does not pretend to have
             // been: a serial line has no rows, and telling it it has 24 would be inventing a
@@ -1567,7 +1609,7 @@ module SessionTerminals =
           Input = input
           Resize = resize
           Write = write
-          Instrumented = fun id -> canInstrument (TerminalId.value id)
+          Tail = tail
           ApplySize = applySize
           Busy = fun () -> busy
           Leased = fun () -> TerminalLeases.held leases
