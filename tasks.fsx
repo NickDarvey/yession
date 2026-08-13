@@ -268,14 +268,41 @@ let private fable (quiet: bool) (project: string) (outDir: string) =
     else exec "dotnet" [ "fable"; project; "-o"; outDir ]
     declareEsm outDir
 
+// The conversation's typefaces (`app/fonts`, declared as @font-face in app/tailwind.css) are
+// folded INTO the emitted stylesheet as data URIs, so the one artefact the shell serves stays
+// one artefact: no font route on either server, nothing extra to stage into the npm package or
+// the Nix installable. Tailwind passes the `url()`s through untouched apart from quoting and
+// path rewriting, so the face is matched by FILENAME rather than by the path it was written as.
+//
+// A reference with no vendored face is a build failure, not a silent 404 in the browser: the
+// stylesheet is emitted once and cached for a year at its own address.
+let private cssFontUrl = Regex (@"url\(\s*['""]?([^)'""]+\.woff2)['""]?\s*\)", RegexOptions.IgnoreCase)
+
+let private inlineFonts (stylesheet: string) =
+    let path = Path.Combine (repoRoot, stylesheet)
+    let inlined =
+        cssFontUrl.Replace (
+            File.ReadAllText path,
+            fun m ->
+                let face = Path.GetFileName m.Groups.[1].Value
+                let file = Path.Combine (repoRoot, "app/fonts", face)
+                if not (File.Exists file) then
+                    failwithf "%s references %s, which is not vendored in app/fonts" stylesheet face
+                sprintf "url(data:font/woff2;base64,%s)" (Convert.ToBase64String (File.ReadAllBytes file)))
+    File.WriteAllText (path, inlined)
+
+/// The served stylesheet, built locally (no CDN); scans the F# sources, carries its own faces.
+let private buildCss (output: string) (extra: string list) =
+    run tailwind ([ "-i"; "app/tailwind.css"; "-o"; output ] @ extra) |> ignore
+    inlineFonts output
+
 let compile () =
     printfn "compiling F# -> JS"
     run "dotnet" [ "build"; "Yession.slnx" ] |> ignore
     fable true "app/main/Yession.Host.Main.fsproj" "app/out"
     fable true "app/browser/Yession.Browser.fsproj" "app/out/browser"
     run esbuild [ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--minify"; "--outfile=app/out/public/client.js" ] |> ignore
-    // Tailwind, built locally into a served stylesheet (no CDN); scans the F# sources.
-    run tailwind [ "-i"; "app/tailwind.css"; "-o"; "app/out/public/app.css"; "--minify" ] |> ignore
+    buildCss "app/out/public/app.css" [ "--minify" ]
 
 let build () =
     restore ()
@@ -785,7 +812,7 @@ let private runCheckOnce (requested: string list) =
         // The harness renders the REAL shell (Plan 14), so it needs the real stylesheet:
         // without it every Tailwind class is inert, and any layout the browser tier measures
         // there — a phone viewport most of all — is a layout nobody will ever get.
-        exec tailwind [ "-i"; "app/tailwind.css"; "-o"; "tests/browser/out/app.css" ]
+        buildCss "tests/browser/out/app.css" []
         progress "running the browser suite (.NET CLR)"
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 

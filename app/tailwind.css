@@ -11,6 +11,62 @@
    every consumer then has to know about. */
 @import "../node_modules/asciinema-player/dist/bundle/asciinema-player.css";
 
+/* The conversation's two voices: GitHub's Monaspace, Neon for what a person wrote and Krypton
+   for what the agent said. Vendored under `app/fonts/` (SIL OFL 1.1, `app/fonts/LICENSE`)
+   rather than fetched — same rule as everything else the shell serves, no CDN.
+
+   The `url()`s are resolved at BUILD time, not at request time: `tasks.fsx` inlines each face
+   as a data URI into the emitted stylesheet. That keeps the one artefact the shell serves one
+   artefact — the same reason the asciinema stylesheet is imported here rather than emitted
+   beside it — so neither server, nor the npm package, nor the Nix installable learns about a
+   font route.
+
+   Three weights per family (the light body, the prose headings' normal, the semibold a strong
+   run wears) and no italics: an `<em>` in a message is rare enough that the browser's synthetic
+   oblique is a fair trade against another 270KB of face. */
+@font-face {
+  font-family: 'Monaspace Neon';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('fonts/monaspace-neon-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Neon';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/monaspace-neon-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Neon';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/monaspace-neon-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Krypton';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('fonts/monaspace-krypton-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Krypton';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/monaspace-krypton-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Krypton';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/monaspace-krypton-latin-600-normal.woff2') format('woff2');
+}
+
 /* Theme — mirrors what the old tailwind.config.js `theme.extend` registered. Namespaced
    custom properties auto-generate utilities (`--color-blue` -> `bg-blue`/`text-blue`,
    `--font-mono` -> `font-mono`, `--animate-pulse2` -> `animate-pulse2`). */
@@ -65,6 +121,15 @@
 
   --font-sans: 'Segoe UI', 'Segoe UI Variable', 'Segoe WP', 'Frutiger', 'Helvetica Neue', system-ui, sans-serif;
   --font-mono: 'Cascadia Code', 'Consolas', monospace;
+
+  /* Who is speaking, said by the typeface. A message body, a draft being written and a queued
+     message all wear the voice of whoever authored them: Neon for a person, Krypton for the
+     agent. Both fall back to the mono stack rather than the sans one — Monaspace is
+     monospaced, so the fallback should be too, or a face that fails to load reflows the whole
+     timeline. This is attribution, not decoration: it is the one thing on a message that is
+     legible before you have read a word of it. */
+  --font-human: 'Monaspace Neon', 'Cascadia Code', 'Consolas', monospace;
+  --font-agent: 'Monaspace Krypton', 'Cascadia Code', 'Consolas', monospace;
 
   /* The type ramp, as size + line-height pairs on the 4px rhythm — `text-<step>` sets
      both, so a size can never drift from its line box. `leading-*` still composes over

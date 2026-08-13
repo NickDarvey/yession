@@ -543,6 +543,21 @@ module Style =
     let whoAgent = caps + " text-blue"
     let messageBody = "col-start-2 font-light text-body text-ink"
     let messageBodyStreaming = "col-start-2 font-light text-body text-ink-dim"
+
+    /// The voice a body is written in: Monaspace Neon for a person, Krypton for the agent
+    /// (`--font-human`/`--font-agent`, both vendored in `app/tailwind.css`). Attribution the
+    /// eye reads before the words — the author line and the avatar say the same thing, but
+    /// they say it once at the top, and a long turn scrolls past them.
+    ///
+    /// A face, not a colour: the caps author line already spends the palette on this
+    /// distinction (`who` vs `whoAgent`), and message bodies are held at full-strength `ink`
+    /// on purpose — what was said is the content, and dimming half of it to mark who said it
+    /// would trade legibility for a fact the line above already carries.
+    ///
+    /// Worn by everything a person is CURRENTLY writing too — the open draft, a collapsed
+    /// peer's draft, a queued message — so text does not change typeface at the moment it is
+    /// sent.
+    let messageVoice (isAgent: bool) = if isAgent then "font-agent" else "font-human"
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 
@@ -646,7 +661,8 @@ module Style =
     /// so `focus:` on the host never fires and the brightening never happened.
     let queueInput =
         cls [ "flex-1 min-w-0 self-center h-5"; fieldBare
-              "font-sans font-light text-small leading-5 text-ink-dim focus-within:text-ink"; touchType ]
+              messageVoice false
+              "font-light text-small leading-5 text-ink-dim focus-within:text-ink"; touchType ]
 
     let queueTools =
         "flex gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 transition-opacity"
@@ -681,7 +697,8 @@ module Style =
     /// the focus signal is the gradient edge plus the box's lift.
     let draftInput =
         cls [ "block w-full"; fieldBare
-              "font-sans font-light text-body text-ink placeholder:text-ink-faint px-4 pt-3 pb-1"; touchType ]
+              messageVoice false
+              "font-light text-body text-ink placeholder:text-ink-faint px-4 pt-3 pb-1"; touchType ]
 
     let draftActions = "flex items-center gap-2 pl-4 pr-2 pb-2"
 
@@ -714,7 +731,7 @@ module Style =
     /// The clamped body: the same read-only editor as anywhere else, held to one line. `truncate`
     /// on the host would fight ProseMirror's block children, so the clamp is on its descendants.
     let draftSummaryBody =
-        "flex-1 min-w-0 font-sans font-light text-small leading-8 text-ink-dim "
+        "flex-1 min-w-0 " + messageVoice false + " font-light text-small leading-8 text-ink-dim "
         + "overflow-hidden whitespace-nowrap [&_*]:inline [&_*]:truncate [&_*]:m-0"
 
     /// Who is in this draft right now: one dot per live caret, coloured by peer (`PeerColour`).
