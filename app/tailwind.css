@@ -1,7 +1,7 @@
-/* The single stylesheet entry, built by the Tailwind CLI (see mise `build`/`verify`) into
-   app/out/public/app.css, served locally at /app.css — no CDN. Tailwind v4 is CSS-first:
-   the theme lives here (there is no tailwind.config.js). The F#-authored `Style` values
-   compose these utilities, so `@source` points the scanner at the F# sources. */
+/* The shell's stylesheet, built by the Tailwind CLI into the build's asset set — where it is
+   `AssetFile.``app```, served under that set's own address and never from a CDN. Tailwind v4
+   is CSS-first: the theme lives here (there is no tailwind.config.js). The F#-authored `Style`
+   values compose these utilities, so `@source` points the scanner at the F# sources. */
 
 @import "tailwindcss";
 
@@ -13,12 +13,16 @@
    for what the agent said. Vendored under `app/fonts/` (SIL OFL 1.1, `app/fonts/LICENSE`)
    rather than fetched — same rule as everything else the shell serves, no CDN.
 
-   The `url()`s are rewritten at BUILD time: `tasks.fsx` emits each face beside the stylesheet
-   under a name carrying a digest of its bytes, and both servers serve that directory. The
-   faces were data URIs inside this sheet when they landed, which put 350KB in front of the
-   first paint of every page — including the ones that render no conversation at all. As
-   separate files the browser fetches only the weights a page actually uses, and fetches them
-   after it has painted (`font-display: swap`).
+   The `url()`s below are passed through verbatim — Tailwind does not rewrite them — and they
+   resolve against wherever this sheet is served, which is inside the asset set, next to
+   `fonts/`. Each face is declared in `AssetFile` and copied there by the build; a face named
+   here and missing from that declaration is a 404, and one declared and not produced stops the
+   build.
+
+   Separate files rather than data URIs inside this sheet, which is what they were when they
+   landed: that put 350KB in front of the first paint of every page, including the ones that
+   render no conversation at all. As files the browser fetches only the weights a page actually
+   uses, and fetches them after it has painted (`font-display: swap`).
 
    Three weights per family (the light body, the prose headings' normal, the semibold a strong
    run wears) and no italics: an `<em>` in a message is rare enough that the browser's synthetic
