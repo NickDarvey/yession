@@ -26,6 +26,12 @@ let private activityBeatMs = 30000
 /// Well under `TerminalLeaseIdle.window`, so the overshoot is bounded by the beat.
 let private idleLeaseBeatMs = 30000
 
+/// How far back `read_terminal` reads (Plan 19). Transcript LINES, then capped to
+/// `TerminalDigest.tailCap` characters — two bounds because they bound different things: this
+/// one keeps the read off a long recording, and the character cap is what fits in a context
+/// window. Generous enough that the answer to "what did the board say" is in it.
+let private readTerminalLines = 500
+
 type SessionHost =
     { SessionId : SessionId
       /// Mint an unattributed peer token valid for this process — what tests/headless
@@ -479,6 +485,33 @@ let startFull
                         match! terminals.Write id ActorRef.Agent data with
                         | Ok () -> return Ok (sprintf "typed into terminal %s; you now hold it" (TerminalId.value id))
                         | Error reason -> return Error reason
+                    }
+              // `write_terminal`'s other half, and deliberately NOT its mirror image: reading
+              // takes no lease, because a reader is not a second writer. A person can be
+              // typing while the agent reads over their shoulder, which is the whole of what
+              // sharing a device means.
+              ReadTerminal =
+                fun id ->
+                    async {
+                        if terminals.Instrumented id then
+                            return
+                                Error
+                                    "this terminal runs commands as blocks — what one printed comes back from execute_command, and every block since your last turn is already in your context"
+                        else
+                            // The tail, from the same transcript the panel renders and the
+                            // digest reads. Bounded from the END: a device that has been
+                            // streaming for an hour has a recording nobody wants in a context
+                            // window, and the panel is where you go to read all of it.
+                            let next =
+                                terminals.Lengths ()
+                                |> List.tryPick (fun (other, length) -> if other = id then Some length else None)
+                            let from = match next with Some length -> max 0 (length - readTerminalLines) | None -> 0
+                            let printed = transcripts.ReadRange id from None |> Transcript.printed
+                            let elided = max 0 (printed.Length - TerminalDigest.tailCap)
+                            return
+                                Ok
+                                    { Text = (if elided > 0 then printed.Substring elided else printed)
+                                      Elided = elided }
                     }
               RunGated = commandGate.Run
               SetSecret =

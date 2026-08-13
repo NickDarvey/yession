@@ -192,6 +192,51 @@ let private sessionTests =
                     (Ok (ToolAnswer.text "could not run the command: no terminal capability"))
                     "the call happened; it is the command that did not"
             }
+
+        // Reading a terminal with no blocks (Plan 19). What matters is the SAME thing that
+        // matters for a block's output: a model that cannot tell a short answer from a
+        // truncated one describes the wrong thing confidently.
+        testCaseAsync "a live-only terminal's tail says how much it left out" <|
+            async {
+                let reading (tail: TerminalTail) =
+                    AgentTools.registry
+                        { AgentCapabilities.none with ReadTerminal = fun _ -> async { return Ok tail } }
+                let read (registry: ToolRegistry) =
+                    registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
+
+                let! whole = read (reading { Text = "U-Boot 2024.01\n=> "; Elided = 0 })
+                Expect.equal whole (Ok (ToolAnswer.text "U-Boot 2024.01\n=> ")) "all of it, as it came"
+
+                let! capped = read (reading { Text = "=> "; Elided = 4096 })
+                Expect.equal
+                    capped
+                    (Ok (ToolAnswer.text "[4096 earlier characters omitted]\n=> "))
+                    "and a tail says what is missing, in the words a block's output uses"
+
+                let! silent = read (reading { Text = ""; Elided = 0 })
+                Expect.equal
+                    silent
+                    (Ok (ToolAnswer.text "terminal t1 has said nothing"))
+                    "a device that has said nothing says so, rather than answering blank"
+            }
+
+        // The refusal is the interesting half: it has to send the model somewhere that
+        // works, not merely say no.
+        testCaseAsync "reading an instrumented terminal is refused, and names what to use" <|
+            async {
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            ReadTerminal =
+                                fun _ ->
+                                    async {
+                                        return Error "this terminal runs commands as blocks — what one printed comes back from execute_command"
+                                    } }
+                let! answer = registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
+                match answer with
+                | Ok text -> Expect.stringContains text.Text "execute_command" "it says where to go instead"
+                | Error e -> failwithf "a refusal is an answer, not a failed call: %s" e
+            }
     ]
 
 // --- the audit seam (Plan 16, part C) ---------------------------------------------------
