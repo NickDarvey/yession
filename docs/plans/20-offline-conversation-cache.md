@@ -143,6 +143,47 @@ today that browser gets an empty conversation instead.
 
 `TranscriptChunk` keeps its policy until the transcript follow-up gives it the same treatment.
 
+## Why not just cache the chunks forever
+
+The cheaper plan is one constant: raise the full chunk's `max-age` to a year and fetch with
+`cache: 'force-cache'`. It is a real option — a browser serves a *fresh* cache entry without
+touching the network, so full chunks already replay offline today, for three days. It is
+rejected for three reasons, in descending order of how badly they bite.
+
+**The tail, which is the symptom.** A partial chunk is not immutable; it grows. Caching it
+pins a truncated log at that address for a year, unfixable from the server — the same failure
+`serveAsset` 404s to avoid ([`Signalling.fs:49`](../../app/Signalling.fs)). So the newest
+events are never cached, and a session that has not reached 100 events lives entirely in chunk
+0, partial forever, cached never. That is most sessions, and it is precisely the session
+somebody opens and finds empty.
+
+**A cache cannot be enumerated.** Offline, a client must guess-walk `0, 1, 2 …` until a fetch
+fails, and a miss is a network error — indistinguishable from a genuine fault. That collapses
+the one distinction the feed was deliberately built to keep (design.md §2.3: never an empty
+page standing in for a failure). A store answers "what do I have" directly, which is the whole
+difference between a replica and a cache.
+
+**Cache keys are not session-scoped.** The zero-config default addresses a session as
+`http://127.0.0.1:{port}` and the port moves per launch (Plan 12). An HTTP cache keys on
+origin + path, so a recycled port serves the *previous* session's `/events/0`. That hazard
+exists today, bounded by three days; a year-long `immutable` entry makes it permanent. A store
+keyed by the session id cannot express it. Eviction is opaque either way, but only one of the
+two can ask to be kept.
+
+What would make cache-only work is fixed-bounds sub-chunk addressing (`/events/{n}/{count}` —
+every prefix immutable by construction). It is correct, and it costs a cache entry per length
+ever observed plus roughly fiftyfold byte duplication inside a chunk. Shrinking
+`EventChunk.size` only narrows the gap and multiplies round trips. Neither is less work than
+the store.
+
+Note what this argument does *not* buy back: causes 2 and 3 above — nothing asks, and the feed
+is constructed inside the probe's success branch — have to be fixed for either design. The
+store is the small part of PR 1, not the expensive one.
+
+**If value is wanted before PR 1 lands**, the `max-age` bump plus `force-cache` plus the boot
+walk is an honest interim that helps long sessions, and PR 1 deletes it. It does nothing at all
+for a session under 100 events.
+
 ## The shell, offline
 
 Everything above is worth nothing on a cold open with no network, because there is no page. A
