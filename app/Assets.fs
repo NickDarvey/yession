@@ -35,25 +35,20 @@ let private fileUrlToPath (url: obj) : string = jsNative
 [<Emit("new URL('./assets', import.meta.url)")>]
 let private packagedAssets : obj = jsNative
 
-/// Every file under a directory, keyed by its path INSIDE that directory (`fonts/x.woff2`), as
-/// bytes. The first of the two roots that exists wins — the package's own directory when
-/// installed, the build output when developing — and neither existing is the un-built case,
-/// which is an empty set rather than a crash at boot.
+/// One declared file's bytes, from the package's `assets/` when installed and the build output
+/// when developing. `None` when it is not there, which is the un-built case: an empty set
+/// rather than a crash at boot.
 ///
-/// Bytes, not text: an asset set holds woff2 as readily as CSS, and `utf8` would mangle it.
+/// Bytes, not text: a set holds woff2 as readily as CSS, and `utf8` would mangle it.
 [<Emit("""(() => {
-  const walk = (dir, prefix) => $0.readdirSync(dir, { withFileTypes: true }).flatMap(entry =>
-    entry.isDirectory()
-      ? walk(dir + '/' + entry.name, prefix + entry.name + '/')
-      : [[prefix + entry.name, $0.readFileSync(dir + '/' + entry.name)]])
-  for (const root of [$1, $2]) { try { return walk(root, '') } catch {} }
-  return []
+  for (const root of [$1, $2]) { try { return $0.readFileSync(root + '/' + $3) } catch {} }
+  return null
 })()""")>]
-let private walkFiles (fs: obj) (packaged: string) (fallback: string) : (string * obj) array = jsNative
+let private readFile (fs: obj) (packaged: string) (fallback: string) (path: string) : obj option = jsNative
 
 /// One digest over the whole set: every path and every byte, in the map's own (sorted) order,
-/// so the same directory always addresses the same. Twelve base64url characters, the same
-/// content address `Interop.contentDigest` gives a document.
+/// so the same set always addresses the same. Twelve base64url characters, the same content
+/// address `Interop.contentDigest` gives a document.
 [<Emit("""(() => {
   const hash = $0.createHash('sha256')
   for (const [path, bytes] of $1) { hash.update(path); hash.update(bytes) }
@@ -70,25 +65,18 @@ type AssetSet =
 /// hands out have to be the addresses this process will answer for, and a re-read could drift
 /// from the document that named them.
 let load (fallbackDir: string) : AssetSet =
-    let entries = walkFiles fs (fileUrlToPath packagedAssets) fallbackDir
-    let files = Map.ofArray entries
+    let packaged = fileUrlToPath packagedAssets
+    let files =
+        AssetFile.all
+        |> List.choose (fun file ->
+            readFile fs packaged fallbackDir (AssetFile.path file)
+            |> Option.map (fun bytes -> AssetFile.path file, bytes))
+        |> Map.ofList
     { Build = AssetBuild (digestEntries nodeCrypto (Map.toArray files))
       Files = files }
 
-/// The URL a document should name for `path` in this set.
-let url (assets: AssetSet) (path: string) : string = AssetBuild.url assets.Build path
-
-/// What a file's bytes should be labelled as. Extension only — this is the one thing the
-/// service knows, and it is about bytes rather than about the product. An unknown extension is
-/// served as opaque bytes rather than refused: a build that ships something new should reach
-/// the browser, and adding a type here is a line, not a design.
-let private contentTypeOf (path: string) =
-    let cut = path.LastIndexOf '.'
-    match (if cut < 0 then "" else path.Substring (cut + 1)).ToLowerInvariant () with
-    | "js" -> "text/javascript; charset=utf-8"
-    | "css" -> "text/css; charset=utf-8"
-    | "woff2" -> "font/woff2"
-    | _ -> "application/octet-stream"
+/// The URL a document should name for `file` in this set.
+let url (assets: AssetSet) (file: AssetFile) : string = AssetBuild.url assets.Build file
 
 /// Serve one file, but only at this build's address.
 ///
@@ -98,12 +86,18 @@ let private contentTypeOf (path: string) =
 /// at an OLD address would write them into an `immutable` cache entry: wrong for a year, and
 /// unfixable from the server.
 let serve (assets: AssetSet) (build: string) (path: string) (res: ServerResponse) =
-    let found = if AssetBuild build = assets.Build then Map.tryFind path assets.Files else None
+    let found =
+        if AssetBuild build = assets.Build then
+            AssetFile.ofPath path
+            |> Option.bind (fun file -> Map.tryFind path assets.Files |> Option.map (fun bytes -> file, bytes))
+        else None
     match found with
-    | Some bytes ->
+    | Some (file, bytes) ->
         res.writeHead (
             200,
-            createObj [ "content-type", box (contentTypeOf path); "cache-control", box CachePolicy.asset ])
+            createObj
+                [ "content-type", box (AssetFile.contentType file)
+                  "cache-control", box CachePolicy.asset ])
         |> ignore
         res.``end`` (unbox bytes)
     | None ->

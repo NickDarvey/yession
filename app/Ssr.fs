@@ -125,11 +125,11 @@ let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (
         // nothing about storage at all.
         (if ephemeralStorage then sprintf "<meta name=\"%s\" content=\"1\">" Dom.ephemeralStorageMetaName else "")
         "<title>Yession</title>"
-        Style.headTags (AssetBuild.url assets AssetFile.appCss)
+        Style.headTags (AssetBuild.url assets AssetFile.``app``)
         // The replay player's sheet, linked but inert: most sessions never open a recording,
         // and a second render-blocking stylesheet in the head would make all of them pay for
         // the ones that do. `Replay.mount` flips its `media` when a replay is first shown.
-        Style.deferredHeadTags (AssetBuild.url assets AssetFile.playerCss) Dom.playerStylesheetHook
+        Style.deferredHeadTags (AssetBuild.url assets AssetFile.``player``) Dom.playerStylesheetHook
         // What makes this installable, and chrome-less once it is (`WebApp`). Both URLs are
         // relative, like every other one here, so they resolve under the mount rather than at
         // the origin root — and the manifest's own contents then resolve against ITS address.
@@ -144,6 +144,6 @@ let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (
         + "document.documentElement.classList.add('nav-alt')}catch(e){}</script>"
         "</head><body>"
         sprintf "<main id=\"%s\" class=\"%s\">%s</main>" Dom.appId Style.app (renderModel model)
-        sprintf "<script type=\"module\" src=\"%s\"></script>" (AssetBuild.url assets AssetFile.clientJs)
+        sprintf "<script type=\"module\" src=\"%s\"></script>" (AssetBuild.url assets AssetFile.``client``)
         "</body></html>"
     ]

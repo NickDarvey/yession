@@ -363,7 +363,7 @@ let private assetsDir = envOr "YESSION_ASSETS" "app/out/public/assets"
 /// rendered per request) names the same bytes.
 let private assets = Assets.load assetsDir
 
-let private cssUrl = Assets.url assets AssetFile.appCss
+let private cssUrl = Assets.url assets AssetFile.``app``
 
 /// The icon's constant is base64 (it lives in source); the wire wants the PNG. Same decode
 /// the session server does, for the same reason — `res.end` takes what Node's `end` takes.

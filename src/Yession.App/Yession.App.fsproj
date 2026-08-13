@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="AssetFile.fs" />
     <Compile Include="Dom.fs" />
     <Compile Include="Routes.fs" />
     <Compile Include="WebApp.fs" />

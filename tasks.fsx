@@ -18,6 +18,13 @@ open System.Diagnostics
 open System.IO
 open System.Text.RegularExpressions
 
+// The one declaration of what a build ships (`src/Yession.App/AssetFile.fs`), loaded rather
+// than restated. Both halves of the repository are F#, so the build and the server can read
+// the SAME list: the match in `produce` below is exhaustive, which is what makes adding a file
+// a compile error here until this script knows how to make it.
+#load "src/Yession.App/AssetFile.fs"
+open Yession.App
+
 let repoRoot = Path.GetFullPath __SOURCE_DIRECTORY__
 let dist = Path.Combine (repoRoot, "dist")
 let pkg = Path.Combine (dist, "npm")
@@ -268,40 +275,59 @@ let private fable (quiet: bool) (project: string) (outDir: string) =
     else exec "dotnet" [ "fable"; project; "-o"; outDir ]
     declareEsm outDir
 
-// The asset set a build ships: one directory, everything in it, served by path and named by
-// nobody (`app/Assets.fs`, `SessionRoute.Asset`). Adding an asset to the product means putting
-// a file in here — no route, no case, no line in `stage`.
+// The asset set a build ships. What goes in it is declared once, in `AssetFile` — which this
+// script loads rather than restates, so the build cannot emit a file the servers will not serve
+// and cannot forget one they will. `produce` matches exhaustively: a new case does not compile
+// until this script says how to make it.
 //
 // The directory is rebuilt from empty every time, which is what keeps it EXACTLY this build:
 // the whole set is addressed by one digest of its contents, so a file left behind from an
-// earlier build would be staged, packaged and served under an address that claims to describe
-// what the build contains.
+// earlier build would be served under an address that claims to describe what the build holds.
 //
-// Nothing rewrites the stylesheet. Tailwind passes `url()` through verbatim, so the `url(fonts/
-// x.woff2)` written in `app/tailwind.css` resolves against wherever the sheet is served — which
-// is inside this directory, next to `fonts/`.
+// Nothing rewrites the stylesheet. Tailwind passes `url()` through verbatim, so the
+// `url(fonts/x.woff2)` written in `app/tailwind.css` resolves against wherever the sheet is
+// served — which is inside this directory, next to `fonts/`.
 let private buildAssets (outDir: string) (minify: bool) =
-    let assets = Path.Combine (repoRoot, outDir, "assets")
-    if Directory.Exists assets then Directory.Delete (assets, true)
-    Directory.CreateDirectory assets |> ignore
-    let out (name: string) = outDir + "/assets/" + name
+    let root = Path.Combine (repoRoot, outDir, "assets")
+    if Directory.Exists root then Directory.Delete (root, true)
     let extra = if minify then [ "--minify" ] else []
+    /// Where a file goes, its directory made — as a repo-relative path, which is what the
+    /// tools take.
+    let at (file: AssetFile) =
+        Directory.CreateDirectory (Path.GetDirectoryName (Path.Combine (root, AssetFile.path file))) |> ignore
+        outDir + "/assets/" + AssetFile.path file
 
-    run esbuild
-        ([ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--outfile=" + out "client.js" ]
-         @ (if minify then [ "--minify" ] else []))
-    |> ignore
+    /// A vendored face, copied from where the faces are kept — which is the set's own path
+    /// under `app/`, so the declaration locates the source as well as the destination.
+    let vendored (file: AssetFile) =
+        at file |> ignore
+        File.Copy (Path.Combine (repoRoot, "app", AssetFile.path file), Path.Combine (root, AssetFile.path file), true)
 
-    // The shell's stylesheet (scans the F# sources for composed class names) and the replay
-    // player's, which is its own file because the shell defers it (see `app/player.css`).
-    run tailwind ([ "-i"; "app/tailwind.css"; "-o"; out "app.css" ] @ extra) |> ignore
-    run tailwind ([ "-i"; "app/player.css"; "-o"; out "player.css" ] @ extra) |> ignore
+    let produce (file: AssetFile) =
+        match file with
+        | AssetFile.``client`` ->
+            run esbuild
+                ([ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--outfile=" + at file ] @ extra)
+            |> ignore
+        // The shell's stylesheet scans the F# sources for composed class names; the player's is
+        // its own file because the shell defers it (see `app/player.css`).
+        | AssetFile.``app`` -> run tailwind ([ "-i"; "app/tailwind.css"; "-o"; at file ] @ extra) |> ignore
+        | AssetFile.``player`` -> run tailwind ([ "-i"; "app/player.css"; "-o"; at file ] @ extra) |> ignore
+        | AssetFile.``neon-300``
+        | AssetFile.``neon-400``
+        | AssetFile.``neon-600``
+        | AssetFile.``krypton-300``
+        | AssetFile.``krypton-400``
+        | AssetFile.``krypton-600`` -> vendored file
 
-    // The vendored faces the stylesheet names, at the address it names them by.
-    let faces = Path.Combine (assets, "fonts")
-    Directory.CreateDirectory faces |> ignore
-    for face in Directory.GetFiles (Path.Combine (repoRoot, "app/fonts"), "*.woff2") do
-        File.Copy (face, Path.Combine (faces, Path.GetFileName face), true)
+    AssetFile.all |> List.iter produce
+
+    // A declared file that nothing produced. `produce` is matched exhaustively, but an
+    // unhandled case is only a WARNING in a script (fsi has no warnaserror), so this is what
+    // turns it into a stopped build rather than a 404 someone meets in a browser later.
+    for file in AssetFile.all do
+        if not (File.Exists (Path.Combine (root, AssetFile.path file))) then
+            failwithf "%s is declared in AssetFile but no producer wrote it" (AssetFile.path file)
 
 let compile () =
     printfn "compiling F# -> JS"
@@ -421,9 +447,8 @@ let stage (version: string) =
     compile ()
     printfn "staging yession %s (npm, one package / two bins) -> dist/npm" version
 
-    for required in
-        [ "app/out/Main.js"; "app/SessionMain.js"
-          "app/out/public/assets/client.js"; "app/out/public/assets/app.css" ] do
+    // The two bins. The asset set checks itself, in `buildAssets`, against its declaration.
+    for required in [ "app/out/Main.js"; "app/SessionMain.js" ] do
         if not (File.Exists (Path.Combine (repoRoot, required))) then
             failwithf "missing %s after compile" required
 

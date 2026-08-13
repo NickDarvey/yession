@@ -225,19 +225,12 @@ type AssetBuild =
 
 module AssetBuild =
 
-    /// Where `path` is served for this build — the URL a document should name. Relative, like
+    /// Where `file` is served for this build — the URL a document should name. Relative, like
     /// every route: it resolves against the shell's `<base href>`, and the stylesheet's own
-    /// relative `url()`s then resolve against IT.
-    let url (AssetBuild digest) (path: string) : string = SessionRoute.relative (Asset (digest, path))
-
-/// The files a DOCUMENT names, as the build emits them. Not routes — `Asset` is deliberately
-/// ignorant of these — but a stylesheet spelled one way in the session shell and another in
-/// the Manager page is the same hazard `SessionRoute` exists to remove, one level down.
-module AssetFile =
-
-    let clientJs = "client.js"
-    let appCss = "app.css"
-    let playerCss = "player.css"
+    /// relative `url()`s then resolve against IT. Takes the declared file rather than a path,
+    /// so a document cannot name one this build does not ship.
+    let url (AssetBuild digest) (file: AssetFile) : string =
+        SessionRoute.relative (Asset (digest, AssetFile.path file))
 
 /// What the two static surfaces may be cached for, stated once because the session server and
 /// the Manager UI both serve them and the pair only works together: the shell is the document
