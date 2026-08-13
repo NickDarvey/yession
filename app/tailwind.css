@@ -112,9 +112,15 @@
 }
 
 /* v4 has no `background-image` theme namespace, so the one custom gradient utility (the
-   composer's focus edge, `Style.fs`) is defined explicitly. */
+   composer's focus edge, `Style.fs`) is defined explicitly.
+
+   `90deg`, because the edge it paints is a 2px-TALL bar across the top of a composer band. It
+   used to be a 2px-WIDE rail down the band's left side and ran `180deg` to sweep along it;
+   turned ninety degrees and left at 180, the sweep ran across two pixels of height instead of
+   the band's width, and blue→green blended into a single flat teal — the gradient still there
+   in the stylesheet and gone from the screen. A gradient runs along the thing it is on. */
 @utility bg-grad {
-  background-image: linear-gradient(180deg, var(--color-blue), var(--color-green));
+  background-image: linear-gradient(90deg, var(--color-blue), var(--color-green));
 }
 
 /* The document ground. Both shells mount their own black surface (`Style.app`), but the

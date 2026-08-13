@@ -768,7 +768,22 @@ let editorTests =
                 let! page = await (ctx.NewPageAsync ())
                 page.SetDefaultTimeout 15000.0f
                 let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 8)))
-                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-panel]")
+                // This page carries two other fixtures ABOVE the shell — the editor host and
+                // the player — so the shell starts a viewport and a half down. Every control
+                // in it is reachable by scroll, which is fine for a person and a trap for a
+                // test: the assertions here are about a WIDTH, and a click that has to scroll
+                // first is one more thing that can be the reason a width did not change.
+                let! _ =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 for (const id of ['host', 'replay']) {
+                                   const el = document.getElementById(id)
+                                   if (el) el.style.display = 'none'
+                                 }
+                                 document.querySelector('#shell [data-terminal-toggle="show"]').click()
+                                 return true
+                               }""")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-term-resize]")
 
                 let width () =
@@ -778,7 +793,9 @@ let editorTests =
 
                 // Focusable, and it says what it is: a separator with a value is the one
                 // shape assistive technology can report and move.
-                do! awaitU (page.FocusAsync "#shell [data-term-resize]")
+                let! _ =
+                    await (page.EvaluateAsync<bool>
+                            "() => { document.querySelector('#shell [data-term-resize]').focus(); return true }")
                 let! isSeparator =
                     await (page.EvaluateAsync<bool>
                             """() => {

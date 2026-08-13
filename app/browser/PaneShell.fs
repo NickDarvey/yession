@@ -78,8 +78,18 @@ let setOpen (isOpen: bool) : unit = jsNative
 [<Emit("""(() => {
   const KEY = 'yession:term-width'
   const root = document.documentElement
-  const MIN = 320
-  const max = () => Math.max(MIN, window.innerWidth - 360)
+  const MIN = 320, CHAT_MIN = 420
+  // The ceiling is what the CHAT can spare, not what the window is: the sidebar takes 280px
+  // of the window and can be collapsed, so a bound measured against `innerWidth` let the pane
+  // grow to 932px on a 1440 screen and left the conversation 228px — its title truncated to a
+  // single letter and its commands gone. Ask the two columns how wide they actually are.
+  const max = () => {
+    const pane = document.querySelector('[data-terminal-panel]')
+    const chat = document.querySelector('[data-conversation]')
+    if (!pane || !chat) return Math.max(MIN, window.innerWidth - CHAT_MIN)
+    const spare = pane.getBoundingClientRect().width + chat.getBoundingClientRect().width - CHAT_MIN
+    return Math.max(MIN, spare)
+  }
   const apply = (w) => {
     const next = Math.max(MIN, Math.min(max(), Math.round(w)))
     root.style.setProperty('--term-w', next + 'px')
