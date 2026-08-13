@@ -359,19 +359,42 @@ Cheap tier — no capability, runs on every PR:
   `LatestKnownOffset` it has no evidence for.
 - Fold idempotence across a replayed step and a network page covering the same offsets (the
   offset gate already guarantees it; this pins that replay goes through the gate).
+- **A shorter server does not truncate a longer client.** A session that answers `head` with a
+  log shorter than what this client has replayed leaves the replayed history standing. The
+  hazard is real and quiet: a rolled-back `LatestKnownOffset` reads as "you are ahead of the
+  log", and the honest answer is that history a client was given does not un-happen.
 
 `Browser` tier — Chromium only, no host machinery:
 
-- **Availability under fault**: a session with messages, reloaded with the network cut, still
-  shows those messages — *including ones in the partial tail*, which is the case the old chunk
-  policy could not hold — and still has a working composer. Scoped to the timeline element, and
-  regressed-to-red before it is believed: a bare page-level `Contains` would pass off the roster
-  while the timeline stayed empty.
-- **The store is the store**: after a load, the session's cache holds the chain and the HTTP
-  cache holds none of it — the one assertion that keeps a second copy from creeping back in.
-  Readable from Resource Timing (`transferSize`) and `caches.keys()`.
 - The shell loads cold with no network (service worker), and the retry affordance is present and
   keyboard-operable.
+
+`[Browser; Native]` — a real Session Process, in the existing path-mounted fixture
+([`Browser.fs:1071`](../../tests/Yession.Tests/Browser.fs)), which already kills the host, wipes
+its data directory, restarts it and reloads to prove a *draft* could only have come from the
+browser. History is that same test one level over, and it is the plan's acceptance criterion in
+two halves:
+
+- **The session's history is the client's (PR 2).** Send messages, kill the host, delete its
+  data directory, restart it, reload. The messages are still in the timeline — and they can only
+  have come from the client, because the server's copy was deleted. The same argument the draft
+  case already makes, applied to durable events, which today vanish. It runs before the service
+  worker exists because the restarted host still serves the shell.
+- **The session is down and the history is still there (PR 5).** Send messages, kill the host,
+  and *leave it dead*. Reload. The page loads at all (the worker's cached shell), the timeline
+  shows the history, and the client says it is retrying rather than saying the conversation is
+  empty. This is the bug report, verbatim, and it cannot go green before PR 5 — the shell is
+  `no-cache` and a dead host cannot answer a revalidation, so until the worker lands there is no
+  page to assert about.
+
+Both assert into `[data-conversation]` rather than the page, and both are regressed to red
+first: a bare page-level `Contains` is satisfied by the roster while the timeline sits empty,
+which is the exact failure mode a loosened UI assertion produces.
+
+One more, cheap to add where the fixture already stands: **the store is the store** — after a
+load, the session's cache holds the chain and the HTTP cache holds none of it. Readable from
+`caches.keys()` and Resource Timing (`transferSize`), and it is what keeps a second copy from
+creeping back in.
 
 Not tested: which element the loader is, what the strip says, or any class token. Those are the
 design changing, which is what a design is for.
@@ -387,7 +410,7 @@ next, and the reverse is not true.
 | 2 | **The walk and the store.** `HistoryCache` over the Cache API, follow `next`, replay from zero at boot above the `/me` probe, `LocalHistoryMsg`, gaps named, and the insecure-context line that says why there is no store. | A session unreachable with the network up (asleep, reaped) reads back in full. |
 | 3 | **Retrying that does not give up.** `online` re-arm, supervised reconnect, manual retry, GAPS entry closed. | Recovery without a reload. |
 | 4 | **The loader.** `HistoryRestore`, the empty-timeline split, the strip's restoring state. | The empty screen stops lying. |
-| 5 | **The service worker.** Shell and fingerprinted assets, scoped to the mount. Nothing else depends on it. | A cold open with no network at all. |
+| 5 | **The service worker.** Shell and fingerprinted assets, scoped to the mount. Nothing else depends on it. | A cold open with no network at all — and the bug report's own test goes green. |
 
 Splitting 1 from 2 is deliberate: the wire change is testable on its own (the 404 property, the
 chain's disjointness, the single response policy) and lands without touching the client's read
