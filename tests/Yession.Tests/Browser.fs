@@ -768,7 +768,10 @@ let editorTests =
                 let! page = await (ctx.NewPageAsync ())
                 page.SetDefaultTimeout 15000.0f
                 let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 8)))
-                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-panel]")
+                // Waited for on the CONTROL, never on the panel: a shut pane is `w-0`, which
+                // Playwright reports as hidden, so waiting for the panel to be visible before
+                // opening it waits for something that only happens afterwards.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-toggle='show']")
                 // This page carries two other fixtures ABOVE the shell — the editor host and
                 // the player — so the shell starts a viewport and a half down. Every control
                 // in it is reachable by scroll, which is fine for a person and a trap for a
@@ -784,7 +787,10 @@ let editorTests =
                                  document.querySelector('#shell [data-terminal-toggle="show"]').click()
                                  return true
                                }""")
-                let! _ = await (page.WaitForSelectorAsync "#shell [data-term-resize]")
+                // The column animates open, so let it arrive before measuring what it is.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width > 100")
 
                 let width () =
                     page.EvaluateAsync<float>
