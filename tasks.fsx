@@ -268,33 +268,66 @@ let private fable (quiet: bool) (project: string) (outDir: string) =
     else exec "dotnet" [ "fable"; project; "-o"; outDir ]
     declareEsm outDir
 
-// The conversation's typefaces (`app/fonts`, declared as @font-face in app/tailwind.css) are
-// folded INTO the emitted stylesheet as data URIs, so the one artefact the shell serves stays
-// one artefact: no font route on either server, nothing extra to stage into the npm package or
-// the Nix installable. Tailwind passes the `url()`s through untouched apart from quoting and
-// path rewriting, so the face is matched by FILENAME rather than by the path it was written as.
+// The conversation's typefaces (`app/fonts`, named by the @font-face `url()`s in
+// app/tailwind.css) are emitted BESIDE the built stylesheet, each under a name carrying a
+// digest of its own bytes, and the `url()` rewritten to match. Separate files rather than data
+// URIs inside the sheet, so the browser fetches only the weights a page renders and none of
+// them before it paints — the stylesheet is render-blocking and the faces are not.
 //
-// A reference with no vendored face is a build failure, not a silent 404 in the browser: the
-// stylesheet is emitted once and cached for a year at its own address.
+// Fingerprinting happens HERE rather than at boot, unlike every other asset the servers
+// address, because the address is written into the stylesheet: the server only has to
+// recognise the name, and a name it does not hold is a 404 rather than a stale byte.
+//
+// Tailwind passes the `url()`s through untouched apart from quoting and path rewriting, so a
+// face is matched by FILENAME rather than by the path it was written as. A reference with no
+// vendored face fails the build — the alternative is a 404 in a stylesheet cached for a year.
 let private cssFontUrl = Regex (@"url\(\s*['""]?([^)'""]+\.woff2)['""]?\s*\)", RegexOptions.IgnoreCase)
 
-let private inlineFonts (stylesheet: string) =
+/// The same content address the servers give the assets they read (`Interop.contentDigest`):
+/// SHA-256, base64url, first 12 characters.
+let private digestOf (bytes: byte array) =
+    Convert
+        .ToBase64String(Security.Cryptography.SHA256.HashData bytes)
+        .Replace('+', '-')
+        .Replace('/', '_')
+        .TrimEnd('=')
+        .Substring (0, 12)
+
+let private emitFonts (stylesheet: string) =
     let path = Path.Combine (repoRoot, stylesheet)
-    let inlined =
+    let fontsDir = Path.Combine (Path.GetDirectoryName path, "fonts")
+    Directory.CreateDirectory fontsDir |> ignore
+    let emitted = Collections.Generic.HashSet<string> ()
+    let rewritten =
         cssFontUrl.Replace (
             File.ReadAllText path,
             fun m ->
                 let face = Path.GetFileName m.Groups.[1].Value
-                let file = Path.Combine (repoRoot, "app/fonts", face)
-                if not (File.Exists file) then
+                let source = Path.Combine (repoRoot, "app/fonts", face)
+                if not (File.Exists source) then
                     failwithf "%s references %s, which is not vendored in app/fonts" stylesheet face
-                sprintf "url(data:font/woff2;base64,%s)" (Convert.ToBase64String (File.ReadAllBytes file)))
-    File.WriteAllText (path, inlined)
+                let bytes = File.ReadAllBytes source
+                let name = sprintf "%s.%s.woff2" (Path.GetFileNameWithoutExtension face) (digestOf bytes)
+                File.WriteAllBytes (Path.Combine (fontsDir, name), bytes)
+                emitted.Add name |> ignore
+                // `SessionRoute.fontsPrefix`, which is where both servers look. Relative, like
+                // every other address the app emits: it resolves against the STYLESHEET's URL,
+                // so a path-mounted session gets its own prefix for free.
+                sprintf "url(fonts/%s)" name)
+    File.WriteAllText (path, rewritten)
+    // A face left from an earlier build is one no stylesheet names any more, and it would be
+    // staged, packaged and served forever. Sweep, so the directory is exactly this build.
+    for stale in Directory.GetFiles (fontsDir, "*.woff2") do
+        if not (emitted.Contains (Path.GetFileName stale)) then File.Delete stale
 
-/// The served stylesheet, built locally (no CDN); scans the F# sources, carries its own faces.
-let private buildCss (output: string) (extra: string list) =
-    run tailwind ([ "-i"; "app/tailwind.css"; "-o"; output ] @ extra) |> ignore
-    inlineFonts output
+/// The stylesheets the app serves, built locally (no CDN): the shell's — which scans the F#
+/// sources for composed class names, and carries its faces beside it — and the replay player's,
+/// which is its own artefact because the shell defers it (see `app/player.css`).
+let private buildStyles (outDir: string) (minify: bool) =
+    let extra = if minify then [ "--minify" ] else []
+    run tailwind ([ "-i"; "app/tailwind.css"; "-o"; outDir + "/app.css" ] @ extra) |> ignore
+    emitFonts (outDir + "/app.css")
+    run tailwind ([ "-i"; "app/player.css"; "-o"; outDir + "/player.css" ] @ extra) |> ignore
 
 let compile () =
     printfn "compiling F# -> JS"
@@ -302,7 +335,7 @@ let compile () =
     fable true "app/main/Yession.Host.Main.fsproj" "app/out"
     fable true "app/browser/Yession.Browser.fsproj" "app/out/browser"
     run esbuild [ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--minify"; "--outfile=app/out/public/client.js" ] |> ignore
-    buildCss "app/out/public/app.css" [ "--minify" ]
+    buildStyles "app/out/public" true
 
 let build () =
     restore ()
@@ -417,7 +450,7 @@ let stage (version: string) =
 
     for required in
         [ "app/out/Main.js"; "app/SessionMain.js"
-          "app/out/public/client.js"; "app/out/public/app.css" ] do
+          "app/out/public/client.js"; "app/out/public/app.css"; "app/out/public/player.css" ] do
         if not (File.Exists (Path.Combine (repoRoot, required))) then
             failwithf "missing %s after compile" required
 
@@ -432,6 +465,14 @@ let stage (version: string) =
     // Assets (read package-relative at runtime by Interop.readAsset).
     File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
     File.Copy (Path.Combine (repoRoot, "app/out/public/app.css"), Path.Combine (pkg, "assets/app.css"), true)
+    File.Copy (Path.Combine (repoRoot, "app/out/public/player.css"), Path.Combine (pkg, "assets/player.css"), true)
+
+    // The faces app.css names, under the digest-bearing names it names them by. A directory
+    // rather than a listed file each, because which faces exist is the stylesheet's business:
+    // `emitFonts` already swept it down to exactly what this build references.
+    Directory.CreateDirectory (Path.Combine (pkg, "assets/fonts")) |> ignore
+    for face in Directory.GetFiles (Path.Combine (repoRoot, "app/out/public/fonts"), "*.woff2") do
+        File.Copy (face, Path.Combine (pkg, "assets/fonts", Path.GetFileName face), true)
 
     // Bin shims. `yession-manager` points the Manager at the packaged session bundle (both live
     // in one install), so it spawns `node session.js` with no PATH assumptions.
@@ -812,7 +853,7 @@ let private runCheckOnce (requested: string list) =
         // The harness renders the REAL shell (Plan 14), so it needs the real stylesheet:
         // without it every Tailwind class is inert, and any layout the browser tier measures
         // there — a phone viewport most of all — is a layout nobody will ever get.
-        buildCss "tests/browser/out/app.css" []
+        buildStyles "tests/browser/out" false
         progress "running the browser suite (.NET CLR)"
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 

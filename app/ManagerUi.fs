@@ -366,6 +366,11 @@ let private css = readAsset "app.css" cssPath fs
 
 let private cssUrl = SessionRoute.relative (AppCss (contentDigest css))
 
+/// The typefaces that stylesheet names. The Manager's own chrome does not wear the
+/// conversation's voices today, so a browser here fetches none of them — but this process
+/// hands out the sheet, and a server that serves a stylesheet answers for what is in it.
+let private fonts = readFonts cssPath fs
+
 /// The icon's constant is base64 (it lives in source); the wire wants the PNG. Same decode
 /// the session server does, for the same reason — `res.end` takes what Node's `end` takes.
 [<Fable.Core.Emit("Buffer.from($0, 'base64')")>]
@@ -485,6 +490,12 @@ let tryHandle
                 match css with
                 | Some body -> respondWith res 200 "text/css; charset=utf-8" CachePolicy.asset body
                 | None -> respond res 404 "text/plain" "stylesheet not built (run: build)")
+        | "GET", path when path.StartsWith ("/" + SessionRoute.fontsPrefix) ->
+            // A typeface the shared stylesheet asked for. Its `url()`s are relative to the
+            // sheet, and the Manager sits at its origin root, so they land here. The face is
+            // looked up by exact name — the build put a digest in it — which is both the
+            // validation and the reason nothing from the path reaches the file system.
+            Some (fun () -> serveFont (path.Substring ("/" + SessionRoute.fontsPrefix).Length) fonts res)
         | "GET", path when path = "/" + SessionRoute.relative Icon ->
             // The same mark the session shells wear, from the same constant — the Manager
             // sits at its origin root, so the relative address the page emits is this path.

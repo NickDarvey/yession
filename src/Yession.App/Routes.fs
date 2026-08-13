@@ -43,6 +43,20 @@ type SessionRoute =
     | ClientBundle of digest: string
     /// The locally built stylesheet (no CDN), addressed the same way.
     | AppCss of digest: string
+    /// The replay player's stylesheet, split out of `AppCss` and addressed the same way.
+    /// Its own file because it is needed only once somebody opens a recording, and a
+    /// stylesheet in the head is render-blocking: the shell links it inert (`media="not
+    /// all"`) and `Replay.mount` turns it on. Nothing else in the product is deferred like
+    /// this, because nothing else is both sizeable and used by a minority of sessions.
+    | PlayerCss of digest: string
+    /// One typeface the stylesheet asks for, by the exact file name the build emitted —
+    /// `<face>.<digest>.woff2`, fingerprinted at build time rather than at boot, because the
+    /// address is written into the stylesheet and the server only has to recognise it.
+    ///
+    /// The faces are separate files rather than data URIs inside the stylesheet (which is
+    /// what they were when they landed) so the browser fetches only the weights a page
+    /// actually renders, and fetches none of them before first paint.
+    | Font of file: string
     /// The web manifest, which is what makes the shell installable — and, once installed,
     /// what makes it launch without the browser's chrome (`WebApp`). NOT fingerprinted: a
     /// browser re-reads it by the address the document names, and the document names this.
@@ -116,6 +130,24 @@ module SessionRoute =
         then Some (segment.Substring (prefix.Length, segment.Length - prefix.Length - suffix.Length))
         else None
 
+    /// Where the faces live, relative to the stylesheet that names them. Public because the
+    /// Manager serves that same stylesheet from its own origin root and has to recognise the
+    /// addresses inside it — the two servers agreeing by inspection is exactly what this type
+    /// exists to prevent.
+    let fontsPrefix = "fonts/"
+
+    /// A face's file name as the build emits it. The character set is fixed by the build, so
+    /// anything outside it is simply not a route — which is also what keeps a segment the
+    /// server may look up on disk from ever carrying a separator or a dot-segment.
+    let private isFaceFile (segment: string) =
+        let ok c =
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+            || c = '.' || c = '-' || c = '_'
+        segment.EndsWith ".woff2"
+        && segment.Length > ".woff2".Length
+        && not (segment.Contains "..")
+        && segment |> Seq.forall ok
+
     let private claudeSegment (action: ClaudeAction) =
         match action with
         | ClaudeAction.Begin -> "begin"
@@ -138,6 +170,8 @@ module SessionRoute =
         | Shell -> ""
         | ClientBundle digest -> fingerprinted "client" "js" digest
         | AppCss digest -> fingerprinted "app" "css" digest
+        | PlayerCss digest -> fingerprinted "player" "css" digest
+        | Font file -> fontsPrefix + file
         | Manifest -> "manifest.webmanifest"
         | Icon -> "icon.png"
         | Signal -> "signal"
@@ -172,6 +206,7 @@ module SessionRoute =
         | "GET", [ "me" ] -> Some Me
         | "GET", [ "manifest.webmanifest" ] -> Some Manifest
         | "GET", [ "icon.png" ] -> Some Icon
+        | "GET", [ "fonts"; file ] when isFaceFile file -> Some (Font file)
         | "GET", [ "login" ] -> Some Login
         | "GET", [ "callback" ] -> Some Callback
         | "GET", [ "events"; index ] ->
@@ -202,7 +237,10 @@ module SessionRoute =
         | "GET", [ segment ] ->
             match fingerprintOf "client" "js" segment with
             | Some digest -> Some (ClientBundle digest)
-            | None -> fingerprintOf "app" "css" segment |> Option.map AppCss
+            | None ->
+                match fingerprintOf "app" "css" segment with
+                | Some digest -> Some (AppCss digest)
+                | None -> fingerprintOf "player" "css" segment |> Option.map PlayerCss
         | _ -> None
 
     /// The route a request is for when this session is served under `mount` (`""` at an
@@ -220,7 +258,8 @@ module SessionRoute =
 /// take them in the wrong order — two bare strings would be silently swappable.
 type AssetDigests =
     { Bundle: string
-      Css: string }
+      Css: string
+      Player: string }
 
 /// What the two static surfaces may be cached for, stated once because the session server and
 /// the Manager UI both serve them and the pair only works together: the shell is the document

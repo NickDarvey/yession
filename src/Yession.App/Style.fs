@@ -1077,3 +1077,13 @@ module Style =
     /// own bytes, which only the serving process (having read them) can know.
     let headTags (styleSheetUrl: string) =
         sprintf "<link rel=\"stylesheet\" href=\"%s\">" styleSheetUrl
+
+    /// A stylesheet the page may never need: linked, so its address is the server's to state
+    /// and the browser may fetch it whenever it likes, but `media="not all"` so it matches
+    /// nothing and cannot hold up first paint. Whoever needs it turns it on by flipping
+    /// `media` — `Replay.mount` does, for the replay player's sheet.
+    ///
+    /// Only worth doing for a sheet that is BOTH sizeable and used by a minority of sessions.
+    /// The app's own stylesheet is neither, and a page that deferred it would paint unstyled.
+    let deferredHeadTags (styleSheetUrl: string) (hook: string) =
+        sprintf "<link rel=\"stylesheet\" href=\"%s\" media=\"not all\" %s>" styleSheetUrl hook

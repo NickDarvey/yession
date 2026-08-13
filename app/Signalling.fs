@@ -39,6 +39,7 @@ let private fs : obj = Fable.Core.Util.jsNative
 // From the package's assets/ when installed; from the build output in development.
 let private readBundle () : string option = readAsset "client.js" bundlePath fs
 let private readCss () : string option = readAsset "app.css" cssPath fs
+let private readPlayerCss () : string option = readAsset "player.css" (besideCss cssPath "player.css") fs
 
 /// Serve a fingerprinted asset, but only at its own address.
 ///
@@ -154,7 +155,13 @@ let start
     // synchronous `readFileSync` on every hit.
     let bundle = readBundle ()
     let css = readCss ()
-    let assets = { Bundle = contentDigest bundle; Css = contentDigest css }
+    let playerCss = readPlayerCss ()
+    let fonts = readFonts cssPath fs
+
+    let assets =
+        { Bundle = contentDigest bundle
+          Css = contentDigest css
+          Player = contentDigest playerCss }
     let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin ephemeralStorage assets
     // The shell is a pure function of the session id, the mount, the Manager origin, and the
     // assets it names — all fixed at boot — so its validator is too, and a reload costs a 304
@@ -293,6 +300,15 @@ let start
         | Some (AppCss digest) ->
             // The locally built Tailwind stylesheet (no CDN).
             serveAsset digest assets.Css css "text/css; charset=utf-8" "stylesheet" res
+        | Some (PlayerCss digest) ->
+            // The replay player's own sheet, which the shell links inert and a mounted replay
+            // turns on. Split out of the stylesheet above so the sessions that never open a
+            // recording never pay for it.
+            serveAsset digest assets.Player playerCss "text/css; charset=utf-8" "player stylesheet" res
+        | Some (Font file) ->
+            // A typeface the stylesheet named. Separate files rather than data URIs inside it,
+            // so a page fetches only the weights it renders and none of them before it paints.
+            serveFont file fonts res
         // The two an INSTALL reads (`WebApp`), and the only routes here served to nobody in
         // particular: a browser fetches a manifest without credentials, and there is nothing
         // in either that a person outside the session could not see from the login page.

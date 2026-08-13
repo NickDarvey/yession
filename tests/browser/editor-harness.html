@@ -8,6 +8,10 @@
          shell below is the real `View.view`, and an unstyled one would make every layout
          this page is used to measure a fiction. -->
     <link rel="stylesheet" href="./out/app.css" />
+    <!-- The replay player's sheet, linked exactly as the shell links it: inert until
+         `Replay.mount` flips its media. Here so the harness answers the same question the
+         shell does — whether a mounted replay ends up styled — rather than a easier one. -->
+    <link rel="stylesheet" href="./out/player.css" media="not all" data-player-css />
   </head>
   <body>
     <!-- The editor mounts here; window.__md() returns the fragment's serialized Markdown.

@@ -775,7 +775,8 @@ let private shellTests =
     testList "Bootstrap shell" [
         // Digests the shell merely carries into its asset URLs; this suite is about the
         // manager meta tag, so any pair does.
-        let assets : AssetDigests = { Bundle = "testbundle01"; Css = "testcss0001" }
+        let assets : AssetDigests =
+            { Bundle = "testbundle01"; Css = "testcss0001"; Player = "testplayer1" }
 
         let pageWith (managerOrigin: string option) (ephemeralStorage: bool) =
             Yession.Host.Ssr.page sessionId "" managerOrigin ephemeralStorage assets representativeModel

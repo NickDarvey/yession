@@ -5,25 +5,24 @@
 
 @import "tailwindcss";
 
-/* The asciinema player's own stylesheet (Plan 13, stage 3e), inlined here rather than
-   emitted as a second artefact. One stylesheet is what the shell serves and what the
-   package ships; a CSS import from the esbuild bundle would produce a second file that
-   every consumer then has to know about. */
-@import "../node_modules/asciinema-player/dist/bundle/asciinema-player.css";
+/* The asciinema player's own stylesheet is NOT here: it is `app/player.css`, built beside this
+   one and linked inert in the shell until a replay is mounted. It is 16KB that most sessions
+   never render, and this sheet is render-blocking.
 
-/* The conversation's two voices: GitHub's Monaspace, Neon for what a person wrote and Krypton
+   The conversation's two voices: GitHub's Monaspace, Neon for what a person wrote and Krypton
    for what the agent said. Vendored under `app/fonts/` (SIL OFL 1.1, `app/fonts/LICENSE`)
    rather than fetched — same rule as everything else the shell serves, no CDN.
 
-   The `url()`s are resolved at BUILD time, not at request time: `tasks.fsx` inlines each face
-   as a data URI into the emitted stylesheet. That keeps the one artefact the shell serves one
-   artefact — the same reason the asciinema stylesheet is imported here rather than emitted
-   beside it — so neither server, nor the npm package, nor the Nix installable learns about a
-   font route.
+   The `url()`s are rewritten at BUILD time: `tasks.fsx` emits each face beside the stylesheet
+   under a name carrying a digest of its bytes, and both servers serve that directory. The
+   faces were data URIs inside this sheet when they landed, which put 350KB in front of the
+   first paint of every page — including the ones that render no conversation at all. As
+   separate files the browser fetches only the weights a page actually uses, and fetches them
+   after it has painted (`font-display: swap`).
 
    Three weights per family (the light body, the prose headings' normal, the semibold a strong
    run wears) and no italics: an `<em>` in a message is rare enough that the browser's synthetic
-   oblique is a fair trade against another 270KB of face. */
+   oblique is a fair trade against another six faces. */
 @font-face {
   font-family: 'Monaspace Neon';
   font-style: normal;

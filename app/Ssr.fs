@@ -124,6 +124,10 @@ let page (sessionId: SessionId) (mount: string) (managerOrigin: string option) (
         (if ephemeralStorage then sprintf "<meta name=\"%s\" content=\"1\">" Dom.ephemeralStorageMetaName else "")
         "<title>Yession</title>"
         Style.headTags (SessionRoute.relative (AppCss assets.Css))
+        // The replay player's sheet, linked but inert: most sessions never open a recording,
+        // and a second render-blocking stylesheet in the head would make all of them pay for
+        // the ones that do. `Replay.mount` flips its `media` when a replay is first shown.
+        Style.deferredHeadTags (SessionRoute.relative (PlayerCss assets.Player)) Dom.playerStylesheetHook
         // What makes this installable, and chrome-less once it is (`WebApp`). Both URLs are
         // relative, like every other one here, so they resolve under the mount rather than at
         // the origin root — and the manifest's own contents then resolve against ITS address.
