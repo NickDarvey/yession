@@ -40,11 +40,45 @@ ends up invoking `get_status_async` and being handed an un-awaited coroutine. St
 are drained to their first few items rather than described as `<generator object …>`, which is
 what makes `driver_call power read` the answer to "what is the board doing".
 
-**A request/response protocol can still hold a conversation.** Bytes do not ride tool calls:
-the console is a stream. Rather than a second transport, the stream stays open for the life of
-the claim and three tools drain it — `serial_send`, `serial_read`, and `serial_expect`, which
-is the one that matters, because waiting for a prompt is a request/response question even
-though the console is not.
+**Bytes do not ride tool calls, so they get a leg of their own.** The console is a stream, and
+there are two ways to reach it here — both of them useful, and the difference between them is
+who is asking:
+
+| leg | transport | carries |
+|---|---|---|
+| control | MCP over HTTP at `/mcp` | the eight tools |
+| data | WebSocket at `/attach/<token>` | the console's bytes, both ways |
+
+joined one way by a ticket, which `acquire` hands back in the result's `_meta`:
+
+```json
+"_meta": {
+  "dev.yession/stream": {
+    "url": "ws://127.0.0.1:7334/attach/8f2c…",
+    "label": "serial console",
+    "renewable": true
+  }
+}
+```
+
+That object is the whole of what a provider implements to have its console become a terminal
+a person can watch and type into. It is in `_meta` rather than in the content because a ticket
+is for the *client*, not for the model — a client that has never heard of the key ignores it,
+still gets the prose, and still has the three console tools.
+
+`serial_expect` remains the tool that matters on the control leg, with or without a stream:
+request/response cannot stream, but *waiting for a prompt* is a request/response question, and
+that is what console interaction mostly is.
+
+**One drain, two readers; one writer.** This is the part worth stealing. The SDK's console is
+a `pexpect` spawn, so whoever reads it consumes it: a drain loop feeding a socket would starve
+`serial_read`/`serial_expect` of the very bytes they exist to return, and the agent would go
+blind the moment a person opened the terminal. So while a stream is attached, one drain owns
+the console and everything else reads what it has already read.
+
+Writes go the other way — from two doors down to one. While a terminal is attached,
+`serial_send` refuses and says where to type instead, because two writers on one console is
+exactly what a terminal's write lease exists to arbitrate.
 
 ## The tools
 
@@ -55,7 +89,7 @@ though the console is not.
 | `release` | yes | give it back, closing the console |
 | `power` | yes | `on`, `off`, or `cycle` |
 | `driver_call` | yes | any method on any driver in the tree — the general case. Call it with no method to be told what that driver offers |
-| `serial_send` | yes | write to the console |
+| `serial_send` | yes | write to the console (refused while a terminal is attached — type there) |
 | `serial_read` | yes | everything it has said, up to a pause |
 | `serial_expect` | yes | wait for a pattern; on a timeout, say what WAS seen |
 
@@ -100,6 +134,7 @@ Configured entirely by the environment:
 | `JUMPSTARTER_HOST` | `127.0.0.1:8815` | the exporter's gRPC address |
 | `JUMPSTARTER_PROVIDER_CONSOLE` | `serial` | which exported driver is the console |
 | `JUMPSTARTER_PROVIDER_TTL` | `300` | seconds of client silence that release a claim |
+| `JUMPSTARTER_PROVIDER_ORIGIN` | the bound address | the `ws://` origin clients should attach to, when the provider sits behind something |
 
 **Loopback is the only deployment this is honest about**, twice over: the MCP leg is
 unauthenticated, and the exporter's gRPC leg runs insecure with no passphrase. Either one
@@ -151,3 +186,4 @@ The suite is deliberately two-layered, and the second layer is not here:
 | [src/jumpstarter_provider/main.py](src/jumpstarter_provider/main.py) | argument handling, the environment, and one line of output naming both ends |
 | [src/jumpstarter_provider/provider.py](src/jumpstarter_provider/provider.py) | the eight tools, the claim, and the liveness that ends one |
 | [src/jumpstarter_provider/exporter.py](src/jumpstarter_provider/exporter.py) | the SDK, behind one seam and on one thread |
+| [src/jumpstarter_provider/stream.py](src/jumpstarter_provider/stream.py) | the data leg: one drain, two readers, one writer |

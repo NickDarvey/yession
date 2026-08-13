@@ -28,7 +28,9 @@ Configured entirely by the environment:
   JUMPSTARTER_HOST              the exporter's gRPC address (default 127.0.0.1:8815)
   JUMPSTARTER_PROVIDER_CONSOLE  which driver is the serial console (default serial)
   JUMPSTARTER_PROVIDER_TTL      seconds of client silence that release a claim \
-(default {int(DEFAULT_CLAIM_TTL_SECONDS)})"""
+(default {int(DEFAULT_CLAIM_TTL_SECONDS)})
+  JUMPSTARTER_PROVIDER_ORIGIN   the ws:// origin clients should attach to, when the
+                                provider sits behind something (default: what it bound)"""
 
 
 def main() -> None:
@@ -56,7 +58,19 @@ def main() -> None:
     console = os.environ.get("JUMPSTARTER_PROVIDER_CONSOLE", "serial")
     ttl = float(os.environ.get("JUMPSTARTER_PROVIDER_TTL", DEFAULT_CLAIM_TTL_SECONDS))
 
-    provider = create(host=exporter, console=console, ttl_seconds=ttl, version=__version__)
+    # The data leg's address, resolved LATE — port 0 is a legitimate ask (every test makes
+    # it) and a provider does not know its own address until it is listening. An operator
+    # who puts this behind something says so, exactly as the serial example allows.
+    bound_origin = os.environ.get("JUMPSTARTER_PROVIDER_ORIGIN", "")
+    origins: list[str] = [bound_origin]
+
+    provider = create(
+        host=exporter,
+        console=console,
+        ttl_seconds=ttl,
+        version=__version__,
+        origin=lambda: origins[0],
+    )
 
     # One line, printed once the port is BOUND rather than before, because
     # JUMPSTARTER_PROVIDER_PORT=0 is a legitimate ask (every test does it) and a line
@@ -66,9 +80,12 @@ def main() -> None:
         async def startup(self, sockets: list | None = None) -> None:  # type: ignore[override]
             await super().startup(sockets)
             bound = self.servers[0].sockets[0].getsockname()[1]
+            if not origins[0]:
+                origins[0] = f"ws://{host}:{bound}"
             print(
                 f"jumpstarter-provider {__version__}: "
-                f"MCP at http://{host}:{bound}/mcp, exporter at {exporter}",
+                f"MCP at http://{host}:{bound}/mcp, streams at {origins[0]}/attach/<token>, "
+                f"exporter at {exporter}",
                 flush=True,
             )
 

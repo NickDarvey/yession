@@ -19,8 +19,10 @@ from typing import Any, Callable
 
 import anyio
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.types import CallToolResult, TextContent
 
 from .exporter import Exporter, ExporterError
+from .stream import Console
 
 # A claim follows a live MCP session. A session is alive while it is TALKING: every request
 # under its id — a tool call, or the `tools/list` a client polls with — pushes the deadline
@@ -30,6 +32,9 @@ from .exporter import Exporter, ExporterError
 # and a crashed client are the same event seen at different speeds, and a second mechanism
 # for the first case would be a second answer to "who holds this".
 DEFAULT_CLAIM_TTL_SECONDS = 300.0
+
+# Where the data leg lives, on the same listener as `/mcp`.
+ATTACH_PATH = "/attach/"
 
 
 @dataclass
@@ -95,6 +100,13 @@ class Claims:
         return True
 
 
+def _said(text: str) -> CallToolResult:
+    """Prose, as the one shape a tool that SOMETIMES carries `_meta` may answer with. The
+    SDK refuses a union return, and rightly: a signature that is sometimes a result and
+    sometimes a string is two contracts."""
+    return CallToolResult(content=[TextContent(type="text", text=text)])
+
+
 def _short(holder: str) -> str:
     """An MCP session id is 32 hex characters, and a refusal that quotes all of it reads as
     a hash rather than as somebody. The first eight are enough to tell two clients apart."""
@@ -104,9 +116,20 @@ def _short(holder: str) -> str:
 class Provider:
     """The MCP server, the exporter behind it, and the claim between them."""
 
-    def __init__(self, exporter: Exporter, claims: Claims, version: str) -> None:
+    def __init__(
+        self,
+        exporter: Exporter,
+        claims: Claims,
+        version: str,
+        origin: Callable[[], str],
+        console: Console,
+    ) -> None:
         self.exporter = exporter
         self.claims = claims
+        # Where this server's own data leg is, resolved LATE: a provider bound to port 0
+        # does not know its address until it is listening, and every test binds port 0.
+        self.origin = origin
+        self.console = console
         # `jumpstarter` is the namespace every tool of this server lands in for a client
         # that prefixes them (Yession shows `mcp__jumpstarter__power`), so it is not a
         # label — it is half of every name the model sees.
@@ -164,17 +187,29 @@ class Provider:
             return f"exporter at {self.exporter.host}, {held}.\nDrivers:\n{listed}"
 
         @mcp.tool()
-        async def acquire(ctx: Context) -> str:
-            """Claim this exporter for your exclusive use. Everything that touches the hardware needs the claim, because powering the board off cuts the console out from under anyone else. One holder at a time: if somebody else has it, this says who. Release it when you are done."""
+        async def acquire(ctx: Context) -> CallToolResult:
+            """Claim this exporter for your exclusive use, and get its console as a stream. Everything that touches the hardware needs the claim, because powering the board off cuts the console out from under anyone else. One holder at a time: if somebody else has it, this says who. Release it when you are done."""
             holder = self._holder(ctx)
             if not holder:
-                return "this request carries no MCP session id, so nothing can be claimed by it"
+                return _said("this request carries no MCP session id, so nothing can be claimed by it")
             took, other = self.claims.acquire(holder)
             if not took:
-                return f"the exporter is already held by {_short(other or '')} — it is in use, not broken"
-            return (
+                return _said(f"the exporter is already held by {_short(other or '')} — it is in use, not broken")
+            held = (
                 "the exporter is yours. It stays yours while you keep talking to this server, "
                 f"and is released automatically after {int(self.claims.ttl_seconds)}s of silence."
+            )
+            # The console, as a stream a CLIENT can open — in `_meta`, which is the place MCP
+            # reserves for data meant for the client rather than the model. A client that has
+            # never heard of the key ignores it and still gets the prose, and still has the
+            # three console tools; one that knows it turns the console into a terminal people
+            # can watch and type into.
+            offer = self.console.offer(self.origin(), holder)
+            if offer is None:
+                return _said(f"{held} Its console is already attached to a terminal.")
+            return CallToolResult(
+                content=[TextContent(type="text", text=held)],
+                meta={"dev.yession/stream": offer},
             )
 
         @mcp.tool()
@@ -232,6 +267,14 @@ class Provider:
             refusal = self._refusal(ctx)
             if refusal:
                 return refusal
+            # One writer, and while a terminal is attached it is the terminal's — where a
+            # lease says who is typing and everyone can see the keystrokes. Writing here as
+            # well would be a second door onto one console, past that lease.
+            if self.console.attached:
+                return (
+                    "the console is attached to a terminal — type into it there "
+                    "(write_terminal), where people can see who is typing"
+                )
             try:
                 await _off_loop(lambda: self.exporter.console_send(data))
             except ExporterError as error:
@@ -245,7 +288,7 @@ class Provider:
             if refusal:
                 return refusal
             try:
-                seen = await _off_loop(lambda: self.exporter.console_read(_timeout(timeout_seconds)))
+                seen = await self.console.read(_timeout(timeout_seconds))
             except ExporterError as error:
                 return f"the console is not readable: {error}"
             return seen if seen else "(the console said nothing)"
@@ -257,9 +300,7 @@ class Provider:
             if refusal:
                 return refusal
             try:
-                matched, seen = await _off_loop(
-                    lambda: self.exporter.console_expect(pattern, _timeout(timeout_seconds))
-                )
+                matched, seen = await self.console.expect(pattern, _timeout(timeout_seconds))
             except ExporterError as error:
                 return f"the console is not readable: {error}"
             if matched:
@@ -276,6 +317,7 @@ class Provider:
         polling client is a live client)."""
         inner = self.mcp.streamable_http_app()
         claims = self.claims
+        console = self.console
 
         async def app(scope: Any, receive: Any, send: Any) -> None:
             if scope["type"] == "http":
@@ -285,6 +327,16 @@ class Provider:
                         break
                 else:
                     claims.expire()
+            # The data leg (Plan 19), on the same port as the control leg — which is the
+            # whole reason a WebSocket was the right shape: the upgrade rides the listener
+            # the provider already has.
+            if scope["type"] == "websocket":
+                path = scope.get("path", "")
+                if path.startswith(ATTACH_PATH):
+                    await console.serve(path[len(ATTACH_PATH) :], receive, send)
+                    return
+                await send({"type": "websocket.close", "code": 1008})
+                return
             await inner(scope, receive, send)
 
         return app
@@ -302,10 +354,23 @@ async def _off_loop(work: Callable[[], Any]) -> Any:
     return await anyio.to_thread.run_sync(work)
 
 
-def create(host: str, console: str, ttl_seconds: float, version: str) -> Provider:
+def create(
+    host: str,
+    console: str,
+    ttl_seconds: float,
+    version: str,
+    origin: Callable[[], str] = lambda: "",
+) -> Provider:
     exporter = Exporter(host=host, console_name=console)
+    stream = Console(exporter=exporter, off_loop=_off_loop)
+
     # A claim ending closes the console, wherever that claim ended: `release`, or silence.
     # The console is the DUT's, not the holder's, and leaving it open would hand the next
-    # holder a stream mid-sentence.
-    claims = Claims(ttl_seconds=ttl_seconds, on_release=exporter.close_console_quietly)
-    return Provider(exporter=exporter, claims=claims, version=version)
+    # holder a stream mid-sentence. The STREAM is the claim's for the same reason, so its
+    # token dies with it.
+    def released() -> None:
+        stream.release()
+        exporter.close_console_quietly()
+
+    claims = Claims(ttl_seconds=ttl_seconds, on_release=released)
+    return Provider(exporter=exporter, claims=claims, version=version, origin=origin, console=stream)
