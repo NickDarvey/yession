@@ -1833,7 +1833,7 @@ module View =
                     html $"""
                         <button type="button" class="{Style.terminalReplayFrom}"
                                 data-terminal-rewind="{TerminalId.value view.TerminalId}"
-                                @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>↻ replay from the start</button>"""
+                                @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>↑ replay from the start</button>"""
                 else Lit.nothing
             let backToLive =
                 if not (view.IsOpen && rewound) then Lit.nothing
@@ -1999,7 +1999,7 @@ module View =
                                 <button type="button" class="{Style.terminalBarAct}" data-terminal-rewind="{TerminalId.value view.TerminalId}"
                                         @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>rewind</button>"""
                         else Lit.nothing
-                    html $"""{approval}{take}{rewind}"""
+                    html $"""{approval}<span class="{Style.terminalBarActs}">{take}{rewind}{closeSelected}</span>"""
             | _ -> Lit.nothing
         // The bar names the SELECTED tab, which is the thing a reader cannot work out for
         // themselves. It used to say "terminals" — the largest text on a phone screen, telling
@@ -2014,7 +2014,6 @@ module View =
                 <div class="{Style.terminalHead}">
                   <span class="{Style.terminalHeadName}">{paneName}</span>
                   {properties}
-                  {closeSelected}
                   <button type="button" class="{Style.navChevronForward}" aria-label="Back to the chat"
                           data-terminal-toggle="hide"
                           @click={Ev(fun _ ->

@@ -864,6 +864,10 @@ module Style =
         cls [ caps; "bg-transparent cursor-pointer shrink-0 px-1.5 py-1 transition-colors"
               Stroke.clear; focusRing ]
     let terminalBarAct = cls [ terminalBarActBase; "text-ink-faint hover:text-ink" ]
+    /// The acts, grouped and set apart from the facts beside them. Same tone, same voice —
+    /// what separates them is the gap, because a bar of eight evenly spaced words reads as one
+    /// run-on and a reader has to parse it to find the verb.
+    let terminalBarActs = "flex items-center gap-1 ml-3"
     /// Closing a terminal kills what is running in it. It reddens under the hand — the same
     /// promise the danger button makes, kept without the rectangle.
     let terminalBarDanger = cls [ terminalBarActBase; "text-ink-faint hover:text-err" ]
