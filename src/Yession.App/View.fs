@@ -1193,14 +1193,47 @@ module View =
                     let text = reason |> Option.defaultValue "did not run"
                     html $"""<div class="{Style.terminalOutputEmpty}" data-terminal-output>{text}</div>"""
             else html $"""<div class="{Style.terminalOutput}" data-terminal-output>{ansiText output}</div>"""
+        // A command that ran and exited 0 says so by being followed by its output and
+        // nothing else — which is what every terminal anyone has used does. `✓ 0` beside
+        // every line was the same fact, printed whether or not it was news, on the surface
+        // that carries the most lines. What is NEWS keeps its status: running, failed,
+        // timed out, refused.
+        let notable =
+            match block.Status with
+            | BlockFinished (CommandSucceeded _) -> Lit.nothing
+            | status -> html $"""<span class="shrink-0">{terminalBlockStatus model status}</span>"""
+        // The facts that used to have nowhere to go, or nowhere better than a status beside
+        // the command: who ran it, who let it through, and how it ended. Behind a
+        // disclosure, because a scrollback is read for its OUTPUT and the provenance is what
+        // you go looking for afterwards — and it is a real `<details>`, so going looking is
+        // a keypress and an announcement rather than a click handler.
+        let fact (text: string) = html $"""<span class="{Style.terminalBlockFact}">{text}</span>"""
+        let exitFact =
+            match block.Status with
+            | BlockFinished (CommandSucceeded code)
+            | BlockFinished (CommandFailed code) -> [ fact (sprintf "exit %d" code) ]
+            | BlockFinished CommandTimedOut -> [ fact "timed out" ]
+            | BlockFinished (CommandExecutionFailed reason) -> [ fact (sprintf "did not run — %s" reason) ]
+            | BlockRejected (by, _) -> [ fact (sprintf "refused by %s" (authorName model by)) ]
+            | BlockRunning -> []
+        let facts =
+            [ fact (sprintf "ran by %s" (authorName model block.Author))
+              match block.ApprovedBy with
+              | Some by -> fact (sprintf "approved by %s" (authorName model by))
+              | None -> ()
+              yield! exitFact ]
         html $"""
             <article class="{Style.terminalBlock}" data-terminal-block="{BlockId.value block.BlockId}"
                      data-terminal-block-status="{terminalBlockStatusLabel block.Status}">
-              <div class="{Style.terminalBlockCommand}">
-                <span class="{Style.terminalPrompt}">$</span>
-                <code class="{Style.terminalCommandText}">{block.Command}</code>
-                <span class="ml-auto shrink-0">{terminalBlockStatus model block.Status}</span>
-              </div>
+              <details>
+                <summary class="{Style.terminalBlockSummary}">
+                  <span class="{Style.terminalPrompt}">$</span>
+                  <code class="{Style.terminalCommandText}">{block.Command}</code>
+                  {notable}
+                  <span class="{Style.terminalBlockMark}" aria-hidden="true">…</span>
+                </summary>
+                <div class="{Style.terminalBlockFacts}" data-terminal-block-facts>{facts}</div>
+              </details>
               {body}
             </article>"""
 
@@ -1454,7 +1487,7 @@ module View =
             else
                 html $"""
                     <button type="button" class="{Style.cls [ Style.btn; "ml-auto" ]}" data-terminal-take="{TerminalId.value terminal}"
-                            @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take terminal</button>"""
+                            @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take it</button>"""
         // In live mode the command lines give way to the lease bar. Drafting into a box marked
         // "Run" that cannot run anything is the misleading half; the QUEUE above stays, because
         // queueing during a live session is meaningful — the entry runs the moment the terminal
@@ -1502,15 +1535,20 @@ module View =
         html $"""
             <section class="{Style.terminalComposer}">
               {lostBanner}
-              <div class="{Style.sideRow}">
-                <label class="{Style.label}" for="terminal-mode">approval</label>
-                <select id="terminal-mode" class="{Style.field} w-auto" data-terminal-mode="{ApprovalMode.describe mode}"
-                        @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (ForTerminal terminal, m)) | None -> ())}>
-                  <option value="approve-agent" ?selected={mode = ApproveAgent}>the agent's commands</option>
-                  <option value="approve-all" ?selected={mode = ApproveAll}>every command</option>
-                  <option value="auto" ?selected={mode = AutoRun}>nothing — run them</option>
-                </select>
-                {takeControl}
+              <div class="{Style.terminalField}">
+                <div class="{Style.terminalFieldHead}">
+                  <label class="{Style.label}" for="terminal-mode">approval</label>
+                  {takeControl}
+                </div>
+                <div class="{Style.fieldSelectWrap}">
+                  <select id="terminal-mode" class="{Style.fieldSelect}" data-terminal-mode="{ApprovalMode.describe mode}"
+                          @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (ForTerminal terminal, m)) | None -> ())}>
+                    <option value="approve-agent" ?selected={mode = ApproveAgent}>the agent's commands</option>
+                    <option value="approve-all" ?selected={mode = ApproveAll}>every command</option>
+                    <option value="auto" ?selected={mode = AutoRun}>nothing — run them</option>
+                  </select>
+                  <span class="{Style.fieldSelectMark}">{Icon.down}</span>
+                </div>
               </div>
               {terminalQueue actions dispatch model terminal}
               {commandLines}
@@ -1632,10 +1670,12 @@ module View =
                              data-pane-replay="{PaneTab.key (BlockTab (terminalId, blockId))}"></div>"""
             html $"""
                 <section class="{Style.paneBody}" data-pane-block="{BlockId.value blockId}">
-                  <div class="{Style.terminalBlockCommand}">
-                    <span class="{Style.terminalPrompt}">$</span>
-                    <code class="{Style.terminalCommandText}">{block.Command}</code>
-                    <span class="ml-auto shrink-0">{terminalBlockStatus model block.Status}</span>
+                  <div class="{Style.paneFacts}">
+                    <div class="{Style.terminalBlockCommand}">
+                      <span class="{Style.terminalPrompt}">$</span>
+                      <code class="{Style.terminalCommandText}">{block.Command}</code>
+                      <span class="ml-auto shrink-0">{terminalBlockStatus model block.Status}</span>
+                    </div>
                   </div>
                   {body}
                   <div class="{Style.paneFacts}">{stepOut}</div>
@@ -1775,7 +1815,7 @@ module View =
                             sprintf "behind live — %s" (durationText (System.TimeSpan.FromSeconds seconds))
                         | _ -> "behind live"
                     html $"""
-                        <div class="{Style.terminalQueuedRow}">
+                        <div class="{Style.terminalDvr}">
                           <span class="{Style.statusFaint}" data-terminal-behind="{TerminalId.value view.TerminalId}">{behind}</span>
                           <button type="button" class="{Style.cls [ Style.btnPrimary; "ml-auto" ]}"
                                   data-terminal-live="{TerminalId.value view.TerminalId}"
@@ -1783,7 +1823,7 @@ module View =
                         </div>"""
                 elif feed.KnownLength > 0 then
                     html $"""
-                        <div class="{Style.terminalQueuedRow}">
+                        <div class="{Style.terminalDvr}">
                           <button type="button" class="{Style.cls [ Style.btn; "ml-auto" ]}"
                                   data-terminal-rewind="{TerminalId.value view.TerminalId}"
                                   @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Rewind</button>
@@ -1805,17 +1845,24 @@ module View =
                 else
                     match view.Lease with
                     | Some holder ->
+                        // The blocks give way to the screen — and so does their BOX. It used
+                        // to stay behind as an empty `flex-1` region holding only the
+                        // truncation notice, so a live terminal spent a third of its column
+                        // (measured 291px of 844 on a phone) on a container with nothing in
+                        // it, and the surface the keyboard actually types into got the same
+                        // third. The notice is a line and now renders as one.
                         html $"""
-                            <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
-                              {truncated}
-                            </div>
+                            {truncated}
                             {dvr}
                             {terminalScreenView actions model view.TerminalId holder}"""
                     | None ->
                         html $"""
-                            <div class="{Style.terminalBlocks}" data-terminal-id="{TerminalId.value view.TerminalId}">
-                              {truncated}
-                              {blocks}
+                            <div class="{Style.terminalScrollback}" data-terminal-scrollback
+                                 data-terminal-id="{TerminalId.value view.TerminalId}">
+                              <div class="{Style.terminalStream}">
+                                {truncated}
+                                {blocks}
+                              </div>
                             </div>
                             {dvr}"""
             html $"""
@@ -1862,7 +1909,7 @@ module View =
                 match TerminalProjection.tryFind id model.Terminals with
                 | Some view when view.IsOpen ->
                     html $"""
-                        <button type="button" class="{Style.cls [ Style.terminalTab; "ml-auto" ]}" data-terminal-close="{TerminalId.value view.TerminalId}"
+                        <button type="button" class="{Style.cls [ Style.terminalTabClose; "ml-auto" ]}" data-terminal-close="{TerminalId.value view.TerminalId}"
                                 aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>close</button>"""
                 // A closed stream, and a provider that said asking again is safe (Plan 19).
                 // Shown ONLY when both are true: a control that mostly refuses teaches people
@@ -1887,9 +1934,11 @@ module View =
                                         // reader came from, exactly as closing a tab does.
                                         selected |> Option.iter (PaneTab.key >> actions.FocusChat))}>{Icon.right}</button>
                 </div>
-                <div class="{Style.terminalTabs}" role="tablist" aria-label="Terminals and recordings"
-                     @keydown={Ev(fun e -> moveTabFocus e)}>
-                  {tabs |> List.map tabButton}
+                <div class="{Style.terminalTabs}">
+                  <div class="{Style.terminalTabList}" role="tablist" aria-label="Terminals and recordings"
+                       @keydown={Ev(fun e -> moveTabFocus e)}>
+                    {tabs |> List.map tabButton}
+                  </div>
                   <button type="button" class="{Style.terminalTabNew}" data-terminal-new
                           @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
                   {closeSelected}
