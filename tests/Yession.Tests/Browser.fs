@@ -787,28 +787,24 @@ let editorTests =
                                  document.querySelector('#shell [data-terminal-toggle="show"]').click()
                                  return true
                                }""")
-                // The column ANIMATES, so every width here is read once it has MOVED off the
-                // width it was at and then stopped. Both halves are load-bearing. "Stopped"
-                // alone is satisfied instantly by a column that has not started yet — the
-                // stability marker is still holding the previous reading — so the measurement
-                // lands before the keypress takes effect and the test reports that nothing
-                // happened while the column is, at that moment, moving.
-                let settledAwayFrom (from: float) =
-                    page.WaitForFunctionAsync
-                        (sprintf """() => {
-                             const w = document.querySelector('#shell [data-terminal-panel]')
-                                         .getBoundingClientRect().width
-                             if (Math.abs(w - %f) < 0.5) return false
-                             const still = window.__w === w
-                             window.__w = w
-                             return still
-                           }""" from)
-                let width () =
+                // Read on `aria-valuenow`, not on the rendered width.
+                //
+                // Not a convenience: the column animates, so its rendered width spends 200ms
+                // being neither the old value nor the new one, and every way of asking "has it
+                // settled" from the outside is a heuristic. Sampling twice and comparing was
+                // the one tried here, and it accepted a 1px panel — a shut pane is its own left
+                // border — as "open and settled" because two polls happened to agree before the
+                // transition started. It passed twice and failed the third time, which is worse
+                // than not having been written.
+                //
+                // The separator's value is the state the shell actually owns: the keydown
+                // handler sets it synchronously, so there is nothing to wait for and nothing to
+                // race. It is also the thing this test is ABOUT — what a keyboard user is told
+                // the split is. That the pixels follow it is asserted once at the end, where
+                // the target is known and the wait is therefore deterministic.
+                let value () =
                     page.EvaluateAsync<float>
-                        "() => document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width"
-                // A shut pane is zero wide, so "away from 0 and stopped" is "open and settled".
-                let! _ = await (settledAwayFrom 0.0)
-                let! before = await (width ())
+                        "() => Number(document.querySelector('#shell [data-term-resize]').getAttribute('aria-valuenow'))"
 
                 // Focusable, and it says what it is: a separator with a value is the one
                 // shape assistive technology can report and move.
@@ -823,6 +819,7 @@ let editorTests =
                                      && h.hasAttribute('aria-valuenow')
                                }""")
                 Expect.isTrue isSeparator "the focused divider is a separator carrying its value"
+                let! before = await (value ())
 
                 // The two arrows move it, and they are opposites. Which one GROWS the column
                 // is deliberately not asserted: this one is on the right, so left-grows reads
@@ -831,35 +828,31 @@ let editorTests =
                 // one — and a test that failed for it would be reporting taste as a
                 // regression. What has to hold is that a keyboard can move the split at all,
                 // and that the second press undoes the first.
-                //
-                // Asserted rather than waited for, so a failure reports the widths it saw:
-                // "the column did not move" and "something timed out" are the same red, and
-                // only one of them tells you anything.
                 do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
-                let! _ = await (settledAwayFrom before)
-                let! moved = await (width ())
+                let! moved = await (value ())
                 Expect.isTrue
                     (abs (moved - before) > 1.0)
                     (sprintf "an arrow key must move the split (was %f, still %f)" before moved)
                 do! awaitU (page.Keyboard.PressAsync "ArrowRight")
-                let! _ = await (settledAwayFrom moved)
-                let! back = await (width ())
+                let! back = await (value ())
                 Expect.isTrue
                     (abs (back - before) < abs (moved - before))
                     (sprintf "the opposite arrow must move it back (started %f, went %f, now %f)"
                         before moved back)
 
-                // And the value it reports follows the width it is actually at, or it is
-                // narrating something other than what happened.
-                let! reported =
-                    await (page.EvaluateAsync<bool>
+                // And the column is really that wide, once it has finished travelling there.
+                // Deterministic because the destination is declared: what is waited for is the
+                // pixels catching up to the value, not a guess about when a transition ended.
+                // Without this the test would be happy with a separator that narrates a resize
+                // nothing performed.
+                let! _ =
+                    await (page.WaitForFunctionAsync
                             """() => {
                                  const h = document.querySelector('#shell [data-term-resize]')
+                                 const pane = document.querySelector('#shell [data-terminal-panel]')
                                  const said = Number(h.getAttribute('aria-valuenow'))
-                                 const is = document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().width
-                                 return Math.abs(said - is) <= 1
+                                 return Math.abs(pane.getBoundingClientRect().width - said) <= 1
                                }""")
-                Expect.isTrue reported "the separator reports the width the column is actually at"
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()

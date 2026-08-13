@@ -107,10 +107,18 @@ let setOpen (isOpen: bool) : unit = jsNative
     const pane = document.querySelector('[data-terminal-panel]')
     return pane ? pane.getBoundingClientRect().width : MIN
   }
+  // Seeded at install, ALWAYS — not only when a width was remembered.
+  //
+  // Unseeded, `current()` had to fall back to measuring the column, and the column animates:
+  // asked while it is opening it answers 1px (a shut pane is its own left border) or whatever
+  // the easing has reached, and the arrow keys then step from a number that was never the
+  // split. It also left the separator reporting the literal the template ships until somebody
+  // resized, which is a value assistive technology reads and nothing had checked.
   let remembered = NaN
   try { remembered = Number(localStorage.getItem(KEY)) } catch (e) {}
-  if (remembered > 0) apply(remembered)
-  window.addEventListener('resize', () => { if (root.style.getPropertyValue('--term-w')) apply(current()) })
+  const fromToken = parseFloat(getComputedStyle(root).getPropertyValue('--spacing-term'))
+  apply(remembered > 0 ? remembered : (fromToken > 0 ? fromToken : MIN))
+  window.addEventListener('resize', () => apply(current()))
   document.addEventListener('pointerdown', (e) => {
     const handle = e.target instanceof Element && e.target.closest('[data-term-resize]')
     if (!handle) return
