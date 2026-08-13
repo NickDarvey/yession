@@ -199,6 +199,13 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
+          # The commit this run BUILT, and not the default branch, which is what the release
+          # API tags when this is left out. Master moves while a run is in flight, so the tag
+          # was landing on whatever had merged since — three commits released untagged that
+          # way, and each following commit wore a version computed from somebody else's
+          # history. That is also how a `+semver:` marker was lost: the next run found a tag
+          # sitting on its own HEAD, computed an EMPTY range, and never read its own message.
+          target_commitish: ${{ github.sha }}
           name: Yession ${{ env.VERSION }}
           prerelease: true
           generate_release_notes: true
