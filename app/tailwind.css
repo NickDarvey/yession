@@ -139,6 +139,12 @@
   }
 }
 
+/* A `<summary>` we have styled ourselves — the chat's tool runs, a block's facts — draws
+   the browser's disclosure triangle as well unless told twice: `list-style: none` (which
+   Tailwind's `list-none` sets) is the standard spelling, and WebKit reads only this one.
+   Without it every disclosure in the product wears a stray triangle on iOS and Safari. */
+summary::-webkit-details-marker { display: none; }
+
 /* Presence carets in a body editor (widget decorations built in `Editor.buildBodyDecorations`;
    the DOM + per-peer colour are set inline by `ProseMirror.caretDom`). The colour rides on
    `border-color`/`background`; these rules give the bar its shape and float the name label. */

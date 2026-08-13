@@ -214,7 +214,7 @@ module Style =
     /// they travel on hover and lead further on press — the only motion chrome earns, and the
     /// reason the two directions are separate values rather than one class plus a guess.
     let private navChevronBase =
-        "bg-transparent border-0 cursor-pointer text-ink-faint hover:text-ink text-small px-1 "
+        "bg-transparent border-0 cursor-pointer text-ink-faint hover:text-ink text-small p-1.5 -m-1.5 "
         + "flex items-center gap-1 transition-[translate,color] duration-150 ease-out "
         + "motion-reduce:transition-none " + focusRing
 
@@ -249,6 +249,16 @@ module Style =
     /// A settings field (input/select): the body scale, never the title's, full width in
     /// the column it sits in.
     let field = cls [ fieldFace; "w-full font-light text-small leading-5 text-ink placeholder:text-ink-faint"; touchType ]
+
+    /// A select. Everything a field is, plus room for the mark below it — `appearance-none`
+    /// (see `fieldFace`) takes the platform's caret away, and a menu with no caret is a text
+    /// box that will not take text.
+    let fieldSelect = cls [ fieldFace; "w-full pr-9 font-light text-small leading-5 text-ink" ]
+
+    /// Its mark, drawn beside it. Absolutely positioned in the wrapper the select sits in and
+    /// deaf to the pointer, so the whole rectangle still opens the menu.
+    let fieldSelectWrap = "relative w-full"
+    let fieldSelectMark = "pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint"
 
     /// The same field in mono, sized by the flex row that holds it — a command line is a
     /// field, not a terminal.
@@ -785,6 +795,17 @@ module Style =
     /// The open-terminal strip: one chip per terminal, scrolling horizontally when there are
     /// more than fit rather than wrapping into a second band that shifts the whole column.
     let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 py-2 overflow-x-auto " + Stroke.dividerBottom
+    /// The tabs THEMSELVES, and nothing else. `role="tablist"` is a promise about what its
+    /// children are, and the strip also holds two things that are not tabs — "+ new" and
+    /// "close" — which a reader was told were tabs (four of them, in a list of two) and which
+    /// the strip's own arrow-key walk had to step over. The row keeps its look; the promise
+    /// now covers only what keeps it.
+    ///
+    /// A real box rather than `display: contents`: a role on a contents box is dropped from
+    /// the accessibility tree by some browsers, which would trade one wrong tablist for no
+    /// tablist at all. `shrink-0` keeps the strip the thing that scrolls when the tabs
+    /// outgrow it, exactly as when they were its direct children.
+    let terminalTabList = "flex items-stretch gap-1 shrink-0"
     let private tabBase =
         cls [ caps; "bg-transparent cursor-pointer px-2.5 py-1.5 max-w-40 truncate transition-colors"
               Stroke.ring; focusRing ]
@@ -792,6 +813,11 @@ module Style =
     let terminalTabActive = cls [ tabBase; Stroke.blue; "text-blue" ]
     /// Adds a terminal. The one action in the strip that is not a selection.
     let terminalTabNew = cls [ tabBase; Stroke.rim; "text-ink-dim"; Stroke.hoverInk; "hover:text-ink" ]
+    /// Closes the selected one — the same rectangle, in the danger face. It used to wear
+    /// `terminalTab`, which is the face of an UNSELECTED TAB: a thing that kills a running
+    /// terminal, dressed as a thing that navigates between them, in a strip full of the
+    /// latter. The border is what says which it is, exactly as everywhere else.
+    let terminalTabClose = cls [ tabBase; Stroke.rim; "text-ink-dim"; Stroke.hoverErr; "hover:text-err" ]
     /// A tab's presence marks: one dot per peer whose caret is in THAT terminal, so a
     /// collaborator typing a command in a terminal you are not looking at is visible from
     /// the strip rather than only from inside it.
@@ -815,23 +841,58 @@ module Style =
     /// A stretch tab's facts, above whatever renders its recording.
     let paneFacts = "shrink-0 flex flex-col gap-1 px-3 py-3 " + Stroke.dividerBottom
 
-    /// The scrolling block history.
+    /// The block history's scroll box, and the stream inside it.
+    ///
+    /// A terminal reads from the BOTTOM: the newest line sits above where you type, and a
+    /// short history hangs off that edge rather than starting at the top of a tall empty
+    /// column. `mt-auto` on the stream is what does it — in a scroll container it collapses
+    /// to nothing the moment the content is taller than the box, so unlike `justify-end` it
+    /// never puts the top of the history somewhere the scrollbar cannot reach.
+    let terminalScrollback = "flex-1 min-h-0 overflow-y-auto flex flex-col px-3 py-3"
+    let terminalStream = "mt-auto flex flex-col gap-2"
+
+    /// The player's own mount, and any other read-only region that shows a recording rather
+    /// than a run of blocks: the same box, without the bottom anchoring (a player is one
+    /// child and belongs at the top of its region).
     let terminalBlocks = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
 
-    /// One block: the command that ran, then its output.
-    let terminalBlock = "flex flex-col bg-surface"
-    /// The command line as it was run — mono, and marked with a prompt glyph so a command
-    /// is never mistaken for the output above it.
-    let terminalBlockCommand = "flex items-baseline gap-2 px-3 py-2 " + Stroke.dividerBottom
+    /// One block: the command that ran, then everything it printed.
+    ///
+    /// It is not a card. A card per command turned a scrollback into a stack of boxes —
+    /// borders, fills and 12px of padding repeated around every two lines of mono, which is
+    /// the one thing a terminal does not look like. What separates two blocks is what
+    /// separates them in a terminal: a green prompt glyph, the command in ink, its output
+    /// dim beneath, and a line of air.
+    let terminalBlock = "flex flex-col"
+    /// The command line as it was run — and the block's disclosure: pressing it opens the
+    /// facts (who ran it, who let it, how it ended) that used to be printed beside every
+    /// command whether anyone wanted them or not. A real `<summary>`, so the disclosure is
+    /// the browser's and arrives keyboard-operable and correctly announced.
+    let terminalBlockCommand = "flex items-baseline gap-2"
+    let terminalBlockSummary =
+        cls [ "group"; terminalBlockCommand; "cursor-pointer list-none"
+              "hover:text-ink transition-colors duration-150 ease-out"; focusRing ]
+    /// The mark at the end of the line: an ellipsis, because what it hides is the rest of
+    /// the sentence. `group-open:` turns it while the facts are showing.
+    let terminalBlockMark =
+        "ml-auto shrink-0 font-mono text-code-sm text-ink-faint select-none "
+        + "group-hover:text-ink transition-colors duration-150 ease-out motion-reduce:transition-none"
+    /// The facts themselves, on the output's column so they read as an aside to the command
+    /// rather than as more output.
+    let terminalBlockFacts = "flex flex-wrap items-baseline gap-x-4 gap-y-0.5 pl-4 py-1"
+    let terminalBlockFact = caps + " text-ink-faint"
+
     let terminalPrompt = "shrink-0 font-mono text-code text-green select-none"
     let terminalCommandText = "font-mono text-code text-ink break-all"
     /// Output: preformatted, wrapping, and horizontally scrollable for the lines that will
-    /// not wrap — the column must never make the PAGE scroll sideways.
-    let terminalOutput = "px-3 py-2 overflow-x-auto font-mono text-code-sm leading-4 whitespace-pre-wrap break-words text-ink-dim"
-    let terminalOutputEmpty = "px-3 py-2 " + small
+    /// not wrap — the column must never make the PAGE scroll sideways. No padding of its
+    /// own: it sits directly under its command, on the scrollback's own gutter, the way a
+    /// terminal prints.
+    let terminalOutput = "overflow-x-auto font-mono text-code-sm leading-4 whitespace-pre-wrap break-words text-ink-dim"
+    let terminalOutputEmpty = small
     /// The truncation notice: a stated gap in the record, in the error voice because a
     /// missing audit trail is not a neutral fact.
-    let terminalTruncated = caps + " px-3 py-2 text-err"
+    let terminalTruncated = caps + " shrink-0 px-3 py-2 text-err"
 
     /// The live screen (Plan 14, stage 6). Monospaced, preformatted, and scrollable in both
     /// axes — a terminal's lines are as wide as the program made them, and wrapping them
@@ -841,8 +902,25 @@ module Style =
         cls [ "flex-1 min-h-0 overflow-auto px-3 py-2 font-mono text-code-sm leading-4"
               "whitespace-pre text-ink bg-bg"; focusRing ]
 
+    /// The DVR's own row (Rewind, or how far behind live you are and the way back). It used
+    /// to borrow `terminalQueuedRow`, which is a row INSIDE a padded region and carries no
+    /// gutter of its own — so out here, as a direct child of the column, its button ran to
+    /// the pane's edge and the border on that side was clipped away by the column's
+    /// `overflow-hidden` (measured: 1px past, against 11px for every other control).
+    let terminalDvr = "shrink-0 flex items-center gap-2 px-3 py-2"
+
     /// The composer area beneath the blocks.
     let terminalComposer = "shrink-0 flex flex-col gap-2 px-3 py-3 " + Stroke.dividerTop
+
+    /// A labelled control in the composer — the approval mode. A column, not a baseline row:
+    /// the row gave a native `<select>` whatever was left after its label and the button
+    /// beside it (measured 163px on a phone), and a select truncates its VALUE, so the one
+    /// thing the control exists to tell you — which commands run without asking — was cut
+    /// off mid-word.
+    let terminalField = "flex flex-col gap-1"
+    /// Its head: the label, and whatever act belongs to the same region — the lease control,
+    /// which needs a row of its own on a phone and has one here without spending a third one.
+    let terminalFieldHead = "flex items-center justify-between gap-3 min-h-8"
     /// A queued command awaiting its turn (or its approval) — a listed row, so its leading
     /// edge carries its state: green ready, blue waiting on someone.
     let private terminalQueued = cls [ "flex-col gap-1 px-3 py-2"; rowBase ]

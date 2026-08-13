@@ -125,6 +125,8 @@ module Dom =
         let terminalClose = "data-terminal-close"
         let terminalId = "data-terminal-id"
         let terminalMode = "data-terminal-mode"
+        /// The scrolling block history — the surface that stays pinned to its newest line.
+        let terminalScrollback = "data-terminal-scrollback"
         let terminalBlock = "data-terminal-block"
         let terminalBlockStatus = "data-terminal-block-status"
         let terminalOutput = "data-terminal-output"
