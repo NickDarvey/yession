@@ -1,12 +1,12 @@
 module Yession.Host.Signalling
 
 // HTTP serves static app bootstrap, temporary WebRTC signalling, and ONE read-only
-// data surface: the event log as immutable, cache-friendly chunks (`/events/{n}`).
-// Everything interactive stays on the data channel (design.md §2.3); the chunk
-// endpoint exists precisely because HTTP caching is the point — full chunks of the
-// append-only log never change, so the browser's cache becomes the client-side event
-// store. `/signal` accepts a peer's offer and returns the Session Process's answer;
-// the established data channel becomes a session `FrameChannel`.
+// data surface: the event log, read by cursor (docs/plans/20). A client sends the offset
+// it has folded through (`/events/after/{n}`) and this redirects to the range it chose
+// (`/events/{first}-{last}`), whose bounds do not move — so those bytes are the same for
+// ever and a client can keep them, the growing tail included. Everything interactive stays
+// on the data channel (design.md §2.3). `/signal` accepts a peer's offer and returns the
+// Session Process's answer; the established data channel becomes a session `FrameChannel`.
 
 open Fable.Core.JsInterop
 open Yession.Domain
@@ -53,14 +53,22 @@ let private pathnameOf (url: string) : string = Fable.Core.Util.jsNative
 [<Fable.Core.Emit("new URL($0, 'http://local').searchParams.get($1)")>]
 let private queryOf (url: string) (name: string) : string option = Fable.Core.Util.jsNative
 
-/// The auth-gated, HTTP-cacheable event-log read surface.
+[<Fable.Core.Emit("encodeURIComponent($0)")>]
+let private encodeUriComponent (value: string) : string = Fable.Core.Util.jsNative
+
+/// The auth-gated event-log read surface: a cursor, and the ranges it resolves to.
 type EventsEndpoint =
     { /// Validates a `?token=` peer token (minted by this process via `/me`) — the
       /// cookie-less access path (Node tests, headless clients).
       ValidateToken : string -> bool
-      /// Read chunk `n`: the JSONL-encoded envelope lines, plus whether the chunk is
-      /// full (and therefore immutable).
-      ReadChunk : int -> Async<string list * bool> }
+      /// The bounds of the answer to a cursor — `None` when the caller is already
+      /// current, which is what makes `204` rather than an empty range the answer to
+      /// "nothing has happened since". The server picks these; no client ever does.
+      BoundsAfter : EventOffset option -> Async<(int64 * int64) option>
+      /// The JSONL-encoded envelope lines at offsets `[first, last]`, or `None` when the
+      /// log has not reached `last` — a range that does not exist yet is not a short
+      /// answer, it is a 404.
+      ReadRange : int64 -> int64 -> Async<string list option> }
 
 /// The same surface for a terminal's transcript (Plan 13) — separate because the resource
 /// is a terminal's, not the session's, so a read can legitimately answer "no such
@@ -80,9 +88,9 @@ type TranscriptEndpoint =
 
 /// Start the HTTP bootstrap + signalling server. For each offer posted to `/signal`, an
 /// answering peer connection is created; when its data channel opens, the resulting frame
-/// channel is handed to `onConnection`. When `events` is given, `GET /events/{n}` serves
-/// the log in fixed-size chunks with cache headers derived from immutability, gated by
-/// the auth cookie or a minted `?token=`. When `auth` is given, the login surface
+/// channel is handed to `onConnection`. When `events` is given, the event cursor and the
+/// ranges it resolves to are served, gated by the auth cookie or a minted `?token=`. When
+/// `auth` is given, the login surface
 /// (`/login`, `/callback`, `/me`) rides the same server; the SHELL stays ungated and
 /// cacheable — offline-first — because it is a pure function of the session id with no
 /// content and no secrets; authorization gates the data surfaces, and the browser client
@@ -99,7 +107,8 @@ let start
     (onConnection: FrameChannel<string> -> unit)
     (events: EventsEndpoint option)
     // `GET /terminals/{id}/{n}`, when this session has terminals (Plan 13). Gated by the
-    // same cookie-or-token check the event chunks use, and cached on the same argument.
+    // same cookie-or-token check the event surface uses. Still chunk-indexed and still
+    // cached by the browser — docs/plans/20 gives it the same treatment as a follow-up.
     (transcripts: TranscriptEndpoint option)
     (auth: SessionAuth.Auth option)
     (extraRoutes: (IncomingMessage -> ServerResponse -> bool) option)
@@ -159,13 +168,50 @@ let start
         |> ignore
         res.``end`` (lines |> List.map (fun l -> l + "\n") |> String.concat "")
 
-    let serveChunk (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (index: int) (res: ServerResponse) =
+    /// The cursor. Never carries events and never caches: it answers where the events
+    /// this caller has not seen are, and that moves.
+    let serveCursor (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (after: EventOffset option) (res: ServerResponse) =
         if not (authorized req url endpoint.ValidateToken) then unauthorized res
         else
             Async.StartImmediate (
                 async {
-                    let! lines, isFull = endpoint.ReadChunk index
-                    writeChunk EventChunk.cacheControl lines isFull res
+                    match! endpoint.BoundsAfter after with
+                    | None ->
+                        // Up to date. `204` rather than an empty range, because an empty
+                        // range is a resource a client would keep, and "nothing yet" is
+                        // exactly the thing that stops being true.
+                        res.writeHead (204, createObj [ "cache-control", box "no-store" ]) |> ignore
+                        res.``end`` ""
+                    | Some (first, last) ->
+                        // An absolute-path Location, built from the mount this session is
+                        // served under: a RELATIVE one would resolve against the cursor's
+                        // own path (`…/events/after/99`) and land two segments deep. The
+                        // token rides along when the caller used one — a redirect drops
+                        // the query, and the cookie-less path would arrive unauthorized.
+                        let target =
+                            let path = (if mount = "" then "" else mount) + "/" + SessionRoute.relative (Events (first, last))
+                            match queryOf url "token" with
+                            | Some token -> sprintf "%s?token=%s" path (encodeUriComponent token)
+                            | None -> path
+                        res.writeHead (
+                            307,
+                            createObj [ "location", box target; "cache-control", box "no-store" ])
+                        |> ignore
+                        res.``end`` ""
+                })
+
+    /// The events themselves, at an address that names its bounds — the same answer for
+    /// ever, which is why the client keeps it. `no-store` all the same: the copy that
+    /// matters is the one the client puts in its own store, and a second one in the HTTP
+    /// cache would be a spare nobody reads (docs/plans/20).
+    let serveRange (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (first: int64) (last: int64) (res: ServerResponse) =
+        if not (authorized req url endpoint.ValidateToken) then unauthorized res
+        else
+            Async.StartImmediate (
+                async {
+                    match! endpoint.ReadRange first last with
+                    | Some lines -> writeChunk (fun _ -> "no-store") lines true res
+                    | None -> notFound res
                 })
 
     let serveTranscript
@@ -281,9 +327,13 @@ let start
                 createObj [ "content-type", box "image/png"; "cache-control", box CachePolicy.shell ])
             |> ignore
             res.``end`` (decodeBase64 WebApp.iconPngBase64)
-        | Some (Events index) ->
+        | Some (EventsAfter after) ->
             match events with
-            | Some endpoint -> serveChunk endpoint req req.url index res
+            | Some endpoint -> serveCursor endpoint req req.url after res
+            | None -> notFound res
+        | Some (Events (first, last)) ->
+            match events with
+            | Some endpoint -> serveRange endpoint req req.url first last res
             | None -> notFound res
         | Some (TerminalTranscript (terminal, index)) ->
             match transcripts with
