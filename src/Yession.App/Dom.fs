@@ -289,6 +289,9 @@ module Dom =
         let degradedReconnecting = "reconnecting"
         // The reconnect offer's button (Plan 11).
         let reopenSession = "Reopen session"
+        /// Ask now rather than waiting out the supervised backoff (Plan 20). The wording is
+        /// what a person wants of it, not what it does to the loop.
+        let retryNow = "Try again"
         /// What every degraded state promises: this is a local-first client, so a lost leg
         /// costs sync, not the ability to work.
         let localFallback = "You can keep writing — everything is saved locally and syncs when the session is back."

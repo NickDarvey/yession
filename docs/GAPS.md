@@ -296,9 +296,11 @@ Items are roughly ordered by how much they matter.
   Process restart does not bring every peer back in lockstep — and a settled failure
   parks the loop and surfaces as `FeedHealth`: a sidebar line, a banner, and a header
   status. Nothing is disabled while it is down, because writing is CRDT state in the
-  local doc. What is still missing is a *manual* retry affordance: recovery waits for the
-  next availability hint or reconnect, which a peer with a permanently rejected token
-  (401) will never get, so that peer must reload to re-authorize.
+  local doc. Recovery is no longer only a hint away (Plan 20): the session leg is driven by
+  one supervised loop, capped at a minute, poked by the browser's `online` event and by a
+  *Try again* control on the status line — and a REFUSED peer, which no schedule can help
+  because the same token would be refused again, parks until somebody asks rather than
+  ending. That control is the affordance this entry used to say was missing.
 
 ## Browser client
 

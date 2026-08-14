@@ -808,30 +808,73 @@ module App =
               Serve : EventOffset option -> (ClientMsg -> unit) -> 'channel -> Async<unit>
               /// How far event consumption has got — where a reconnect resumes from.
               ReadPosition : unit -> EventOffset option
+              /// Wait before the next attempt, and say whether to make one.
+              ///
+              /// `Some delay` is the supervised schedule. `None` is "wait to be asked" — the
+              /// park a REFUSED peer gets, because no schedule can help it: the same token
+              /// would be refused again, and only a person (a fresh login, a button) can
+              /// change the answer.
+              ///
+              /// Returning early is how a trigger shortens a wait — the network came back,
+              /// someone pressed retry — WITHOUT becoming a second schedule. `false` ends the
+              /// lifecycle, which is how a page that is going away stops it.
+              WaitBeforeRetry : System.TimeSpan option -> Async<bool>
               /// The lifecycle's own reporting.
               Dispatch : ClientMsg -> unit }
 
+        /// How long to wait before trying to open a transport again, once the policy at the
+        /// composition site has spent its own budget on the attempt that just failed.
+        ///
+        /// It never runs out, and that is the point: a session that is not there YET may still
+        /// come back — a laptop closed on a train, a Process restarting, a tunnel dropping —
+        /// and the client that gave up after four seconds made "reload the tab" the only cure.
+        /// The one outcome that earns no further attempt is a refusal, and it parks rather
+        /// than backing off, because waiting longer cannot fix a token.
+        ///
+        /// Jittered for the reason the feed's policy is: a Process restart drops every peer at
+        /// the same instant, and an unjittered backoff brings them all back in lockstep.
+        let supervision (random: unit -> float) : Resilience.Schedule =
+            Resilience.Schedule.exponential
+                (System.TimeSpan.FromSeconds 1.0)
+                2.0
+                (System.TimeSpan.FromMinutes 1.0)
+                System.Int32.MaxValue
+            |> Resilience.Schedule.jittered 0.5 random
+
         /// Drive the session leg to a settled state and keep it there.
         ///
-        /// A channel that closes after the session was ACCEPTED is an ended session — a
-        /// Process restart, a sleeping laptop, a network blip — so come back, resuming
-        /// consumption from where the read position got to. A channel that closes without ever
-        /// being accepted was refused (a stale token); the model holds that reason and
-        /// reconnecting would only be refused again, so stop.
+        /// Three outcomes, and each earns a different next move:
         ///
-        /// Those two cases are the whole design, and why this cannot spin: only an accepted
-        /// session earns another attempt, and every other outcome ends here.
-        let run (ports: Ports<'channel>) : Async<unit> =
-            let rec attempt (isFirst: bool) (resumeAfter: EventOffset option) =
+        /// * **Accepted, then the channel closed** — an ended session (a Process restart, a
+        ///   sleeping laptop, a network blip). Come straight back, resuming consumption from
+        ///   where the read position got to.
+        /// * **Never opened** — the session is not reachable. Keep trying on `supervision`,
+        ///   which never runs out. The policy at the composition site has already spent its
+        ///   budget on the attempt that just failed; this is the slower outer loop, and it is
+        ///   not a retry loop wrapped around a retry loop — it is the difference between "this
+        ///   attempt failed" and "give up on the session", which are not the same claim.
+        /// * **Opened but refused** — a stale token. No schedule can help, because the same
+        ///   token would be refused again, so PARK: wait to be asked, and let a person supply
+        ///   the one thing that can change the answer.
+        ///
+        /// That is also why this cannot spin. Every path either succeeds, backs off, or waits
+        /// for a human, and the only unbounded one is bounded by a minute.
+        let run (supervision: Resilience.Schedule) (ports: Ports<'channel>) : Async<unit> =
+            let rec attempt (announce: bool) (failures: int) (resumeAfter: EventOffset option) =
                 async {
-                    // Announce the FIRST attempt: until a channel exists the model would read
-                    // `Disconnected`, and opening one costs a handshake plus whatever retries
-                    // the policy spends. A reconnect needs no announcement — `Reconnecting` is
-                    // already the truer word, and the connection driver says `Connecting`
-                    // itself the moment a channel is up.
-                    if isFirst then ports.Dispatch ConnectingMsg
+                    // Announce an attempt that follows a wait: until a channel exists the model
+                    // would read `Disconnected`, and opening one costs a handshake plus whatever
+                    // retries the policy spends. A reconnect after an ACCEPTED session needs no
+                    // announcement — `Reconnecting` is already the truer word, and the driver
+                    // says `Connecting` itself the moment a channel is up.
+                    if announce then ports.Dispatch ConnectingMsg
                     match! ports.Open () with
-                    | Error fault -> ports.Dispatch (ConnectFailedMsg (ChannelFault.describe fault))
+                    | Error fault ->
+                        ports.Dispatch (ConnectFailedMsg (ChannelFault.describe fault))
+                        let attempts = failures + 1
+                        match! ports.WaitBeforeRetry (supervision attempts) with
+                        | true -> return! attempt true attempts resumeAfter
+                        | false -> return ()
                     | Ok channel ->
                         // Acceptance is learned from the message that carries it, as it passes.
                         let mutable accepted = false
@@ -841,6 +884,13 @@ module App =
                             | _ -> ()
                             ports.Dispatch msg
                         do! ports.Serve resumeAfter observing channel
-                        if accepted then return! attempt false (ports.ReadPosition ())
+                        if accepted then
+                            // A session that worked resets the backoff: the next failure is
+                            // this client's first, not the continuation of an old streak.
+                            return! attempt false 0 (ports.ReadPosition ())
+                        else
+                            match! ports.WaitBeforeRetry None with
+                            | true -> return! attempt true 0 resumeAfter
+                            | false -> return ()
                 }
-            attempt true None
+            attempt true 0 None

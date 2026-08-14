@@ -523,6 +523,45 @@ let private openHistoryCache () : Async<App.HistoryCache> =
                   Write = fun url body -> cacheWrite cache url body |> Async.AwaitPromise }
     }
 
+// --- Waiting to try again (Plan 20, step 3) ----------------------------------------------
+// ONE wait, poked by two triggers. "Keep trying", "the network came back" and "someone pressed
+// retry" are three ways to want the same thing, and building them as three schedules would put
+// three of them in a race. So: the lifecycle decides WHETHER and HOW LONG to wait, and these
+// only ever cut a wait short.
+//
+// `ms < 0` is the park a refused peer gets — no timer at all, because no amount of waiting
+// fixes a token. It ends when the network returns or a person asks, which are the two things
+// that can.
+
+/// Cut the current wait short, if one is running. Replaced each time a wait begins.
+let mutable private pokeRetry : unit -> unit = ignore
+
+[<Emit("""new Promise(resolve => {
+  let settled = false
+  const finish = () => {
+    if (settled) return
+    settled = true
+    window.removeEventListener('online', finish)
+    if (timer !== null) clearTimeout(timer)
+    resolve(true)
+  }
+  const timer = $0 >= 0 ? setTimeout(finish, $0) : null
+  window.addEventListener('online', finish)
+  $1(finish)
+})""")>]
+let private waitOrPoke (ms: float) (register: (unit -> unit) -> unit) : JS.Promise<bool> = jsNative
+
+let private waitBeforeRetry (delay: System.TimeSpan option) : Async<bool> =
+    async {
+        let ms =
+            match delay with
+            | Some d -> d.TotalMilliseconds
+            | None -> -1.0
+        return!
+            waitOrPoke ms (fun finish -> pokeRetry <- finish)
+            |> Async.AwaitPromise
+    }
+
 [<Emit("Math.random()")>]
 let private jsRandom () : float = jsNative
 
@@ -1159,6 +1198,10 @@ let private start () =
                 fun id cols rows -> connectionRef |> Option.iter (fun c -> c.ResizeTerminal id cols rows)
               SendTerminalDraft =
                 fun terminal author -> connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
+              RetryNow =
+                // Cut short whatever wait the lifecycle is in. On a refused peer that wait is
+                // indefinite by design, so this is its only way back short of a reload.
+                fun () -> pokeRetry ()
               ReopenSession =
                 fun () ->
                     // A full navigation to the Manager, not a fetch: it launches the session
@@ -1315,6 +1358,7 @@ let private start () =
             // browser's four ports and nothing else.
             do!
                 App.SessionLifecycle.run
+                    (App.SessionLifecycle.supervision jsRandom)
                     { Open = openChannel
                       Serve =
                         fun resumeAfter dispatch dc ->
@@ -1333,6 +1377,9 @@ let private start () =
                                 connectionRef <- None
                             }
                       ReadPosition = fun () -> latestModel.EventConsumer.LastProcessedOffset
+                      // Always `true`: a page that is still open is a client that still wants
+                      // its session. The lifecycle ends when the page does.
+                      WaitBeforeRetry = waitBeforeRetry
                       Dispatch = fun msg -> dispatchRef msg }
     }
 
