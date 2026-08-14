@@ -9,30 +9,54 @@
    one and linked inert in the shell until a replay is mounted. It is 16KB that most sessions
    never render, and this sheet is render-blocking.
 
-   The conversation's two voices: GitHub's Monaspace, Neon for what a person wrote and Krypton
-   for what the agent said. Vendored under `app/fonts/` (SIL OFL 1.1, `app/fonts/LICENSE`)
-   rather than fetched — same rule as everything else the shell serves, no CDN.
+   Every typeface the product wears is vendored under `app/fonts/` rather than fetched — same
+   rule as everything else the shell serves, no CDN. Both are SIL OFL 1.1; the two licences sit
+   beside the faces.
 
-   The `url()`s below are passed through verbatim — Tailwind does not rewrite them — and they
-   resolve against wherever this sheet is served, which is inside the asset set, next to
-   `fonts/`. Each face is declared in `AssetFile` and copied there by the build; a face named
-   here and missing from that declaration is a 404, and one declared and not produced stops the
-   build.
+   Four voices. The chrome is Noto Sans, which is where the Segoe UI this design was drawn
+   around went: Segoe cannot be redistributed, and Noto descends from the same designer's
+   humanist line, so a box without Segoe stops guessing and every box reads the same. The
+   other three are GitHub's Monaspace, because they are all showing you machine text — and
+   the two a reader must tell apart mid-paragraph are the two furthest apart in that
+   superfamily: Xenon is a serif, Krypton a mechanical sans. Neon and Krypton, which shipped
+   first, differ only in their zero at 15px, which is not attribution.
 
-   Separate files rather than data URIs inside this sheet, which is what they were when they
-   landed: that put 350KB in front of the first paint of every page, including the ones that
-   render no conversation at all. As files the browser fetches only the weights a page actually
-   uses, and fetches them after it has painted (`font-display: swap`).
+   Each face is declared in `AssetFile` and copied beside this sheet by the build; the
+   `url()`s below are passed through verbatim — Tailwind does not rewrite them — and resolve
+   against wherever the sheet is served, which is inside the asset set next to `fonts/`. A
+   face named here and missing from that declaration is a 404; one declared and not produced
+   stops the build.
 
-   Three weights per family (the light body, the prose headings' normal, the semibold a strong
-   run wears) and no italics: an `<em>` in a message is rare enough that the browser's synthetic
-   oblique is a fair trade against another six faces. */
+   The weights are exactly what the surfaces wear, no more: the chrome sets four (the
+   extralight wordmark, light body, normal, semibold caps), a message three, and a terminal
+   two — 400, and 600 because that is what ANSI bold renders as. */
 @font-face {
-  font-family: 'Monaspace Neon';
+  font-family: 'Noto Sans';
+  font-style: normal;
+  font-weight: 200;
+  font-display: swap;
+  src: url('fonts/noto-sans-latin-200-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Sans';
   font-style: normal;
   font-weight: 300;
   font-display: swap;
-  src: url('fonts/monaspace-neon-latin-300-normal.woff2') format('woff2');
+  src: url('fonts/noto-sans-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/noto-sans-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/noto-sans-latin-600-normal.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Monaspace Neon';
@@ -47,6 +71,27 @@
   font-weight: 600;
   font-display: swap;
   src: url('fonts/monaspace-neon-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Xenon';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('fonts/monaspace-xenon-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Xenon';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/monaspace-xenon-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Xenon';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/monaspace-xenon-latin-600-normal.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Monaspace Krypton';
@@ -72,7 +117,7 @@
 
 /* Theme — mirrors what the old tailwind.config.js `theme.extend` registered. Namespaced
    custom properties auto-generate utilities (`--color-blue` -> `bg-blue`/`text-blue`,
-   `--font-mono` -> `font-mono`, `--animate-pulse2` -> `animate-pulse2`). */
+   `--font-ui` -> `font-ui`, `--animate-pulse2` -> `animate-pulse2`). */
 @theme {
   --color-bg: #000;
   --color-panel: #0a0a0a;
@@ -122,17 +167,29 @@
   --color-term-cyan-bright: #8cebf5;
   --color-term-white-bright: #fff;
 
-  --font-sans: 'Segoe UI', 'Segoe UI Variable', 'Segoe WP', 'Frutiger', 'Helvetica Neue', system-ui, sans-serif;
-  --font-mono: 'Cascadia Code', 'Consolas', monospace;
+  /* WHO IS TALKING, said by the typeface. Four voices, four families, and every one of them
+     a face this build ships — so the product reads the same on every machine. `--font-sans`
+     and `--font-mono` are gone because they named a CATEGORY and resolved to whatever
+     Microsoft fonts a box happened to have; these name a ROLE and resolve to bytes we ship.
 
-  /* Who is speaking, said by the typeface. A message body, a draft being written and a queued
-     message all wear the voice of whoever authored them: Neon for a person, Krypton for the
-     agent. Both fall back to the mono stack rather than the sans one — Monaspace is
-     monospaced, so the fallback should be too, or a face that fails to load reflows the whole
-     timeline. This is attribution, not decoration: it is the one thing on a message that is
-     legible before you have read a word of it. */
-  --font-human: 'Monaspace Neon', 'Cascadia Code', 'Consolas', monospace;
-  --font-agent: 'Monaspace Krypton', 'Cascadia Code', 'Consolas', monospace;
+     Every surface wears exactly one of them, and each is written here once. */
+  /* What a browser falls back to for the moment before a face arrives, or forever if it
+     never does. Deliberately NOT in the `--font-*` namespace: they are not voices, and naming
+     them there would mint `font-*` utilities nothing should ever compose. The sans one still
+     names Segoe first — on the machines this design was drawn around, the fallback should be
+     the face it was drawn with. */
+  --fallback-sans: 'Segoe UI', system-ui, sans-serif;
+  --fallback-mono: ui-monospace, monospace;
+
+  --font-ui: 'Noto Sans', var(--fallback-sans);
+  --font-terminal: 'Monaspace Neon', var(--fallback-mono);
+  --font-human: 'Monaspace Xenon', var(--fallback-mono);
+  --font-agent: 'Monaspace Krypton', var(--fallback-mono);
+
+  /* Retired, so a leftover `font-sans`/`font-mono` cannot silently pick up Tailwind's own
+     defaults instead of a voice above. */
+  --font-sans: initial;
+  --font-mono: initial;
 
   /* The type ramp, as size + line-height pairs on the 4px rhythm — `text-<step>` sets
      both, so a size can never drift from its line box. `leading-*` still composes over

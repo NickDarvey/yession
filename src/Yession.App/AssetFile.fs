@@ -27,11 +27,20 @@ type AssetFile =
     | ``app``
     /// The replay player's stylesheet, its own file because the shell defers it.
     | ``player``
-    // The conversation's two voices, vendored under `app/fonts` (SIL OFL 1.1). One case per
-    // face, so a weight cannot be referenced by a stylesheet and forgotten by the build.
-    | ``neon-300``
+    // The four voices, vendored under `app/fonts` (both SIL OFL 1.1; see the two LICENCE files
+    // beside them). One case per FACE, not per family, so a weight a stylesheet asks for cannot
+    // be forgotten by the build — and the weights are exactly the ones the surfaces wear, which
+    // is why the families differ: the chrome sets four, a message three, and a terminal two
+    // (400, and 600 because that is what ANSI bold renders as).
+    | ``noto-sans-200``
+    | ``noto-sans-300``
+    | ``noto-sans-400``
+    | ``noto-sans-600``
     | ``neon-400``
     | ``neon-600``
+    | ``xenon-300``
+    | ``xenon-400``
+    | ``xenon-600``
     | ``krypton-300``
     | ``krypton-400``
     | ``krypton-600``
@@ -55,9 +64,15 @@ module AssetFile =
         | AssetFile.``client`` -> "client.js", javascript
         | AssetFile.``app`` -> "app.css", stylesheet
         | AssetFile.``player`` -> "player.css", stylesheet
-        | AssetFile.``neon-300`` -> "fonts/monaspace-neon-latin-300-normal.woff2", woff2
+        | AssetFile.``noto-sans-200`` -> "fonts/noto-sans-latin-200-normal.woff2", woff2
+        | AssetFile.``noto-sans-300`` -> "fonts/noto-sans-latin-300-normal.woff2", woff2
+        | AssetFile.``noto-sans-400`` -> "fonts/noto-sans-latin-400-normal.woff2", woff2
+        | AssetFile.``noto-sans-600`` -> "fonts/noto-sans-latin-600-normal.woff2", woff2
         | AssetFile.``neon-400`` -> "fonts/monaspace-neon-latin-400-normal.woff2", woff2
         | AssetFile.``neon-600`` -> "fonts/monaspace-neon-latin-600-normal.woff2", woff2
+        | AssetFile.``xenon-300`` -> "fonts/monaspace-xenon-latin-300-normal.woff2", woff2
+        | AssetFile.``xenon-400`` -> "fonts/monaspace-xenon-latin-400-normal.woff2", woff2
+        | AssetFile.``xenon-600`` -> "fonts/monaspace-xenon-latin-600-normal.woff2", woff2
         | AssetFile.``krypton-300`` -> "fonts/monaspace-krypton-latin-300-normal.woff2", woff2
         | AssetFile.``krypton-400`` -> "fonts/monaspace-krypton-latin-400-normal.woff2", woff2
         | AssetFile.``krypton-600`` -> "fonts/monaspace-krypton-latin-600-normal.woff2", woff2
@@ -73,9 +88,15 @@ module AssetFile =
         [ AssetFile.``client``
           AssetFile.``app``
           AssetFile.``player``
-          AssetFile.``neon-300``
+          AssetFile.``noto-sans-200``
+          AssetFile.``noto-sans-300``
+          AssetFile.``noto-sans-400``
+          AssetFile.``noto-sans-600``
           AssetFile.``neon-400``
           AssetFile.``neon-600``
+          AssetFile.``xenon-300``
+          AssetFile.``xenon-400``
+          AssetFile.``xenon-600``
           AssetFile.``krypton-300``
           AssetFile.``krypton-400``
           AssetFile.``krypton-600`` ]

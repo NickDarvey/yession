@@ -26,9 +26,12 @@ open Lit
 /// their controls on the same right rail. The name column takes whatever is left.
 module private Col =
     let table = "w-full text-left border-collapse table-fixed"
-    /// Wide enough for a whole Crockford id in 12px mono — a half id identifies nothing,
-    /// so this column is sized to never truncate. The first thing to go on a phone.
-    let id = "w-[204px] max-md:hidden"
+    /// Wide enough for a whole Crockford id — a half id identifies nothing, so this column is
+    /// sized never to truncate. MEASURED, because the number depends on the face: 26 characters
+    /// of 12px Monaspace Neon is 194px, plus the cell's own 16px gutter. It was 204px when the
+    /// ids were set in whatever monospace a box happened to have, and the switch to a shipped
+    /// face made them 6px too wide for it. The first thing to go on a phone.
+    let id = "w-[210px] max-md:hidden"
     /// Holds the status word plus `port · pid` uncut; on a phone, just the word.
     let status = "w-[256px] max-md:w-[100px]"
     /// One `h-8` control, full-bleed in its column, plus the cell's left gutter. The
@@ -48,7 +51,7 @@ let private statusView (status: ProcessManager.SessionStatus) : TemplateResult =
         html $"""<span class="{Style.statusFaint}" data-status="{Dom.Manager.statusStopped}">stopped</span>"""
     | ProcessManager.Running (port, pid) ->
         html
-            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-mono text-code-sm text-ink-faint tabular-nums ml-2.5 max-md:hidden">port {port} · pid {pid}</span>"""
+            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-terminal text-code-sm text-ink-faint tabular-nums ml-2.5 max-md:hidden">port {port} · pid {pid}</span>"""
     | ProcessManager.Exited code ->
         let reason = code |> Option.map string |> Option.defaultValue "signal"
         html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""
@@ -102,7 +105,7 @@ let private rowTemplate (access: PublicAccess) (view: ProcessManager.SessionView
     html $"""
         <tr class="border-b border-hair hover:bg-surface transition-colors" data-session="{id}">
           <td class="py-3 pr-4 align-middle truncate" title="{view.Record.DisplayName}">{nameView access view}</td>
-          <td class="py-3 pr-4 align-middle font-mono text-code text-ink-faint truncate max-md:hidden">{id}</td>
+          <td class="py-3 pr-4 align-middle font-terminal text-code text-ink-faint truncate max-md:hidden">{id}</td>
           <td class="py-3 pr-4 align-middle truncate">{statusView view.Status}</td>
           <td class="py-3 pl-4 align-middle">{actions view}</td>
         </tr>"""
@@ -224,7 +227,7 @@ let private mcpRowTemplate (views: ProcessManager.SessionView list) (declaration
     html $"""
         <tr class="border-b border-hair hover:bg-surface transition-colors" data-mcp-server="{name}">
           <td class="py-3 pr-4 align-middle {Style.body} truncate" title="{name}">{name}</td>
-          <td class="py-3 pr-4 align-middle font-mono text-code text-ink-faint truncate max-md:hidden"
+          <td class="py-3 pr-4 align-middle font-terminal text-code text-ink-faint truncate max-md:hidden"
               title="{McpTransport.describe declaration.Server.Transport}">{McpTransport.describe declaration.Server.Transport}</td>
           <td class="py-3 pr-4 align-middle {Style.small} truncate" title="{audience}">{audience}</td>
           <td class="py-3 pl-4 align-middle">
