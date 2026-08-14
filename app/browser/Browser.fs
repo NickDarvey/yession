@@ -124,23 +124,40 @@ let private appRoot () : obj = jsNative
 [<Emit("$0.replaceChildren()")>]
 let private clearChildren (el: obj) : unit = jsNative
 
-// The timeline is a chat surface: pinned to bottom while the reader is at (or within a few
-// px of) the bottom, position preserved when they've scrolled up to read. `-1` marks "was
-// pinned". Lit preserves focus/caret across its diff, but scroll is ours to manage.
+// The two surfaces that are read from their END — the chat, and a terminal's scrollback.
+// Both are pinned to the bottom while the reader is at (or within a few px of) it, and both
+// keep their place when they have scrolled up to read. `-1` marks "was pinned". Lit
+// preserves focus/caret across its diff, but scroll is ours to manage.
+//
+// One selector list, taken once and put back once: the terminal used to have neither half,
+// so a command whose output arrived after the render left the newest line below the fold
+// with nothing to say it was there.
+let [<Literal>] private PinnedSurfaces = "[data-conversation],[data-terminal-scrollback]"
+
+// Keyed by what the surface IS, never by its position in the list: a terminal that took its
+// lease between two renders removes its scrollback from the document, and an index would
+// then put its scroll position into the chat.
 [<Emit("""(() => {
-  const el = document.querySelector('[data-conversation]')
-  if (!el) return null
-  return el.scrollTop + el.clientHeight >= el.scrollHeight - 4 ? -1 : el.scrollTop
+  const key = el => el.getAttribute('data-terminal-id') || 'chat'
+  const taken = {}
+  for (const el of document.querySelectorAll($0)) {
+    taken[key(el)] = el.scrollTop + el.clientHeight >= el.scrollHeight - 4 ? -1 : el.scrollTop
+  }
+  return taken
 })()""")>]
-let private timelineScroll () : float option = jsNative
+let private surfaceScroll (selector: string) : obj = jsNative
 
 [<Emit("""(() => {
-  const el = document.querySelector('[data-conversation]')
-  if (el) el.scrollTop = $0 < 0 ? el.scrollHeight : $0
+  const key = el => el.getAttribute('data-terminal-id') || 'chat'
+  for (const el of document.querySelectorAll($0)) {
+    const position = $1[key(el)]
+    if (position === undefined) continue
+    el.scrollTop = position < 0 ? el.scrollHeight : position
+  }
 })()""")>]
-let private restoreTimelineScroll (position: float) : unit = jsNative
+let private restoreSurfaceScroll (selector: string) (positions: obj) : unit = jsNative
 
-// A RENDER is not the only thing that moves the end of the conversation away from the
+// A RENDER is not the only thing that moves the end of one of those surfaces away from the
 // reader — a RESIZE does it too, and on a phone the viewport is not a constant: the
 // browser's toolbars come and go, the device turns. The shell is the visible viewport's
 // height (`Style.app`), so each of those shortens the timeline's box while its `scrollTop`
@@ -151,19 +168,20 @@ let private restoreTimelineScroll (position: float) : unit = jsNative
 // resize handler runs the measurement would always say "no"), so it rides the scroll event —
 // captured, because scroll does not bubble, and the element is Lit's to replace.
 [<Emit("""(() => {
-  const sel = '[data-conversation]'
+  const sel = $0
   const atEnd = el => el.scrollTop + el.clientHeight >= el.scrollHeight - 4
-  let pinned = true
+  const pinned = new WeakMap()
   document.addEventListener('scroll', e => {
     const el = e.target
-    if (el instanceof Element && el.matches(sel)) pinned = atEnd(el)
+    if (el instanceof Element && el.matches(sel)) pinned.set(el, atEnd(el))
   }, true)
   window.addEventListener('resize', () => {
-    const el = document.querySelector(sel)
-    if (el && pinned) el.scrollTop = el.scrollHeight
+    for (const el of document.querySelectorAll(sel)) {
+      if (pinned.get(el) !== false) el.scrollTop = el.scrollHeight
+    }
   })
 })()""")>]
-let private keepTimelinePinned () : unit = jsNative
+let private keepSurfacesPinned (selector: string) : unit = jsNative
 
 // A native <input> has no per-character DOM geometry, so we measure the pixel offset of a
 // substring with a canvas using the input's own font. Given a peer's decoded selection
@@ -1109,11 +1127,9 @@ let private start () =
         let setState (model: ClientModel) (dispatch: Ylmish.Program.Message<ClientMsg> -> unit) =
             dispatchRef <- fun msg -> dispatch (Ylmish.Program.Message.User msg)
             latestModel <- model
-            let scroll = timelineScroll ()
+            let scroll = surfaceScroll PinnedSurfaces
             Lit.render (unbox el) (View.view actions model dispatchRef)
-            match scroll with
-            | Some position -> restoreTimelineScroll position
-            | None -> ()
+            restoreSurfaceScroll PinnedSurfaces scroll
             // Mount/dispose the rich editors on their body hosts (bound to live fragments), then
             // overlay collaborators' cursors: remote carets in each body editor, and title carets
             // measured against the just-rendered input.
@@ -1143,8 +1159,8 @@ let private start () =
         |> Program.run
 
         // Renders keep the reader's place (`setState`); this keeps it across the other thing
-        // that moves it, a viewport that changed size under a laid-out conversation.
-        keepTimelinePinned ()
+        // that moves it, a viewport that changed size under a laid-out surface.
+        keepSurfacesPinned PinnedSurfaces
 
         // The local peer's draft slot follows its body: published on the first keystroke,
         // retracted when the composer empties. Watches the body itself, so a keystroke and a

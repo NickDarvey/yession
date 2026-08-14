@@ -295,6 +295,7 @@ let startFull
                 log
                 sandboxes.EnvironmentFor
                 transcripts.Open
+                transcripts.ReadRange
                 Emulator.openEmulator
                 SessionTerminals.TerminalShell.posix
                 (fun () -> DateTimeOffset.UtcNow)
@@ -480,6 +481,10 @@ let startFull
                         | Ok () -> return Ok (sprintf "typed into terminal %s; you now hold it" (TerminalId.value id))
                         | Error reason -> return Error reason
                     }
+              // `write_terminal`'s other half, and it lives beside it in the terminal
+              // manager: the rule that admits one admits the other, and the composition root
+              // is not where a bound belongs.
+              ReadTerminal = terminals.Tail
               RunGated = commandGate.Run
               SetSecret =
                 match secretsCapabilities with

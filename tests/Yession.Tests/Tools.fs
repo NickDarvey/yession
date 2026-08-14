@@ -119,6 +119,12 @@ let private writeOnly (schema: string) : (string * bool) list =
         Decode.object (fun get -> get.Optional.Field "writeOnly" Decode.bool |> Option.defaultValue false)
     Decode.fromString (Decode.field "properties" (Decode.keyValuePairs property)) schema |> expect
 
+/// `read_terminal` against a capability that answers with exactly this tail.
+let private readingTerminal (tail: TerminalTail) =
+    let registry =
+        AgentTools.registry { AgentCapabilities.none with ReadTerminal = fun _ -> async { return Ok tail } }
+    registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
+
 let private sessionTests =
     testList "the yession namespace" [
 
@@ -191,6 +197,49 @@ let private sessionTests =
                     answer
                     (Ok (ToolAnswer.text "could not run the command: no terminal capability"))
                     "the call happened; it is the command that did not"
+            }
+
+        // Reading a terminal with no blocks (Plan 19).
+        testCaseAsync "a tail that left nothing out comes back as it came" <|
+            async {
+                let! answer = readingTerminal { Text = "U-Boot 2024.01\n=> "; Elided = 0 }
+                Expect.equal answer (Ok (ToolAnswer.text "U-Boot 2024.01\n=> ")) "all of it, unannotated"
+            }
+
+        // What matters is the SAME thing that matters for a block's output: a model that
+        // cannot tell a short answer from a truncated one describes the wrong thing
+        // confidently.
+        testCaseAsync "a tail that left something out says how much" <|
+            async {
+                let! answer = readingTerminal { Text = "=> "; Elided = 4096 }
+                Expect.equal
+                    answer
+                    (Ok (ToolAnswer.text "[4096 earlier characters omitted]\n=> "))
+                    "in the words a block's output already uses"
+            }
+
+        testCaseAsync "a terminal that has said nothing says so, rather than answering blank" <|
+            async {
+                let! answer = readingTerminal { Text = ""; Elided = 0 }
+                Expect.equal answer (Ok (ToolAnswer.text "terminal t1 has said nothing")) "silence is an answer"
+            }
+
+        // The refusal is the interesting half: it has to send the model somewhere that
+        // works, not merely say no.
+        testCaseAsync "reading an instrumented terminal is refused, and names what to use" <|
+            async {
+                let registry =
+                    AgentTools.registry
+                        { AgentCapabilities.none with
+                            ReadTerminal =
+                                fun _ ->
+                                    async {
+                                        return Error "this terminal runs commands as blocks — what one printed comes back from execute_command"
+                                    } }
+                let! answer = registry.Invoke (call "yession" "read_terminal" """{"terminal":"t1"}""")
+                match answer with
+                | Ok text -> Expect.stringContains text.Text "execute_command" "it says where to go instead"
+                | Error e -> failwithf "a refusal is an answer, not a failed call: %s" e
             }
     ]
 

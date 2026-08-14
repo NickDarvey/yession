@@ -212,6 +212,19 @@ module AgentTools =
             | Error reason -> return sprintf "could not type into terminal %s: %s" (TerminalId.value id) reason
         }
 
+    /// Read a live-only terminal (Plan 19). Same rendering as a block's output, because it is
+    /// the same question — what did this print — and a model should not have to learn two
+    /// shapes for one answer.
+    let private readTerminal (capabilities: AgentCapabilities) (id: TerminalId) : Async<string> =
+        async {
+            match! capabilities.ReadTerminal id with
+            | Error reason -> return sprintf "could not read terminal %s: %s" (TerminalId.value id) reason
+            | Ok tail when tail.Text = "" -> return sprintf "terminal %s has said nothing" (TerminalId.value id)
+            | Ok tail when tail.Elided > 0 ->
+                return sprintf "[%d earlier characters omitted]\n%s" tail.Elided tail.Text
+            | Ok tail -> return tail.Text
+        }
+
     let private setSecret (capabilities: AgentCapabilities) (name: string) (value: string) : Async<string> =
         async {
             match SecretName.create name with
@@ -360,6 +373,20 @@ module AgentTools =
                           match TerminalId.create terminal with
                           | Error e -> return Error (sprintf "not a terminal id: %s" e)
                           | Ok id -> return! ok (writeTerminal capabilities id data)
+                  })
+
+          tool
+              "read_terminal"
+              "Read what a terminal that is streaming something live has said — a device, a console, anything whose bytes come from outside this session. This is how you see the answer to what write_terminal typed. Returns the tail of it, saying how much it left out. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on an ordinary shell terminal, where what a command printed comes back from execute_command instead."
+              [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.string "terminal" args with
+                      | Error e -> return Error e
+                      | Ok terminal ->
+                          match TerminalId.create terminal with
+                          | Error e -> return Error (sprintf "not a terminal id: %s" e)
+                          | Ok id -> return! ok (readTerminal capabilities id)
                   })
 
           tool

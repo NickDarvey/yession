@@ -84,6 +84,40 @@ locations, a fallback beside a primary), keep ONLY the one verified working here
 the other. A redundant spare hides which path is live, rots unverified, and turns the next
 failure into an archaeology dig.
 
+## Colocation
+
+**A rule lives with the state it governs.** An invariant that holds only because a CALLER
+remembered to ask first is not an invariant — it is a convention with a good reputation, and
+the next caller has not read it.
+
+`design.md` §1 says composition happens at the top. This is the other half of that sentence:
+what composes at the top must have nothing left to DECIDE. A composition root that computes —
+a bound, a fallback, a refusal, a subtraction — has taken a decision out of the only place it
+could be tested cheaply and put it where no test can reach.
+
+The tell is a member exported for no local reason. `SessionTerminals` briefly grew an
+`Instrumented` predicate that nothing inside it used: it existed so `Host.fs` could ask "does
+this terminal have blocks?", subtract a line window, and cap the answer. Meanwhile the WRITE
+half of that same feature was one verb on the manager with its refusal inside it. Two halves of
+one story in two shapes — and the half that had drifted upward was carrying arithmetic no cheap
+test could see. A bug was living in it: closing a terminal forgot what its source had been, so
+a closed device answered "this runs commands as blocks" about a recording sitting right there.
+
+Three questions, and any `no` means it is in the wrong place:
+
+- **Can a caller break it by not calling something first?** Then those calls are one verb.
+  Take-then-write is `Write`, because an actor that could write without the lease is the second
+  writer the lease exists to prevent.
+- **Would testing it mean building the composition root?** Then move it down to where the state
+  is. The cheap tier is the measure: a rule the cheap tier cannot reach is a rule nobody
+  re-checks.
+- **Does a sibling operation on the same state live somewhere else?** Then one of them has
+  moved. `Write` and `Tail` sit together because the rule that admits one admits the other.
+
+The corollary is that a seam belongs where it is USED. The terminal manager takes a transcript
+reader because `Tail` needs one — not because a layer above it offered to read on its behalf.
+Passing state downward is colocation; reaching upward for it is not.
+
 ## Examples
 
 `examples/` holds integrations built the way somebody OUTSIDE this repository would build
@@ -298,8 +332,20 @@ window-size clamp makes naive mobile screenshots lie; the skill's CDP driver doe
 
 ### Writing tests
 
-High signal, non-brittle. A test earns its place by failing when behavior regresses — and only
-then:
+**A test pins one invariant, and goes red only when that invariant breaks.** Two promises, and
+a test earns its place by keeping both. The first is what it PROVES; the second is what its red
+MEANS. A suite whose red can also mean "something moved" is a suite people re-run instead of
+read.
+
+One invariant is one arrangement, one action, one assertion of the consequence — and a name
+that says which invariant. A case that asserts three things fails as one, so its red names
+none of them, and the two behaviours nobody touched get dragged into every revision of the
+third. Split it: three cases cost three names and buy three verdicts. What may repeat across
+them is the SETUP, hoisted into a helper — asserting that a call both succeeded and returned
+the right body is one invariant seen from two angles, but asserting that an open terminal reads
+back, a closed one still does, and a shell refuses, is three tests wearing one name.
+
+Then, so that red means what it says:
 
 - Assert observable behavior and contracts, not implementation detail (private state, call
   order, exact log text, incidental DOM structure). A refactor that preserves behavior must

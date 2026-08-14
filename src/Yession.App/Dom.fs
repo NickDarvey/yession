@@ -32,6 +32,11 @@ module Dom =
     /// absence is the good deployment, exactly as with the Manager origin above.
     let ephemeralStorageMetaName = "yession-ephemeral-storage"
 
+    /// The attribute marking the replay player's deferred stylesheet in the head, so the
+    /// browser half can find it and turn it on (`Style.deferredHeadTags`, `Replay.mount`).
+    /// A hook rather than a selector spelled twice, for the same reason every other one is.
+    let playerStylesheetHook = "data-player-css"
+
     /// `data-*` hooks on the session client shell (`View`) and its browser delegation.
     module Hooks =
         // Header — the collaborative session title and its secondary id.
@@ -125,6 +130,8 @@ module Dom =
         let terminalClose = "data-terminal-close"
         let terminalId = "data-terminal-id"
         let terminalMode = "data-terminal-mode"
+        /// The scrolling block history — the surface that stays pinned to its newest line.
+        let terminalScrollback = "data-terminal-scrollback"
         let terminalBlock = "data-terminal-block"
         let terminalBlockStatus = "data-terminal-block-status"
         let terminalOutput = "data-terminal-output"

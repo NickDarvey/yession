@@ -46,9 +46,9 @@ including after the log reaches 500. The mutability does not disappear — it mo
 
 ```http
 GET /events                            → 307  Location: /events/0-99          (no cursor: the start)
-GET /events?after=99                   → 307  Location: /events/100-136
+GET /events/after/99                   → 307  Location: /events/100-136
 GET /events/100-136                    → 37 lines                              (immutable bytes)
-GET /events?after=136                  → 204  No Content                       (you are current)
+GET /events/after/136                  → 204  No Content                       (you are current)
 ```
 
 The cursor request is `no-store` and carries no events; the range it resolves to carries the
@@ -57,19 +57,22 @@ offset, ask, keep what comes back under the address it came back from.
 
 Three rules, and each one is load-bearing:
 
-- **The client computes nothing.** `?after=` is the offset of the last event it folded — a
+- **The client computes nothing.** The cursor is the offset of the last event it folded — a
   value it already holds (`LastProcessedOffset`) and already treats as opaque, because
   design.md §2.2 has clients consuming the log by offset and nothing else. It never derives a
   range, never aligns to a boundary, never needs to know `EventChunk.size` exists. Omitting the
-  parameter means "from the beginning", which is exactly `EventFeed`'s existing
-  `EventOffset option`.
+  segment means "from the beginning", which is exactly `EventFeed`'s existing
+  `EventOffset option`. (A path segment rather than a query because `SessionRoute.parse`
+  matches on the pathname alone, and `relative`/`parse` are exact inverses.)
 - **The server mints every boundary**, capped at `EventChunk.size`. Because no client ever names
   a range, no client can name one the log has not reached — the 404 below stops being a path
   anyone travels and becomes what it should be, a guard on a public address.
 - **A range is served only if the log reaches its end**, else 404. The address is guessable, and
   a guess answered with a *short* body would be kept for ever as if it were the whole range —
-  wrong until someone clears it, and unfixable from the server. Exactly the hazard `serveAsset`
-  404s to avoid ([`Signalling.fs:49`](../../app/Signalling.fs)); same argument, same answer.
+  wrong until someone clears it, and unfixable from the server. Exactly the hazard the asset
+  surface 404s to avoid — a `build` that is not ours holds nothing, so a stale shell is sent
+  back rather than answered with current bytes ([`Assets.serve`](../../app/Signalling.fs));
+  same argument, same answer.
 
 `204` is what a client that is current gets, and it is why nothing else is needed to make the
 HTTP leg self-sufficient: a peer with no data channel can still ask and be told it is up to
@@ -169,7 +172,7 @@ Two seams use it, and they are deliberately separate:
 
 **1. The feed sends a cursor instead of computing an address.** `EventFetch.overHttp` currently
 turns an offset into `/events/{EventChunk.indexOf n}` ([`App.fs:291`](../../src/Yession.App/App.fs));
-it instead sends that offset as `?after=` and keeps whatever comes back, under whatever address
+it instead sends that offset as the cursor and keeps whatever comes back, under whatever address
 it came back from. The signature it implements is unchanged — `EventOffset option -> …` — and it
 is now a literal reading of it. Each answer is written to the cache as it settles, *inside* the
 resilience guard, so only settled answers are kept.
@@ -199,7 +202,7 @@ Nothing new is needed for the resume. `ConnectOptions.ReadPosition` is already t
 `LastProcessedOffset` ([`Browser.fs:1217`](../../app/browser/Browser.fs)), and the read loop
 already asks the model rather than its own bookkeeping — for precisely this class of reason
 ([`App.fs:236`](../../src/Yession.App/App.fs)). Replay first, and the first *network* request
-the loop makes is `?after=<that offset>`, and the server answers with whatever has happened
+the loop makes is `events/after/<that offset>`, and the server answers with whatever has happened
 since. One request, usually small, and nothing computed to make it.
 
 That ordering is the only new invariant, and it is worth a test of its own: **a client that
@@ -371,7 +374,7 @@ Cheap tier — no capability, runs on every PR:
 - **The cursor is disjoint and total**: asking from each answer's last offset in turn yields
   every offset exactly once, and a cursor at the end of the log answers `204` rather than an
   empty range nobody should be keeping.
-- **A cursor resolves to bounds the client never chose**: `?after=99` lands on an address whose
+- **A cursor resolves to bounds the client never chose**: `events/after/99` lands on an address whose
   range the server picked and capped, and the client stores it under the address it was given.
 - **Resume**: replay a store covering `0..41`, then a transport advertising latest `47`, and
   assert the network was asked for `42-47` and nothing below it — the plan's central promise,
@@ -427,7 +430,7 @@ next, and the reverse is not true.
 
 | | | |
 |---|---|---|
-| 1 | **The cursor and the range it resolves to.** `?after=` redirecting to `Events of from * until`, `204` when current, the 404 on an unreached range, `no-store` everywhere. Server and route only — the existing client keeps working, since a cursor is what its feed already had. | The tail becomes fetchable at a stable address, which is the whole symptom. |
+| 1 | **The cursor and the range it resolves to.** `EventsAfter` redirecting to `Events of first * last`, `204` when current, the 404 on an unreached range, `no-store` everywhere. Server and route only — the existing client keeps working, since a cursor is what its feed already had. | The tail becomes fetchable at a stable address, which is the whole symptom. |
 | 2 | **The walk and the store.** `HistoryCache` over the Cache API, follow `next`, replay from zero at boot above the `/me` probe, `LocalHistoryMsg`, gaps named, and the insecure-context line that says why there is no store. | A session unreachable with the network up (asleep, reaped) reads back in full. |
 | 3 | **Retrying that does not give up.** `online` re-arm, supervised reconnect, manual retry, GAPS entry closed. | Recovery without a reload. |
 | 4 | **The loader.** `HistoryRestore`, the empty-timeline split, the strip's restoring state. | The empty screen stops lying. |
