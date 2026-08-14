@@ -237,6 +237,14 @@ let private sandboxPolicyTests =
                     Support.emptyPolicy
             Expect.equal unrestricted.AllowedDomains [] "a policy naming no domains gets no egress, never all of it"
 
+        testCase "the srt config opens .git/config, which a clone cannot avoid writing" <| fun () ->
+            let config =
+                Sandboxes.SrtSandbox.configFor
+                    { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
+                    None
+                    Support.emptyPolicy
+            Expect.isTrue config.AllowGitConfig "srt's default denies the write every `git clone` makes"
+
         testCase "the confinement tools: named, blank is absent, and weakening is never a guess" <| fun () ->
             let tools =
                 Sandboxes.SrtSandbox.toolsFrom

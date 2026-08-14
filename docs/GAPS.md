@@ -375,6 +375,25 @@ Items are roughly ordered by how much they matter.
     operator's explicitly lax choice, as everywhere `host` is chosen. The per-invocation
     hardening (hooks/fsmonitor/ext off, no global config, protocol pinned) still
     applies; the filesystem and egress boundaries do not.
+  - **Every srt sandbox may write a checkout's `.git/config`.** srt denies that write by
+    default; a `git clone` makes it, so the flag is on. It cannot be scoped to the git
+    sandbox: srt reads it from the session config that whichever sandbox came up first
+    initialized the process-wide manager with, and ignores the per-spawn one. So the
+    WorkSandbox and the
+    agent can write a `.git/config` too — planting a `core.fsmonitor`, an alias, or a
+    pager that runs when git next runs in that checkout. Inside the session that is the
+    shared-trust boundary already stated above, and the verbs themselves are immune (the
+    per-invocation `GIT_CONFIG_*` hardening wins over any repo config); OUTSIDE it, a
+    human running git in the checkout on their own host is not. `.git/hooks` — the other
+    half of the same vector — stays denied.
+  - **On macOS a checkout cannot contain what srt refuses to write.** Seatbelt's mandatory
+    denies are patterns, not a scan, and no policy re-allows them: `**/.vscode/**`,
+    `**/.idea/**`, `**/.claude/commands|agents/**`, `**/.mcp.json`, `**/.gitmodules`, and
+    the shell rc names. A repo carrying any of them fails mid-checkout with git's
+    "Operation not permitted". Linux computes its denies by scanning what already exists,
+    so the same clone succeeds there and no suite here can see the difference —
+    `YESSION_AGENT_SANDBOX=host` is the only route for such a repo until srt can be told
+    to stand down per spawn.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **The session's imperative API is split, and only half of it is built**

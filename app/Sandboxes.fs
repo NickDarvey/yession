@@ -635,7 +635,14 @@ type SrtConfig =
       Bwrap : string option
       Socat : string option
       Ripgrep : string option
-      WeakNesting : bool }
+      WeakNesting : bool
+      /// srt denies writes to `.git/config` unless told otherwise, and a `git clone`
+      /// writes one. So this is on — and it is on for EVERY sandbox, because srt reads
+      /// the flag from the session config the first sandbox initialized the manager with
+      /// and ignores the per-spawn one, which makes any per-sandbox answer a lie about
+      /// which sandbox got it. What that costs is stated in docs/GAPS.md; the hooks deny
+      /// (the execution vector) is separate and stays.
+      AllowGitConfig : bool }
 
 /// OS-level confinement via `@anthropic-ai/sandbox-runtime` (bubblewrap on Linux,
 /// Seatbelt on macOS): a wrapped spawn, no container, and egress that is ENFORCED —
@@ -677,7 +684,8 @@ module SrtSandbox =
           Bwrap = tools.Bwrap
           Socat = tools.Socat
           Ripgrep = tools.Ripgrep
-          WeakNesting = (tools.Nesting = WeakNesting) }
+          WeakNesting = (tools.Nesting = WeakNesting)
+          AllowGitConfig = true }
 
     /// How this host confines, as configured. A blank tool path is an absent one: the dev
     /// shell and the installable set these per platform, and on macOS they are empty.
@@ -705,7 +713,7 @@ module SrtSandbox =
               Ripgrep = named "YESSION_RIPGREP_PATH"
               Nesting = nesting })
 
-    [<Emit("({ network: { allowedDomains: $0, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: $1, allowRead: $2, allowWrite: $3, denyWrite: [] }, ...($4 ? { bwrapPath: $4 } : {}), ...($5 ? { socatPath: $5 } : {}), ...($6 ? { ripgrep: { command: $6 } } : {}), ...($7 ? { enableWeakerNestedSandbox: true } : {}) })")>]
+    [<Emit("({ network: { allowedDomains: $0, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: $1, allowRead: $2, allowWrite: $3, denyWrite: [], allowGitConfig: $8 }, ...($4 ? { bwrapPath: $4 } : {}), ...($5 ? { socatPath: $5 } : {}), ...($6 ? { ripgrep: { command: $6 } } : {}), ...($7 ? { enableWeakerNestedSandbox: true } : {}) })")>]
     let private configObject
         (allowedDomains: string array)
         (denyRead: string array)
@@ -715,6 +723,7 @@ module SrtSandbox =
         (socat: string)
         (ripgrep: string)
         (weakNesting: bool)
+        (allowGitConfig: bool)
         : obj = jsNative
 
     let private toJs (config: SrtConfig) : obj =
@@ -727,6 +736,7 @@ module SrtSandbox =
             (config.Socat |> Option.defaultValue "")
             (config.Ripgrep |> Option.defaultValue "")
             config.WeakNesting
+            config.AllowGitConfig
 
     // The package is loaded on demand: it pulls a proxy stack and a TLS library, and a
     // session on the host backend must not pay for either. Dynamic `import` (not

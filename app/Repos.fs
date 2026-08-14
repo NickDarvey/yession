@@ -242,7 +242,13 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                     return! listingOf repo
                 else
                     let! token = config.ResolveToken caller.Credential
-                    match! runOk token [ "clone"; "--no-recurse-submodules"; config.CloneUrl repo; RepoRef.relativePath repo ] with
+                    // `--template=` is empty deliberately: git's default templates are a
+                    // set of `.git/hooks/*.sample` files, and srt's macOS profile denies
+                    // every write under `**/.git/hooks/**` unconditionally — so the copy
+                    // that populates them is what fails, and a clone that asks for no
+                    // templates never attempts it. Nothing here wants a hooks directory
+                    // anyway: repo-controlled execution is off by construction.
+                    match! runOk token [ "clone"; "--no-recurse-submodules"; "--template="; config.CloneUrl repo; RepoRef.relativePath repo ] with
                     | Error e -> return Error e
                     | Ok _ ->
                         match! listingOf repo with
