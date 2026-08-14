@@ -70,6 +70,13 @@ type ViewActions =
       /// Imperative because it is a navigation, and a navigation is not a state change this
       /// document survives to fold.
       ReopenSession : unit -> unit
+      /// Try the session again NOW, rather than when the supervised loop next would.
+      ///
+      /// A trigger, never a second schedule (Plan 20): it shortens the wait the lifecycle is
+      /// already in. It earns its place on the one client the loop deliberately will not
+      /// carry — a peer whose token was refused, which no amount of waiting fixes and which
+      /// therefore parks until somebody asks.
+      RetryNow : unit -> unit
       /// Ask the Session Process to open a terminal (Plan 13). A command, so imperative:
       /// the terminal's id is minted by the Process and comes back as an event.
       OpenTerminal : string -> unit
@@ -135,6 +142,7 @@ module ViewActions =
           GitHubPasteToken = ignore
           GitHubDisconnect = ignore
           ReopenSession = ignore
+          RetryNow = ignore
           OpenTerminal = ignore
           CloseTerminal = ignore
           SendTerminalDraft = fun _ _ -> ()
@@ -290,7 +298,13 @@ module View =
         let connectionReason =
             match model.Connection with
             | Disconnected (Some reason) ->
-                html $"""<span class="{Style.small}" data-connection-reason>{reason}</span>"""
+                // The reason, and the one thing a person can do about it. The supervised loop
+                // is already trying; this is for the client it will not carry — a refused peer
+                // parks until asked — and for anyone who would rather not wait out a backoff.
+                html $"""
+                  <span class="{Style.small}" data-connection-reason>{reason}</span>
+                  <button type="button" class="{Style.btn}" data-retry-now
+                          @click={Ev(fun _ -> actions.RetryNow ())}>{Dom.Text.retryNow}</button>"""
             | _ -> Lit.nothing
         let feedLine =
             match consumer.Feed with
