@@ -152,7 +152,8 @@ let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : P
       OnBehalfOf = None
       ApprovedBy = None
       RejectedBy = None
-      RejectedReason = None }
+      RejectedReason = None
+      Background = false }
 
 /// Poll until `condition` holds or the budget runs out. Bounded rather than a fixed sleep:
 /// a shell's timing is not ours to predict, and a test that sleeps long enough to be safe is

@@ -162,6 +162,7 @@ let private shellModel : ClientModel =
                           Author = PeerRef peerId
                           ApprovedBy = None
                           Command = "ls -la"
+                          Background = false
                           FromSeq = 0
                           ToSeq = Some 2
                           Status = BlockFinished (CommandSucceeded 0) } ]

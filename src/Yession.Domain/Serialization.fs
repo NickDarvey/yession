@@ -702,7 +702,8 @@ module Codec =
                       "author", actor.Encode p.Author
                       "approvedBy", Encode.option actor.Encode p.ApprovedBy
                       "command", Encode.string p.Command
-                      "fromSeq", Encode.int p.FromSeq ]
+                      "fromSeq", Encode.int p.FromSeq
+                      "background", Encode.bool p.Background ]
           Decode =
             Decode.object (fun get ->
                 { TerminalBlockStarted.TerminalId = get.Required.Field "terminalId" terminalId.Decode
@@ -711,7 +712,14 @@ module Codec =
                   TerminalBlockStarted.Author = get.Required.Field "author" actor.Decode
                   TerminalBlockStarted.ApprovedBy = get.Required.Field "approvedBy" (Decode.option actor.Decode)
                   TerminalBlockStarted.Command = get.Required.Field "command" Decode.string
-                  TerminalBlockStarted.FromSeq = get.Required.Field "fromSeq" Decode.int }) }
+                  TerminalBlockStarted.FromSeq = get.Required.Field "fromSeq" Decode.int
+                  // Optional on the way IN and required on the way out: every block written
+                  // before Plan 20 ran in the foreground, and an event log is read back for
+                  // the life of its session. A `Required` field here would make those pages
+                  // undecodable — which is a session that will not open, to record a bool
+                  // whose absence already means `false`.
+                  TerminalBlockStarted.Background =
+                    get.Optional.Field "background" Decode.bool |> Option.defaultValue false }) }
 
     let private terminalBlockCompleted : Codec<TerminalBlockCompleted> =
         { Encode =

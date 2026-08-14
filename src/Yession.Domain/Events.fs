@@ -148,6 +148,16 @@ and AgentTurnStarted =
     { AgentTurnId : AgentTurnId
       TriggeredByMessageId : MessageId }
 
+/// Why a turn exists when nobody spoke (Plan 20, stage 2).
+///
+/// Attribution, never payload: the substance of what happened arrives through the same door
+/// every turn's does — `TerminalBlockDigest` for terminal work, the tool roster for a roster
+/// change — so a wake carries the REASON and nothing else. A reason that carried results
+/// would be a second channel into the agent's context, free to disagree with the first.
+and WakeReason =
+    /// A command the agent asked to run in the background finished while it was not running.
+    | CommandFinished
+
 and AgentContextBuilt =
     { AgentTurnId : AgentTurnId
       MessageCount : int }
@@ -302,7 +312,16 @@ and TerminalBlockStarted =
       /// immutable thereafter — exactly as `MessageSent` snapshots a message body.
       Command : string
       /// The transcript line index at which this block's output begins.
-      FromSeq : int }
+      FromSeq : int
+      /// Whether the agent asked for this one to run in the BACKGROUND (Plan 20, stage 2):
+      /// it did not hold the turn open, and its completion is something the agent wants to
+      /// be told about.
+      ///
+      /// On the block rather than only in the queue entry it came from, because that is what
+      /// makes "is a wake due" a pure fold over the log: the doc's entry is gone the moment
+      /// the block starts, and a scheduling decision that depended on it would be a decision
+      /// a restart could not re-derive.
+      Background : bool }
 
 /// A queued command a peer refused (Plan 13, stage 2a). The other half of the approval
 /// gate: a log that records every yes and no no is the weaker thing wearing the stronger

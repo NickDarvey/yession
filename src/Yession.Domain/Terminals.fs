@@ -56,6 +56,11 @@ type TerminalBlock =
       /// Who approved it, when the mode required one.
       ApprovedBy : ActorRef option
       Command : string
+      /// Whether the agent asked for this one in the background (Plan 20, stage 2) — it did
+      /// not hold a turn open, and its completion is something the agent is waiting to be
+      /// told about. Projected so a surface can SAY so while it runs: work nobody is sitting
+      /// in front of is the work most worth marking.
+      Background : bool
       /// First transcript line of this block's output.
       FromSeq : int
       /// One past its last transcript line; `None` while it is still running.
@@ -98,17 +103,15 @@ type TerminalView =
 /// in the terminal list offers.
 ///
 /// Here rather than in the view because it is a rule about a terminal's state, and a rule
-/// lives with the state it governs. The same rule is spelled out by hand in three templates
-/// — "offered only for a terminal that is actually open", "a live terminal's recording is
-/// still being written", "shown ONLY when both are true" — each correct, each re-derived,
-/// and each testable only by building the whole client and reading HTML back. As one fold it
-/// is four booleans the cheap tier pins directly, and "a destructive control is not offered
-/// over nothing" stops being a convention three templates happen to remember.
+/// lives with the state it governs. The same rule used to be spelled out by hand in three
+/// templates — "offered only for a terminal that is actually open", "a live terminal's
+/// recording is still being written", "shown ONLY when both are true" — each correct, each
+/// re-derived, and each testable only by building the whole client and reading HTML back. As
+/// one fold it is four booleans the cheap tier pins directly, and "a destructive control is
+/// not offered over nothing" stops being a convention three templates happen to remember.
 ///
-/// Those three are still there: the list ships BESIDE the pane's own controls, and stage 1
-/// deletes them as the strip stops being a census. Until it does, this is the one the list
-/// reads and they are the ones the pane reads — stated, because two mechanisms for one rule
-/// is exactly what the next stage exists to close.
+/// Stage 1 deleted those three with the strip's own verbs, so this is now the only place
+/// that decides.
 ///
 /// Absent verbs are ABSENT, never disabled: a control that mostly refuses teaches people not
 /// to press it, and this list's controls have to work the time somebody needs them.
@@ -210,6 +213,7 @@ module TerminalProjection =
                                   Author = e.Author
                                   ApprovedBy = e.ApprovedBy
                                   Command = e.Command
+                                  Background = e.Background
                                   FromSeq = e.FromSeq
                                   ToSeq = None
                                   Status = BlockRunning } ] })
@@ -227,6 +231,8 @@ module TerminalProjection =
                             t.Blocks
                             @ [ { BlockId = e.BlockId
                                   QueueId = Some e.QueueId
+                                  // A command that never ran was never anybody's wait.
+                                  Background = false
                                   Author = e.Author
                                   // Nobody approved it; someone did the opposite, and that
                                   // is on the status rather than smuggled in here.

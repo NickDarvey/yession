@@ -408,9 +408,81 @@ let private liveTests =
             }
     ]
 
+
+// --- The wake (Plan 20, stage 2) ---------------------------------------------------------
+
+let private blockStarted (n: string) (background: bool) =
+    SessionEvent.TerminalBlockStarted
+        { TerminalId = TerminalId.create "term-a" |> expect
+          BlockId = BlockId.create n |> expect
+          QueueId = None
+          Author = ActorRef.Agent
+          ApprovedBy = None
+          Command = "make"
+          FromSeq = 0
+          Background = background }
+
+let private blockCompleted (n: string) =
+    SessionEvent.TerminalBlockCompleted
+        { TerminalId = TerminalId.create "term-a" |> expect
+          BlockId = BlockId.create n |> expect
+          Result = CommandSucceeded 0
+          ToSeq = 4 }
+
+let private turnStarted (n: string) =
+    AgentTurnStarted
+        { AgentTurnId = AgentTurnId.create n |> expect
+          TriggeredByMessageId = MessageId.create ("m-" + n) |> expect }
+
+let private wakeTests =
+    testList "The wake (Plan 20, stage 2)" [
+
+        testCase "a background command that finished owes the agent a turn" <| fun () ->
+            Expect.isTrue
+                (AgentWake.due [ turnStarted "1"; blockStarted "b1" true; blockCompleted "b1" ])
+                "nobody was waiting on it, so somebody has to be told"
+
+        testCase "a foreground command that finished owes nothing" <| fun () ->
+            // Somebody WAS waiting: the tool call that queued it is what carries the outcome
+            // back, and waking a turn to re-report it would be the second channel this
+            // design does not have.
+            Expect.isFalse
+                (AgentWake.due [ turnStarted "1"; blockStarted "b1" false; blockCompleted "b1" ])
+                "its own call answered it"
+
+        testCase "a background command still running owes nothing yet" <| fun () ->
+            Expect.isFalse
+                (AgentWake.due [ turnStarted "1"; blockStarted "b1" true ])
+                "there is no outcome to be told about"
+
+        testCase "the turn a wake started takes that wake with it" <| fun () ->
+            // What makes the wake fire once without storing a cursor: an `AgentTurnStarted`
+            // resets the window, exactly as it does for the digest that turn reads.
+            Expect.isFalse
+                (AgentWake.due [ blockStarted "b1" true; blockCompleted "b1"; turnStarted "woken" ])
+                "the turn that was owed has run"
+
+        testCase "several finishing at once are ONE wake, and one turn sees them all" <| fun () ->
+            // Coalescing is not a mechanism here, it is a consequence: the wake is a bool
+            // over the same window the digest reads, so everything that landed before the
+            // turn starts is in that turn's digest.
+            let page =
+                [ turnStarted "1"
+                  blockStarted "b1" true
+                  blockStarted "b2" true
+                  blockCompleted "b1"
+                  blockCompleted "b2" ]
+            Expect.isTrue (AgentWake.due page) "one wake"
+            Expect.equal
+                (TerminalDigest.window page |> Set.count)
+                2
+                "and the turn it starts is told about both"
+    ]
+
 let tests =
     testList "Agent" [
         turnTests
+        wakeTests
         Tag.needs "Agent E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
         Tag.needs "Agent live SDK" [ Tag.LiveAgent; Tag.Native ] (fun () -> liveTests)
     ]

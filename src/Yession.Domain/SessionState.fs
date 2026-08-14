@@ -116,7 +116,16 @@ type PendingAct =
       RejectedBy : PeerId option
       /// Why it was refused, when the peer said. Optional because "no" is a complete
       /// answer; the reason is what makes it a useful one.
-      RejectedReason : string option }
+      RejectedReason : string option
+      /// Whether the author asked for this to run WITHOUT holding their turn open (Plan 20,
+      /// stage 2). Only an agent sets it — a person's composer never waits on anything —
+      /// and it rides the queue entry because the drain is what reads the doc and mints the
+      /// block that records it.
+      ///
+      /// It changes nothing about what runs or who may approve it: a background command is
+      /// queued, editable and refusable exactly as every other one is. What it changes is
+      /// who is waiting, which is why it is here and not in the payload.
+      Background : bool }
 
 module PendingAct =
 

@@ -1281,7 +1281,11 @@ module SessionTerminals =
                                   Author = entry.Author
                                   ApprovedBy = entry.ApprovedBy |> Option.map PeerRef
                                   Command = command
-                                  FromSeq = fromSeq })
+                                  FromSeq = fromSeq
+                                  // Carried from the queue entry onto the block, which is
+                                  // what lets `AgentWake.due` decide from the LOG alone: the
+                                  // entry is removed the moment this lands.
+                                  Background = entry.Background })
                     // Consumed: the durable fact exists, so the doc key can go. Between
                     // the append and this call the entry is in both places, which the
                     // drain answers by planning against the log-anchored `consumed` set
@@ -1788,7 +1792,7 @@ module TerminalCommands =
           Read : QueueId -> Async<Result<TerminalCommandOutcome, string>> }
 
     let unavailable : TerminalCommands =
-        { Execute = fun _ _ -> async { return Error "this session has no terminals" }
+        { Execute = fun _ _ _ -> async { return Error "this session has no terminals" }
           Read = fun _ -> async { return Error "this session has no terminals" } }
 
     /// Wake on the next change, or on a short tick. The tick is a floor, not the mechanism:
@@ -1917,7 +1921,7 @@ module TerminalCommands =
                     return! awaitOutcome terminal handle startedAt runningSince
             }
 
-        let execute (requested: CommandTarget option) (command: string) : Async<Result<TerminalCommandOutcome, string>> =
+        let execute (requested: CommandTarget option) (command: string) (background: bool) : Async<Result<TerminalCommandOutcome, string>> =
             async {
                 let command = command.Trim ()
                 if command = "" then return Error "a command cannot be empty"
@@ -1948,7 +1952,23 @@ module TerminalCommands =
                             ActorRef.Agent
                             (TerminalQueueOrder.nextFor terminal synced.Pending)
                             command
-                        return! awaitOutcome terminal handle (now ()) None
+                            background
+                        if not background then return! awaitOutcome terminal handle (now ()) None
+                        else
+                            // Answer with what is true NOW rather than waiting: the caller
+                            // said it is not waiting, and the outcome reaches it as a wake
+                            // and the digest that turn reads. Not "queued" as a fixed word,
+                            // because the honest answer differs — a refusal or a hold has
+                            // already happened by the time an `AutoRun` terminal drains, and
+                            // reporting those as "queued" is how a model concludes, after a
+                            // silence, that its command failed and tries something else.
+                            let observation = observe terminal handle
+                            let status =
+                                match TerminalCommandWait.step false false observation with
+                                | TerminalCommandWait.Return status -> status
+                                | TerminalCommandWait.Gone | TerminalCommandWait.KeepWaiting ->
+                                    TerminalCommandRunning
+                            return Ok (outcomeOf terminal handle status)
             }
 
         let read (handle: QueueId) : Async<Result<TerminalCommandOutcome, string>> =

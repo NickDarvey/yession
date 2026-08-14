@@ -227,7 +227,11 @@ module SyncedStateSync =
           Order : float
           ApprovedBy : string
           RejectedBy : string
-          RejectedReason : string }
+          RejectedReason : string
+          /// Whether the author is waiting on this one (Plan 20, stage 2). A string on the
+          /// doc side like every other field here — the doc carries text, and the domain
+          /// type is where it becomes a bool.
+          Background : string }
 
     /// A terminal draft entry: the queue key it becomes when sent. Both ids come from the
     /// map key, so only this crosses.
@@ -250,6 +254,7 @@ module SyncedStateSync =
             let! approvedBy = Decode.object.optional "approvedBy" Decode.string
             let! rejectedBy = Decode.object.optional "rejectedBy" Decode.string
             let! rejectedReason = Decode.object.optional "rejectedReason" Decode.string
+            let! background = Decode.object.optional "background" Decode.string
             return
                 { Subject = subject
                   Payload = defaultArg payload ""
@@ -261,7 +266,8 @@ module SyncedStateSync =
                   Order = defaultArg order 0.0
                   ApprovedBy = defaultArg approvedBy ""
                   RejectedBy = defaultArg rejectedBy ""
-                  RejectedReason = defaultArg rejectedReason "" }
+                  RejectedReason = defaultArg rejectedReason ""
+                  Background = defaultArg background "" }
         }
 
     let private decodeTerminalSize<'m> : Decoder<'m, TerminalSize> =
@@ -356,7 +362,10 @@ module SyncedStateSync =
                       OnBehalfOf = (if f.OnBehalfOf = "" then None else ActorRef.ofToken f.OnBehalfOf)
                       ApprovedBy = approvedBy
                       RejectedBy = rejectedBy
-                      RejectedReason = (if f.RejectedReason = "" then None else Some f.RejectedReason) }
+                      RejectedReason = (if f.RejectedReason = "" then None else Some f.RejectedReason)
+                      // Absent reads as foreground, which is what every entry a person
+                      // writes is and what every entry written before Plan 20 was.
+                      Background = (f.Background = "true") }
             | _ -> acc)
 
     let private terminalSizesToDomain (h: HashMap<string, TerminalSize>) : Map<TerminalId, TerminalSize> =
@@ -501,7 +510,8 @@ module SyncedStateSync =
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
                   ApprovedBy = entryString entry "approvedBy"
                   RejectedBy = entryString entry "rejectedBy"
-                  RejectedReason = entryString entry "rejectedReason" })
+                  RejectedReason = entryString entry "rejectedReason"
+                  Background = entryString entry "background" })
         let gatesH = foldRoot doc "gates" (fun entry -> entryString entry "mode")
         let terminalSizesH =
             foldRoot doc "terminalSizes" (fun entry ->
@@ -625,6 +635,11 @@ module SyncedStateSync =
         (author: ActorRef)
         (order: float)
         (command: string)
+        // Whether the author will wait on it (Plan 20, stage 2). On the entry rather than
+        // held by the caller, because the DRAIN is what mints the block that records it and
+        // the drain reads the doc — a flag the caller kept would not survive the hop, nor a
+        // restart between the enqueue and the run.
+        (background: bool)
         : unit =
         doc.transact (
             (fun _ ->
@@ -636,6 +651,7 @@ module SyncedStateSync =
                 entry.set ("payload", box "line") |> ignore
                 entry.set ("author", box (ActorRef.token author)) |> ignore
                 entry.set ("order", box order) |> ignore
+                if background then entry.set ("background", box "true") |> ignore
                 // Never approved on arrival: whether an approval is REQUIRED is the mode's
                 // question, and pre-answering it here would let the agent approve itself.
                 entry.set ("approvedBy", box "") |> ignore),
