@@ -1895,7 +1895,7 @@ module View =
             | None ->
                 html $"""
                     <div class="{Style.terminalEmpty}">
-                      <span class="font-mono text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
+                      <span class="font-terminal text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
                       <button type="button" class="{Style.btnPrimary}" data-terminal-new
                               @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
                     </div>"""
