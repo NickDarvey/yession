@@ -640,6 +640,12 @@ module SyncedStateSync =
         // the drain reads the doc — a flag the caller kept would not survive the hop, nor a
         // restart between the enqueue and the run.
         (background: bool)
+        // Whose credential this runs on (Plan 20, stage 2). Set for an agent's command and
+        // meaning what it has always meant on `enqueueCommandCall`: the agent is the acting
+        // party and the credential is the turn human's. It is what a WOKEN turn resolves its
+        // own authority from, so a command queued without it can start no turn — the safe
+        // direction, and the same one an unreadable owner already takes.
+        (onBehalfOf: ActorRef option)
         : unit =
         doc.transact (
             (fun _ ->
@@ -652,6 +658,7 @@ module SyncedStateSync =
                 entry.set ("author", box (ActorRef.token author)) |> ignore
                 entry.set ("order", box order) |> ignore
                 if background then entry.set ("background", box "true") |> ignore
+                onBehalfOf |> Option.iter (fun actor -> entry.set ("onBehalfOf", box (ActorRef.token actor)) |> ignore)
                 // Never approved on arrival: whether an approval is REQUIRED is the mode's
                 // question, and pre-answering it here would let the agent approve itself.
                 entry.set ("approvedBy", box "") |> ignore),

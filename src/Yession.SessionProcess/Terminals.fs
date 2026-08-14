@@ -1283,9 +1283,10 @@ module SessionTerminals =
                                   Command = command
                                   FromSeq = fromSeq
                                   // Carried from the queue entry onto the block, which is
-                                  // what lets `AgentWake.due` decide from the LOG alone: the
-                                  // entry is removed the moment this lands.
-                                  Background = entry.Background })
+                                  // what lets the wake decide from the LOG alone: the entry
+                                  // is removed the moment this lands.
+                                  Background = entry.Background
+                                  OnBehalfOf = entry.OnBehalfOf })
                     // Consumed: the durable fact exists, so the doc key can go. Between
                     // the append and this call the entry is in both places, which the
                     // drain answers by planning against the log-anchored `consumed` set
@@ -1785,14 +1786,17 @@ module TerminalCommands =
     type OnChanged = (unit -> unit) -> (unit -> unit)
 
     type TerminalCommands =
-        { Execute : ExecuteCommand
+        { /// Not `ExecuteCommand`: the agent-facing capability takes no authority argument,
+          /// and this takes the one the per-turn binding supplies. Two shapes because they
+          /// are two audiences — the tool surface must not be able to name a credential.
+          Execute : CommandTarget option -> string -> bool -> ActorRef option -> Async<Result<TerminalCommandOutcome, string>>
           /// Resume a terminal handle. The terminal HALF of `CheckPending` (Plan 15, stage
           /// 3b): the Host joins it to the command gate's half, because a handle names a
           /// request without saying which kind, which is exactly what makes one tool enough.
           Read : QueueId -> Async<Result<TerminalCommandOutcome, string>> }
 
     let unavailable : TerminalCommands =
-        { Execute = fun _ _ _ -> async { return Error "this session has no terminals" }
+        { Execute = fun _ _ _ _ -> async { return Error "this session has no terminals" }
           Read = fun _ -> async { return Error "this session has no terminals" } }
 
     /// Wake on the next change, or on a short tick. The tick is a floor, not the mechanism:
@@ -1921,7 +1925,15 @@ module TerminalCommands =
                     return! awaitOutcome terminal handle startedAt runningSince
             }
 
-        let execute (requested: CommandTarget option) (command: string) (background: bool) : Async<Result<TerminalCommandOutcome, string>> =
+        let execute
+            (requested: CommandTarget option)
+            (command: string)
+            (background: bool)
+            // Whose credential this runs on (Plan 20, stage 2). Supplied by the per-turn
+            // binding rather than by the agent, for the reason every other `OnBehalfOf` is:
+            // an acting party that could name its own authority is not gated by one.
+            (onBehalfOf: ActorRef option)
+            : Async<Result<TerminalCommandOutcome, string>> =
             async {
                 let command = command.Trim ()
                 if command = "" then return Error "a command cannot be empty"
@@ -1953,6 +1965,7 @@ module TerminalCommands =
                             (TerminalQueueOrder.nextFor terminal synced.Pending)
                             command
                             background
+                            onBehalfOf
                         if not background then return! awaitOutcome terminal handle (now ()) None
                         else
                             // Answer with what is true NOW rather than waiting: the caller

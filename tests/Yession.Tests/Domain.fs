@@ -193,7 +193,7 @@ let private frameSerializationTests =
                   PeerLeft { PeerId = peerId }
                   MessageSent { MessageId = messageId; QueueId = None; Author = PeerRef peerId; Body = "hi" }
                   MessageSent { MessageId = messageId; QueueId = Some (QueueId.create "q-1" |> expect); Author = ActorRef.System; Body = "" }
-                  AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = messageId }
+                  AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (messageId); Woke = None }
                   AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }
                   AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId }
                   AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "d" }

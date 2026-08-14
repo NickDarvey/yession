@@ -146,7 +146,17 @@ and MessageSent =
 
 and AgentTurnStarted =
     { AgentTurnId : AgentTurnId
-      TriggeredByMessageId : MessageId }
+      /// What was said to start this turn. `None` for a turn nobody asked for (Plan 20,
+      /// stage 2) — an option rather than a minted stand-in, because an id that names no
+      /// message is a fact invented to fill a field.
+      TriggeredByMessageId : MessageId option
+      /// Why this turn exists when nobody spoke (Plan 20, stage 2). `None` is the ordinary
+      /// turn, whose trigger is the message above.
+      ///
+      /// Durable because an agent that acts unprompted must be able to SAY why on every
+      /// surface that shows what it did — an unexplained turn in a shared session reads as
+      /// the agent deciding on its own, which is the one thing it must never look like.
+      Woke : WakeReason option }
 
 /// Why a turn exists when nobody spoke (Plan 20, stage 2).
 ///
@@ -313,6 +323,14 @@ and TerminalBlockStarted =
       Command : string
       /// The transcript line index at which this block's output begins.
       FromSeq : int
+      /// Whose credential the command ran on, when that is not the author's own (Plan 20,
+      /// stage 2) — the queue entry's `OnBehalfOf`, carried onto the block.
+      ///
+      /// Here because a WOKEN turn has no triggering message to resolve its authority from,
+      /// and the log is the only thing it can read. Absent means no turn can be woken by
+      /// this block: an unresolvable owner runs on NOTHING rather than on somebody else's
+      /// credential, which is the direction every other reader of this field already takes.
+      OnBehalfOf : ActorRef option
       /// Whether the agent asked for this one to run in the BACKGROUND (Plan 20, stage 2):
       /// it did not hold the turn open, and its completion is something the agent wants to
       /// be told about.

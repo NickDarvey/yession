@@ -619,7 +619,7 @@ let private acceptanceTests =
                           Body = "hi" }
                       AgentTurnStarted
                         { AgentTurnId = AgentTurnId.create "t1" |> expect
-                          TriggeredByMessageId = MessageId.create "m1" |> expect }
+                          TriggeredByMessageId = Some (MessageId.create "m1" |> expect); Woke = None }
                       EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None }
                       EnvironmentStarted { EnvironmentId = "env"; ContainerRef = "ctr" }
                       SessionEvent.TerminalOpened
@@ -632,7 +632,8 @@ let private acceptanceTests =
                           ApprovedBy = None
                           Command = "true"
                           FromSeq = 0
-                          Background = false }
+                          Background = false
+                          OnBehalfOf = None }
                       SessionEvent.TerminalBlockCompleted
                         { TerminalId = TerminalId.create "t1" |> expect
                           BlockId = BlockId.create "b1" |> expect

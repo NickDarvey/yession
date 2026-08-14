@@ -552,7 +552,7 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
             // party on the events is the agent, the credential is the turn human's. The
             // query surface is bound in the same place for a duller reason — the registry
             // is built in the boot async, and this is where a turn first sees it.
-            let capabilities = repoCapabilitiesFor context.CurrentMessage.Author capabilities
+            let capabilities = repoCapabilitiesFor context.TurnActor capabilities
             let capabilities =
                 { capabilities with
                     Queries = queryRegistry.Definitions
@@ -560,7 +560,7 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
             // The sandbox commands are bound to THIS turn's actor for the repo verbs'
             // reason (Plan 15, stage 2): the acting party on the event is the agent, and
             // the credentials a forwarding start resolves are the turn human's.
-            let capabilities = sandboxCapabilitiesFor context.CurrentMessage.Author capabilities
+            let capabilities = sandboxCapabilitiesFor context.TurnActor capabilities
             // A dispatch-level failure streams its reason as the message body first:
             // the turn's item is already open (AgentMessageStarted precedes the
             // runner), so this is what makes the reason VISIBLE in the timeline.
@@ -568,7 +568,7 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
                 onChunk { Text = reason }
                 AgentFailed reason
             let targets =
-                ClaudeConnection.turnTargets sessionId context.CurrentMessage.Author
+                ClaudeConnection.turnTargets sessionId context.TurnActor
                 |> List.filter (fun target -> Map.containsKey target connectionStatus)
             match connectionsClient, targets with
             | Some client, target :: _ ->
@@ -585,7 +585,7 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
                         fail (
                             sprintf
                                 "no Claude account connected for %s — open Connections to sign in"
-                                (ClaudeConnection.actorLabel context.CurrentMessage.Author))
+                                (ClaudeConnection.actorLabel context.TurnActor))
         }
 
 /// A built-in probe (`YESSION_AGENT=credential-probe`): completes immediately, naming

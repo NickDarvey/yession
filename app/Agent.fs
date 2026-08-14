@@ -229,12 +229,23 @@ let private promptOf (context: AgentContextPack) : string =
             sprintf
                 "\n\nTerminal activity since your last turn (you did not see this before now):\n%s"
                 (blocks |> List.map render |> String.concat "\n\n")
-    sprintf
-        "Conversation so far:\n%s%s\n\nReply to the latest message from %s:\n%s"
-        transcript
-        terminals
-        (label context.CurrentMessage.Author)
-        context.CurrentMessage.Body
+    match context.CurrentMessage with
+    | Some message ->
+        sprintf
+            "Conversation so far:\n%s%s\n\nReply to the latest message from %s:\n%s"
+            transcript
+            terminals
+            (label message.Author)
+            message.Body
+    // A turn nobody asked for (Plan 20, stage 2): work this agent started finished while it
+    // was not running. There is no message to reply to, and inventing one — "the system says
+    // your build finished" — would put words in somebody's mouth on a shared transcript. It
+    // is told what it is, and the terminal activity above is what it acts on.
+    | None ->
+        sprintf
+            "Conversation so far:\n%s%s\n\nNobody has said anything new. You are running because work you started in the background finished — the terminal activity above is that work. Carry on with it, and say what it means for what you were doing."
+            transcript
+            terminals
 
 /// The registry's descriptors, as plain objects the Emit block can walk. The only place
 /// the two representations meet, and it is a projection — nothing is decided here.

@@ -355,3 +355,68 @@ bare into this document or a PR body). Stages 1, 4 and 5 are `+semver: patch` at
 - **Pin-state loss is cheap but real.** Pins are client-local; a new device starts with
   rule-1 defaults only. Durable per-user pins are a deliberate non-goal until tabs stop
   being personal, which would be its own decision.
+
+## Provenance, as a value (stage 2b)
+
+Wiring the wake turned up a bug older than this plan: **agent terminal commands recorded no
+`OnBehalfOf` at all.** Gated commands set it (`SessionMain`, twice); the terminal enqueue path
+never did. So "the agent is the acting party and the credential is the turn human's" — Plan
+08's no-borrowing rule — held in two places and was silently absent in a third.
+
+That is not a missed line. It is what happens when a domain concept is carried as three loose
+fields that every site re-spells:
+
+```fsharp
+Author     : ActorRef          // who wrote it
+OnBehalfOf : ActorRef option   // whose authority it runs on
+ApprovedBy : ActorRef option   // who released it, when a gate held it
+```
+
+`PendingAct` spells them, `TerminalBlockStarted` spells them, `TerminalCommandRejected` and
+`CommandRefused` spell their share. Each is free to drift, and one did. An invariant that
+holds only because a caller remembered to set a field is a convention with a good reputation.
+
+**Make it a value object with the rule inside it.**
+
+```fsharp
+/// Who is behind an act: the three parties an audit asks about, as ONE value.
+type ActProvenance =
+    private { Author : ActorRef; OnBehalfOf : ActorRef option; ApprovedBy : ActorRef option }
+
+module ActProvenance =
+    /// A party acting for themselves. There is no authority to borrow, so there is none to
+    /// state — which is why a person's act cannot accidentally carry somebody else's.
+    let ofAuthor (actor: ActorRef) : ActProvenance
+
+    /// The agent, acting on a turn human's authority (Plan 08). The rule that was missing
+    /// from one call site, as the ONLY way to build an agent-authored act: you cannot
+    /// construct one without naming whose authority it runs on.
+    let agentFor (turnActor: ActorRef) : ActProvenance
+
+    /// Released by a peer, when the subject's mode demanded one.
+    let approvedBy (peer: PeerId) (provenance: ActProvenance) : ActProvenance
+
+    /// Whose credentials this resolves to — the borrowed authority when there is one, the
+    /// author otherwise. The question every dispatch actually asks, answered once.
+    let effective (provenance: ActProvenance) : ActorRef
+```
+
+What this buys, in order of how much it matters:
+
+1. **The bug becomes unrepresentable.** `agentFor` takes the turn actor; there is no
+   agent-authored `ActProvenance` without one. The terminal enqueue path could not have
+   forgotten, because forgetting would not compile.
+2. **`effective` replaces four hand-rolled `defaultArg`s.** The dispatch, the wake, the repo
+   verbs and the sandbox verbs each answer "whose credential?" today; they would ask once.
+3. **One shape to serialize.** A single codec, used by `PendingAct`, the block event and the
+   refusal events, instead of three encoders that agree by inspection.
+
+Deliberately NOT included: the peer/user attribution step (`actorFor`, at the durable-append
+boundary). That converts a connection into a party and is a different question from which
+parties are behind an act — folding it in here would make this type know about transports.
+
+**Delivery.** It lands with the wake arm (stage 2b), because that is the change that needs
+`effective` and the change whose absence exposed the gap. It is a mechanical refactor with one
+behavioural consequence, and that consequence is the fix: agent terminal commands start
+recording whose authority they ran on, so an audit of a session can answer "who was this for?"
+about every act rather than about some of them.

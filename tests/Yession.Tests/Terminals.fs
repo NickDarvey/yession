@@ -251,7 +251,8 @@ let private drainTests =
                       ApprovedBy = None
                       Command = "ls"
                       FromSeq = 0
-                      Background = false }
+                      Background = false
+                      OnBehalfOf = None }
             Expect.equal (TerminalQueueDrain.consumedOf started) (Some "q-a1") "a started block consumes its entry"
             Expect.equal
                 (TerminalQueueDrain.consumedOf (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "x" }))
@@ -273,7 +274,8 @@ let private started (id: TerminalId) (b: string) (command: string) (fromSeq: int
           ApprovedBy = None
           Command = command
           FromSeq = fromSeq
-          Background = false }
+          Background = false
+          OnBehalfOf = None }
 
 let private completed (id: TerminalId) (b: string) (result: CommandResult) (toSeq: int) =
     SessionEvent.TerminalBlockCompleted { TerminalId = id; BlockId = block b; Result = result; ToSeq = toSeq }
@@ -588,7 +590,8 @@ let private rejectionTests =
                       ApprovedBy = None
                       Command = "make"
                       FromSeq = 0
-                      Background = false }
+                      Background = false
+                      OnBehalfOf = None }
             let rejection = rejectedEvent terminalA "a1" "2" bob None
             for winner in [ started; rejection ] do
                 let consumed =
@@ -1130,7 +1133,7 @@ let private leaseCommandTests =
 let private turnStarted (n: string) =
     SessionEvent.AgentTurnStarted
         { AgentTurnId = AgentTurnId.create ("t-" + n) |> expect
-          TriggeredByMessageId = MessageId.create ("m-" + n) |> expect }
+          TriggeredByMessageId = Some (MessageId.create ("m-" + n) |> expect); Woke = None }
 
 /// A reader that answers from a per-terminal string, so the digest's own slicing is what
 /// is under test rather than a transcript store's.
@@ -1185,7 +1188,8 @@ let private digestTests =
                         ApprovedBy = Some (PeerRef bob)
                         Command = "rm -rf build"
                         FromSeq = 0
-                        Background = false }
+                        Background = false
+                        OnBehalfOf = None }
                   completed terminalA "1" (CommandSucceeded 0) 3 ]
             let entry = (digestOf events).Head
             Expect.equal entry.Author ActorRef.Agent "the agent's own command"
@@ -1414,7 +1418,8 @@ let private codecTests =
                         ApprovedBy = Some (PeerRef ada)
                         Command = "ls -la"
                         FromSeq = 3
-                        Background = false }
+                        Background = false
+                        OnBehalfOf = None }
                   completed terminalA "1" CommandTimedOut 9
                   SessionEvent.TerminalTranscriptTruncated
                       { TerminalId = terminalA; BlockId = None; DroppedBytes = 17 }
@@ -1857,7 +1862,7 @@ let private schedulerTests =
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals Set.empty
                 // Queued exactly as the agent's capability queues one — same doc write.
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (PeerRef ada) 1.0 "echo ok" false
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (PeerRef ada) 1.0 "echo ok" false None
                 scheduler.Drain ()
                 do! Async.Sleep 20
 
@@ -1879,7 +1884,7 @@ let private schedulerTests =
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals Set.empty
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id ActorRef.Agent 1.0 "rm -rf /" false
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id ActorRef.Agent 1.0 "rm -rf /" false None
                 scheduler.Drain ()
                 do! Async.Sleep 20
                 Expect.isEmpty (List.ofSeq spawned) "nothing ran"
@@ -1913,7 +1918,7 @@ let private schedulerTests =
                 let doc = Y.Doc.Create ()
                 // The crash window: a block start reached the log, the doc removal did not.
                 let scheduler = TerminalScheduler.create doc terminals (Set.singleton "q-a1")
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (PeerRef ada) 1.0 "make" false
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (PeerRef ada) 1.0 "make" false None
                 scheduler.Drain ()
                 do! Async.Sleep 20
                 Expect.isEmpty (List.ofSeq spawned) "it does not run a second time"
@@ -1928,7 +1933,7 @@ let private syncTests =
     testList "Terminal collaborative state" [
         testCase "a terminal queue entry survives a doc round-trip" <| fun () ->
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 3.0 "git status" false
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 3.0 "git status" false None
             let synced = syncedOf doc
             let entry = synced.Pending |> Map.find (queue "a1")
             Expect.equal entry.Subject (ForTerminal terminalA) "the subject names its terminal"
@@ -1941,7 +1946,7 @@ let private syncTests =
         testCase "an unreadable approval reads as NOT approved" <| fun () ->
             // Fail closed: a value we cannot read must never release an agent's command.
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 1.0 "x" false
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 1.0 "x" false None
             setQueuedFieldInDoc doc (queue "a1") "approvedBy" "   "
             let synced = syncedOf doc
             Expect.equal (synced.Pending |> Map.find (queue "a1")).ApprovedBy None "blank is not an approval"
@@ -1987,7 +1992,7 @@ let private syncTests =
 
         testCase "migrating a doc that was never legacy does nothing" <| fun () ->
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 1.0 "git status" false
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 1.0 "git status" false None
             Expect.equal (SyncedStateSync.migrateGateRoots doc) (0, 0) "no legacy roots, no work"
             Expect.equal (Map.count (syncedOf doc).Pending) 1 "and the entry it did have is untouched"
     ]

@@ -137,16 +137,36 @@ module Codec =
                   MessageSent.Author = get.Required.Field "author" actor.Decode
                   MessageSent.Body = get.Required.Field "body" Decode.string }) }
 
+    /// Why a turn ran with nobody speaking (Plan 20, stage 2). A tagged object rather than a
+    /// bare string, because the reasons are a vocabulary that grows — a roster change, a
+    /// stream ending — and each may come to carry what it is about.
+    let private wakeReason : Codec<WakeReason> =
+        { Encode =
+            (fun r ->
+                match r with
+                | CommandFinished -> Encode.object [ "kind", Encode.string "commandFinished" ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "commandFinished" -> Decode.succeed CommandFinished
+                | other -> Decode.fail (sprintf "Unknown wake reason: %s" other)) }
+
     let private agentTurnStarted : Codec<AgentTurnStarted> =
         { Encode =
             fun (p: AgentTurnStarted) ->
                 Encode.object
                     [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
-                      "triggeredByMessageId", messageId.Encode p.TriggeredByMessageId ]
+                      "triggeredByMessageId", Encode.option messageId.Encode p.TriggeredByMessageId
+                      "woke", Encode.option wakeReason.Encode p.Woke ]
           Decode =
             Decode.object (fun get ->
                 { AgentTurnStarted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
-                  AgentTurnStarted.TriggeredByMessageId = get.Required.Field "triggeredByMessageId" messageId.Decode }) }
+                  // Optional on the way in: every turn written before Plan 20 carried a bare
+                  // id, and those pages are read back for the life of their session.
+                  AgentTurnStarted.TriggeredByMessageId =
+                    get.Optional.Field "triggeredByMessageId" (Decode.option messageId.Decode) |> Option.flatten
+                  AgentTurnStarted.Woke =
+                    get.Optional.Field "woke" (Decode.option wakeReason.Decode) |> Option.flatten }) }
 
     let private agentContextBuilt : Codec<AgentContextBuilt> =
         { Encode =
@@ -703,7 +723,8 @@ module Codec =
                       "approvedBy", Encode.option actor.Encode p.ApprovedBy
                       "command", Encode.string p.Command
                       "fromSeq", Encode.int p.FromSeq
-                      "background", Encode.bool p.Background ]
+                      "background", Encode.bool p.Background
+                      "onBehalfOf", Encode.option actor.Encode p.OnBehalfOf ]
           Decode =
             Decode.object (fun get ->
                 { TerminalBlockStarted.TerminalId = get.Required.Field "terminalId" terminalId.Decode
@@ -719,7 +740,9 @@ module Codec =
                   // undecodable — which is a session that will not open, to record a bool
                   // whose absence already means `false`.
                   TerminalBlockStarted.Background =
-                    get.Optional.Field "background" Decode.bool |> Option.defaultValue false }) }
+                    get.Optional.Field "background" Decode.bool |> Option.defaultValue false
+                  TerminalBlockStarted.OnBehalfOf =
+                    get.Optional.Field "onBehalfOf" (Decode.option actor.Decode) |> Option.flatten }) }
 
     let private terminalBlockCompleted : Codec<TerminalBlockCompleted> =
         { Encode =

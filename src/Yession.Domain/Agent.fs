@@ -11,7 +11,18 @@ namespace Yession.Domain
 type AgentContextPack =
     { SessionId      : SessionId
       Conversation   : ConversationItem list
-      CurrentMessage : ConversationItem
+      /// Whose turn this is: the party whose credentials it runs on (Plan 08 — the agent is
+      /// the acting party and has no scope of its own), stated rather than derived.
+      ///
+      /// It used to be read off `CurrentMessage.Author` by everything that needed it, which
+      /// was fine while every turn began with somebody speaking. A woken turn (Plan 20,
+      /// stage 2) has nobody speaking and still has authority, so the thing three call sites
+      /// actually wanted — WHOSE turn is this — says so itself.
+      TurnActor      : ActorRef
+      /// What was just said, when a turn began with somebody saying something. `None` for a
+      /// turn nothing asked for: the agent was woken because work it started finished, and
+      /// there is no message to point at. What moved arrives through `Terminals` either way.
+      CurrentMessage : ConversationItem option
       /// What the session's terminals did since the previous turn (Plan 13, stage 3a).
       /// A SEPARATE field, deliberately: a command someone ran is not something someone
       /// said, so folding blocks into `Conversation` would make the chat log a place
@@ -438,18 +449,41 @@ module AgentWake =
     ///
     /// A block that completed and was never `Background` does not wake anything: somebody was
     /// already waiting on it, and their tool call is what carries the outcome back.
-    let due (events: SessionEvent list) : bool =
+    /// The actor a woken turn would run AS, or `None` when nothing is owed.
+    ///
+    /// One fold answering both halves, because they are one question: a turn that is due but
+    /// has nobody to run as is not due. Every turn resolves its repo credential, its sandbox
+    /// credential and its Claude account from whoever it is FOR, and a woken turn has no
+    /// triggering message to read that from — so it carries the actor of the turn that queued
+    /// the work, which the block recorded as `OnBehalfOf`. That invents no authority: it
+    /// continues the one the queuing turn already had.
+    ///
+    /// A background block with no recorded owner therefore wakes nothing. That is the same
+    /// safe direction an unreadable owner already takes elsewhere — run on nothing rather
+    /// than on somebody else's credential — and the alternative, picking whoever spoke most
+    /// recently, would run one person's work as another.
+    let pending (events: SessionEvent list) : ActorRef option =
         events
         |> List.fold
-            (fun (background: Set<string>, completed: bool) event ->
-                    match event with
-                    // A new turn takes everything before it: whatever those blocks did, that
-                    // turn's digest reported it.
-                    | AgentTurnStarted _ -> Set.empty, false
-                    | SessionEvent.TerminalBlockStarted b when b.Background ->
-                        Set.add (BlockId.value b.BlockId) background, completed
-                    | SessionEvent.TerminalBlockCompleted b ->
-                        background, completed || Set.contains (BlockId.value b.BlockId) background
-                    | _ -> background, completed)
-            (Set.empty, false)
+            (fun (background: Map<string, ActorRef>, woken: ActorRef option) event ->
+                match event with
+                // A new turn takes everything before it: whatever those blocks did, that
+                // turn's digest reported it.
+                | AgentTurnStarted _ -> Map.empty, None
+                | SessionEvent.TerminalBlockStarted b when b.Background ->
+                    match b.OnBehalfOf with
+                    | Some owner -> Map.add (BlockId.value b.BlockId) owner background, woken
+                    | None -> background, woken
+                | SessionEvent.TerminalBlockCompleted b ->
+                    // The FIRST owed turn wins, and the rest coalesce into it: they are all
+                    // reported by the digest of whichever turn runs, so a second wake would
+                    // be a second turn reading the same window.
+                    let owner = Map.tryFind (BlockId.value b.BlockId) background
+                    background, (match woken with Some _ -> woken | None -> owner)
+                | _ -> background, woken)
+            (Map.empty, None)
         |> snd
+
+    /// Whether a turn is owed at all. `pending` says who; this says whether, for the readers
+    /// that only need the question answered.
+    let due (events: SessionEvent list) : bool = pending events |> Option.isSome
