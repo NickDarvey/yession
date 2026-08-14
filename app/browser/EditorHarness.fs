@@ -221,6 +221,11 @@ let private shellModel : ClientModel =
         // SHUT to begin with, like a fresh client: the phone case is about what happens when
         // a chip brings the pane on screen, which is nothing to watch if it is already there.
         TerminalScreens = Map.ofList [ liveId, "\u001b[32mvim ~/notes\u001b[0m" ]
+        // The two terminals this peer opened, pinned as the events fold would have pinned
+        // them (Plan 20, stage 1). Set by hand because this model is BUILT rather than folded
+        // — and without them the strip would hold only whatever is being previewed, which is
+        // a fresh client's state rather than a working one.
+        Pins = [ TerminalTab terminalId; TerminalTab liveId ]
         TerminalsOpen = false }
 
 /// Every byte the live screen decided to send, for the E2E to read back. The keystroke
