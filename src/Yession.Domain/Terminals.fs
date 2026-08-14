@@ -94,6 +94,56 @@ type TerminalView =
       /// the record has a stated gap.
       DroppedBytes : int }
 
+/// What a terminal's state affords a reader RIGHT NOW (Plan 20, stage 0) — the verbs its row
+/// in the terminal list offers.
+///
+/// Here rather than in the view because it is a rule about a terminal's state, and a rule
+/// lives with the state it governs. The same rule is spelled out by hand in three templates
+/// — "offered only for a terminal that is actually open", "a live terminal's recording is
+/// still being written", "shown ONLY when both are true" — each correct, each re-derived,
+/// and each testable only by building the whole client and reading HTML back. As one fold it
+/// is four booleans the cheap tier pins directly, and "a destructive control is not offered
+/// over nothing" stops being a convention three templates happen to remember.
+///
+/// Those three are still there: the list ships BESIDE the pane's own controls, and stage 1
+/// deletes them as the strip stops being a census. Until it does, this is the one the list
+/// reads and they are the ones the pane reads — stated, because two mechanisms for one rule
+/// is exactly what the next stage exists to close.
+///
+/// Absent verbs are ABSENT, never disabled: a control that mostly refuses teaches people not
+/// to press it, and this list's controls have to work the time somebody needs them.
+type TerminalAffordances =
+    { /// End the process. Open terminals only — a "close" on a closed one either does
+      /// nothing or reports an error, and both are worse than not being there.
+      CanKill : bool
+      /// Step back through what a LIVE terminal has recorded so far (Plan 14, stage 7). A
+      /// DVR with nothing behind it is a control with nothing to do.
+      CanRewind : bool
+      /// Play a CLOSED terminal's recording. False with the terminal closed is the stated
+      /// gap — the per-terminal cap ate it — which the surface says rather than opening an
+      /// empty player.
+      CanReplay : bool
+      /// Ask the provider for the stream again (Plan 19, step 4). Closed, and its source
+      /// said asking again is safe; a shell terminal is never renewable, because a second
+      /// shell is a second terminal and opening one already exists.
+      CanReattach : bool }
+
+module TerminalAffordances =
+
+    /// `recorded` is whether this READER holds anything of the terminal's recording. The one
+    /// input that is not a fact about the terminal, and it cannot be: a recording lives in
+    /// the transcript store, so no fold over the event log can answer it — which is exactly
+    /// why it is a named parameter rather than something this module reaches for.
+    let ofView (recorded: bool) (view: TerminalView) : TerminalAffordances =
+        { CanKill = view.IsOpen
+          CanRewind = view.IsOpen && recorded
+          CanReplay = not view.IsOpen && recorded
+          // Not gated on `recorded`, and that is the point of asking the provider rather than
+          // the store: a terminal whose recording the cap ate can still have a live device on
+          // the other end, and refusing the way back because the RECORD is gone would answer
+          // a question nobody asked.
+          CanReattach = not view.IsOpen && view.Renewable }
+
 /// Every terminal this session has had, in the order they were opened.
 type TerminalProjection = { Terminals : TerminalView list }
 

@@ -858,6 +858,40 @@ module Style =
     /// A stretch tab's facts, above whatever renders its recording.
     let paneFacts = "shrink-0 flex flex-col gap-1 px-3 py-3 " + Stroke.dividerBottom
 
+    // --- The terminal list (Plan 20, stage 0) --------------------------------------------
+
+    /// The list's scroll box. It takes the pane's whole body, because the list IS the body
+    /// while it is showing — not a drawer over a terminal, which would leave two surfaces
+    /// arguing about which one the reader is in.
+    let terminalListBody = "flex-1 min-h-0 overflow-y-auto flex flex-col"
+
+    /// One row: state, name, verbs. A grid rather than a flex row so the names line up down
+    /// the list whatever their state marks are — a ragged left edge is what makes a list of
+    /// twenty read as twenty unrelated things.
+    let terminalListRow =
+        "grid grid-cols-[auto_1fr_auto] items-center gap-2 px-3 py-2 " + Stroke.dividerBottom
+
+    /// The row's own control: its name, which opens it. Ink at rest so the list reads as a
+    /// list of names, blue under the pointer because that is what interactive means here —
+    /// the same reasoning `recordLink` carries, at the list's size.
+    let terminalListName =
+        cls [ "bg-transparent cursor-pointer text-left w-full truncate p-0 font-sans text-body text-ink"
+              "no-underline hover:text-blue transition-colors"; focusRing ]
+
+    /// A closed row's name. The recording is still worth opening, and the row says which
+    /// half of the list it is in by its tone rather than by repeating the word "closed" —
+    /// the play mark beside it is what it IS.
+    let terminalListNameClosed =
+        cls [ "bg-transparent cursor-pointer text-left w-full truncate p-0 font-sans text-body text-ink-dim"
+              "no-underline hover:text-blue transition-colors"; focusRing ]
+
+    /// The row's verbs, kept on one baseline at its right edge.
+    let terminalListVerbs = "flex items-center gap-1 shrink-0"
+
+    /// The list's own empty state: the same idle prompt the empty pane wears, because a
+    /// session with no terminals is one fact however you arrive at it.
+    let terminalListEmpty = "flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center"
+
     /// The block history's scroll box, and the stream inside it.
     ///
     /// A terminal reads from the BOTTOM: the newest line sits above where you type, and a

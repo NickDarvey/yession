@@ -996,8 +996,78 @@ let private toolTests =
             | other -> failwithf "expected one tool-use item, got %A" other
     ]
 
+// --- The terminal list (Plan 20, stage 0) --------------------------------------------------
+
+let private closedNow (id: TerminalId) =
+    SessionEvent.TerminalClosed { TerminalId = id; Reason = "closed by a peer" }
+
+let private listTests =
+    testList "The terminal list (Plan 20, stage 0)" [
+
+        testCase "the open terminals lead, in the order the strip shows them" <| fun () ->
+            // The list's open half and the strip are the same terminals, and two surfaces
+            // listing them in two orders is a difference a reader has to hold in their head.
+            let model = clientOf [ at 1L 0.0 (opened terminalA "build"); at 2L 1.0 (opened terminalB "logs") ]
+            Expect.equal
+                (ClientModel.terminalRows model |> List.map (fun t -> TerminalId.value t.TerminalId))
+                [ "term-a"; "term-b" ]
+                "open order, exactly as the strip"
+
+        testCase "closed terminals follow the open ones, most recently opened first" <| fun () ->
+            // The closed half is history, and history reads newest first — the one place the
+            // list deliberately disagrees with the strip's order, because it is answering a
+            // different question.
+            let model =
+                clientOf
+                    [ at 1L 0.0 (opened terminalA "build")
+                      at 2L 1.0 (opened terminalB "logs")
+                      at 3L 2.0 (closedNow terminalA)
+                      at 4L 3.0 (closedNow terminalB) ]
+            Expect.equal
+                (ClientModel.terminalRows model |> List.map (fun t -> TerminalId.value t.TerminalId))
+                [ "term-b"; "term-a" ]
+                "the newest recording first"
+
+        testCase "a terminal is recorded for this reader whichever way its transcript arrived" <| fun () ->
+            // A LIVE terminal's length arrives as a catch-up hint before any chunk is
+            // fetched; a CLOSED one's records arrive as chunks with no live hint behind
+            // them. Asking only one of the two would refuse the verb the other one earns.
+            let model = clientOf [ at 1L 0.0 (opened terminalA "build") ]
+            Expect.isFalse (ClientModel.hasRecording terminalA model) "nothing has arrived yet"
+            let byHint = ClientModel.update (TerminalAvailableMsg (terminalA, 12)) model
+            Expect.isTrue (ClientModel.hasRecording terminalA byHint) "a live terminal's length"
+            let byRecord =
+                ClientModel.update
+                    (TerminalRecordMsg (terminalA, 0, { At = 0.0; Kind = TranscriptOutput; Data = "hi" }))
+                    model
+            Expect.isTrue (ClientModel.hasRecording terminalA byRecord) "a fetched record"
+
+        testCase "choosing a row shows that terminal and leaves the list" <| fun () ->
+            // One act, not two: a row that selected a terminal and left the reader in the
+            // census would have them press twice for one intention.
+            let model =
+                clientOf [ at 1L 0.0 (opened terminalA "build"); at 2L 1.0 (opened terminalB "logs") ]
+                |> ClientModel.update ToggleTerminalListMsg
+                |> ClientModel.update (SelectFromListMsg terminalB)
+            Expect.isFalse model.TerminalList "the list stepped aside"
+            Expect.equal
+                (ClientModel.selectedPane model |> Option.map PaneTab.key)
+                (Some "terminal:term-b")
+                "showing what was chosen"
+
+        testCase "reaching the list opens the column it is in" <| fun () ->
+            // Looking for a terminal you cannot see is exactly the case where the column is
+            // shut, so the toggle brings it with it.
+            let model = clientOf [ at 1L 0.0 (opened terminalA "build") ]
+            Expect.isFalse model.TerminalsOpen "the column starts shut"
+            let listed = ClientModel.update ToggleTerminalListMsg model
+            Expect.isTrue listed.TerminalList "the list is showing"
+            Expect.isTrue listed.TerminalsOpen "and the column came with it"
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
+        listTests
         orderTests
         toolTests
         chipTests
