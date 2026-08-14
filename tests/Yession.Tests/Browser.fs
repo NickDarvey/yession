@@ -623,7 +623,7 @@ let editorTests =
         // Neither is visible to a rendered string, and both are the WCAG floor rather than a
         // nicety: a chip that opens a pane and leaves focus behind, or a close that strands
         // focus on a control it just removed, is exactly the failure the floor names.
-        testCaseAsync "a chat chip opens a pane tab that plays, the strip walks, and closing hands focus back" <|
+        testCaseAsync "a chat chip opens a pane tab that plays, and the strip walks" <|
             async {
                 let server = serveStatic harnessRoot (EDITOR_PORT + 4)
                 let! pw = await (Playwright.CreateAsync ())
@@ -665,12 +665,6 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         """document.querySelector('#shell [data-pane-block]')?.textContent.includes('total 0') === true""")
-
-                // Closing the tab hands focus back to the chip that opened it, rather than
-                // stranding it on a control that has just left the document.
-                do! awaitU (page.ClickAsync "#shell [data-pane-tab-close]")
-                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-pane-block]')""")
-                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()
@@ -876,6 +870,56 @@ let editorTests =
                 do! awaitU (page.ClickAsync "#shell [data-terminal-live='term-live']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+
+        // Pins (Plan 20, stage 1). The pin's STATE is a rendered attribute the cheap tier can
+        // read; what needs a browser is the keyboard release — Delete on a focused tab
+        // removes that tab from the document, and focus has to land on what took its place
+        // rather than on `body`. Same floor the DVR's control swap answers, in the surface a
+        // keyboard user actually walks.
+        testCaseAsync "a tab is kept by its pin and released from the keyboard, without stranding focus" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 9)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 9)))
+
+                // A chip's tab arrives previewed — kept by nothing.
+                do! awaitU (page.ClickAsync "#shell [data-chat-block]")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-tab^='block:']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-pane-tab-pin^='block:']")?.getAttribute('aria-pressed') === 'false'""")
+
+                // Pinning says so where anything that cannot see colour can read it.
+                do! awaitU (page.ClickAsync "#shell [data-pane-tab-pin^='block:']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-pane-tab-pin^='block:']")?.getAttribute('aria-pressed') === 'true'""")
+
+                // Move on to something else. The pinned tab stays, which is what a pin is
+                // for — a preview would have been replaced here.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-harness']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-tab^='block:']")
+
+                // Delete on the focused tab releases it. The tab leaves the strip, and focus
+                // lands on whatever took its position — never nowhere.
+                do! awaitU (page.FocusAsync "#shell [data-pane-tab^='block:']")
+                do! awaitU (page.Keyboard.PressAsync "Delete")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelectorAll("#shell [data-pane-tab^='block:']").length === 0""")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.closest('[role="tab"]') !== null""")
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()

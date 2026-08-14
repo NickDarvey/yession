@@ -868,10 +868,20 @@ module Style =
     /// close control. A group rather than one control, because a `<button>` inside a
     /// `<button>` is not markup — and the two do different things.
     let paneTabGroup = "inline-flex items-stretch shrink-0"
-    /// The close control, sized to the tab band beside it.
-    let paneTabClose =
+    /// The pin control, sized to the tab band beside it (Plan 20, stage 1).
+    ///
+    /// Two faces of ONE control, and neither is destructive: pinned is blue, exactly as the
+    /// selected tab is blue, because both mean "this is mine and it stays"; unpinned is the
+    /// faint ink every quiet affordance wears. It replaced a close control in the `err`
+    /// face, and the colour change is the substance — nothing in the strip destroys anything
+    /// any more, so nothing in it wears the danger tone.
+    let paneTabPin =
         cls [ "bg-transparent cursor-pointer px-1.5 grid place-items-center transition-colors"
-              Stroke.clear; "text-ink-faint hover:text-err"; focusRing ]
+              Stroke.clear; "text-ink-faint hover:text-blue"; focusRing ]
+
+    let paneTabPinned =
+        cls [ "bg-transparent cursor-pointer px-1.5 grid place-items-center transition-colors"
+              Stroke.clear; "text-blue hover:text-ink"; focusRing ]
 
     /// The pane's body — whatever the selected tab shows. It takes the column's remaining
     /// height so the thing inside it scrolls rather than the column.

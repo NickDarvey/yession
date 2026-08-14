@@ -139,7 +139,7 @@ let private representativeModel : ClientModel =
                 Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
       TerminalKeyframes = Map.empty
       TerminalScreens = Map.empty
-      PaneTabs = []
+      Pins = []
       PaneChoice = None
       PaneStartAt = None
       PaneRewound = None
@@ -421,23 +421,10 @@ let private uiChecklistTests =
             Expect.isFalse
                 (html.Contains (Dom.attr Dom.Hooks.terminalInput (BodyKey.terminalDraft terminalId ada)))
                 "no command line"
-            Expect.isFalse
-                (html.Contains (Dom.attr "data-terminal-close" (TerminalId.value terminalId)))
-                "and no offer to close what is already closed"
-            // Nor a way back, for a terminal whose bytes came from this session's own
-            // sandbox: there is no provider to ask (Plan 19, step 4).
-            Expect.isFalse
-                (html.Contains (Dom.attr Dom.Hooks.terminalReattach (TerminalId.value terminalId)))
-                "and no offer to attach a stream that never was one"
-
-        // A control that mostly refuses teaches people not to press it, so this one is
-        // offered exactly where it works: a closed stream whose provider said asking again is
-        // safe. Both halves are the invariant — offered there, absent everywhere else.
-        testCase "a closed stream offers a way back when its provider said there is one" <| fun () ->
-            let html = Support.render renewableTerminalModel
-            Expect.isTrue
-                (html.Contains (Dom.attr Dom.Hooks.terminalReattach (TerminalId.value terminalId)))
-                "the control that asks the provider again"
+            // The kill and the attach-again used to be asserted here, against the STRIP.
+            // They live on the terminal's row in the list now (Plan 20, stage 1), and the
+            // list's own cases pin both halves of each. Re-asserting their absence from a
+            // strip that offers no verbs at all would be a test that cannot fail.
 
         testCase "terminal work sits in the chat WHERE it happened, not at the end" <| fun () ->
             // Plan 14, stage 1. The fixture's block is anchored at offset 2, between the two
@@ -724,10 +711,10 @@ let private terminalListTests =
 
         testCase "a row offers the kill while its terminal is running, and never once it has stopped" <| fun () ->
             Expect.isTrue
-                ((listed representativeModel).Contains (Dom.attr Dom.Hooks.terminalListKill id))
+                ((listed representativeModel).Contains (Dom.attr Dom.Hooks.terminalClose id))
                 "a running terminal can be killed from its row"
             Expect.isFalse
-                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListKill id))
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalClose id))
                 "a closed one has nothing left to kill"
 
         testCase "a row offers the rewind while its terminal is live, and never over a recording" <| fun () ->
@@ -740,10 +727,10 @@ let private terminalListTests =
 
         testCase "a row offers the way back only where a provider said there is one" <| fun () ->
             Expect.isTrue
-                ((listed renewableTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListReattach id))
+                ((listed renewableTerminalModel).Contains (Dom.attr Dom.Hooks.terminalReattach id))
                 "a closed stream whose provider allows asking again"
             Expect.isFalse
-                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListReattach id))
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalReattach id))
                 "and never for a shell terminal, which has no provider to ask"
 
         testCase "a recording the cap ate is stated on its row rather than left to look empty" <| fun () ->

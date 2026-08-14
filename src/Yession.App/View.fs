@@ -1649,6 +1649,35 @@ module View =
 })()""")>]
     let private moveTabFocus (e: obj) : unit = Fable.Core.Util.jsNative
 
+    /// Delete/Backspace on a focused tab — the keyboard's unpin (Plan 20, stage 1). Returns
+    /// the tab's key, or `""` when this keypress is not that: the strip's other keys are the
+    /// arrow walk above, and typing must not unpin anything.
+    [<Fable.Core.Emit("""(() => {
+  if ($0.key !== 'Delete' && $0.key !== 'Backspace') return ''
+  const tab = document.activeElement?.closest('[data-pane-tab]')
+  if (!tab) return ''
+  $0.preventDefault()
+  return tab.getAttribute('data-pane-tab')
+})()""")>]
+    let private unpinKeyOn (e: obj) : string = Fable.Core.Util.jsNative
+
+    /// Move focus to the tab that will take the released one's place — BEFORE the release,
+    /// which is what makes it need no timing assumption at all.
+    ///
+    /// Focusing afterwards is the obvious shape and it does not work: the strip has to be
+    /// re-rendered first, and when that happens is the renderer's business. Measured on both
+    /// attempts — synchronously, focus landed on the node about to be removed and the browser
+    /// moved it to `body`; on `requestAnimationFrame`, a headless browser that paints no
+    /// frames never ran the callback at all. Going first has neither problem: the neighbour
+    /// exists right now, and a node that keeps focus keeps it across the patch.
+    [<Fable.Core.Emit("""(() => {
+  const tabs = Array.from($0.currentTarget.querySelectorAll('[role="tab"]'))
+  const here = tabs.indexOf(document.activeElement?.closest('[role="tab"]'))
+  if (here < 0 || tabs.length < 2) return
+  tabs[Math.min(here, tabs.length - 2)].focus()
+})()""")>]
+    let private focusNeighbourTab (e: obj) : unit = Fable.Core.Util.jsNative
+
     /// One block's read-only view, as a tab opened from its chip shows it: the command, and
     /// everything it printed, from the chunks this client already has.
     ///
@@ -1803,14 +1832,14 @@ module View =
                 if not affords.CanReattach then Lit.nothing
                 else
                     html $"""
-                        <button type="button" class="{Style.btnIcon}" data-terminal-list-reattach="{id}"
+                        <button type="button" class="{Style.btnIcon}" data-terminal-reattach="{id}"
                                 aria-label="Attach {view.Title} again"
                                 @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>{Icon.attach}</button>"""
             let kill =
                 if not affords.CanKill then Lit.nothing
                 else
                     html $"""
-                        <button type="button" class="{Style.btnIconDanger}" data-terminal-list-kill="{id}"
+                        <button type="button" class="{Style.btnIconDanger}" data-terminal-close="{id}"
                                 aria-label="Kill {view.Title}"
                                 @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>{Icon.stop}</button>"""
             let nameClass = if view.IsOpen then Style.terminalListName else Style.terminalListNameClosed
@@ -1881,7 +1910,7 @@ module View =
                     <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-closed-tab="{id}"
                             aria-selected="{selectedAttr}" tabindex="{tabIndex}"
                             @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
-        let openedTabButton (tab: PaneTab) =
+        let readonlyTabButton (tab: PaneTab) =
             let on = isOn tab
             let label =
                 match tab with
@@ -1893,22 +1922,46 @@ module View =
                     |> Option.defaultValue (BlockId.value blockId)
                 | StretchTab stretch -> sprintf "%s · %s" (authorName model stretch.Holder) stretch.Title
             html $"""
-                <span class="{Style.paneTabGroup}">
-                  <button type="button" role="tab" class="{if on then Style.terminalTabActive else Style.terminalTab}"
-                          data-pane-tab="{PaneTab.key tab}"
-                          aria-selected="{if on then "true" else "false"}" tabindex="{if on then "0" else "-1"}"
-                          @click={Ev(fun _ -> dispatch (SelectPaneTabMsg tab))}>{label}</button>
-                  <button type="button" class="{Style.paneTabClose}" data-pane-tab-close="{PaneTab.key tab}"
-                          aria-label="Close this view of {label}"
-                          @click={Ev(fun _ -> dispatch (ClosePaneTabMsg tab); actions.FocusChat (PaneTab.key tab))}>{Icon.close}</button>
-                </span>"""
+                <button type="button" role="tab" class="{if on then Style.terminalTabActive else Style.terminalTab}"
+                        data-pane-tab="{PaneTab.key tab}"
+                        aria-selected="{if on then "true" else "false"}" tabindex="{if on then "0" else "-1"}"
+                        @click={Ev(fun _ -> dispatch (SelectPaneTabMsg tab))}>{label}</button>"""
+        /// The pin, on every tab that can be kept (Plan 20, stage 1).
+        ///
+        /// Offered where a pin would MEAN something: a live terminal, or a recording somebody
+        /// opened from the chat. A closed terminal appears here only as the preview — its
+        /// home is the list — so pinning one would be kept by nothing, and a control whose
+        /// effect is undone by the next event is worse than no control.
+        let pinToggle (tab: PaneTab) (label: string) =
+            if not (PaneTab.isLive model.Terminals tab) then Lit.nothing
+            else
+                let pinned = ClientModel.isPinned tab model
+                // The name states the CONSEQUENCE, because the vocabulary this control
+                // replaced — a tab's `✕` — means "gone", and someone who reads it that way
+                // would think they were killing a terminal.
+                let name = if pinned then sprintf "Unpin %s — keeps running" label else sprintf "Pin %s" label
+                html $"""
+                    <button type="button" class="{if pinned then Style.paneTabPinned else Style.paneTabPin}"
+                            data-pane-tab-pin="{PaneTab.key tab}"
+                            aria-pressed="{if pinned then "true" else "false"}" aria-label="{name}"
+                            @click={Ev(fun _ -> dispatch (TogglePinMsg tab))}>{Icon.pin}</button>"""
         let tabButton (tab: PaneTab) =
-            match tab with
-            | TerminalTab id ->
-                match TerminalProjection.tryFind id model.Terminals with
-                | Some view -> terminalTabButton view
-                | None -> Lit.nothing
-            | BlockTab _ | StretchTab _ -> openedTabButton tab
+            let inner =
+                match tab with
+                | TerminalTab id ->
+                    match TerminalProjection.tryFind id model.Terminals with
+                    | Some view -> terminalTabButton view
+                    | None -> Lit.nothing
+                | BlockTab _ | StretchTab _ -> readonlyTabButton tab
+            let label =
+                match tab with
+                | TerminalTab id ->
+                    TerminalProjection.tryFind id model.Terminals
+                    |> Option.map (fun v -> v.Title)
+                    |> Option.defaultValue (TerminalId.value id)
+                | BlockTab (_, blockId) -> BlockId.value blockId
+                | StretchTab stretch -> stretch.Title
+            html $"""<span class="{Style.paneTabGroup}">{inner}{pinToggle tab label}</span>"""
         let terminalBody (view: TerminalView) =
             let feed = ClientModel.terminalFeed view.TerminalId model
             let truncated =
@@ -2028,25 +2081,13 @@ module View =
                          data-pane-panel="{PaneTab.key tab}">
                       {inner}
                     </div>"""
-        // Offered only for a terminal that is actually open: a "close" on a closed one either
-        // does nothing or reports an error, and both are worse than not being there.
-        let closeSelected =
-            match selected with
-            | Some (TerminalTab id) ->
-                match TerminalProjection.tryFind id model.Terminals with
-                | Some view when view.IsOpen ->
-                    html $"""
-                        <button type="button" class="{Style.cls [ Style.terminalTabClose; "ml-auto" ]}" data-terminal-close="{TerminalId.value view.TerminalId}"
-                                aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>close</button>"""
-                // A closed stream, and a provider that said asking again is safe (Plan 19).
-                // Shown ONLY when both are true: a control that mostly refuses teaches people
-                // not to press it, and this one has to work the time somebody needs it.
-                | Some view when view.Renewable ->
-                    html $"""
-                        <button type="button" class="{Style.cls [ Style.terminalTab; "ml-auto" ]}" data-terminal-reattach="{TerminalId.value view.TerminalId}"
-                                aria-label="Attach this stream again" @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>attach again</button>"""
-                | _ -> Lit.nothing
-            | _ -> Lit.nothing
+        // The strip's kill and its attach-again are GONE (Plan 20, stage 1): both are verbs
+        // about a terminal rather than about which tab you are reading, and both now live on
+        // that terminal's row in the list, offered from the one fold that decides what a
+        // terminal's state allows. What the strip keeps is navigation and the pin — so the
+        // strip has become incapable of destroying anything, and a person closing tabs out of
+        // habit can no longer kill somebody's build by reflex.
+        //
         // The strip and the list are alternatives, never both at once, and that is an ARIA
         // requirement rather than a preference: `role="tablist"` promises a tabpanel showing
         // one of its tabs, and a strip left standing over the list would be promising a panel
@@ -2055,12 +2096,25 @@ module View =
             html $"""
                 <div class="{Style.terminalTabs}">
                   <div class="{Style.terminalTabList}" role="tablist" aria-label="Terminals and recordings"
-                       @keydown={Ev(fun e -> moveTabFocus e)}>
+                       @keydown={Ev(fun e ->
+                                        moveTabFocus e
+                                        // Delete/Backspace unpins what is focused. The index
+                                        // is taken BEFORE the dispatch and the focus handed
+                                        // back after it, because the tab being released may
+                                        // be the one leaving the document.
+                                        match unpinKeyOn e with
+                                        | "" -> ()
+                                        | key ->
+                                            tabs
+                                            |> List.tryFind (fun tab -> PaneTab.key tab = key)
+                                            |> Option.filter (fun tab -> ClientModel.isPinned tab model)
+                                            |> Option.iter (fun tab ->
+                                                focusNeighbourTab e
+                                                dispatch (TogglePinMsg tab)))}>
                     {tabs |> List.map tabButton}
                   </div>
                   <button type="button" class="{Style.terminalTabNew}" data-terminal-new
                           @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
-                  {closeSelected}
                 </div>"""
         // ONE control with two faces rather than a pair that swap places: it never leaves the
         // document, so pressing it can never strand the focus that is on it — the stranded-focus
