@@ -87,7 +87,10 @@ let mount (element: Browser.Types.Element) (replay: PaneReplay) (caughtUp: (unit
     let options =
         [ "fit" ==> "width"
           "idleTimeLimit" ==> 2
-          "terminalFontFamily" ==> "ui-monospace, monospace" ]
+          // The same face a live terminal wears. A literal here meant a recording replayed in
+          // a different typeface than the terminal beside it — invisible on a box where both
+          // fell back to the platform mono, plain on any box where they did not.
+          "terminalFontFamily" ==> "var(--font-terminal)" ]
         @ (if List.isEmpty replay.Markers then []
            else [ "markers" ==> (replay.Markers |> List.map (fun (at, label) -> box [| box at; box label |]) |> Array.ofList) ])
         @ (match replay.StartAt with Some at -> [ "startAt" ==> at ] | None -> [])
