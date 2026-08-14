@@ -34,6 +34,7 @@ let private grant : OAuthGrant =
     { AccessToken = "at-1"
       RefreshToken = Some "rt-1"
       ExpiresAt = Some (DateTimeOffset.Parse "2026-07-28T12:00:00Z")
+      RefreshExpiresAt = None
       TokenUrl = "http://token.example/oauth"
       ClientId = "client-1"
       Dialect = FormEncoded }
@@ -323,7 +324,25 @@ let private githubTests =
             Expect.isError (Decode.fromString GitHubConnection.deviceCodeDecoder """{"user_code":"X"}""") "missing device code refused"
 
         testCase "poll outcomes fold from the body, never the status code" <| fun () ->
-            Expect.equal (GitHubConnection.pollOutcome 5 """{"access_token":"gho_t","token_type":"bearer"}""") (GitHubConnection.PollGranted "gho_t") "granted"
+            // A grant with no stated lifetimes — an App with token expiration disabled —
+            // is still a grant. It simply never comes due.
+            Expect.equal
+                (GitHubConnection.pollOutcome 5 """{"access_token":"gho_t","token_type":"bearer"}""")
+                (GitHubConnection.PollGranted
+                    { AccessToken = "gho_t"; RefreshToken = None; ExpiresIn = None; RefreshTokenExpiresIn = None })
+                "granted"
+            // And one WITH them keeps every part, because those are what decide whether it
+            // can ever rotate: dropping them is what made this credential refresh-dead.
+            Expect.equal
+                (GitHubConnection.pollOutcome
+                    5
+                    """{"access_token":"gho_t","expires_in":28800,"refresh_token":"ghr_r","refresh_token_expires_in":15897600}""")
+                (GitHubConnection.PollGranted
+                    { AccessToken = "gho_t"
+                      RefreshToken = Some "ghr_r"
+                      ExpiresIn = Some 28800
+                      RefreshTokenExpiresIn = Some 15897600 })
+                "an expiring grant keeps its refresh token and both lifetimes"
             Expect.equal (GitHubConnection.pollOutcome 5 """{"error":"authorization_pending"}""") (GitHubConnection.PollPending 5) "pending keeps the pace"
             Expect.equal (GitHubConnection.pollOutcome 5 """{"error":"slow_down"}""") (GitHubConnection.PollPending 10) "slow_down widens by the spec's 5s"
             Expect.equal
@@ -438,6 +457,7 @@ let private brokerTests =
                         { AccessToken = "at-stale"
                           RefreshToken = Some "rt-stale"
                           ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = None
                           TokenUrl = endpoint.Url
                           ClientId = "cid"
                           Dialect = JsonEncoded }
@@ -530,6 +550,7 @@ let private brokerTests =
                         { AccessToken = "at-stale"
                           RefreshToken = Some "rt-stale"
                           ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = None
                           TokenUrl = endpoint.Url
                           ClientId = "cid"
                           Dialect = FormEncoded }
@@ -560,6 +581,7 @@ let private brokerTests =
                         { AccessToken = "at-stale"
                           RefreshToken = Some "rt-stale"
                           ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = None
                           TokenUrl = endpoint.Url
                           ClientId = "cid"
                           Dialect = FormEncoded }
@@ -570,6 +592,88 @@ let private brokerTests =
                 let! raw = store.Resolve t
                 Expect.isTrue (expect raw |> Option.isSome) "the old entry survives for a reconnect"
                 Expect.isTrue (observed |> List.exists (function Broker.RefreshFailed _ -> true | _ -> false)) "observed"
+            }
+
+        testCaseAsync "a grant handed over by a session is refreshable, unlike a pasted one" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                let! stored =
+                    broker.PutGrant
+                        { Target = t
+                          AccessToken = "ghu_1"
+                          RefreshToken = Some "ghr_1"
+                          ExpiresIn = Some 28800
+                          RefreshTokenExpiresIn = Some 15897600
+                          TokenUrl = "https://github.example/token"
+                          ClientId = "Iv1.test"
+                          TokenDialect = FormEncoded }
+                Expect.isOk stored "stored"
+                let! raw = store.Resolve t
+                match BrokeredCredentialCodec.fromString (expect raw |> Option.defaultValue "") with
+                | Ok (BrokeredOAuth g) ->
+                    Expect.equal g.AccessToken "ghu_1" "the token"
+                    Expect.equal g.RefreshToken (Some "ghr_1") "and what a refresh needs"
+                    // Lifetimes arrive as seconds and are stored as instants, because the
+                    // clock a later refresh decides on is the Manager's.
+                    Expect.isTrue g.ExpiresAt.IsSome "the access token has an expiry"
+                    Expect.isTrue g.RefreshExpiresAt.IsSome "and so does the refresh token"
+                    Expect.equal g.TokenUrl "https://github.example/token" "the endpoint to refresh at"
+                | other -> failwithf "a handed-over grant must be stored as one: %A" other
+                let! blank = broker.PutGrant { Target = t; AccessToken = " "; RefreshToken = None; ExpiresIn = None; RefreshTokenExpiresIn = None; TokenUrl = "u"; ClientId = "c"; TokenDialect = FormEncoded }
+                Expect.isError blank "blank refused, as for a paste"
+            }
+
+        testCaseAsync "an expired refresh token says to sign in again rather than retrying" <|
+            async {
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                // Due for refresh, and holding a refresh token that has itself lapsed.
+                let finished =
+                    BrokeredOAuth
+                        { AccessToken = "at-stale"
+                          RefreshToken = Some "rt-spent"
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds -1.0)
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
+                let! _ = store.Set t (BrokeredCredentialCodec.toString finished)
+                let! resolved = broker.Resolve t
+                match resolved with
+                | Error reason -> Expect.stringContains reason "sign in again" "the refusal says what to DO"
+                | Ok _ -> failwith "a lapsed refresh token cannot resolve"
+                Expect.equal endpoint.Requests.Count 0 "and nothing was asked of the provider"
+            }
+
+        testCaseAsync "concurrent resolves of one due grant refresh it once" <|
+            async {
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                let stale =
+                    BrokeredOAuth
+                        { AccessToken = "at-stale"
+                          RefreshToken = Some "rt-stale"
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = None
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
+                let! _ = store.Set t (BrokeredCredentialCodec.toString stale)
+                endpoint.SetResponse """{"access_token":"at-fresh","refresh_token":"rt-fresh","expires_in":3600}"""
+                // A provider that rotates spends the refresh token it answers for. Two
+                // resolves that each redeemed `rt-stale` would leave one of them holding a
+                // grant minted from a token the other already spent — and a session resolves
+                // per turn AND per network verb, so two at once is ordinary.
+                let! both = [ broker.Resolve t; broker.Resolve t ] |> Async.Parallel
+                for outcome in both do
+                    Expect.equal (expect outcome) (OAuthConnection, "at-fresh") "both callers get the fresh token"
+                Expect.equal endpoint.Requests.Count 1 "and the provider was asked exactly once"
             }
 
         testCaseAsync "disconnect deletes and reports existence" <|
@@ -1040,18 +1144,24 @@ let private stubAuth () : SessionAuth.Auth =
 type private RecordingConnections =
     { Client : ControlClient.SessionConnections
       Puts : ResizeArray<SecretId * string>
+      /// Grants handed over for the Manager to refresh — the device flow's path, kept
+      /// apart from `Puts` because which one a sign-in takes is the thing under test.
+      Grants : ResizeArray<ControlWire.ConnectionPutGrantRequest>
       Disconnects : ResizeArray<SecretId> }
 
 let private recordingConnections () : RecordingConnections =
     let puts = ResizeArray<SecretId * string> ()
+    let grants = ResizeArray<ControlWire.ConnectionPutGrantRequest> ()
     let disconnects = ResizeArray<SecretId> ()
     { Client =
         { Begin = fun _ -> async { return Error "not under test" }
           Complete = fun _ _ -> async { return Error "not under test" }
           Put = fun target value -> async { puts.Add (target, value); return Ok () }
+          PutGrant = fun request -> async { grants.Add request; return Ok () }
           Disconnect = fun target -> async { disconnects.Add target; return Ok true }
           Resolve = fun _ -> async { return Error "not under test" } }
       Puts = puts
+      Grants = grants
       Disconnects = disconnects }
 
 /// A bare server carrying only the /github handler, mounted at the origin root.
@@ -1192,17 +1302,29 @@ let private githubRouteTests =
                         Expect.isTrue (again.body.Contains "\"interval\":10") "the widened pace survives the next poll"
 
                         // The grant lands under the SIGNED-IN HUMAN's scope, never a scope the
-                        // request named.
-                        stub.SetTokenReply """{"access_token":"ghu_granted","token_type":"bearer"}"""
+                        // request named — and it lands as a GRANT, which is what lets the
+                        // Manager refresh it later. Stored through `Put` it would be static
+                        // by type, and the App would have to disable token expiration.
+                        stub.SetTokenReply """{"access_token":"ghu_granted","token_type":"bearer","expires_in":28800,"refresh_token":"ghr_next","refresh_token_expires_in":15897600}"""
                         let! connected = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
                         Expect.equal connected.status 200 "granted"
                         Expect.isTrue (connected.body.Contains "\"status\":\"connected\"") "and says so"
-                        Expect.equal (List.ofSeq recorder.Puts) [ githubTarget (UserScope alice), "ghu_granted" ] "stored under alice, verbatim"
+                        Expect.equal recorder.Puts.Count 0 "a device-flow grant is not a pasted token"
+                        Expect.equal recorder.Grants.Count 1 "one grant handed to the Manager"
+                        let stored = recorder.Grants.[0]
+                        Expect.equal stored.Target (githubTarget (UserScope alice)) "stored under alice"
+                        Expect.equal stored.AccessToken "ghu_granted" "the token, verbatim"
+                        Expect.equal stored.RefreshToken (Some "ghr_next") "with the refresh token the Manager will need"
+                        Expect.equal stored.ExpiresIn (Some 28800) "and both lifetimes as github stated them"
+                        Expect.equal stored.RefreshTokenExpiresIn (Some 15897600) "including the refresh token's own"
+                        // The facts a refresh needs that only the SESSION knows.
+                        Expect.equal stored.TokenUrl stub.TokenUrl "the endpoint it came from"
+                        Expect.equal stored.ClientId "Iv1.test" "the client it was minted for"
 
                         // The flow is spent. A replayed poll finds nothing to finish.
                         let! replay = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
                         Expect.equal replay.status 400 "single-use"
-                        Expect.equal recorder.Puts.Count 1 "and stored nothing twice"
+                        Expect.equal recorder.Grants.Count 1 "and stored nothing twice"
                     })
             }
 
@@ -1234,7 +1356,10 @@ let private githubRouteTests =
                         // Alice finishes hers, and it lands where it began.
                         let! alice' = postJsonWithCookie (url + "/github/poll") "who=alice" """{"scope":"mine"}""" |> Async.AwaitPromise
                         Expect.equal alice'.status 200 "alice's flow completes"
-                        Expect.equal (List.ofSeq recorder.Puts) [ githubTarget (UserScope alice), "ghu_alices" ] "under alice, and only alice"
+                        Expect.equal
+                            (recorder.Grants |> Seq.map (fun g -> g.Target, g.AccessToken) |> List.ofSeq)
+                            [ githubTarget (UserScope alice), "ghu_alices" ]
+                            "under alice, and only alice"
                     })
             }
 
