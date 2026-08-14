@@ -503,7 +503,11 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
         runner.Dispatch (user msg)
     Async.StartImmediate (
         App.SessionLifecycle.run
-            { Open =
+            (Resilience.Schedule.constant System.TimeSpan.Zero 0)
+            { // What this harness drives is the FEED; the session leg makes one pass and stops
+              // rather than supervising, so a refused peer here ends instead of parking.
+              WaitBeforeRetry = fun _ -> async { return false }
+              Open =
                 fun () ->
                     async {
                         opens.Value <- opens.Value + 1
@@ -616,16 +620,22 @@ let private lifecycleTests =
                 do! host.Stop ()
             }
 
-        testCaseAsync "a transport that cannot be opened settles, and does not retry behind the policy" <|
+        testCaseAsync "a transport that cannot be opened keeps being tried, and says so each time" <|
             async {
-                // `Open` is already policy-guarded at the composition site, so an `Error` here is
-                // final: report it and stop. A second attempt would be a retry loop wrapped
-                // around a retry loop.
+                // The policy at the composition site spends its budget on ONE attempt; this is
+                // the slower outer loop, and the difference it draws is between "this attempt
+                // failed" and "give up on the session" — which are not the same claim. A client
+                // that made them the same claim left "reload the tab" as the only cure for a
+                // laptop that had been closed for a minute.
+                //
+                // The wait is a port, so this drives the rule with no clock in it at all.
                 let opens = ref 0
+                let waits = ResizeArray<System.TimeSpan option> ()
                 let dispatched = ResizeArray<ClientMsg> ()
                 let model = ref (ClientModel.init (peer "ada" "Ada"))
                 do!
                     App.SessionLifecycle.run
+                        (App.SessionLifecycle.supervision (fun () -> 0.0))
                         { Open =
                             fun () ->
                                 async {
@@ -634,15 +644,34 @@ let private lifecycleTests =
                                 }
                           Serve = fun _ _ _ -> async { failwith "must not serve a channel it never opened" }
                           ReadPosition = fun () -> None
+                          // Three failures is enough to show it keeps going and to read the
+                          // schedule off; a real client stops when the page does.
+                          WaitBeforeRetry =
+                            fun delay ->
+                                async {
+                                    waits.Add delay
+                                    return waits.Count < 3
+                                }
                           Dispatch =
                             fun msg ->
                                 dispatched.Add msg
                                 model.Value <- ClientModel.update msg model.Value }
-                Expect.equal opens.Value 1 "one attempt, then settled"
+                Expect.equal opens.Value 3 "it kept trying rather than settling on the first failure"
                 Expect.equal
                     (List.ofSeq dispatched)
-                    [ ConnectingMsg; ConnectFailedMsg "the session did not answer" ]
-                    "it announced the attempt, then reported the failure with its reason"
+                    [ ConnectingMsg
+                      ConnectFailedMsg "the session did not answer"
+                      ConnectingMsg
+                      ConnectFailedMsg "the session did not answer"
+                      ConnectingMsg
+                      ConnectFailedMsg "the session did not answer" ]
+                    "each attempt is announced and each failure reported with its reason"
+                Expect.isTrue
+                    (waits |> Seq.forall Option.isSome)
+                    "an unreachable session is a scheduled wait, never the indefinite park"
+                Expect.isTrue
+                    (waits |> Seq.forall (fun d -> d.Value <= System.TimeSpan.FromMinutes 1.0))
+                    "and the backoff is capped, so a session that never returns is not polled less and less for ever"
                 Expect.equal
                     model.Value.Connection
                     (Disconnected (Some "the session did not answer"))
@@ -659,9 +688,11 @@ let private lifecycleTests =
                       AssignedDisplayName = "Ada"
                       LatestOffset = None }
                 let serves = ref 0
+                let waits = ResizeArray<System.TimeSpan option> ()
                 let dispatched = ResizeArray<ClientMsg> ()
                 do!
                     App.SessionLifecycle.run
+                        (App.SessionLifecycle.supervision (fun () -> 0.0))
                         { Open = fun () -> async { return Ok () }
                           Serve =
                             fun _ dispatch _ ->
@@ -672,12 +703,22 @@ let private lifecycleTests =
                                         dispatch (ConnectedMsg accepted)
                                         dispatch DisconnectedMsg
                                     else
-                                        // Refused this time: the loop must end here.
+                                        // Refused this time: no schedule can help, so it parks.
                                         dispatch (RejectedMsg "peer token expired")
                                 }
                           ReadPosition = fun () -> None
+                          WaitBeforeRetry =
+                            fun delay ->
+                                async {
+                                    waits.Add delay
+                                    return false
+                                }
                           Dispatch = dispatched.Add }
-                Expect.equal serves.Value 2 "the ended session earned one more attempt, and the refusal ended it"
+                Expect.equal serves.Value 2 "the ended session earned one more attempt straight away"
+                Expect.equal
+                    (List.ofSeq waits)
+                    [ None ]
+                    "and the refusal waited to be ASKED rather than backing off — a token no amount of waiting fixes"
                 Expect.equal
                     (dispatched |> Seq.filter (fun m -> m = ConnectingMsg) |> Seq.length)
                     1
@@ -689,6 +730,22 @@ let private lifecycleTests =
 
 let private surfaceTests =
     testList "Degradation is visible and never blocking" [
+        testCase "a disconnected client is offered a way to ask again; a connected one is not" <| fun () ->
+            // The affordance GAPS asked for, and the availability invariant behind it: the
+            // supervised loop is already trying, but the one client it deliberately will not
+            // carry — a peer whose token was refused — parks until a person asks, and a park
+            // with nothing to press is a dead end wearing a reason.
+            let model = ClientModel.init (peer "ada" "Ada")
+            let disconnected =
+                Support.render { model with Connection = Disconnected (Some "peer token expired") }
+            Expect.isTrue
+                (disconnected.Contains "data-retry-now")
+                "a settled disconnection offers the ask"
+            let connected = Support.render { model with Connection = Connected }
+            Expect.isFalse
+                (connected.Contains "data-retry-now")
+                "a working session offers nothing to retry"
+
         testCase "a stalled feed shows history paused with its reason, and the composer stays live" <| fun () ->
             let model = ClientModel.init (peer "ada" "Ada")
             let html =
