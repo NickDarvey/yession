@@ -41,6 +41,9 @@ let private representativeModel : ClientModel =
       // A representative client is one that can keep what it is given; the case that cannot
       // is the exception, and says so where it matters.
       CanKeepHistory = true
+      // A representative client has been to look; the timeline it renders is the session's,
+      // not a placeholder for one it has not read.
+      HistoryRead = true
       Synced =
         // Draft/queue bodies are rich-text `Y.XmlFragment`s mounted by the browser editor,
         // not fields on the model — so the SSR fixture carries only the slot's identity; the
@@ -337,6 +340,34 @@ let private uiChecklistTests =
                   "no-agent connect call-to-action", Dom.Hooks.noAgentConnect ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+
+        testCase "an empty timeline says whether it has looked, and the caret means one thing again" <| fun () ->
+            // Two opposite facts used to wear the same mark. The idle caret says "nothing was
+            // ever said here"; it was also what a client showed BEFORE it had read anything,
+            // which after the local store is the ordinary cold open. So the caret was telling
+            // most people the opposite of the truth, and neither state could be told from the
+            // other on screen.
+            let empty =
+                { representativeModel with
+                    Conversation = ConversationProjection.empty
+                    Timeline = TimelineProjection.empty }
+            let looking = Support.render { empty with HistoryRead = false }
+            Expect.isTrue
+                (looking.Contains "data-history-loading")
+                "a client that has not looked yet says it is reading, rather than claiming emptiness"
+            Expect.isTrue
+                (looking.Contains Dom.Text.readingHistory)
+                "and says it in words too, since the pulse alone reaches nobody who cannot see it"
+            let looked = Support.render { empty with HistoryRead = true }
+            Expect.isFalse
+                (looked.Contains "data-history-loading")
+                "a client that has looked and found nothing is not still reading"
+            // The other half, and the reason this is worth pinning: a session that HAS messages
+            // never shows either, whether or not the client has finished looking.
+            let full = Support.render { representativeModel with HistoryRead = false }
+            Expect.isFalse
+                (full.Contains "data-history-loading")
+                "a timeline with messages in it is not an empty one"
 
         testCase "a client that cannot keep history says so; one that can says nothing" <| fun () ->
             // The availability invariant, not the wording: a client whose context denies it a

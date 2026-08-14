@@ -273,6 +273,18 @@ type ClientModel =
       /// and a default of false would have every server-rendered page announce a missing store
       /// before the client that knows has had a chance to look.
       CanKeepHistory : bool
+      /// Whether this client has finished reading the history it already had (Plan 20).
+      ///
+      /// It exists because an empty timeline had two opposite meanings wearing one mark: the
+      /// idle caret says *nothing was ever said here*, and it was also what a client showed
+      /// while it had not yet looked. After the local store landed, the second is the common
+      /// case on a cold open — so the caret was telling most people the opposite of the truth.
+      ///
+      /// One flag rather than a `Pending | Restoring | Restored`: the view asks one question,
+      /// "has this client looked yet", and a state nothing distinguishes is a state nobody
+      /// can act on. Starts FALSE, including on the server-rendered shell, because at first
+      /// paint no client has looked.
+      HistoryRead : bool
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
       /// The terminal half of the chat (Plan 14, stage 1): block chips and lease-stretch
@@ -374,6 +386,11 @@ type ClientMsg =
     /// off the local store proves only that this client kept it, and an offline client
     /// reporting a live history feed would be lying about the one leg that is down.
     | LocalHistoryMsg of EventPage<SessionEvent>
+    /// The client has finished reading what it already had (Plan 20) — whether that was a
+    /// full conversation, or nothing at all because it keeps nothing. Either way it has now
+    /// LOOKED, which is what the timeline needs to know before it can claim a session is
+    /// empty.
+    | HistoryReadMsg
     /// The event feed's health changed: a read failed and is being retried (reported by the
     /// resilience policy composed with the transport), or it failed for good (reported by
     /// the read loop, which is the one place that knows a read is over). A successful page
@@ -518,6 +535,7 @@ module ClientModel =
           Manager = None
           EphemeralStorage = false
           CanKeepHistory = true
+          HistoryRead = false
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
           Timeline = TimelineProjection.empty
@@ -1059,6 +1077,7 @@ module ClientModel =
                         match msg with
                         | EventsPageMsg _ -> FeedLive
                         | _ -> model.EventConsumer.Feed } }
+        | HistoryReadMsg -> { model with HistoryRead = true }
         | EventFeedMsg health ->
             { model with EventConsumer = { model.EventConsumer with Feed = health } }
         | CatchUpSlowMsg slow ->

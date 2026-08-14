@@ -595,6 +595,17 @@ module Style =
     let timelineIdle = "pl-8 max-md:pl-8"
     let caretIdle = caret + " opacity-50"
 
+    /// The same caret while this client is still READING what it already had (Plan 20). It
+    /// pulses rather than blinks, which is the vocabulary every other "working on it" in this
+    /// app already uses (`statusDotPulse`), and it is full strength: something IS happening,
+    /// unlike the dimmed invitation beside it.
+    let caretReading = "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-pulse2 motion-reduce:animate-none"
+
+    /// Present to a screen reader, absent to everyone else. For a state whose whole expression
+    /// is a moving mark: the pulse says "reading" to people who can see it, and this says the
+    /// same thing to the people who cannot.
+    let srOnly = "sr-only"
+
     /// Terminal work in the chat (Plan 14, stage 1): one line, subtler than a message, and a
     /// real `<button>` — so it is keyboard-operable and focus-ringed by construction rather
     /// than by a handler bolted onto a div.
