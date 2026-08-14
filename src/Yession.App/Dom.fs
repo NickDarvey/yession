@@ -194,10 +194,11 @@ module Dom =
         /// tablist and a test asserting keyboard order should not have to know which is which.
         /// Its value is `PaneTab.key`.
         let paneTab = "data-pane-tab"
-        /// The close control on a tab a person opened. Terminal tabs have none: the strip
-        /// lists every terminal the session has, and "close" there already means something
-        /// else (`terminalClose`).
-        let paneTabClose = "data-pane-tab-close"
+        /// The pin on a tab (Plan 20, stage 1), carrying `PaneTab.key` and its state in
+        /// `aria-pressed`. It replaced a close control, and the difference is the point: this
+        /// one releases a tab and never ends anything, so the strip cannot destroy. Killing a
+        /// terminal is `terminalClose`, on its row in the list.
+        let paneTabPin = "data-pane-tab-pin"
         /// The pane's body, carrying the key of whatever it is showing.
         let panePanel = "data-pane-panel"
         /// A block's read-only view: its command line and everything it printed.
@@ -234,13 +235,15 @@ module Dom =
         /// One row, carrying its terminal's id — and the control that shows that terminal,
         /// so a row is keyboard-operable by construction rather than by a handler on a div.
         let terminalListRow = "data-terminal-list-row"
-        /// A row's verbs, hooked apart from the pane body's own controls for as long as both
-        /// exist (Plan 20, stage 1 deletes the pane's copies). Each is rendered ONLY where
-        /// `TerminalAffordances` says it applies, so a test asserting one is absent is
-        /// asserting the fold, not a template's mood.
+        /// The rewind, on a row. Its own hook because the pane keeps a DVR rewind of its own
+        /// (`terminalRewind`) for the terminal it is showing, and the two are different
+        /// controls in different places — unlike the kill and the attach-again, which the
+        /// list is now the ONLY home of (Plan 20, stage 1) and which therefore keep the names
+        /// they have always had: `terminalClose`, `terminalReattach`.
+        ///
+        /// Every row verb is rendered ONLY where `TerminalAffordances` says it applies, so a
+        /// test asserting one is absent is asserting the fold, not a template's mood.
         let terminalListRewind = "data-terminal-list-rewind"
-        let terminalListKill = "data-terminal-list-kill"
-        let terminalListReattach = "data-terminal-list-reattach"
         /// A closed row whose recording the per-terminal cap ate. The stated gap, where a
         /// play affordance would otherwise be — an audit trail's hole is said, never left to
         /// look like a terminal that printed nothing.
