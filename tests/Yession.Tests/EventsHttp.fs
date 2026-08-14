@@ -41,16 +41,16 @@ let private httpGetRaw (url: string) : JS.Promise<RedirectReply> = Fable.Core.Ut
 // to the browser's port (app/browser/Browser.fs); failure classification is covered in
 // Resilience.fs, so here it only has to be the real thing.
 [<Emit("""fetch($0).then(
-  async r => r.ok ? { ok: true, status: r.status, detail: await r.text() } : { ok: false, status: r.status, detail: '' },
-  e => ({ ok: false, status: 0, detail: String(e) }))""")>]
-let private fetchChunk (url: string) : JS.Promise<{| ok: bool; status: int; detail: string |}> = Fable.Core.Util.jsNative
+  async r => r.ok ? { ok: true, status: r.status, url: r.url, detail: await r.text() } : { ok: false, status: r.status, url: r.url, detail: '' },
+  e => ({ ok: false, status: 0, url: '', detail: String(e) }))""")>]
+let private fetchChunk (url: string) : JS.Promise<{| ok: bool; status: int; url: string; detail: string |}> = Fable.Core.Util.jsNative
 
 let private chunkGet : App.HttpGet =
     fun url ->
         async {
             let! reply = fetchChunk url |> Async.AwaitPromise
             return
-                if reply.ok then Ok reply.detail
+                if reply.ok then Ok { Url = reply.url; Body = reply.detail }
                 elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
                 else Error (App.HttpStatus reply.status)
         }
@@ -156,7 +156,129 @@ let private endpointTests =
             })
     ]
 
+// --- What a client keeps, and what it does with it (Plan 20, step 2) ----------------------
+// The store is a port, so these need no browser: a dictionary standing in for the Cache API
+// answers the same three questions, and what is under test is the client's reasoning about
+// what it holds — replay it in order, notice a hole, and ask the network only for what is
+// missing.
+
+/// A `HistoryCache` over a list, ordered the way the Cache API orders `keys()`: insertion
+/// first, which is fetch order, which is ascending.
+let private storeOf (entries: (string * string) list) =
+    let kept = ResizeArray entries
+    // Type-qualified: `Read` is a field name several records in the domain share, and an
+    // unqualified one would resolve to whichever was declared last.
+    { App.Stored = fun () -> async.Return (kept |> Seq.map fst |> List.ofSeq)
+      App.Read = fun url -> async.Return (kept |> Seq.tryPick (fun (u, body) -> if u = url then Some body else None))
+      App.Write = fun url body -> async { kept.Add (url, body) } } : App.HistoryCache
+
+/// One kept answer: the JSONL the server served for offsets [first, last].
+let private answerOf (first: int64) (count: int) =
+    let line (offset: int64) =
+        Codec.toString
+            Codec.sessionEventEnvelope
+            { EventId = EventId.fresh ()
+              SessionId = SessionId.create "kept-history" |> expect
+              Offset = EventOffset.create offset |> expect
+              Actor = ActorRef.SessionProcess
+              Timestamp = System.DateTimeOffset.FromUnixTimeSeconds 0L
+              Event =
+                PeerJoined
+                    { PeerId = PeerId.create (sprintf "p-%d" offset) |> expect
+                      DisplayName = sprintf "peer %d" offset
+                      User = None } }
+    let last = first + int64 count - 1L
+    sprintf "events/%d-%d" first last,
+    [ first .. last ] |> List.map line |> String.concat "\n"
+
+let private storeTests =
+    testList "What a client keeps" [
+        testCaseAsync "a replay folds what was kept, in order, with no network at all" <|
+            async {
+                let store = storeOf [ answerOf 0L 3; answerOf 3L 2 ]
+                let seen = ResizeArray ()
+                do! App.EventFetch.replay store seen.Add
+                let offsets =
+                    seen
+                    |> Seq.collect (fun msg ->
+                        match msg with
+                        | LocalHistoryMsg page -> page.Events |> List.map (fun e -> EventOffset.value e.Offset)
+                        | _ -> [])
+                    |> List.ofSeq
+                Expect.equal offsets [ 0L; 1L; 2L; 3L; 4L ] "every kept event, once, in log order"
+            }
+
+        testCaseAsync "a replayed page never claims the feed is live" <|
+            async {
+                // The distinction the separate message exists for: these events prove this
+                // client KEPT them, and nothing whatever about whether the network works. A
+                // client replaying offline while reporting a healthy history feed is lying
+                // about the one leg that is down.
+                let store = storeOf [ answerOf 0L 2 ]
+                let seen = ResizeArray ()
+                do! App.EventFetch.replay store seen.Add
+                let stalled = { ClientModel.init { PeerId = PeerId.create "p" |> expect; DisplayName = "P" } with
+                                  EventConsumer =
+                                    { (ClientModel.init { PeerId = PeerId.create "p" |> expect; DisplayName = "P" }).EventConsumer with
+                                        Feed = FeedStalled "offline" } }
+                let folded = seen |> Seq.fold (fun m msg -> ClientModel.update msg m) stalled
+                Expect.equal folded.EventConsumer.Feed (FeedStalled "offline") "the feed's health is untouched by a local read"
+                Expect.equal
+                    (folded.Conversation.Items |> List.length)
+                    0
+                    "these are joins, so nothing lands in the conversation — the offsets are the point"
+                Expect.equal
+                    (folded.EventConsumer.LastProcessedOffset |> Option.map EventOffset.value)
+                    (Some 1L)
+                    "and the read position moved, which is what the resume reads"
+            }
+
+        testCaseAsync "a hole stops the fold at its edge, and says which offsets are missing" <|
+            async {
+                // An entry evicted from the middle leaves the rest kept. Folding over the gap
+                // would advance the read position past events nothing will ever offer again,
+                // so the walk stops AT the hole — and reports it, rather than looking like
+                // the end of history.
+                let store = storeOf [ answerOf 0L 2; answerOf 5L 2 ]
+                let seen = ResizeArray ()
+                do! App.EventFetch.replay store seen.Add
+                let folded =
+                    seen
+                    |> Seq.collect (fun msg ->
+                        match msg with
+                        | LocalHistoryMsg page -> page.Events |> List.map (fun e -> EventOffset.value e.Offset)
+                        | _ -> [])
+                    |> List.ofSeq
+                Expect.equal folded [ 0L; 1L ] "everything up to the hole, and nothing past it"
+                let reported =
+                    seen
+                    |> Seq.tryPick (fun msg ->
+                        match msg with
+                        | EventFeedMsg (FeedStalled reason) -> Some reason
+                        | _ -> None)
+                match reported with
+                | None -> failwith "a hole must be reported, not silently treated as the end"
+                | Some reason ->
+                    Expect.stringContains reason "offset 2" "naming where the fill has to start"
+            }
+
+        testCaseAsync "an answer is kept under the address it came back FROM, not the one asked for" <|
+            async {
+                // The cursor moves; the range it resolves to does not. Keying by the request
+                // would key history under an address whose meaning changes, which is the bug
+                // the whole scheme exists to avoid.
+                let store = storeOf []
+                let answering : App.HttpGet =
+                    fun _ -> async { return Ok { Url = "events/0-41"; Body = snd (answerOf 0L 2) } }
+                let storing = App.EventFetch.storing store answering
+                let! _ = storing "events/after/99"
+                let! kept = store.Stored ()
+                Expect.equal kept [ "events/0-41" ] "the resolved range is the key"
+            }
+    ]
+
 let tests =
     testList "EventsHttp" [
         endpointTests
+        storeTests
     ]

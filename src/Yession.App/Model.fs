@@ -265,6 +265,14 @@ type ClientModel =
       /// Static for the life of the page, like `Manager`: a fact about the deployment that
       /// served this document, never a message and never folded.
       EphemeralStorage : bool
+      /// Whether this client can keep the history it is given (Plan 20). The store is the
+      /// Cache API, which needs a secure context — loopback and every `https://` mount are
+      /// one, a session reached over plain HTTP at a LAN address is not.
+      ///
+      /// Defaults to TRUE, and the browser says otherwise: the server renders this shell too,
+      /// and a default of false would have every server-rendered page announce a missing store
+      /// before the client that knows has had a chance to look.
+      CanKeepHistory : bool
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
       /// The terminal half of the chat (Plan 14, stage 1): block chips and lease-stretch
@@ -353,6 +361,15 @@ type ClientMsg =
     /// A read-only event page from the Session Process (Step 07): the conversation is
     /// built by folding pages through the shared projection; offsets track progress.
     | EventsPageMsg of EventPage<SessionEvent>
+    /// A page this client had already been given and kept (Plan 20): replayed out of its own
+    /// store at boot, before any network read and without a session.
+    ///
+    /// Folded through exactly the same projection as `EventsPageMsg` — the events are the
+    /// same events — and differing in one thing, which is the reason it is a separate case:
+    /// it says NOTHING about the feed. A page off the network proves the feed works; a page
+    /// off the local store proves only that this client kept it, and an offline client
+    /// reporting a live history feed would be lying about the one leg that is down.
+    | LocalHistoryMsg of EventPage<SessionEvent>
     /// The event feed's health changed: a read failed and is being retried (reported by the
     /// resilience policy composed with the transport), or it failed for good (reported by
     /// the read loop, which is the one place that knows a read is over). A successful page
@@ -490,6 +507,7 @@ module ClientModel =
           Session = None
           Manager = None
           EphemeralStorage = false
+          CanKeepHistory = true
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
           Timeline = TimelineProjection.empty
@@ -923,7 +941,10 @@ module ClientModel =
             { model with Connection = Disconnected (Some reason) }
         | EventsAvailableMsg latest ->
             { model with EventConsumer = withLatestKnown (Some latest) model.EventConsumer }
-        | EventsPageMsg page ->
+        // One fold, reached by two messages. The events are the same events and the
+        // projection is the same projection; what differs is what arriving PROVED, and that
+        // is `Feed`, decided below rather than in here.
+        | EventsPageMsg page | LocalHistoryMsg page ->
             // The offset-gated projection fold makes overlapping/duplicate pages
             // idempotent: events at or below the processed offset are skipped.
             let conversation, highWater =
@@ -988,9 +1009,14 @@ module ClientModel =
                       // was about to say.
                       CatchUpIsSlow =
                         isBehind highWater latestKnown && model.EventConsumer.CatchUpIsSlow
-                      // A page arrived, so the feed is live by construction — recovery from
-                      // a stall needs no separate signal.
-                      Feed = FeedLive } }
+                      // A page off the NETWORK is proof the feed works, so recovery from a
+                      // stall needs no separate signal. A page off the local store proves
+                      // only that this client kept it — the feed is whatever it already
+                      // was, which offline is exactly the truth the strip is showing.
+                      Feed =
+                        match msg with
+                        | EventsPageMsg _ -> FeedLive
+                        | _ -> model.EventConsumer.Feed } }
         | EventFeedMsg health ->
             { model with EventConsumer = { model.EventConsumer with Feed = health } }
         | CatchUpSlowMsg slow ->

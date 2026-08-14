@@ -447,20 +447,81 @@ let private absolute (relative: string) : string = jsNative
 // transport error it never got past (`status: 0` — offline, refused, DNS, TLS). It never
 // rejects, because the information a rejection destroys is exactly the information the
 // resilience policy needs to decide whether retrying could help.
+// `r.url` is the address the answer came back FROM, which after a redirect is not the one
+// that was asked for — and it is the one worth keeping, because a range's bounds never move
+// while a cursor's answer does (Plan 20).
 [<Emit("""fetch($0).then(
-  async r => r.ok ? { ok: true, status: r.status, detail: await r.text() } : { ok: false, status: r.status, detail: '' },
-  e => ({ ok: false, status: 0, detail: String(e) }))""")>]
-let private fetchChunk (url: string) : JS.Promise<{| ok: bool; status: int; detail: string |}> = jsNative
+  async r => r.ok ? { ok: true, status: r.status, url: r.url, detail: await r.text() } : { ok: false, status: r.status, url: r.url, detail: '' },
+  e => ({ ok: false, status: 0, url: '', detail: String(e) }))""")>]
+let private fetchChunk (url: string) : JS.Promise<{| ok: bool; status: int; url: string; detail: string |}> = jsNative
 
 let private httpGet : App.HttpGet =
     fun url ->
         async {
             let! reply = fetchChunk url |> Async.AwaitPromise
             return
-                if reply.ok then Ok reply.detail
+                if reply.ok then Ok { Url = reply.url; Body = reply.detail }
                 elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
                 else Error (App.HttpStatus reply.status)
         }
+
+// --- The history store (Plan 20, step 2): the Cache API, not the HTTP cache ---------------
+// A cache header can say "reuse this without asking me"; it cannot say "keep this". The HTTP
+// cache is a bounded pool shared with every other site, reclaimed under pressure and wiped by
+// the browsing-data checkbox people tick casually — and it can be neither enumerated nor asked
+// to persist. The Cache API is all three, and it needs no service worker: `window.caches` is
+// reachable from the page in any secure context.
+//
+// Whole `Response` objects, keyed by the address they came back from — which after the
+// cursor's redirect is the range, whose bounds never move. That is what makes an answer
+// keepable, and the client never has to construct one.
+
+[<Emit("(typeof window !== 'undefined' && window.isSecureContext === true && !!window.caches)")>]
+let private canKeepHistory () : bool = jsNative
+
+// The cache is named for the SESSION, which closes inside the client what a URL-keyed cache
+// could not: the zero-config deployment addresses sessions as `127.0.0.1:{port}` and ports are
+// recycled, so a shared key would hand one session the previous one's history. Derived from the
+// doc store's key rather than spelled again — one rule for what identifies a session's storage.
+let private historyCacheName () = persistenceKey () + "/events"
+
+[<Emit("window.caches.open($0)")>]
+let private openCache (name: string) : JS.Promise<obj> = jsNative
+
+// `keys()` answers in INSERTION order, which is fetch order, which is ascending — so a replay
+// is "read them in order" and never parses an address to sort by.
+[<Emit("$0.keys().then(rs => rs.map(r => r.url))")>]
+let private cacheKeys (cache: obj) : JS.Promise<string array> = jsNative
+
+[<Emit("$0.match($1).then(r => r ? r.text() : null)")>]
+let private cacheRead (cache: obj) (url: string) : JS.Promise<string option> = jsNative
+
+// A FRESH Response, never the one that came off the network: a response carrying
+// `redirected = true` is a known trap in the Cache API, and re-wrapping also keeps the store
+// free of anything about how the bytes were obtained.
+[<Emit("$0.put($1, new Response($2, { headers: { 'content-type': 'application/x-ndjson; charset=utf-8' } })).catch(() => undefined)")>]
+let private cacheWrite (cache: obj) (url: string) (body: string) : JS.Promise<unit> = jsNative
+
+/// Ask for the store to be kept. A request, not a guarantee — granted for an engaged site on
+/// Chrome, essentially only for an installed app on Safari — and best-effort by design: the
+/// answer changes nothing this client does, it only changes how long what it kept survives.
+[<Emit("(navigator.storage && navigator.storage.persist) ? navigator.storage.persist().catch(() => false) : Promise.resolve(false)")>]
+let private requestPersistence () : JS.Promise<bool> = jsNative
+
+/// The history store for this session, or the one that keeps nothing when this context cannot
+/// have one. Total either way: a client with no store is exactly today's client, asking the
+/// network from its cursor.
+let private openHistoryCache () : Async<App.HistoryCache> =
+    async {
+        if not (canKeepHistory ()) then return App.HistoryCache.none
+        else
+            let! cache = openCache (historyCacheName ()) |> Async.AwaitPromise
+            let! _ = requestPersistence () |> Async.AwaitPromise
+            return
+                { Stored = fun () -> async { let! keys = cacheKeys cache |> Async.AwaitPromise in return List.ofArray keys }
+                  Read = fun url -> cacheRead cache url |> Async.AwaitPromise
+                  Write = fun url body -> cacheWrite cache url body |> Async.AwaitPromise }
+    }
 
 [<Emit("Math.random()")>]
 let private jsRandom () : float = jsNative
@@ -583,7 +644,10 @@ let private start () =
                         | Ok id -> Some id
                         | Error _ -> None)
                 Manager = metaContent Dom.managerMetaName
-                EphemeralStorage = (metaContent Dom.ephemeralStorageMetaName).IsSome }
+                EphemeralStorage = (metaContent Dom.ephemeralStorageMetaName).IsSome
+                // The one place that can answer this: the model defaults to true because the
+                // SERVER renders this shell too and has no idea what the browser can do.
+                CanKeepHistory = canKeepHistory () }
 
         // The connection is wired later (after persistence and signalling); the interrupt
         // control holds this ref so everything else works before — and without — the
@@ -754,8 +818,8 @@ let private start () =
                                 // still rebases and still plays, as the naive slice. Asking
                                 // again on every render would be a spin with nothing to gain.
                                 | Error _ -> ()
-                                | Ok body ->
-                                    match Codec.fromString Codec.transcriptKeyframe body with
+                                | Ok answer ->
+                                    match Codec.fromString Codec.transcriptKeyframe answer.Body with
                                     | Ok keyframe -> dispatchRef (TerminalKeyframeMsg (terminal, keyframe))
                                     | Error _ -> ()
                             })
@@ -1178,6 +1242,14 @@ let private start () =
         // empty-bodied slot, and this is where it goes.
         DraftSlot.settle doc registry peerId (fun msg -> dispatchRef msg)
 
+        // Durable history, out of this client's own store, BEFORE anything asks the network
+        // and regardless of what `/me` is about to say (Plan 20). The probe decides whether
+        // this client may CONNECT; it has never had any business deciding whether a client may
+        // read what it was already given. That it did is why an offline open rendered an empty
+        // conversation rather than the one it had been reading.
+        let! historyCache = openHistoryCache ()
+        do! App.EventFetch.replay historyCache (fun msg -> dispatchRef msg)
+
         // Authorization by renavigation: probe `/me` for a peer token. 401 -> bounce
         // through `/login` (code + PKCE via the Manager) and land back on this shell,
         // where the probe succeeds. A NETWORK failure (offline, session down) is a
@@ -1208,7 +1280,9 @@ let private start () =
             // retrying, backoff, or attempt counts. Interim progress is the policy's to report,
             // which is the one thing a settled outcome cannot carry.
             let feed =
-                App.EventFetch.overHttp httpGet SessionRoute.relative None
+                // `storing` sits UNDER the policy, so only a settled answer is kept — a
+                // retried fetch stores once, and a failed one stores nothing.
+                App.EventFetch.overHttp (App.EventFetch.storing historyCache httpGet) SessionRoute.relative None
                 |> Resilience.Policy.guard
                     (App.EventFetch.policy Resilience.Policy.sleep jsRandom (fun attempt ->
                         App.EventFetch.retrying attempt
