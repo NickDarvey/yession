@@ -1200,6 +1200,87 @@ let mountedTests =
                     proxy.Stop ()
                     try mountedHost.Kill true with _ -> ()
             }
+
+        // THE bug report, and the last thing plan 20 owed: open a session you have read
+        // before, with the session gone, and read it.
+        //
+        // Everything it needs was built in the four steps before this one — the log addressed
+        // so its tail can be kept, the client keeping it, the replay that runs before the
+        // client knows whether it may connect, and a timeline that does not claim emptiness
+        // it has not checked. What was missing was a PAGE: the shell is `no-cache`, and a dead
+        // host cannot answer a revalidation, so until the worker there was nothing to render
+        // any of it into. That is why this case could not go green before now, and why it
+        // merges with the worker rather than sitting red beside it.
+        testCaseAsync "the session is gone, the page is still there, and so is its history" <|
+            async {
+                if Directory.Exists mountDataDir then Directory.Delete (mountDataDir, true)
+                startMountedHost ()
+                let proxy = startMountProxy MOUNT_PROXY_PORT (fun () -> mountSessionPort)
+                let mutable browserToClose : IBrowser option = None
+                let mutable playwrightToDispose : IPlaywright option = None
+                try
+                    let publicUrl = sprintf "http://127.0.0.1:%d/s/%s/" MOUNT_PROXY_PORT MOUNT_SESSION
+                    let! pw = await (Playwright.CreateAsync ())
+                    playwrightToDispose <- Some pw
+                    let! br =
+                        await (pw.Chromium.LaunchAsync (
+                            BrowserTypeLaunchOptions (
+                                ExecutablePath = chromiumPath (),
+                                Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
+                    browserToClose <- Some br
+                    let! context = await (br.NewContextAsync ())
+                    let! page = await (context.NewPageAsync ())
+                    page.SetDefaultTimeout 20000.0f
+                    let! _ = await (page.GotoAsync publicUrl)
+                    let! _ = await (page.WaitForFunctionAsync connected)
+
+                    // Say something, so there is history to lose.
+                    let said = "still here when the session is not"
+                    let composerSel = """[data-rich-readonly="false"] .ProseMirror"""
+                    let! _ = await (page.WaitForSelectorAsync composerSel)
+                    do! awaitU (page.ClickAsync composerSel)
+                    do! awaitU (page.Keyboard.TypeAsync said)
+                    do! awaitU (page.Locator("[data-send-draft]").First.ClickAsync ())
+                    let inTimeline =
+                        sprintf
+                            """document.querySelector('[data-conversation]')?.textContent?.includes(%s) === true"""
+                            (sprintf "'%s'" said)
+                    let! _ = await (page.WaitForFunctionAsync inTimeline)
+
+                    // The worker has to be RUNNING before the session goes, or the reload has
+                    // nothing serving it. Waiting on the registration is the difference between
+                    // testing this and testing a race.
+                    let! _ =
+                        await (page.WaitForFunctionAsync
+                                "navigator.serviceWorker.ready.then(r => !!r.active)")
+
+                    // Gone, and staying gone. The proxy stays up, which is the honest shape of
+                    // a reaped session behind an operator's front door — and it means the
+                    // shell request comes back 502 rather than failing outright, which the
+                    // worker has to treat as the failure it is.
+                    mountedHost.Kill true
+                    mountedHost.WaitForExit ()
+
+                    let! _ = await (page.ReloadAsync ())
+
+                    // The page loaded at all — the whole of what the worker adds.
+                    let! _ = await (page.WaitForSelectorAsync "[data-conversation]")
+                    // And it has what this client had been reading. Scoped to the conversation
+                    // element: a page-level match is satisfied by the roster and by the
+                    // composer this text was typed into.
+                    do! await (page.WaitForFunctionAsync inTimeline) |> Async.Ignore
+                    // Said honestly, too: it is not pretending to be connected to a session
+                    // that is not there.
+                    do!
+                        await (page.WaitForFunctionAsync
+                                """document.querySelector('[data-connection]')?.textContent !== 'Connected'""")
+                        |> Async.Ignore
+                finally
+                    browserToClose |> Option.iter (fun b -> b.CloseAsync () |> ignore)
+                    playwrightToDispose |> Option.iter (fun p -> p.Dispose ())
+                    proxy.Stop ()
+                    try mountedHost.Kill true with _ -> ()
+            }
     ]
 
 #else

@@ -58,6 +58,12 @@ type SessionRoute =
     /// rewriting, and immutability still holds because any change to any file changes
     /// `<build>` and so changes every address in the set.
     | Asset of build: string * path: string
+    /// The service worker that makes a COLD open possible with no network (Plan 20). Served
+    /// at the mount root and nowhere else: a worker's scope is its own path, so the same file
+    /// under `assets/<build>/` would control the asset directory and nothing else — which is
+    /// why this is not a fingerprinted asset. It carries the build digest in its BODY instead,
+    /// so a new build is a byte-different worker and the browser updates it.
+    | ServiceWorker
     /// The web manifest, which is what makes the shell installable — and, once installed,
     /// what makes it launch without the browser's chrome (`WebApp`). NOT fingerprinted: a
     /// browser re-reads it by the address the document names, and the document names this.
@@ -154,6 +160,7 @@ module SessionRoute =
         match route with
         | Shell -> ""
         | Asset (build, path) -> assetsPrefix + build + "/" + path
+        | ServiceWorker -> "sw.js"
         | Manifest -> "manifest.webmanifest"
         | Icon -> "icon.png"
         | Signal -> "signal"
@@ -188,6 +195,7 @@ module SessionRoute =
         | "GET", [ "" ] -> Some Shell
         | "POST", [ "signal" ] -> Some Signal
         | "GET", [ "me" ] -> Some Me
+        | "GET", [ "sw.js" ] -> Some ServiceWorker
         | "GET", [ "manifest.webmanifest" ] -> Some Manifest
         | "GET", [ "icon.png" ] -> Some Icon
         // Everything static, by path, with no opinion about what is in there.
@@ -266,6 +274,11 @@ module AssetBuild =
     /// so a document cannot name one this build does not ship.
     let url (AssetBuild digest) (file: AssetFile) : string =
         SessionRoute.relative (Asset (digest, AssetFile.path file))
+
+    /// The set's own address, for the one consumer that names no file: the service worker,
+    /// which keeps a cache PER BUILD and drops the others (Plan 20). It is the digest and
+    /// nothing else, so a new build is a new cache name and a byte-different worker.
+    let digest (AssetBuild d) = d
 
 /// What the two static surfaces may be cached for, stated once because the session server and
 /// the Manager UI both serve them and the pair only works together: the shell is the document
