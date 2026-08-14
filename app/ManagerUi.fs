@@ -273,20 +273,22 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
               <div class="flex flex-col gap-1.5">
                 <label class="{Style.label}" for="mcp-name">name</label>
                 <input id="mcp-name" name="name" placeholder="serial" autocomplete="off" required
-                  class="w-40 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+                  class="{Style.fieldOf "w-40 max-w-full"}">
               </div>
               <div class="flex flex-col gap-1.5">
                 <label class="{Style.label}" for="mcp-url">address</label>
                 <input id="mcp-url" name="url" type="url" placeholder="http://127.0.0.1:7333" autocomplete="off" required
-                  class="w-72 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+                  class="{Style.fieldOf "w-72 max-w-full"}">
               </div>
               <div class="flex flex-col gap-1.5">
                 <label class="{Style.label}" for="mcp-audience">reaches</label>
-                <select id="mcp-audience" name="session"
-                  class="w-56 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
-                  <option value="">any session</option>
-                  {options}
-                </select>
+                <div class="{Style.fieldSelectWrapOf "w-56 max-w-full"}">
+                  <select id="mcp-audience" name="session" class="{Style.fieldSelect}">
+                    <option value="">any session</option>
+                    {options}
+                  </select>
+                  <span class="{Style.fieldSelectMark}">{Icon.down}</span>
+                </div>
               </div>
               <button type="submit" class="{Style.btnPrimary}">Declare</button>
             </div>
@@ -319,7 +321,7 @@ let private bodyTemplate
               <label class="{Style.label}" for="new-session-name">new session</label>
               <div class="flex flex-wrap items-center gap-3">
                 <input id="new-session-name" name="name" placeholder="display name" autocomplete="off"
-                  class="w-72 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+                  class="{Style.fieldOf "w-72 max-w-full"}">
                 <button type="submit" class="{Style.btnPrimary}">Create</button>
               </div>
             </form>

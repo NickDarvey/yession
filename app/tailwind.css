@@ -218,6 +218,12 @@
   /* Structural dimensions with names, so the layouts that must agree on them compose
      one token instead of repeating a literal: the shared header band (`h-band`) and
      the sidebar column (`w-side`). */
+  /* The height of a CONTROL — every button, every field, every select. One token because
+     they sit in rows together and must agree: a 42px input beside a 32px button is not a
+     row, and the difference came from deriving one height from padding and the other from
+     a box. Both are the box now. */
+  --spacing-control: 32px;
+
   --spacing-band: 88px;
   --spacing-side: 280px;
   /* The terminals column (Plan 13). Wider than the sidebar because it holds 80-column

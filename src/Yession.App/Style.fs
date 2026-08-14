@@ -120,6 +120,22 @@ module Style =
     /// The caps voice — one size, one tracking, semibold — worn by every label, status,
     /// button, and author line. Colour composes at the use site.
     let private caps = "font-semibold text-label tracking-caps uppercase"
+
+    /// The voice a body is written in: Monaspace Xenon for a person, Krypton for the agent
+    /// (`--font-human`/`--font-agent`, both vendored in `app/tailwind.css`). Attribution the
+    /// eye reads before the words — the author line and the avatar say the same thing, but
+    /// they say it once at the top, and a long turn scrolls past them.
+    ///
+    /// A face, not a colour: the caps author line already spends the palette on this
+    /// distinction (`who` vs `whoAgent`), and message bodies are held at full-strength `ink`
+    /// on purpose — what was said is the content, and dimming half of it to mark who said it
+    /// would trade legibility for a fact the line above already carries.
+    ///
+    /// Worn by everything a person is CURRENTLY writing too — the open draft, a collapsed
+    /// peer's draft, a queued message, every field they type into — so text does not change
+    /// typeface at the moment it is sent. A command line is the exception and stays
+    /// `font-terminal` (`fieldMono`): what is being written there is machine input.
+    let messageVoice (isAgent: bool) = if isAgent then "font-agent" else "font-human"
     let label = caps + " text-ink-faint"
     let mono = "font-terminal text-code text-ink"
     let monoOut = "font-terminal text-code-sm text-ink-faint whitespace-pre-wrap"
@@ -145,12 +161,13 @@ module Style =
 
     // --- Buttons: bordered Metro rectangles — hover brightens, press fills --------------
 
-    /// Sized by construction, not padding arithmetic: the box is `h-8` (the same 32px the
-    /// composer's large icon button and the Send row share) with the line flex-centred in
-    /// it — the old `py-[7px]` was that same 32px, hand-derived and easy to break.
+    /// Sized by construction, not padding arithmetic: the box is `h-control` with the line
+    /// flex-centred in it — the old `py-[7px]` was that same height, hand-derived and easy to
+    /// break. A FIELD is built the same way from the same token (`fieldFace`), which is what
+    /// makes a button and an input in one row actually line up.
     let private btnBase =
         cls [ "bg-transparent cursor-pointer font-ui"; caps
-              "h-8 px-3.5 inline-flex items-center justify-center transition-colors"
+              "h-control px-3.5 inline-flex items-center justify-center transition-colors"
               Stroke.ring; focusRing ]
 
     /// The three faces, as (rest tone, hover, press) — the only thing that varies between
@@ -242,22 +259,43 @@ module Style =
     // never the chrome. `fieldFace` therefore sets no width and no font — those belong to
     // the caller, and baking them in is how the three drifted apart in the first place.
 
-    let private fieldFace =
-        cls [ "bg-surface outline-none appearance-none px-3 py-2 transition-colors"
+    /// Built exactly as `btnBase` is, and from the same `h-control`: the box sets the height
+    /// and the content is centred in it. It used to set `py-2` and let the line box decide,
+    /// which made an input 42px, a select 40px and a button 32px — three heights in one row.
+    /// `inline-flex` is what centres the content of the one field that is not an input: the
+    /// device code is a `span`, and a span does not centre itself in a fixed height.
+    let fieldFace =
+        cls [ "bg-surface outline-none appearance-none h-control px-3 transition-colors"
+              "inline-flex items-center"
               Stroke.ring; Stroke.hair; Stroke.hoverRim; Stroke.focus ]
 
-    /// A settings field (input/select): the body scale, never the title's, full width in
-    /// the column it sits in.
-    let field = cls [ fieldFace; "w-full font-light text-small leading-5 text-ink placeholder:text-ink-faint"; touchType ]
+    /// What a field holds, as opposed to what it looks like: the body scale (never the
+    /// title's) in the human voice, because a field is somebody typing.
+    let private fieldType =
+        cls [ messageVoice false; "font-light text-small leading-5 text-ink placeholder:text-ink-faint" ]
+
+    /// A settings field (input/select), filling the column it sits in.
+    let field = cls [ fieldFace; fieldType; "w-full"; touchType ]
+
+    /// The same field where the ROW gives it a width rather than the column — the Manager's
+    /// forms lay three of them out side by side. Public because the alternative is what was
+    /// here before: the Manager spelling the whole face inline, which drifted to a 42px input
+    /// beside a 32px button.
+    let fieldOf (width: string) = cls [ fieldFace; fieldType; width; touchType ]
 
     /// A select. Everything a field is, plus room for the mark below it — `appearance-none`
     /// (see `fieldFace`) takes the platform's caret away, and a menu with no caret is a text
     /// box that will not take text.
-    let fieldSelect = cls [ fieldFace; "w-full pr-9 font-light text-small leading-5 text-ink" ]
+    let fieldSelect = cls [ fieldFace; fieldType; "w-full pr-9" ]
 
     /// Its mark, drawn beside it. Absolutely positioned in the wrapper the select sits in and
     /// deaf to the pointer, so the whole rectangle still opens the menu.
+    ///
+    /// The WRAPPER carries the width — `fieldSelect` always fills it — so a row that sizes its
+    /// own controls sizes the wrapper (`fieldSelectWrapOf`) and the mark still lands on the
+    /// box's right edge.
     let fieldSelectWrap = "relative w-full"
+    let fieldSelectWrapOf (width: string) = cls [ "relative"; width ]
     let fieldSelectMark = "pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint"
 
     /// The same field in mono, sized by the flex row that holds it — a command line is a
@@ -544,20 +582,6 @@ module Style =
     let messageBody = "col-start-2 font-light text-body text-ink"
     let messageBodyStreaming = "col-start-2 font-light text-body text-ink-dim"
 
-    /// The voice a body is written in: Monaspace Neon for a person, Krypton for the agent
-    /// (`--font-human`/`--font-agent`, both vendored in `app/tailwind.css`). Attribution the
-    /// eye reads before the words — the author line and the avatar say the same thing, but
-    /// they say it once at the top, and a long turn scrolls past them.
-    ///
-    /// A face, not a colour: the caps author line already spends the palette on this
-    /// distinction (`who` vs `whoAgent`), and message bodies are held at full-strength `ink`
-    /// on purpose — what was said is the content, and dimming half of it to mark who said it
-    /// would trade legibility for a fact the line above already carries.
-    ///
-    /// Worn by everything a person is CURRENTLY writing too — the open draft, a collapsed
-    /// peer's draft, a queued message — so text does not change typeface at the moment it is
-    /// sent.
-    let messageVoice (isAgent: bool) = if isAgent then "font-agent" else "font-human"
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 
