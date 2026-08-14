@@ -241,6 +241,14 @@ let tests =
         // (the slot rule, the queue, the approval gate, the drain, the transcript) is covered
         // in the cheap tier; what is under test here is the binding itself, and that the
         // command really runs in the session's sandbox.
+        //
+        // `Srt` because of that last clause, and it is not a formality: the product's default
+        // work sandbox IS srt (`SessionMain.fs`, `YESSION_WORK_SANDBOX`), so on a box that
+        // cannot host one the command never runs, the block never reaches `ok`, and this waits
+        // out its timeout — thirty seconds to report, in effect, "this machine is not a
+        // machine this test can run on", which is precisely what a capability is for. It cost
+        // an agent a stash-and-re-run to discover that once.
+        Tag.needs "a command that really runs" [ Tag.Browser; Tag.Native; Tag.Srt ] (fun () ->
         testCaseAsync "a command typed in the terminal composer converges, runs in the sandbox, and both peers see the block" <|
             async {
                 // The column starts shut, so the header control is the way back in — and
@@ -291,7 +299,7 @@ let tests =
                     await (pageA.WaitForFunctionAsync
                             "document.querySelector(\"[data-terminal-input^='term-draft:']:not([readonly])\")?.value === ''")
                     |> Async.Ignore
-            }
+            })
 
         // Plan 11. THE discriminating check for the manager origin: this fixture sets no
         // YESSION_MANAGER_URL, so `PublicAccess.managerUrl` alone answers None here and an

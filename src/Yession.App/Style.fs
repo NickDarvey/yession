@@ -120,9 +120,25 @@ module Style =
     /// The caps voice — one size, one tracking, semibold — worn by every label, status,
     /// button, and author line. Colour composes at the use site.
     let private caps = "font-semibold text-label tracking-caps uppercase"
+
+    /// The voice a body is written in: Monaspace Xenon for a person, Krypton for the agent
+    /// (`--font-human`/`--font-agent`, both vendored in `app/tailwind.css`). Attribution the
+    /// eye reads before the words — the author line and the avatar say the same thing, but
+    /// they say it once at the top, and a long turn scrolls past them.
+    ///
+    /// A face, not a colour: the caps author line already spends the palette on this
+    /// distinction (`who` vs `whoAgent`), and message bodies are held at full-strength `ink`
+    /// on purpose — what was said is the content, and dimming half of it to mark who said it
+    /// would trade legibility for a fact the line above already carries.
+    ///
+    /// Worn by everything a person is CURRENTLY writing too — the open draft, a collapsed
+    /// peer's draft, a queued message, every field they type into — so text does not change
+    /// typeface at the moment it is sent. A command line is the exception and stays
+    /// `font-terminal` (`fieldMono`): what is being written there is machine input.
+    let messageVoice (isAgent: bool) = if isAgent then "font-agent" else "font-human"
     let label = caps + " text-ink-faint"
-    let mono = "font-mono text-code text-ink"
-    let monoOut = "font-mono text-code-sm text-ink-faint whitespace-pre-wrap"
+    let mono = "font-terminal text-code text-ink"
+    let monoOut = "font-terminal text-code-sm text-ink-faint whitespace-pre-wrap"
 
     // --- Statuses: text only — never filled, never boxed --------------------------------
 
@@ -145,12 +161,13 @@ module Style =
 
     // --- Buttons: bordered Metro rectangles — hover brightens, press fills --------------
 
-    /// Sized by construction, not padding arithmetic: the box is `h-8` (the same 32px the
-    /// composer's large icon button and the Send row share) with the line flex-centred in
-    /// it — the old `py-[7px]` was that same 32px, hand-derived and easy to break.
+    /// Sized by construction, not padding arithmetic: the box is `h-control` with the line
+    /// flex-centred in it — the old `py-[7px]` was that same height, hand-derived and easy to
+    /// break. A FIELD is built the same way from the same token (`fieldFace`), which is what
+    /// makes a button and an input in one row actually line up.
     let private btnBase =
-        cls [ "bg-transparent cursor-pointer font-sans"; caps
-              "h-8 px-3.5 inline-flex items-center justify-center transition-colors"
+        cls [ "bg-transparent cursor-pointer font-ui"; caps
+              "h-control px-3.5 inline-flex items-center justify-center transition-colors"
               Stroke.ring; focusRing ]
 
     /// The three faces, as (rest tone, hover, press) — the only thing that varies between
@@ -242,27 +259,48 @@ module Style =
     // never the chrome. `fieldFace` therefore sets no width and no font — those belong to
     // the caller, and baking them in is how the three drifted apart in the first place.
 
-    let private fieldFace =
-        cls [ "bg-surface outline-none appearance-none px-3 py-2 transition-colors"
+    /// Built exactly as `btnBase` is, and from the same `h-control`: the box sets the height
+    /// and the content is centred in it. It used to set `py-2` and let the line box decide,
+    /// which made an input 42px, a select 40px and a button 32px — three heights in one row.
+    /// `inline-flex` is what centres the content of the one field that is not an input: the
+    /// device code is a `span`, and a span does not centre itself in a fixed height.
+    let fieldFace =
+        cls [ "bg-surface outline-none appearance-none h-control px-3 transition-colors"
+              "inline-flex items-center"
               Stroke.ring; Stroke.hair; Stroke.hoverRim; Stroke.focus ]
 
-    /// A settings field (input/select): the body scale, never the title's, full width in
-    /// the column it sits in.
-    let field = cls [ fieldFace; "w-full font-light text-small leading-5 text-ink placeholder:text-ink-faint"; touchType ]
+    /// What a field holds, as opposed to what it looks like: the body scale (never the
+    /// title's) in the human voice, because a field is somebody typing.
+    let private fieldType =
+        cls [ messageVoice false; "font-light text-small leading-5 text-ink placeholder:text-ink-faint" ]
+
+    /// A settings field (input/select), filling the column it sits in.
+    let field = cls [ fieldFace; fieldType; "w-full"; touchType ]
+
+    /// The same field where the ROW gives it a width rather than the column — the Manager's
+    /// forms lay three of them out side by side. Public because the alternative is what was
+    /// here before: the Manager spelling the whole face inline, which drifted to a 42px input
+    /// beside a 32px button.
+    let fieldOf (width: string) = cls [ fieldFace; fieldType; width; touchType ]
 
     /// A select. Everything a field is, plus room for the mark below it — `appearance-none`
     /// (see `fieldFace`) takes the platform's caret away, and a menu with no caret is a text
     /// box that will not take text.
-    let fieldSelect = cls [ fieldFace; "w-full pr-9 font-light text-small leading-5 text-ink" ]
+    let fieldSelect = cls [ fieldFace; fieldType; "w-full pr-9" ]
 
     /// Its mark, drawn beside it. Absolutely positioned in the wrapper the select sits in and
     /// deaf to the pointer, so the whole rectangle still opens the menu.
+    ///
+    /// The WRAPPER carries the width — `fieldSelect` always fills it — so a row that sizes its
+    /// own controls sizes the wrapper (`fieldSelectWrapOf`) and the mark still lands on the
+    /// box's right edge.
     let fieldSelectWrap = "relative w-full"
+    let fieldSelectWrapOf (width: string) = cls [ "relative"; width ]
     let fieldSelectMark = "pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint"
 
     /// The same field in mono, sized by the flex row that holds it — a command line is a
     /// field, not a terminal.
-    let fieldMono = cls [ fieldFace; "flex-1 min-w-0 font-mono text-code text-ink placeholder:text-ink-faint"; touchType ]
+    let fieldMono = cls [ fieldFace; "flex-1 min-w-0 font-terminal text-code text-ink placeholder:text-ink-faint"; touchType ]
 
     /// The chrome-LESS field: an input whose CONTAINER already carries the stroke (the
     /// composer's box, a listed row's leading edge), so the control itself must draw
@@ -278,7 +316,7 @@ module Style =
     /// an edged card, is what made a queued COMMAND look like a different kind of thing from
     /// a queued MESSAGE, which is the one thing they are not.
     let fieldMonoBare =
-        cls [ "flex-1 min-w-0"; fieldBare; "font-mono text-code text-ink placeholder:text-ink-faint"; touchType ]
+        cls [ "flex-1 min-w-0"; fieldBare; "font-terminal text-code text-ink placeholder:text-ink-faint"; touchType ]
 
     // --- Listed rows: the leading edge says what the row IS ------------------------------
     // Every row in a list — a queued message, a queued command, a peer's collapsed draft —
@@ -509,7 +547,7 @@ module Style =
     /// the sidebar is off-canvas (no baseline to meet) and the band is only 64px, so the id
     /// stays in flow there.
     let titleId =
-        "font-mono text-code-sm text-ink-faint truncate mt-0.5 "
+        "font-terminal text-code-sm text-ink-faint truncate mt-0.5 "
         + "md:absolute md:top-full md:left-0 md:right-0"
 
     /// A collaborator's selection highlight in the title: an absolutely-positioned span the
@@ -544,20 +582,6 @@ module Style =
     let messageBody = "col-start-2 font-light text-body text-ink"
     let messageBodyStreaming = "col-start-2 font-light text-body text-ink-dim"
 
-    /// The voice a body is written in: Monaspace Neon for a person, Krypton for the agent
-    /// (`--font-human`/`--font-agent`, both vendored in `app/tailwind.css`). Attribution the
-    /// eye reads before the words — the author line and the avatar say the same thing, but
-    /// they say it once at the top, and a long turn scrolls past them.
-    ///
-    /// A face, not a colour: the caps author line already spends the palette on this
-    /// distinction (`who` vs `whoAgent`), and message bodies are held at full-strength `ink`
-    /// on purpose — what was said is the content, and dimming half of it to mark who said it
-    /// would trade legibility for a fact the line above already carries.
-    ///
-    /// Worn by everything a person is CURRENTLY writing too — the open draft, a collapsed
-    /// peer's draft, a queued message — so text does not change typeface at the moment it is
-    /// sent.
-    let messageVoice (isAgent: bool) = if isAgent then "font-agent" else "font-human"
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
 
@@ -588,7 +612,7 @@ module Style =
     let chatChipWho = caps + " text-ink-faint shrink-0"
     /// The command itself: mono, truncated to one line. A chip that wrapped to three would
     /// stop being a chip.
-    let chatChipCommand = "font-mono text-code-sm text-ink-dim truncate min-w-0 flex-1"
+    let chatChipCommand = "font-terminal text-code-sm text-ink-dim truncate min-w-0 flex-1"
     /// A stretch item's sentence — prose, not mono: nothing was typed that we recorded.
     let chatChipText = "font-light text-small text-ink-dim truncate min-w-0 flex-1"
 
@@ -604,9 +628,9 @@ module Style =
     /// One call inside an expanded run: the tool it called, then how it went.
     let chatToolCall = "flex items-baseline gap-2 py-0.5"
     /// `namespace/name` — mono, because it is an identifier and reads as one.
-    let chatToolName = "font-mono text-code-sm text-ink-dim truncate min-w-0"
+    let chatToolName = "font-terminal text-code-sm text-ink-dim truncate min-w-0"
     /// The arguments as recorded. Dim and truncated: this is evidence, not content.
-    let chatToolArgs = "font-mono text-code-sm text-ink-faint truncate min-w-0 flex-1"
+    let chatToolArgs = "font-terminal text-code-sm text-ink-faint truncate min-w-0 flex-1"
 
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
@@ -630,8 +654,8 @@ module Style =
     let proseStrong = "font-semibold text-ink"
     // Inline code keeps the paragraph's line box (no leading of its own), so only the size
     // is set — 13px, the small step, but written bare to leave line-height inherited.
-    let proseCode = "font-mono text-[13px] bg-surface-2 text-ink px-1 py-0.5"
-    let prosePre = "font-mono text-code leading-5 bg-surface-2 text-ink p-3 [&:not(:first-child)]:mt-2 overflow-x-auto whitespace-pre-wrap"
+    let proseCode = "font-terminal text-[13px] bg-surface-2 text-ink px-1 py-0.5"
+    let prosePre = "font-terminal text-code leading-5 bg-surface-2 text-ink p-3 [&:not(:first-child)]:mt-2 overflow-x-auto whitespace-pre-wrap"
     let proseQuote = Stroke.lead + " " + Stroke.hair + " pl-3 text-ink-dim [&:not(:first-child)]:mt-2"
     let proseLink = "text-blue underline decoration-1 underline-offset-2 hover:text-blue-bright"
     let proseHr = "border-0 " + Stroke.dividerTop + " my-3"
@@ -926,20 +950,20 @@ module Style =
     /// The mark at the end of the line: an ellipsis, because what it hides is the rest of
     /// the sentence. `group-open:` turns it while the facts are showing.
     let terminalBlockMark =
-        "ml-auto shrink-0 font-mono text-code-sm text-ink-faint select-none "
+        "ml-auto shrink-0 font-terminal text-code-sm text-ink-faint select-none "
         + "group-hover:text-ink transition-colors duration-150 ease-out motion-reduce:transition-none"
     /// The facts themselves, on the output's column so they read as an aside to the command
     /// rather than as more output.
     let terminalBlockFacts = "flex flex-wrap items-baseline gap-x-4 gap-y-0.5 pl-4 py-1"
     let terminalBlockFact = caps + " text-ink-faint"
 
-    let terminalPrompt = "shrink-0 font-mono text-code text-green select-none"
-    let terminalCommandText = "font-mono text-code text-ink break-all"
+    let terminalPrompt = "shrink-0 font-terminal text-code text-green select-none"
+    let terminalCommandText = "font-terminal text-code text-ink break-all"
     /// Output: preformatted, wrapping, and horizontally scrollable for the lines that will
     /// not wrap — the column must never make the PAGE scroll sideways. No padding of its
     /// own: it sits directly under its command, on the scrollback's own gutter, the way a
     /// terminal prints.
-    let terminalOutput = "overflow-x-auto font-mono text-code-sm leading-4 whitespace-pre-wrap break-words text-ink-dim"
+    let terminalOutput = "overflow-x-auto font-terminal text-code-sm leading-4 whitespace-pre-wrap break-words text-ink-dim"
     let terminalOutputEmpty = small
     /// The truncation notice: a stated gap in the record, in the error voice because a
     /// missing audit trail is not a neutral fact.
@@ -950,7 +974,7 @@ module Style =
     /// would redraw a screen the program laid out. The focus ring matters more here than
     /// anywhere: this is the one surface whose whole purpose is having the keyboard.
     let terminalScreen =
-        cls [ "flex-1 min-h-0 overflow-auto px-3 py-2 font-mono text-code-sm leading-4"
+        cls [ "flex-1 min-h-0 overflow-auto px-3 py-2 font-terminal text-code-sm leading-4"
               "whitespace-pre text-ink bg-bg"; focusRing ]
 
     /// The DVR's own row (Rewind, or how far behind live you are and the way back). It used
@@ -1100,7 +1124,7 @@ module Style =
     /// which is what the layout below already assumes, every region being sized off this one
     /// height. On a viewport that never changes (every desktop, and the test harnesses) the
     /// two units are the same number.
-    let app = "flex h-dvh overflow-hidden bg-bg text-ink font-sans antialiased"
+    let app = "flex h-dvh overflow-hidden bg-bg text-ink font-ui antialiased"
 
     /// Tailwind, built locally into a stylesheet and served by both the Session Process and
     /// the Manager UI — never a CDN (local first). The utilities and the theme tokens come

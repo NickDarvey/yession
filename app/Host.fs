@@ -747,23 +747,49 @@ let startFull
                     signalSessionEnded ()
                 })
 
-        // The HTTP-cacheable event read surface: chunk n = the JSONL envelopes at
-        // offsets [n*size, (n+1)*size). Full chunks are immutable (append-only log),
-        // so browsers cache them hard and cold loads replay history from disk.
+        // The event read surface (docs/plans/20): a client sends the offset it has folded
+        // through, and this answers with the bounds of what came next — an address whose
+        // bytes never change, so the client can keep it, the growing tail included.
+        //
+        // Both operations are `log.Read`, and the cursor deliberately reads the page it
+        // then only reports the bounds of. The alternative is a length the log does not
+        // expose, and the read is over an in-memory log: one extra read per NEW range is
+        // not worth a second way to ask how long the log is.
+        let encodeLines (page: EventPage<SessionEvent>) =
+            page.Events |> List.map (Codec.toString Codec.sessionEventEnvelope)
+
         let eventsEndpoint : Signalling.EventsEndpoint =
             { ValidateToken = peerTokens.Validate >> Option.isSome
-              ReadChunk =
-                fun index ->
+              BoundsAfter =
+                fun after ->
                     async {
-                        let after =
-                            if index = 0 then None
-                            else
-                                match EventOffset.create (EventChunk.firstOffset index - 1L) with
-                                | Ok o -> Some o
-                                | Error e -> failwithf "chunk offset invariant violated: %s" e
                         let! page = log.Read after EventChunk.size
-                        let lines = page.Events |> List.map (Codec.toString Codec.sessionEventEnvelope)
-                        return lines, List.length lines = EventChunk.size
+                        // Empty means the caller is current. The bounds come from the
+                        // events themselves rather than from arithmetic over the cursor,
+                        // so a capped page and a short one are the same code path.
+                        match page.Events, page.LastOffset with
+                        | first :: _, Some last ->
+                            return Some (EventOffset.value first.Offset, EventOffset.value last)
+                        | _ -> return None
+                    }
+              ReadRange =
+                fun first last ->
+                    async {
+                        let! after =
+                            if first = 0L then async.Return None
+                            else
+                                async {
+                                    match EventOffset.create (first - 1L) with
+                                    | Ok o -> return Some o
+                                    | Error e -> return failwithf "range bound invariant violated: %s" e
+                                }
+                        let wanted = int (last - first + 1L)
+                        let! page = log.Read after wanted
+                        let lines = encodeLines page
+                        // Short means the log has not reached `last` yet. Answering with
+                        // what exists would put a partial answer at an address that
+                        // promises the whole range, and the client keeps that for ever.
+                        return if List.length lines = wanted then Some lines else None
                     } }
 
         // The HTTP-cacheable transcript read surface (Plan 13) — the history leg of the

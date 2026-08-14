@@ -153,9 +153,9 @@ let private guardTests =
 /// The runtime's real `fetch`, shaped exactly as the browser's port is: total, carrying the
 /// status on a refusal and the error text on a transport failure.
 [<Emit("""fetch($0).then(
-  async r => r.ok ? { ok: true, status: r.status, detail: await r.text() } : { ok: false, status: r.status, detail: '' },
-  e => ({ ok: false, status: 0, detail: String(e) }))""")>]
-let private realFetch (url: string) : JS.Promise<{| ok: bool; status: int; detail: string |}> =
+  async r => r.ok ? { ok: true, status: r.status, url: r.url, detail: await r.text() } : { ok: false, status: r.status, url: r.url, detail: '' },
+  e => ({ ok: false, status: 0, url: '', detail: String(e) }))""")>]
+let private realFetch (url: string) : JS.Promise<{| ok: bool; status: int; url: string; detail: string |}> =
     Fable.Core.Util.jsNative
 
 let private realHttpGet : App.HttpGet =
@@ -163,7 +163,7 @@ let private realHttpGet : App.HttpGet =
         async {
             let! reply = realFetch url |> Async.AwaitPromise
             return
-                if reply.ok then Ok reply.detail
+                if reply.ok then Ok { Url = reply.url; Body = reply.detail }
                 elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
                 else Error (App.HttpStatus reply.status)
         }
@@ -197,7 +197,8 @@ let private classificationTests =
 
         testCaseAsync "a chunk that will not decode is corruption — a value, not a thrown page" <|
             async {
-                let get : App.HttpGet = fun _ -> async { return Ok "{\"not\":\"an envelope\"}" }
+                let get : App.HttpGet =
+                    fun url -> async { return Ok { Url = url; Body = "{\"not\":\"an envelope\"}" } }
                 match! App.EventFetch.overHttp get SessionRoute.relative None None with
                 | Error (App.FeedCorrupt _) -> ()
                 | other -> failwithf "expected FeedCorrupt, got %A" other
@@ -219,7 +220,7 @@ let private classificationTests =
 
 // --- The integration test ----------------------------------------------------------------
 
-/// A stand-in for the Session Process's `/events/{n}` endpoint that can be switched off. When
+/// A stand-in for the Session Process's event cursor that can be switched off. When
 /// up it serves the host's REAL log through the REAL codec — byte-identical to the HTTP route
 /// (app/Host.fs `eventsEndpoint`); when down it fails the way an unreachable session does.
 type private Socket =
@@ -251,14 +252,25 @@ let private fakeSocket (host: Host.SessionHost) : Socket =
                 if offline then
                     return Error (App.HttpUnreachable "ECONNREFUSED")
                 else
-                    // `overHttp` builds `<base>/events/{chunk}`; serve that chunk from the log.
-                    let index = int (url.Substring (url.LastIndexOf '/' + 1))
+                    // `overHttp` builds `<base>/events` or `<base>/events/after/{n}`. The
+                    // real server answers a cursor with a redirect to the range it chose;
+                    // this collapses the two hops, because what is under test here is the
+                    // retry policy around the fetch, not the shape of the address.
                     let after =
-                        if index = 0 then None
-                        else EventOffset.create (EventChunk.firstOffset index - 1L) |> expect |> Some
+                        let last = url.Substring (url.LastIndexOf '/' + 1)
+                        match System.Int64.TryParse last with
+                        | true, offset -> EventOffset.create offset |> expect |> Some
+                        | _ -> None
                     let! page = host.Log.Read after EventChunk.size
+                    // The fake answers at the address that asked — it does not redirect, and
+                    // what is under test here is the retry policy, not the addressing.
                     return
-                        Ok (page.Events |> List.map (Codec.toString Codec.sessionEventEnvelope) |> String.concat "\n")
+                        Ok
+                            { Url = url
+                              Body =
+                                page.Events
+                                |> List.map (Codec.toString Codec.sessionEventEnvelope)
+                                |> String.concat "\n" }
             } }
 
 /// A client whose history arrives over `get` under the SHIPPED policy, with the policy's

@@ -74,7 +74,11 @@ If consistent: proceed. No need to ask.
 
 ## Step 3: Watch PR CI through to merge
 
-The PR pipeline is `.github/workflows/pr.yaml` (`check Browser Ports Native`).
+The PR pipeline is `.github/workflows/pr.yaml`. **Read the tier out of that file rather than
+from here** — it is one line in the workflow, it grows as capabilities become cheap enough to
+gate every PR on, and a copy of it in this skill went stale within two plans. A local run at a
+SMALLER tier than CI's is not "what CI runs": suites are gated on the capabilities they need,
+so the ones CI declares and you did not are the ones you will not have run.
 
 - **CI green + auto-merge fires → merged.** Go to Step 4.
 - **CI fails →** diagnose from the logs (`mcp__github__get_job_logs`), reproduce locally

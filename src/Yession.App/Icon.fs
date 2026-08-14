@@ -5,7 +5,7 @@ open Lit
 /// The client's icons, as inline SVG.
 ///
 /// They used to be text: `✕`, `↑`, `↓`, `‹`, `✓`, `✗`. A glyph renders only if the reader's
-/// machine has a font carrying it, and the `font-sans` stack this design asks for (`Segoe UI`
+/// machine has a font carrying it, and the `font-ui` face this design asks for (`Monaspace Argon`
 /// first) is a WINDOWS stack — everywhere else the browser falls through to whatever it has,
 /// which may substitute a differently-styled glyph, an emoji, or a tofu box. The buttons stayed
 /// clickable and their `aria-label`s stayed correct, but a delete button that shows a tofu box

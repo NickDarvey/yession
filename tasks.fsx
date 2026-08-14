@@ -313,9 +313,15 @@ let private buildAssets (outDir: string) (minify: bool) =
         // its own file because the shell defers it (see `app/player.css`).
         | AssetFile.``app`` -> run tailwind ([ "-i"; "app/tailwind.css"; "-o"; at file ] @ extra) |> ignore
         | AssetFile.``player`` -> run tailwind ([ "-i"; "app/player.css"; "-o"; at file ] @ extra) |> ignore
-        | AssetFile.``neon-300``
+        | AssetFile.``noto-sans-200``
+        | AssetFile.``noto-sans-300``
+        | AssetFile.``noto-sans-400``
+        | AssetFile.``noto-sans-600``
         | AssetFile.``neon-400``
         | AssetFile.``neon-600``
+        | AssetFile.``xenon-300``
+        | AssetFile.``xenon-400``
+        | AssetFile.``xenon-600``
         | AssetFile.``krypton-300``
         | AssetFile.``krypton-400``
         | AssetFile.``krypton-600`` -> vendored file

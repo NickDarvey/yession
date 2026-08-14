@@ -11,32 +11,19 @@ type EventPage<'event> =
 type AppendResult =
     { Offset : EventOffset }
 
-/// Fixed-size chunking of the append-only log, for HTTP-cacheable reads: chunk `n`
-/// covers offsets `[n*Size, (n+1)*Size)`. Because the log is append-only, a chunk that
-/// has all `Size` events is IMMUTABLE — its URL can be cached hard by any HTTP cache
-/// (the browser's included); only the growing tail chunk must never be cached. That
-/// makes the browser's own cache the client-side event store: cold loads replay full
-/// chunks from disk and fetch only the tail.
+/// How much of the append-only log one HTTP answer carries (docs/plans/20).
+///
+/// The log is read by CURSOR: a client sends the offset it has folded through and the
+/// server answers at an address naming the bounds it chose — `events/{first}-{last}`.
+/// Those bounds never move, so that answer is the same bytes for ever and a client can
+/// keep it, tail included. The client computes none of this: it holds an offset and
+/// stores what it is given under the address it was given.
+///
+/// This module used to map offsets to fixed chunk indices, and the index was the problem:
+/// `events/3` meant *whatever chunk 3 holds now*, which grows, so the newest events could
+/// never be kept by anyone.
 module EventChunk =
 
-    /// Events per chunk. Fixed forever once shipped: chunk URLs are cache keys.
+    /// The most events one answer carries. Server-side only — no client ever names a
+    /// range, so nothing outside the session process needs to know this number.
     let size = 100
-
-    /// Cached-full-chunk lifetime: 3 days, so a session resumed over a weekend still
-    /// replays from the browser cache.
-    let private maxAgeSeconds = 259200
-
-    /// The chunk containing `offset`.
-    let indexOf (offset: int64) : int = int (offset / int64 size)
-
-    /// The first offset of chunk `index`.
-    let firstOffset (index: int) : int64 = int64 index * int64 size
-
-    /// The `Cache-Control` value for a chunk response. Full chunks are immutable by
-    /// construction (append-only log, fixed chunk bounds); a partial chunk is still
-    /// growing and must be revalidated every time. `private` because chunks now sit
-    /// behind per-user authorization: the BROWSER cache still serves them (offline
-    /// replay keeps working); only shared caches are excluded.
-    let cacheControl (isFull: bool) : string =
-        if isFull then sprintf "private, max-age=%d, immutable" maxAgeSeconds
-        else "no-store"

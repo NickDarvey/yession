@@ -298,6 +298,13 @@ module Dom =
         /// meantime. Everything already sent is safe; it is on the server.
         let localFallbackEphemeral =
             "You can keep writing, but this session reopens at a new address — anything written here while it is away will not come back with it."
+        /// Why this client is keeping no history (Plan 20). The Cache API needs a secure
+        /// context; a session reached over plain HTTP at a non-loopback address has none, so
+        /// nothing is kept and — without this — nothing says why, which is indistinguishable
+        /// from a bug. The remedy is the operator's, and it is one flag, so name it.
+        let historyNotKept =
+            "History is not kept on this device: this session is served over plain HTTP, and a browser "
+            + "withholds storage of this kind outside a secure context. Serving it over HTTPS restores it."
         /// What the composer's keys do, shown in the composer while you are in it. Enter is
         /// the send because that is what every chat surface's Enter is; what it used to do
         /// did not disappear, it split in two — a line break and a paragraph, which Enter

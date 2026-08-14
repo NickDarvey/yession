@@ -606,6 +606,19 @@ module View =
     /// the way out at the foot (where `settings ›` sits), and the column's own collapse control
     /// in the same corner on both faces — chrome that belongs to the column, not to a face, so
     /// it never disappears under you.
+    /// Said only where it is true, and only once: a client that cannot keep history keeps
+    /// none, and the alternative to saying so is a session that silently stops remembering.
+    /// Not in the degraded strip — that reports LEGS that are down, and this is a property of
+    /// how the page was served, fixed for the whole life of the document.
+    let private historyStoreNote (model: ClientModel) : TemplateResult =
+        if model.CanKeepHistory then Lit.nothing
+        else
+            html $"""
+                <section class="{Style.sideSection}" data-history-store="none">
+                  <span class="{Style.label}">history</span>
+                  <span class="{Style.small}">{Dom.Text.historyNotKept}</span>
+                </section>"""
+
     let private settingsPane (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         html $"""
             <div class="{Style.settingsPane}" data-settings-panel>
@@ -617,6 +630,7 @@ module View =
               {githubSection actions dispatch model.GitHub}
               {queriesSection model.Queries}
               {gatesSection dispatch model}
+              {historyStoreNote model}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
             </div>"""
@@ -1979,7 +1993,7 @@ module View =
             | None ->
                 html $"""
                     <div class="{Style.terminalEmpty}">
-                      <span class="font-mono text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
+                      <span class="font-terminal text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
                       <button type="button" class="{Style.btnPrimary}" data-terminal-new
                               @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
                     </div>"""

@@ -38,6 +38,9 @@ let private representativeModel : ClientModel =
       Manager = Some "http://127.0.0.1:8321"
       // Path-mounted unless a case says otherwise: the address survives a restart.
       EphemeralStorage = false
+      // A representative client is one that can keep what it is given; the case that cannot
+      // is the exception, and says so where it matters.
+      CanKeepHistory = true
       Synced =
         // Draft/queue bodies are rich-text `Y.XmlFragment`s mounted by the browser editor,
         // not fields on the model — so the SSR fixture carries only the slot's identity; the
@@ -334,6 +337,23 @@ let private uiChecklistTests =
                   "no-agent connect call-to-action", Dom.Hooks.noAgentConnect ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
+
+        testCase "a client that cannot keep history says so; one that can says nothing" <| fun () ->
+            // The availability invariant, not the wording: a client whose context denies it a
+            // store keeps no history, and the alternative to saying so is a session that
+            // quietly stops remembering with nothing on screen to explain it. The note is
+            // ABSENT for every ordinary client, which is the half that keeps it meaningful.
+            let ordinary = Support.render representativeModel
+            Expect.isFalse
+                (ordinary.Contains "data-history-store")
+                "a client that keeps history has nothing to explain"
+            let denied = Support.render { representativeModel with CanKeepHistory = false }
+            Expect.isTrue
+                (denied.Contains "data-history-store")
+                "a client that cannot keep history says which capability is missing"
+            Expect.isTrue
+                (denied.Contains "HTTPS")
+                "and names the remedy, which is the operator's and is one flag"
 
         testCase "live mode: the lease bar names the holder and offers the steal" <| fun () ->
             let html = Support.render leasedTerminalModel
