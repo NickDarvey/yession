@@ -80,8 +80,11 @@ the human approves it in their own tab, the session polls the token endpoint, an
 resulting token is stored through the broker's existing paste path as a static credential.
 The Manager is untouched and never learns the service. Pasting a PAT works identically.
 
-The operator registers their own GitHub App (device flow enabled, **user-token expiration
-disabled** — a static credential cannot be refreshed) and sets `YESSION_GITHUB_CLIENT_ID`.
+The operator registers their own GitHub App (device flow enabled) and sets
+`YESSION_GITHUB_CLIENT_ID`. User-token expiration used to have to be disabled here, because
+the grant was stored as a static credential and a static credential cannot be refreshed;
+[Plan 21](21-expiring-tokens.md) stores it as a grant instead, so an expiring token is now the
+better setting rather than an unsupported one.
 
 A GitHub App user-to-server token reaches the intersection of the user's access and the
 App's installations — so "a session may only add repos the App covers" is enforced by the
@@ -95,7 +98,8 @@ never the WorkSandbox, never the transcript.
   everything in the WorkSandbox; revocation at GitHub does not claw back bytes on disk.
   The panel says so at add time; the `RepoAdded` event names who added it.
 - A pasted PAT bypasses the App-installation scope rule.
-- The stored token does not rotate (device flow + static storage). Revoke at GitHub.
+- The stored token rotates only if the App expires it ([Plan 21](21-expiring-tokens.md)); a
+  non-expiring one is still permanent, and revocation is at GitHub either way.
 - srt's egress allowlist is per process (GAPS): allowing `github.com` for git extends to
   the WorkSandbox's reachable set. Accepted — terminal git legitimately wants it.
 - Under `YESSION_AGENT_SANDBOX=host`, git verbs run unconfined, by the operator's explicit
@@ -110,7 +114,9 @@ never the WorkSandbox, never the transcript.
 - Installation-token swap (verify with the user token, fetch with a short-lived
   `contents:read` installation token) — the token provider sits behind a seam for exactly
   this; needs App-private-key custody, deferred.
-- Broker confidential-client + refresh support (expiring user tokens).
+- ~~Broker confidential-client + refresh support (expiring user tokens)~~ — done in
+  [Plan 21](21-expiring-tokens.md), and it needed no confidential client: GitHub waives the
+  client secret on refresh for tokens the DEVICE flow minted, which is the flow this uses.
 - Commit attribution machinery (author = requesting user, `Co-Authored-By: Claude`) —
   lands with the terminal-side commit flow, not here.
 

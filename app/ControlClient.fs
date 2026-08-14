@@ -187,6 +187,9 @@ type SessionConnections =
     { Begin : ControlWire.ConnectionBeginRequest -> Async<Result<ControlWire.ConnectionBeginResponse, string>>
       Complete : SecretId -> string -> Async<Result<unit, string>>
       Put : SecretId -> string -> Async<Result<unit, string>>
+      /// Hand over a grant this session obtained itself, so the Manager can refresh it
+      /// later. The session never keeps the refresh token: it goes over this leg once.
+      PutGrant : ControlWire.ConnectionPutGrantRequest -> Async<Result<unit, string>>
       Disconnect : SecretId -> Async<Result<bool, string>>
       Resolve : SecretId -> Async<Result<ConnectionKind * string, string>> }
 
@@ -214,6 +217,11 @@ let connections (baseUrl: string) (secret: string) : SessionConnections =
         fun target value ->
             post "put"
                 (ControlWire.toString ControlWire.connectionPutRequest { Target = target; Value = value })
+                (fun _ -> Ok ())
+      PutGrant =
+        fun request ->
+            post "put-grant"
+                (ControlWire.toString ControlWire.connectionPutGrantRequest request)
                 (fun _ -> Ok ())
       Disconnect =
         fun target ->
