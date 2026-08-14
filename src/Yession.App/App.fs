@@ -446,6 +446,10 @@ module App =
                                               IsEnd = true })
                                     folded <-
                                         EventOffset.maxOption folded (Some (List.last envelopes).Offset)
+                // Looked. Said even when nothing was kept and even when a gap cut the walk
+                // short: what the timeline needs to know is whether this client has been to
+                // look, not whether looking found anything.
+                dispatch HistoryReadMsg
             }
 
         /// The shipped resilience policy for the HTTP feed: five retries, exponentially
