@@ -144,6 +144,8 @@ let private representativeModel : ClientModel =
       PaneStartAt = None
       PaneRewound = None
       TerminalsOpen = true
+      // The pane shows a TAB by default; the list is what the cases below turn on.
+      TerminalList = false
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = Some false }
           Flow = ClaudeIdle }
@@ -707,6 +709,73 @@ let private uiChecklistTests =
             Expect.isFalse (html.Contains "data-repo-switch") "the branch switch is gone"
     ]
 
+// The terminal list (Plan 20, stage 0). What is pinned here is AVAILABILITY — which verbs a
+// row offers over which state — and nothing about how a row looks: the marks, the tones and
+// the order of the controls are the design, and a test that quoted them would go red on the
+// next improvement while saying the design was wrong.
+let private terminalListTests =
+    testList "The terminal list" [
+        let listed (model: ClientModel) = Support.render { model with TerminalList = true }
+        let id = TerminalId.value terminalId
+
+        // Every case below is the same shape deliberately: the verb where it works, and its
+        // absence where it does not. Only asserting the presence would leave a row that
+        // offered everything to everyone looking correct.
+
+        testCase "a row offers the kill while its terminal is running, and never once it has stopped" <| fun () ->
+            Expect.isTrue
+                ((listed representativeModel).Contains (Dom.attr Dom.Hooks.terminalListKill id))
+                "a running terminal can be killed from its row"
+            Expect.isFalse
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListKill id))
+                "a closed one has nothing left to kill"
+
+        testCase "a row offers the rewind while its terminal is live, and never over a recording" <| fun () ->
+            Expect.isTrue
+                ((listed representativeModel).Contains (Dom.attr Dom.Hooks.terminalListRewind id))
+                "a live terminal with something recorded can be stepped back through"
+            Expect.isFalse
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListRewind id))
+                "a closed terminal is replayed, not rewound"
+
+        testCase "a row offers the way back only where a provider said there is one" <| fun () ->
+            Expect.isTrue
+                ((listed renewableTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListReattach id))
+                "a closed stream whose provider allows asking again"
+            Expect.isFalse
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListReattach id))
+                "and never for a shell terminal, which has no provider to ask"
+
+        testCase "a recording the cap ate is stated on its row rather than left to look empty" <| fun () ->
+            // The gap is the one state with no mark of its own, because the absence of a
+            // recording has no glyph — so it is the one that says a word.
+            Expect.isTrue
+                ((listed forgottenTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListGone id))
+                "the hole in the audit trail is said"
+            Expect.isFalse
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListGone id))
+                "and a recording that survived says nothing of the sort"
+
+        // An ARIA requirement rather than a layout preference: `role="tablist"` promises a
+        // tabpanel showing one of its tabs, and a strip left standing over the list would be
+        // promising a panel that is not in the document.
+        testCase "the strip and the list are never on screen together" <| fun () ->
+            Expect.isTrue
+                ((Support.render representativeModel).Contains "role=\"tablist\"")
+                "the strip, while the pane is showing a tab"
+            Expect.isFalse
+                ((listed representativeModel).Contains "role=\"tablist\"")
+                "and no tablist promising a panel the list has replaced"
+
+        testCase "every terminal the session has had is reachable from the list, open or not" <| fun () ->
+            // The reason the strip can stop being a census (Plan 20, stage 1): the row IS the
+            // way to a closed terminal's recording, so nothing is lost by dropping it from
+            // the strip.
+            Expect.isTrue
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListRow id))
+                "a closed terminal has a row that opens it"
+    ]
+
 // The offer to bring a stopped session back (Plan 11). It replaces the connection status
 // word, so the thing to pin is WHEN it appears — a button with nowhere to go, or one shown
 // over a session that is merely reconnecting, are both worse than the plain status.
@@ -969,13 +1038,18 @@ let private chromeTests =
 
         let shell = Support.render representativeModel
         let settingsShell = Support.render { representativeModel with Claude = { representativeModel.Claude with Flow = ClaudeAwaitingCode ("https://claude.ai/auth", "mine") } }
+        // The terminal list (Plan 20, stage 0) replaces the pane's body, so no other render
+        // contains its controls. Scanned HERE rather than pinned again beside the list's own
+        // tests: the accessibility floor is asserted once and centrally, and a surface that
+        // is invisible to the scan is a surface the floor does not cover.
+        let listShell = Support.render { representativeModel with TerminalList = true }
 
         // Every input either wears the ONE field face (a ring that goes blue on focus) or
         // wears nothing at all, because the row around it carries the stroke. What is ruled
         // out is the third thing: a control that invents its own border, or one that draws a
         // box with no focus state.
         testCase "every input draws the one field face, or draws nothing" <| fun () ->
-            for classes in classesOf [ "input"; "select"; "textarea" ] (shell + settingsShell) do
+            for classes in classesOf [ "input"; "select"; "textarea" ] (shell + settingsShell + listShell) do
                 let isField = classes.Contains "focus:border-blue"
                 let isBare = classes.Contains "border-0"
                 Expect.isTrue (isField || isBare) (sprintf "an input is neither the field face nor bare: %s" classes)
@@ -984,7 +1058,7 @@ let private chromeTests =
         // The failure this pins is silent by nature: a control with `outline-2` and no
         // `outline` draws nothing, and you only find out with a keyboard.
         testCase "every button and link declares a visible focus ring" <| fun () ->
-            for classes in classesOf [ "button"; "a " ] (shell + settingsShell) do
+            for classes in classesOf [ "button"; "a " ] (shell + settingsShell + listShell) do
                 Expect.isTrue
                     (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
                     (sprintf "a control has no visible focus ring: %s" classes)
@@ -1086,6 +1160,7 @@ let private semanticsTests =
 let tests =
     testList "Acceptance" [
         uiChecklistTests
+        terminalListTests
         presenceTests
         syncStatusTests
         chromeTests

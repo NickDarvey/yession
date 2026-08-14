@@ -225,6 +225,26 @@ module Dom =
         /// How far behind live the rewound reader is, growing as the terminal keeps
         /// printing under them.
         let terminalBehind = "data-terminal-behind"
+        /// The terminal LIST (Plan 20, stage 0): every terminal the session has ever had,
+        /// and every verb one of them affords. The toggle carries `list`/`pane` — the face
+        /// it will show, so the browser can hand focus to whichever control replaces the one
+        /// just pressed, exactly as the nav and settings toggles do.
+        let terminalList = "data-terminal-list"
+        let terminalListToggle = "data-terminal-list-toggle"
+        /// One row, carrying its terminal's id — and the control that shows that terminal,
+        /// so a row is keyboard-operable by construction rather than by a handler on a div.
+        let terminalListRow = "data-terminal-list-row"
+        /// A row's verbs, hooked apart from the pane body's own controls for as long as both
+        /// exist (Plan 20, stage 1 deletes the pane's copies). Each is rendered ONLY where
+        /// `TerminalAffordances` says it applies, so a test asserting one is absent is
+        /// asserting the fold, not a template's mood.
+        let terminalListRewind = "data-terminal-list-rewind"
+        let terminalListKill = "data-terminal-list-kill"
+        let terminalListReattach = "data-terminal-list-reattach"
+        /// A closed row whose recording the per-terminal cap ate. The stated gap, where a
+        /// play affordance would otherwise be — an audit trail's hole is said, never left to
+        /// look like a terminal that printed nothing.
+        let terminalListGone = "data-terminal-list-gone"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).

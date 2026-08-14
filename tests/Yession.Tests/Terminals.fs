@@ -2187,8 +2187,70 @@ let private sourceTests =
             }
     ]
 
+// --- What a terminal's state affords (Plan 20, stage 0) -------------------------------------
+
+/// A terminal in whatever state a case is about. Written out rather than folded from events
+/// because these tests are about the RULE, and building each state through the projection
+/// would make them tests of the projection with the rule as an afterthought.
+let private viewOf (isOpen: bool) (renewable: bool) : TerminalView =
+    { TerminalId = terminalA
+      Title = "build"
+      OpenedBy = PeerRef ada
+      Sandbox = Some SandboxName.defaultName
+      Renewable = renewable
+      IsOpen = isOpen
+      ClosedReason = (if isOpen then None else Some "closed by nick")
+      Lease = None
+      IntegrationLost = false
+      Blocks = []
+      DroppedBytes = 0 }
+
+let private affordanceTests =
+    testList "What a terminal affords (Plan 20, stage 0)" [
+
+        // Each of these is a BICONDITIONAL, and both halves are the invariant: a verb offered
+        // where it works and absent everywhere else. Asserting only the presence would leave a
+        // fold that returns `true` always looking correct, which is the failure mode a
+        // loosened test reads as coverage for.
+
+        testCase "the kill is offered exactly while the terminal is open" <| fun () ->
+            let afforded (view: TerminalView) = (TerminalAffordances.ofView true view).CanKill
+            Expect.isTrue (afforded (viewOf true false)) "a running terminal can be killed"
+            Expect.isFalse (afforded (viewOf false false)) "a closed one has nothing left to kill"
+
+        testCase "the rewind is offered exactly while a live terminal has something recorded" <| fun () ->
+            let afforded recorded view = (TerminalAffordances.ofView recorded view).CanRewind
+            Expect.isTrue (afforded true (viewOf true false)) "live, and there is something behind it"
+            Expect.isFalse (afforded false (viewOf true false)) "a DVR with nothing recorded has nothing to do"
+            Expect.isFalse (afforded true (viewOf false false)) "and a closed terminal is replayed, not rewound"
+
+        testCase "the replay is offered exactly where a closed terminal's recording survives" <| fun () ->
+            let afforded recorded view = (TerminalAffordances.ofView recorded view).CanReplay
+            Expect.isTrue (afforded true (viewOf false false)) "closed, with its recording"
+            // The stated gap: the per-terminal cap ate it. Offering a player over nothing
+            // would be indistinguishable from a terminal that printed nothing.
+            Expect.isFalse (afforded false (viewOf false false)) "closed, with nothing kept"
+            Expect.isFalse (afforded true (viewOf true false)) "and a live terminal is not a recording yet"
+
+        testCase "attaching again is offered exactly on a closed stream whose provider allows it" <| fun () ->
+            let afforded (view: TerminalView) = (TerminalAffordances.ofView true view).CanReattach
+            Expect.isTrue (afforded (viewOf false true)) "closed, and asking again is safe"
+            Expect.isFalse (afforded (viewOf false false)) "a shell terminal has no provider to ask"
+            Expect.isFalse (afforded (viewOf true true)) "and a stream still running needs no second one"
+
+        // Not gated on the recording, and that is the point of asking the PROVIDER rather
+        // than the store: a device is still on the other end of a stream whose recording the
+        // cap ate, and refusing the way back because the RECORD is gone answers a question
+        // nobody asked.
+        testCase "attaching again survives a recording the cap ate" <| fun () ->
+            Expect.isTrue
+                ((TerminalAffordances.ofView false (viewOf false true)).CanReattach)
+                "the way back is about the stream, not about what was kept of it"
+    ]
+
 let tests =
     testList "Terminals (Plan 13)" [
+        affordanceTests
         sourceTests
         approvalTests
         drainTests

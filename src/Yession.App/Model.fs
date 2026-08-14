@@ -337,6 +337,10 @@ type ClientModel =
       /// Whether the terminals panel is open. View state, never synced: two people in one
       /// session may reasonably want different columns on screen.
       TerminalsOpen : bool
+      /// Whether the pane is showing the terminal LIST rather than the selected tab (Plan
+      /// 20, stage 0) — every terminal the session has ever had, and every verb one of them
+      /// affords. Local like every other tab fact: reading the census is not collaborating.
+      TerminalList  : bool
       /// The Claude connection panel's state (Plan 08), driven by the /claude routes.
       Claude        : ClaudeViewState
       /// The GitHub connection panel's state (Plan 14), driven by the /github routes.
@@ -462,6 +466,12 @@ type ClientMsg =
     | JumpToLiveMsg of TerminalId
     /// Open or close the terminals column.
     | ToggleTerminalsMsg
+    /// Show the terminal list, or go back to the selected tab (Plan 20, stage 0).
+    | ToggleTerminalListMsg
+    /// Show this terminal, from the list — the list's own way back to a tab, so that
+    /// selecting a row and leaving the list are one act rather than two the caller must
+    /// remember to pair.
+    | SelectFromListMsg of TerminalId
     /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
     /// becomes when sent. The author's own call, exactly as for a message draft.
     | EnsureTerminalDraftMsg of TerminalId * PeerId * QueueId
@@ -532,6 +542,7 @@ module ClientModel =
           PaneStartAt = None
           PaneRewound = None
           TerminalsOpen = false
+          TerminalList = false
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = None }
               Flow = ClaudeIdle }
@@ -803,6 +814,37 @@ module ClientModel =
     /// A terminal's feed, empty when nothing has arrived for it yet.
     let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
         model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
+
+    /// Whether this client holds anything of a terminal's recording (Plan 20, stage 0) — the
+    /// one client-local input `TerminalAffordances.ofView` takes.
+    ///
+    /// Either signal counts, because they are the same fact reaching this client two ways: a
+    /// LIVE terminal's length arrives as a catch-up hint before any chunk is fetched, and a
+    /// CLOSED one's records arrive as chunks with no live hint behind them. Asking only one
+    /// would offer the rewind on a terminal whose records had not been fetched, or refuse the
+    /// replay on a recording sitting in the feed.
+    let hasRecording (terminal: TerminalId) (model: ClientModel) : bool =
+        let feed = terminalFeed terminal model
+        feed.KnownLength > 0 || not (Map.isEmpty feed.Records)
+
+    /// What a terminal's row offers this reader.
+    let affordances (view: TerminalView) (model: ClientModel) : TerminalAffordances =
+        TerminalAffordances.ofView (hasRecording view.TerminalId model) view
+
+    /// The terminal list, in the order it renders (Plan 20, stage 0): the OPEN terminals in
+    /// open order, then the closed ones most recently opened first.
+    ///
+    /// Two orders because the two halves answer different questions. The open half is the
+    /// working set and mirrors the strip exactly — two surfaces listing the same live
+    /// terminals in two orders would be a difference a reader has to hold in their head. The
+    /// closed half is history, and history reads newest first.
+    ///
+    /// Ordered by OPEN order rather than by last activity, which the projection cannot
+    /// answer: a `TerminalView` carries no clock, and inventing one from block ranges would
+    /// make the list's order a function of how much a terminal printed.
+    let terminalRows (model: ClientModel) : TerminalView list =
+        let opened, closed = model.Terminals.Terminals |> List.partition (fun t -> t.IsOpen)
+        opened @ List.rev closed
 
     /// A terminal's queued commands in run order.
     let terminalQueue (terminal: TerminalId) (model: ClientModel) : PendingAct list =
@@ -1182,6 +1224,21 @@ module ClientModel =
             { model with PaneTabs = model.PaneTabs |> List.filter (fun t -> PaneTab.key t <> PaneTab.key tab) }
         | ToggleTerminalsMsg ->
             { model with TerminalsOpen = not model.TerminalsOpen }
+        | ToggleTerminalListMsg ->
+            // The column comes with it. Reaching the list from a shut column is exactly the
+            // case where a person is looking for a terminal they cannot see.
+            { model with TerminalList = not model.TerminalList; TerminalsOpen = true }
+        | SelectFromListMsg terminal ->
+            // Selecting and leaving the list are ONE act: a row that selected a terminal and
+            // left the reader in the list would have them press twice for one intention, and
+            // a caller who forgot the second press would leave the pane showing the census
+            // over the terminal it had just chosen.
+            { model with
+                PaneChoice = Some (TerminalTab terminal)
+                PaneStartAt = None
+                PaneRewound = None
+                TerminalList = false
+                TerminalsOpen = true }
         | EnsureTerminalDraftMsg (terminal, author, queueId) ->
             // Idempotent, and the queue key of an existing slot is never re-minted: every
             // co-editor's send depends on it staying the one the slot was published with.

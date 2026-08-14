@@ -1745,6 +1745,101 @@ module View =
               {player}
             </section>"""
 
+    /// The terminal LIST (Plan 20, stage 0): every terminal the session has ever had, and
+    /// every verb one of them affords.
+    ///
+    /// The verbs are rendered from `TerminalAffordances` and from nothing else — a row wears
+    /// exactly the controls its terminal's state allows, and a control that does not apply is
+    /// ABSENT rather than disabled. That is the same rule the pane's own controls already
+    /// followed by hand in three places; here it is one fold, which is what lets a test assert
+    /// "kill is never offered over a closed terminal" without building a browser.
+    ///
+    /// Every state a row can be in is carried by a MARK rather than by a sentence: a pulsing
+    /// blue dot is a command running, a peer's own colour is that peer typing, a play outline
+    /// is a recording, and the one state with no glyph — a recording the cap ate — is the only
+    /// one that says a word, in the voice this design keeps for facts that are wrong.
+    let private terminalListView (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        let row (view: TerminalView) =
+            let id = TerminalId.value view.TerminalId
+            let affords = ClientModel.affordances view model
+            let running = TerminalProjection.runningBlock view |> Option.isSome
+            let state =
+                if not view.IsOpen then
+                    if affords.CanReplay then
+                        html $"""<span class="{Style.statusFaint}" title="Recording">{Icon.playSm}</span>"""
+                    else
+                        // No recording and no glyph for the absence of one: a hole in an audit
+                        // trail is stated, in the voice reserved for a fact that is wrong.
+                        html $"""<span class="{Style.statusErr}" data-terminal-list-gone="{id}">not kept</span>"""
+                elif running then
+                    html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span></span>"""
+                else
+                    match view.Lease with
+                    // Whoever is typing, in their own colour — the same dot the roster and the
+                    // tabs wear, so one person is one mark on every surface at once.
+                    | Some (PeerRef peer) ->
+                        html $"""<span class="{Style.syncDot}" style="background:{PeerColour.ofPeer peer}"
+                                       title="{authorName model (PeerRef peer)}"></span>"""
+                    | Some holder ->
+                        html $"""<span class="{Style.statusRun}" title="{authorName model holder}"><span class="{Style.statusDot}"></span></span>"""
+                    | None -> html $"""<span class="{Style.statusFaint}"><span class="{Style.statusDot}"></span></span>"""
+            let peers =
+                ClientModel.peersInTerminal view.TerminalId model
+                |> List.map (fun (peer, name) ->
+                    html $"""
+                        <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer peer}"
+                              title="{name}" data-terminal-tab-peer="{PeerId.value peer}"></span>""")
+            let rewind =
+                if not affords.CanRewind then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.btnIcon}" data-terminal-list-rewind="{id}"
+                                aria-label="Rewind {view.Title}"
+                                @click={Ev(fun _ ->
+                                              dispatch (RewindTerminalMsg view.TerminalId)
+                                              dispatch (SelectFromListMsg view.TerminalId)
+                                              actions.FocusPane ())}>{Icon.rewind}</button>"""
+            let reattach =
+                if not affords.CanReattach then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.btnIcon}" data-terminal-list-reattach="{id}"
+                                aria-label="Attach {view.Title} again"
+                                @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>{Icon.attach}</button>"""
+            let kill =
+                if not affords.CanKill then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.btnIconDanger}" data-terminal-list-kill="{id}"
+                                aria-label="Kill {view.Title}"
+                                @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>{Icon.stop}</button>"""
+            let nameClass = if view.IsOpen then Style.terminalListName else Style.terminalListNameClosed
+            html $"""
+                <div class="{Style.terminalListRow}" role="listitem">
+                  {state}
+                  <span class="min-w-0 flex items-center">
+                    <button type="button" class="{nameClass}" data-terminal-list-row="{id}"
+                            @click={Ev(fun _ -> dispatch (SelectFromListMsg view.TerminalId); actions.FocusPane ())}>{view.Title}</button>
+                    <span class="{Style.terminalTabPeers}">{peers}</span>
+                  </span>
+                  <span class="{Style.terminalListVerbs}">{rewind}{reattach}{kill}</span>
+                </div>"""
+        match ClientModel.terminalRows model with
+        | [] ->
+            html $"""
+                <div class="{Style.terminalListEmpty}" data-terminal-list>
+                  <span class="font-mono text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
+                  <button type="button" class="{Style.btnPrimary}" data-terminal-new
+                          @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
+                </div>"""
+        | rows ->
+            let items = rows |> List.map row
+            html $"""
+                <div class="{Style.terminalListBody}" data-terminal-list role="list"
+                     aria-label="Every terminal in this session">
+                  {items}
+                </div>"""
+
     /// The side pane: a tab strip over three kinds of thing — a terminal, a block's
     /// read-only view, and a stretch's replay (Plan 14, stage 2).
     ///
@@ -1901,7 +1996,10 @@ module View =
                  // against what you are watching: the way back is "jump to live", above.
                  elif rewound then Lit.nothing
                  else terminalComposer actions dispatch model view.TerminalId}"""
-        let body =
+        // A thunk, because the list renders INSTEAD of this: a pane body built on every
+        // render while the list is showing would walk a terminal's whole block history to
+        // produce markup nothing mounts, on every keystroke and every arriving record.
+        let body () =
             match selected with
             // The empty pane wears the terminal's own symbol — an idle prompt, display-sized
             // — and the one button that fills it. What a terminal IS was a paragraph here;
@@ -1949,11 +2047,39 @@ module View =
                                 aria-label="Attach this stream again" @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>attach again</button>"""
                 | _ -> Lit.nothing
             | _ -> Lit.nothing
+        // The strip and the list are alternatives, never both at once, and that is an ARIA
+        // requirement rather than a preference: `role="tablist"` promises a tabpanel showing
+        // one of its tabs, and a strip left standing over the list would be promising a panel
+        // that is not in the document. One surface at a time; the toggle is how you swap them.
+        let strip =
+            html $"""
+                <div class="{Style.terminalTabs}">
+                  <div class="{Style.terminalTabList}" role="tablist" aria-label="Terminals and recordings"
+                       @keydown={Ev(fun e -> moveTabFocus e)}>
+                    {tabs |> List.map tabButton}
+                  </div>
+                  <button type="button" class="{Style.terminalTabNew}" data-terminal-new
+                          @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
+                  {closeSelected}
+                </div>"""
+        // ONE control with two faces rather than a pair that swap places: it never leaves the
+        // document, so pressing it can never strand the focus that is on it — the stranded-focus
+        // case the DVR's pair needs `FocusDvr` to answer. Its value is the face it will show,
+        // which is the same contract `data-nav-toggle` and `data-settings-toggle` carry.
+        let listToggle =
+            let showingList = model.TerminalList
+            html $"""
+                <button type="button" class="{Style.cls [ Style.btnIcon; "w-8 h-8 ml-auto" ]}"
+                        data-terminal-list-toggle="{if showingList then "pane" else "list"}"
+                        aria-pressed="{if showingList then "true" else "false"}"
+                        aria-label="Every terminal in this session"
+                        @click={Ev(fun _ -> dispatch ToggleTerminalListMsg)}>{Icon.list}</button>"""
         html $"""
             <aside class="{Style.terminalPanel}" data-terminal-panel>
               <div class="{Style.terminalPane}">
                 <div class="{Style.terminalHead}">
                   <span class="{Style.settingsTitle}">terminals</span>
+                  {listToggle}
                   <button type="button" class="{Style.navChevronForward}" aria-label="Back to the chat"
                           data-terminal-toggle="hide"
                           @click={Ev(fun _ ->
@@ -1963,16 +2089,8 @@ module View =
                                         // reader came from, exactly as closing a tab does.
                                         selected |> Option.iter (PaneTab.key >> actions.FocusChat))}>{Icon.right}</button>
                 </div>
-                <div class="{Style.terminalTabs}">
-                  <div class="{Style.terminalTabList}" role="tablist" aria-label="Terminals and recordings"
-                       @keydown={Ev(fun e -> moveTabFocus e)}>
-                    {tabs |> List.map tabButton}
-                  </div>
-                  <button type="button" class="{Style.terminalTabNew}" data-terminal-new
-                          @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
-                  {closeSelected}
-                </div>
-                {body}
+                {if model.TerminalList then Lit.nothing else strip}
+                {if model.TerminalList then terminalListView actions dispatch model else body ()}
               </div>
             </aside>"""
 

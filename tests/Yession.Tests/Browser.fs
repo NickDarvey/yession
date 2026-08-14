@@ -881,6 +881,54 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+
+        // The terminal list (Plan 20, stage 0). WHICH verbs a row offers is a fold the cheap
+        // tier already pins; what only a browser can answer is the DOM swap — the list
+        // replaces the strip and the pane's body at once, so choosing a row removes the
+        // control that was pressed, and focus has to land on what replaced it rather than
+        // on `body`. That is the WCAG floor, not a nicety.
+        testCaseAsync "the list opens a terminal and hands focus to the pane it replaced itself with" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 8)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 8)))
+
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-list-toggle='list']")
+
+                // One surface at a time: the tablist promises a panel showing one of its
+                // tabs, and it must not be left standing over a list that replaced it.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-list]")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [role='tablist']")""")
+
+                // Every terminal the session has is reachable here, whether or not the strip
+                // would have carried it.
+                let! rows = await (page.EvaluateAsync<int> "() => document.querySelectorAll('#shell [data-terminal-list-row]').length")
+                Expect.equal rows 3 "every terminal the harness has, the closed one included"
+
+                // Choosing a row shows that terminal AND leaves the list — one act — so the
+                // row that was pressed is gone from the document by the time focus moves.
+                // Driven from the KEYBOARD, because that is the half of this a click cannot
+                // answer: a row has to be a real control somebody can reach and press
+                // without a pointer, and the focus move afterwards is what the floor asks
+                // for when the pressed control leaves the document.
+                do! awaitU (page.FocusAsync "#shell [data-terminal-list-row='term-live']")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-terminal-list]')""")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel') === 'terminal:term-live'""")
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 // --- A path-mounted session in a real browser (docs/plans/10) ---------------------------
