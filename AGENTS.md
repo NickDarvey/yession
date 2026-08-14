@@ -253,11 +253,27 @@ Capabilities:
   (this container, CI), it re-execs itself under a private D-Bus session + gnome-keyring
   unlocked with an empty password (both from devenv).
 - `Srt` — OS-level confinement: bubblewrap + socat on Linux, Seatbelt on macOS. Probed by
-  RUNNING it, not by looking for it — installed is not the same as permitted. This
-  container cannot create the nested user namespace the strict profile needs, so the suites
-  run here only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, `check Srt` refuses to
-  start. Never set that variable to make a session pass — weaker confinement is the
-  operator's decision, and production defaults to strict.
+  RUNNING it, not by looking for it — installed is not the same as permitted. This container
+  cannot create the nested user namespace the strict profile needs, so the suites run here
+  only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, `check Srt` refuses to start.
+
+  **`Srt` is not only the escape probes.** The default work sandbox IS srt, so every suite
+  that runs a real command needs it — including the browser case that types one into a
+  terminal composer. On a box that cannot host a sandbox those do not fail, they HANG: the
+  command never runs, the block never reaches `ok`, and a Playwright timeout eventually
+  reports, in effect, "this machine is not a machine this test can run on". Which is what a
+  capability says in one line and a skip. If a suite you are writing runs a command, it needs
+  `Srt`.
+
+  **When to set the variable, and when it is a lie.** Set it to give a suite a sandbox to
+  RUN in — `YESSION_SANDBOX_NESTED=weak check Browser Ports Native Srt` is how this container
+  runs the whole PR tier, and what is under test there (a composer binding, a command really
+  having run) is untouched by profile strength. Do NOT set it to turn a red run green when
+  the CONFINEMENT is the thing under test: `weak` is srt's `enableWeakerNestedSandbox`, so a
+  green escape probe under it is a green for a profile production never uses. Strict is CI's
+  job — `pr.yaml` clears `kernel.apparmor_restrict_unprivileged_userns` so the probes run for
+  real there — and weaker confinement in production is the operator's decision, never a way
+  to get a passing session here.
 - `Jumpstarter` — uv, and an interpreter it can resolve the `examples/jumpstarter` lock
   against. Probed by BUILDING that environment (`uv sync --frozen`), because "uv is on PATH"
   and "this box can assemble that environment" are different questions and only the second
