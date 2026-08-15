@@ -55,12 +55,10 @@ let private started (id: TerminalId) (n: string) (author: ActorRef) (command: st
         { TerminalId = id
           BlockId = block n
           QueueId = None
-          Author = author
-          ApprovedBy = None
+          Provenance = ActProvenance.ofAuthor author
           Command = command
           FromSeq = fromSeq
-          Background = false
-          OnBehalfOf = None }
+          Background = false }
 
 let private completed (id: TerminalId) (n: string) (result: CommandResult) (toSeq: int) =
     SessionEvent.TerminalBlockCompleted { TerminalId = id; BlockId = block n; Result = result; ToSeq = toSeq }

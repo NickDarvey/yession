@@ -418,12 +418,10 @@ let private blockStarted (n: string) (background: bool) (owner: ActorRef option)
         { TerminalId = TerminalId.create "term-a" |> expect
           BlockId = BlockId.create n |> expect
           QueueId = None
-          Author = ActorRef.Agent
-          ApprovedBy = None
+          Provenance = ActProvenance.rehydrate ActorRef.Agent owner None
           Command = "make"
           FromSeq = 0
-          Background = background
-          OnBehalfOf = owner }
+          Background = background }
 
 let private blockCompleted (n: string) =
     SessionEvent.TerminalBlockCompleted

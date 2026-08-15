@@ -86,7 +86,7 @@ module CommandGates =
         // policy that would have released the act must not beat a person who said no.
         match act.RejectedBy, act.ApprovedBy with
         | Some by, _ -> Refused (by, act.RejectedReason)
-        | None, approved when not (ApprovalMode.requiresApproval (SyncedSessionState.gateOf act.Subject synced) act.Author) ->
+        | None, approved when not (ApprovalMode.requiresApproval (SyncedSessionState.gateOf act.Subject synced) (ActProvenance.author act.Provenance)) ->
             Approved approved
         | None, Some by -> Approved (Some by)
         | None, None -> Undecided
@@ -143,7 +143,7 @@ module CommandGates =
             async {
                 match verdict with
                 | Undecided -> ()
-                | Refused (by, reason) -> do! refuse handle tool summary act.Author (PeerRef by) reason
+                | Refused (by, reason) -> do! refuse handle tool summary (ActProvenance.author act.Provenance) (PeerRef by) reason
                 | Approved approver ->
                     match Map.tryFind tool (dispatch ()) with
                     // A command the running build does not have: refuse it rather than leave
@@ -151,7 +151,7 @@ module CommandGates =
                     // refusal, and this is what a rename or a downgrade looks like from here.
                     | None ->
                         do!
-                            refuse handle tool summary act.Author ActorRef.System
+                            refuse handle tool summary (ActProvenance.author act.Provenance) ActorRef.System
                                 (Some (sprintf "this session has no command called '%s'" tool))
                     | Some run ->
                         // The entry goes BEFORE the command runs, for the terminal drain's
@@ -160,7 +160,9 @@ module CommandGates =
                         // approval of the same thing.
                         SyncedStateSync.removePending doc [ handle ]
                         let! result =
-                            run { Args = args; OnBehalfOf = act.OnBehalfOf; ApprovedBy = approver |> Option.map PeerRef }
+                            run
+                                { Args = args
+                                  Provenance = act.Provenance |> ActProvenance.approvedBy approver }
                         record
                             handle
                             { Handle = Some handle
@@ -234,8 +236,7 @@ module CommandGates =
                         call.Command.Tool
                         call.Args
                         call.Summary
-                        call.Author
-                        call.OnBehalfOf
+                        call.Provenance
                         (PendingAct.nextOrder subject synced.Pending)
                     drain ()
                     let! settled = awaitSettled call handle (now ())
@@ -257,8 +258,7 @@ module CommandGates =
                                     { Command = GatedCommands.tryFind tool |> Option.defaultValue { Tool = tool; Title = tool }
                                       Args = ""
                                       Summary = summary
-                                      Author = act.Author
-                                      OnBehalfOf = act.OnBehalfOf }
+                                      Provenance = act.Provenance }
                                 let! settled = awaitSettled call handle (now ())
                                 return Ok settled
                             | CommandLine -> return Error "that handle names a terminal command"

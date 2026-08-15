@@ -190,7 +190,8 @@ module TerminalQueueDrain =
             // know when it started or finished. Holding is the honest answer — draining into
             // an unmarked shell would produce blocks that never close.
             elif Set.contains (TerminalId.value terminal) lost then Choice2Of2 AwaitingIntegration
-            elif ApprovalMode.requiresApproval modeOf entry.Author && Option.isNone entry.ApprovedBy then
+            elif ApprovalMode.requiresApproval modeOf (ActProvenance.author entry.Provenance)
+                 && Option.isNone entry.ApprovedBy then
                 Choice2Of2 AwaitingApproval
             else Choice1Of2 (terminal, entry)
 
@@ -1258,7 +1259,7 @@ module SessionTerminals =
                     busy <- Set.add key busy
                     // The flip policy's input: if this command takes the alternate screen, its
                     // author is the person who now needs the keyboard.
-                    runningAuthor.[key] <- entry.Author
+                    runningAuthor.[key] <- ActProvenance.author entry.Provenance
                     let blockId = mintBlockId ()
                     // Taken BEFORE the command is written, which is forced by the anchor
                     // ordering below and is the honest reading anyway: on a pty the shell
@@ -1273,20 +1274,22 @@ module SessionTerminals =
                     // command that silently runs twice.
                     do!
                         appendAs
-                            entry.Author
+                            (ActProvenance.author entry.Provenance)
                             (SessionEvent.TerminalBlockStarted
                                 { TerminalId = terminalId
                                   BlockId = blockId
                                   QueueId = Some entry.QueueId
-                                  Author = entry.Author
-                                  ApprovedBy = entry.ApprovedBy |> Option.map PeerRef
-                                  Command = command
-                                  FromSeq = fromSeq
                                   // Carried from the queue entry onto the block, which is
                                   // what lets the wake decide from the LOG alone: the entry
-                                  // is removed the moment this lands.
-                                  Background = entry.Background
-                                  OnBehalfOf = entry.OnBehalfOf })
+                                  // is removed the moment this lands. The approval joins it
+                                  // HERE — a verdict register on the entry while people can
+                                  // still change it, part of the provenance once it is what
+                                  // let the command run.
+                                  Provenance =
+                                    entry.Provenance |> ActProvenance.approvedBy entry.ApprovedBy
+                                  Command = command
+                                  FromSeq = fromSeq
+                                  Background = entry.Background })
                     // Consumed: the durable fact exists, so the doc key can go. Between
                     // the append and this call the entry is in both places, which the
                     // drain answers by planning against the log-anchored `consumed` set
@@ -1584,7 +1587,7 @@ module SessionTerminals =
                                 { TerminalId = terminalId
                                   QueueId = entry.QueueId
                                   BlockId = mintBlockId ()
-                                  Author = entry.Author
+                                  Author = ActProvenance.author entry.Provenance
                                   RejectedBy = PeerRef by
                                   Command = command
                                   Reason = entry.RejectedReason })
@@ -1801,7 +1804,7 @@ module TerminalCommands =
         { /// Not `ExecuteCommand`: the agent-facing capability takes no authority argument,
           /// and this takes the one the per-turn binding supplies. Two shapes because they
           /// are two audiences — the tool surface must not be able to name a credential.
-          Execute : CommandTarget option -> string -> bool -> ActorRef option -> Async<Result<TerminalCommandOutcome, string>>
+          Execute : CommandTarget option -> string -> bool -> ActProvenance -> Async<Result<TerminalCommandOutcome, string>>
           /// Resume a terminal handle. The terminal HALF of `CheckPending` (Plan 15, stage
           /// 3b): the Host joins it to the command gate's half, because a handle names a
           /// request without saying which kind, which is exactly what makes one tool enough.
@@ -1941,10 +1944,11 @@ module TerminalCommands =
             (requested: CommandTarget option)
             (command: string)
             (background: bool)
-            // Whose credential this runs on (Plan 20, stage 2). Supplied by the per-turn
-            // binding rather than by the agent, for the reason every other `OnBehalfOf` is:
-            // an acting party that could name its own authority is not gated by one.
-            (onBehalfOf: ActorRef option)
+            // Who is behind it (Plan 20). Supplied by the per-turn binding rather than by the
+            // agent, for the reason the authority itself is: an acting party that could name
+            // its own is not gated by one. A value rather than a loose owner, so the binding
+            // cannot hand over an agent command with nobody's authority on it.
+            (provenance: ActProvenance)
             : Async<Result<TerminalCommandOutcome, string>> =
             async {
                 let command = command.Trim ()
@@ -1973,11 +1977,10 @@ module TerminalCommands =
                             doc
                             handle
                             terminal
-                            ActorRef.Agent
+                            provenance
                             (TerminalQueueOrder.nextFor terminal synced.Pending)
                             command
                             background
-                            onBehalfOf
                         if not background then return! awaitOutcome terminal handle (now ()) None
                         else
                             // Answer with what is true NOW rather than waiting: the caller

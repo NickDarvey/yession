@@ -97,6 +97,25 @@ module Codec =
                 | "system" -> Decode.succeed System
                 | other -> Decode.fail (sprintf "Unknown actor kind: %s" other)) }
 
+    /// The three parties behind an act, on the wire (Plan 20). Not a nested object: these
+    /// keys sit at the payload's top level and always have, and an event log is read back for
+    /// the life of its session — so what changed is where the value lives in F#, and nothing
+    /// about what is written. One pair of helpers rather than a spelling per event, which is
+    /// how the three came to disagree in the first place.
+    let private provenanceFields (provenance: ActProvenance) =
+        [ "author", actor.Encode (ActProvenance.author provenance)
+          "approvedBy", Encode.option actor.Encode (ActProvenance.approver provenance)
+          "onBehalfOf", Encode.option actor.Encode (ActProvenance.onBehalfOf provenance) ]
+
+    /// Recovered, never authored — `rehydrate`'s reason. `onBehalfOf` is optional on the way
+    /// in because events written before Plan 20 have no such key, and a `Required` field would
+    /// make those pages undecodable, which is a session that will not open.
+    let private provenanceOf (get: Decode.IGetters) : ActProvenance =
+        ActProvenance.rehydrate
+            (get.Required.Field "author" actor.Decode)
+            (get.Optional.Field "onBehalfOf" (Decode.option actor.Decode) |> Option.flatten)
+            (get.Required.Field "approvedBy" (Decode.option actor.Decode))
+
     let private sessionCreated : Codec<SessionCreated> =
         { Encode = fun (p: SessionCreated) -> Encode.object [ "sessionId", sessionId.Encode p.SessionId ]
           Decode =
@@ -715,23 +734,20 @@ module Codec =
     let private terminalBlockStarted : Codec<TerminalBlockStarted> =
         { Encode =
             fun (p: TerminalBlockStarted) ->
-                Encode.object
+                Encode.object (
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "blockId", blockId.Encode p.BlockId
                       "queueId", Encode.option queueId.Encode p.QueueId
-                      "author", actor.Encode p.Author
-                      "approvedBy", Encode.option actor.Encode p.ApprovedBy
                       "command", Encode.string p.Command
                       "fromSeq", Encode.int p.FromSeq
-                      "background", Encode.bool p.Background
-                      "onBehalfOf", Encode.option actor.Encode p.OnBehalfOf ]
+                      "background", Encode.bool p.Background ]
+                    @ provenanceFields p.Provenance)
           Decode =
             Decode.object (fun get ->
                 { TerminalBlockStarted.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalBlockStarted.BlockId = get.Required.Field "blockId" blockId.Decode
                   TerminalBlockStarted.QueueId = get.Required.Field "queueId" (Decode.option queueId.Decode)
-                  TerminalBlockStarted.Author = get.Required.Field "author" actor.Decode
-                  TerminalBlockStarted.ApprovedBy = get.Required.Field "approvedBy" (Decode.option actor.Decode)
+                  TerminalBlockStarted.Provenance = provenanceOf get
                   TerminalBlockStarted.Command = get.Required.Field "command" Decode.string
                   TerminalBlockStarted.FromSeq = get.Required.Field "fromSeq" Decode.int
                   // Optional on the way IN and required on the way out: every block written
@@ -740,9 +756,7 @@ module Codec =
                   // undecodable — which is a session that will not open, to record a bool
                   // whose absence already means `false`.
                   TerminalBlockStarted.Background =
-                    get.Optional.Field "background" Decode.bool |> Option.defaultValue false
-                  TerminalBlockStarted.OnBehalfOf =
-                    get.Optional.Field "onBehalfOf" (Decode.option actor.Decode) |> Option.flatten }) }
+                    get.Optional.Field "background" Decode.bool |> Option.defaultValue false }) }
 
     let private terminalBlockCompleted : Codec<TerminalBlockCompleted> =
         { Encode =

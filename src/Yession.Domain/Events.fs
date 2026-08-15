@@ -312,25 +312,21 @@ and TerminalBlockStarted =
       /// The queue entry this block was drained from, when it came through the composer.
       /// `None` for a block the Session Process ran on its own behalf.
       QueueId : QueueId option
-      /// Who wrote the command — not who approved it (that is `ApprovedBy`) and not who
-      /// happened to press send.
-      Author : ActorRef
-      /// The approver, when the terminal's mode required one. `None` = ran unapproved,
-      /// which is a fact worth recording rather than an absence worth inferring.
-      ApprovedBy : ActorRef option
+      /// The three parties behind the command: who wrote it, whose credential it ran on when
+      /// that was not their own, and who released it when the terminal's mode required an
+      /// approval. One value rather than three fields, because they are one question — and
+      /// because the answer to its middle third went missing here once (Plan 20).
+      ///
+      /// The owner matters beyond the audit: a WOKEN turn has no triggering message to
+      /// resolve its authority from, and the log is the only thing it can read. Absent means
+      /// no turn can be woken by this block — an unresolvable owner runs on NOTHING rather
+      /// than on somebody else's credential.
+      Provenance : ActProvenance
       /// The command line, snapshotted from the collaborative draft at drain time and
       /// immutable thereafter — exactly as `MessageSent` snapshots a message body.
       Command : string
       /// The transcript line index at which this block's output begins.
       FromSeq : int
-      /// Whose credential the command ran on, when that is not the author's own (Plan 20,
-      /// stage 2) — the queue entry's `OnBehalfOf`, carried onto the block.
-      ///
-      /// Here because a WOKEN turn has no triggering message to resolve its authority from,
-      /// and the log is the only thing it can read. Absent means no turn can be woken by
-      /// this block: an unresolvable owner runs on NOTHING rather than on somebody else's
-      /// credential, which is the direction every other reader of this field already takes.
-      OnBehalfOf : ActorRef option
       /// Whether the agent asked for this one to run in the BACKGROUND (Plan 20, stage 2):
       /// it did not hold the turn open, and its completion is something the agent wants to
       /// be told about.

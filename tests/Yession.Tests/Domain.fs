@@ -328,9 +328,59 @@ let private repoTests =
             Expect.equal (proj.Items |> List.map (fun i -> i.Author)) [ PeerRef ada; ActorRef.Agent; PeerRef ada ] "attributed to the acting party"
     ]
 
+// Who is behind an act (Plan 20). The type exists because these three were loose fields
+// every site re-spelled, and one site drifted: agent terminal commands recorded no owner at
+// all, so Plan 08's no-borrowing rule held in two places and was absent in a third.
+let private provenanceTests =
+    let ada = PeerId.create "ada" |> expect
+    let bob = PeerId.create "bob" |> expect
+    testList "ActProvenance (Plan 20)" [
+
+        testCase "a person's act borrows nothing, so it resolves to themselves" <| fun () ->
+            let provenance = ActProvenance.ofAuthor (PeerRef ada)
+            Expect.equal (ActProvenance.onBehalfOf provenance) None "there is no authority to state"
+            Expect.equal (ActProvenance.effective provenance) (PeerRef ada) "and it runs as its own author"
+
+        testCase "an agent's act resolves to the authority it was built with, never to itself" <| fun () ->
+            // The rule that went missing, as the only thing `agentFor` can produce: the agent
+            // is the acting party and the credential is the turn human's. There is no
+            // agent-authored provenance without one, so the omission would not compile.
+            let provenance = ActProvenance.agentFor (PeerRef ada)
+            Expect.equal (ActProvenance.author provenance) ActorRef.Agent "the agent is who acted"
+            Expect.equal (ActProvenance.effective provenance) (PeerRef ada) "on the turn human's credential"
+
+        testCase "an approval joins the provenance without moving who acted or whose it was" <| fun () ->
+            let provenance = ActProvenance.agentFor (PeerRef ada) |> ActProvenance.approvedBy (Some bob)
+            Expect.equal (ActProvenance.approver provenance) (Some (PeerRef bob)) "the peer who released it"
+            Expect.equal (ActProvenance.author provenance) ActorRef.Agent "still the agent's act"
+            Expect.equal (ActProvenance.effective provenance) (PeerRef ada) "still on ada's credential"
+
+        testCase "no approval is not an approval" <| fun () ->
+            // Every call site holds the queue entry's register, and `None` there means nobody
+            // had to say yes. Identity, so an ungated act does not record a blank approver.
+            let provenance = ActProvenance.agentFor (PeerRef ada)
+            Expect.equal
+                (ActProvenance.approvedBy None provenance)
+                provenance
+                "an act nobody had to release is unchanged"
+
+        testCase "an act recovered without its owner invents no other one" <| fun () ->
+            // The decode path's safe direction, and why it does not go through the authoring
+            // constructors: a doc entry whose owner did not read back is a fact to recover,
+            // not a state to refuse — and refusing it would turn a corrupt field into a
+            // missing act. What must never happen is a substitute owner appearing.
+            let recovered = ActProvenance.rehydrate ActorRef.Agent None None
+            Expect.equal (ActProvenance.onBehalfOf recovered) None "no authority is conjured"
+            Expect.equal
+                (ActProvenance.effective recovered)
+                ActorRef.Agent
+                "so it resolves to the agent, which has no scope of its own — not to a person"
+    ]
+
 let tests =
     testList "Domain" [
         identityTests
+        provenanceTests
         envelopeSerializationTests
         conversationProjectionTests
         repoTests
