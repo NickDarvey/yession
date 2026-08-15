@@ -642,6 +642,17 @@ module SessionTerminals =
           /// nothing: a session that only talks to a serial port should not start a
           /// container.
           Open : ActorRef -> TerminalSource -> string -> Async<Result<TerminalId, string>>
+          /// The AGENT's terminal in one WorkSandbox, opened on first use (Plan 15, stage 2).
+          ///
+          /// Here rather than in the composition root, where it used to live, because it is a
+          /// rule about which terminals exist and the terminals are here. A caller could not
+          /// break it by forgetting to ask — it IS the asking — and a second caller cannot
+          /// open a rival one, which a `Map` held above could not prevent.
+          ///
+          /// `reason` is the command that needed it, and becomes the title: the strip says
+          /// `npm test` rather than `agent`, a better answer to "what is that terminal for"
+          /// than a label would be.
+          AgentTerminal : SandboxName -> string -> Async<Result<TerminalId, string>>
           /// Close a terminal. Rejected when it is not open.
           Close : TerminalId -> string -> Async<Result<unit, string>>
           /// Run one drained queue entry to completion, recording the block and streaming
@@ -733,6 +744,7 @@ module SessionTerminals =
     /// A session with no terminals: every operation refuses, nothing is ever open.
     let unavailable : SessionTerminals =
         { Open = fun _ _ _ -> async { return Error "this session has no environment" }
+          AgentTerminal = fun _ _ -> async { return Error "this session has no environment" }
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ _ -> async { return () }
           Reject = fun _ _ _ _ -> async { return () }
@@ -793,10 +805,19 @@ module SessionTerminals =
         // capability, so a session given no provider simply cannot attach one — rather than
         // carrying a client for a thing it will never talk to.
         (attach: AttachTerminal)
+        // How a terminal is set to run its queue unapproved (Plan 15, stage 2). The RULE —
+        // that the agent's own terminal is one — lives here with the terminals it governs;
+        // the gate register lives in the doc, which is the composition root's. So the
+        // decision is here and the write is injected, exactly like `onRecord`.
+        (setAutoRun: TerminalId -> unit)
         (openAtBoot: TerminalId list)
         : SessionTerminals =
 
         let live = Collections.Generic.Dictionary<string, LiveTerminal> ()
+        /// The agent's terminal in each sandbox, by sandbox name. Held here beside `live`
+        /// because it is a fact about which terminals exist, and a caller cannot ask for a
+        /// second one — `AgentTerminal` is the only way to name it.
+        let agentTerminals = Collections.Generic.Dictionary<string, TerminalId> ()
 
         /// The block a pty terminal is waiting on: what to call when its `D` mark lands, and
         /// the per-block output accounting the piped path keeps in locals. Keyed by terminal,
@@ -1607,7 +1628,38 @@ module SessionTerminals =
                 leftOpen <- Set.empty
             }
 
+        /// One agent terminal PER SANDBOX (Plan 15, stage 2), keyed rather than single because
+        /// `execute_command` is the only door into a sandbox and a session has several: one
+        /// shared cell would quietly run a command meant for `test` in whichever sandbox
+        /// happened to be first.
+        ///
+        /// It opens in `AutoRun`, NOT the `ApproveAgent` default every other terminal has. If
+        /// it inherited that, the agent's one execution path would silently become an approval
+        /// prompt — a large change to autonomy smuggled in under a refactor. What the gate
+        /// gains instead is teeth: setting `ApproveAgent` on a terminal a human opened now
+        /// stops the agent, because there is no second door.
+        let agentTerminal (sandbox: SandboxName) (reason: string) : Async<Result<TerminalId, string>> =
+            async {
+                let key = SandboxName.value sandbox
+                match agentTerminals.TryGetValue key with
+                | true, id when isOpen id -> return Ok id
+                | _ ->
+                    let label = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
+                    // The sandbox is in the title when it is not the default one: several
+                    // terminals in a strip are navigable only if each says where it is.
+                    let title =
+                        if sandbox = SandboxName.defaultName then label
+                        else sprintf "[%s] %s" key label
+                    match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
+                    | Error reason -> return Error reason
+                    | Ok id ->
+                        agentTerminals.[key] <- id
+                        setAutoRun id
+                        return Ok id
+            }
+
         { Open = openTerminal
+          AgentTerminal = agentTerminal
           Close = closeTerminal
           RunBlock = runBlock
           Reject = reject
