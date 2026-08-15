@@ -1153,6 +1153,54 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+
+        // Task cards (Plan 20, stage 4). WHICH commands group, in what order, and what the
+        // summary counts are all folds the cheap tier pins. What only a browser can answer is
+        // that grouping does not cost a person a control: a burst's commands are behind a
+        // disclosure now, and a line inside it has to be the same reachable, pressable thing
+        // the chip was before it was grouped. Nothing here asserts the card's layout — that
+        // is the design, and the design is what a card is FOR.
+        testCaseAsync "a task card's lines stay real controls, reachable and pressable without a pointer" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 10)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 10)))
+
+                // A real `<details>`, so the disclosure is the browser's: keyboard-operable
+                // and announced without a handler or an ARIA role of our own.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-task-card]")
+                do! awaitU (page.FocusAsync "#shell [data-chat-task-card] summary")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-chat-task-card]')?.open === true""")
+
+                // The failed command leads, which is the one thing the ordering promises —
+                // and it is a BUTTON, not a div someone hung a click on.
+                let! first =
+                    await (page.EvaluateAsync<string>
+                        """() => {
+                             const line = document.querySelector('#shell [data-chat-task-card] [data-chat-block]')
+                             return line.tagName + ':' + line.getAttribute('data-chat-block')
+                           }""")
+                Expect.equal first "BUTTON:block-burst-failed" "the failure leads, as a real button"
+
+                // And pressing it does what an ungrouped chip does: opens that block.
+                do! awaitU (page.Keyboard.PressAsync "Tab")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel') === 'block:term-harness:block-burst-failed'""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 // --- A path-mounted session in a real browser (docs/plans/10) ---------------------------

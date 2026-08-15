@@ -877,7 +877,8 @@ let private drawn (events: EventEnvelope<SessionEvent> list) : string list =
     TimelineProjection.rows conversation timeline
     |> List.map (function
         | RowItem item -> List.head (shapes [ item ])
-        | RowToolRun (t, items) -> sprintf "run:%s:%d" (AgentTurnId.value t) (List.length items))
+        | RowToolRun (t, items) -> sprintf "run:%s:%d" (AgentTurnId.value t) (List.length items)
+        | RowTaskCard (t, items) -> sprintf "card:%s:%d" (AgentTurnId.value t) (List.length items))
 
 let private toolTests =
     testList "Tool use in the chat" [
@@ -1129,12 +1130,183 @@ let private pinTests =
                 "still in the list, which is where every terminal is"
     ]
 
+// --- Task cards (Plan 20, stage 4) --------------------------------------------------------
+
+let private turnStarted (t: string) =
+    AgentTurnStarted { AgentTurnId = turn t; TriggeredByMessageId = Some (message "1"); Woke = None }
+
+let private rejected (id: TerminalId) (n: string) (author: ActorRef) (command: string) =
+    SessionEvent.TerminalCommandRejected
+        { TerminalId = id
+          QueueId = QueueId.create ("q-" + n) |> expect
+          BlockId = block n
+          Author = author
+          RejectedBy = PeerRef ada
+          Command = command
+          Reason = Some "not that one" }
+
+let private cardTests =
+    testList "Task cards (Plan 20, stage 4)" [
+
+        testCase "consecutive commands from one turn are one card" <| fun () ->
+            // An agent working across several of its terminals is the second item a single
+            // turn can emit a dozen of, after tool use — and it costs one row, not twelve.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (opened terminalB "agent 2")
+                  at 4L 3.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 5L 4.0 (started terminalB "2" ActorRef.Agent "npm test" 1)
+                  at 6L 5.0 (started terminalA "3" ActorRef.Agent "git status" 40) ]
+            Expect.equal (drawn events) [ "card:turn-a:3" ] "three commands, one card"
+
+        testCase "a card forms on the SECOND command, never the first" <| fun () ->
+            // A disclosure around one chip hides the only thing the row has to say behind a
+            // click, and buys nothing back.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1) ]
+            Expect.equal (drawn events) [ "ran:b-1" ] "one command is a chip"
+
+        testCase "a message between two commands splits the card" <| fun () ->
+            // The same boundary a tool run stops at, for the same reason: swallowing what was
+            // said in the middle would tell a reader the wrong story about the order.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (started terminalA "2" ActorRef.Agent "npm test" 40)
+                  at 5L 4.0 (sent "1" "how's it going?")
+                  at 6L 5.0 (started terminalA "3" ActorRef.Agent "git status" 80)
+                  at 7L 6.0 (started terminalA "4" ActorRef.Agent "git diff" 120) ]
+            Expect.equal
+                (drawn events)
+                [ "card:turn-a:2"; "said:m-1"; "card:turn-a:2" ]
+                "two cards, and the message stays between them"
+
+        testCase "commands from two turns never share a card" <| fun () ->
+            // A burst is one turn's work. Two turns' commands adjacent in the log are two
+            // pieces of work that happened to touch, and a card saying otherwise invents a
+            // task nobody ran.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (started terminalA "2" ActorRef.Agent "npm test" 40)
+                  at 5L 4.0 (turnStarted "b")
+                  at 6L 5.0 (started terminalA "3" ActorRef.Agent "git status" 80)
+                  at 7L 6.0 (started terminalA "4" ActorRef.Agent "git diff" 120) ]
+            Expect.equal (drawn events) [ "card:turn-a:2"; "card:turn-b:2" ] "one card per turn"
+
+        testCase "a person's commands never group, even during a turn" <| fun () ->
+            // Grouping is for work nobody is hand-driving. The clock says a command happened
+            // DURING a turn; only the authority says whose it was, and a person typing while
+            // the agent works is still a person typing.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "build")
+                  at 3L 2.0 (started terminalA "1" (PeerRef ada) "make" 1)
+                  at 4L 3.0 (started terminalA "2" (PeerRef ada) "npm test" 40) ]
+            Expect.equal (drawn events) [ "ran:b-1"; "ran:b-2" ] "two chips, no card"
+
+        testCase "a command nobody's turn started never groups" <| fun () ->
+            // A block the Session Process ran on its own behalf, before any turn: no turn to
+            // attribute it to, and inventing one would be a task nobody asked for.
+            let events =
+                [ at 1L 0.0 (opened terminalA "boot")
+                  at 2L 1.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 3L 2.0 (started terminalA "2" ActorRef.Agent "npm test" 40) ]
+            Expect.equal (drawn events) [ "ran:b-1"; "ran:b-2" ] "two chips, no card"
+
+        testCase "a refused command joins the card of the turn that proposed it" <| fun () ->
+            // The refusal is the more interesting half of the pair, and a card that left it
+            // out would say the turn ran fewer commands than it asked to.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (rejected terminalA "2" ActorRef.Agent "rm -rf /") ]
+            Expect.equal (drawn events) [ "card:turn-a:2" ] "the proposal counts, whether or not it ran"
+
+        testCase "a card anchors where its FIRST command started" <| fun () ->
+            // The chip's anchoring rule, unchanged: a burst that takes four minutes stays
+            // above the messages sent while it ran rather than jumping to the bottom.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (started terminalA "2" ActorRef.Agent "npm test" 40)
+                  at 5L 4.0 (sent "1" "how's it going?")
+                  at 6L 9.0 (completed terminalA "1" (CommandSucceeded 0) 40) ]
+            let conversation, _ = ConversationProjection.applyEvents None events ConversationProjection.empty
+            let timeline, _ = TimelineProjection.applyEvents None events TimelineProjection.empty
+            match TimelineProjection.rows conversation timeline with
+            | (RowTaskCard _ as card) :: _ ->
+                Expect.equal (EventOffset.value (TimelineRow.offset card)) 3L "the offset of the first command"
+            | other -> failwithf "expected the card first, got %A" other
+
+        testCase "a card carries NO status of its own — the row is the same either way" <| fun () ->
+            // What makes a card's lines mutate in place for free, exactly as chips do: the
+            // row holds which blocks and where, `TerminalProjection` holds what they say.
+            let running =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (started terminalA "2" ActorRef.Agent "npm test" 40) ]
+            let finished = running @ [ at 5L 9.0 (completed terminalA "1" (CommandFailed 2) 40) ]
+            let rowsOf events =
+                let conversation, _ = ConversationProjection.applyEvents None events ConversationProjection.empty
+                let timeline, _ = TimelineProjection.applyEvents None events TimelineProjection.empty
+                TimelineProjection.rows conversation timeline
+            Expect.equal (rowsOf running) (rowsOf finished) "the card does not move or change as its work does"
+    ]
+
+let private tallyTests =
+    testList "What a task card counts (Plan 20, stage 4)" [
+
+        testCase "a refusal counts as a failure" <| fun () ->
+            // Red on every other surface for the same reason: a command the agent proposed
+            // and did not get to run is what a person scanning for trouble is scanning for.
+            Expect.equal (TaskCard.stateOf (BlockRejected (PeerRef ada, Some "no"))) TaskFailed "refused reads as failed"
+
+        testCase "a non-zero exit and a timeout are one bucket" <| fun () ->
+            // The exact code is on the line and in the block behind it. A summary that
+            // counted `exit 2` apart from `timed out` would be longer and say less.
+            Expect.equal (TaskCard.stateOf (BlockFinished (CommandFailed 2))) TaskFailed "exit 2 failed"
+            Expect.equal (TaskCard.stateOf (BlockFinished CommandTimedOut)) TaskFailed "so did the timeout"
+
+        testCase "the summary counts every command once" <| fun () ->
+            let states = [ TaskDone; TaskFailed; TaskDone; TaskRunning; TaskDone ]
+            Expect.equal
+                (TaskCard.tally states)
+                { Commands = 5; Failed = 1; Running = 1; Done = 3 }
+                "5 commands, 3 done, 1 failed, 1 running"
+
+        testCase "failures sort first, then what is still going" <| fun () ->
+            // A burst of twenty commands with one failure buried at line fourteen makes a
+            // person hunt for the one thing the card exists to show them.
+            let lines = [ "a", TaskDone; "b", TaskRunning; "c", TaskFailed; "d", TaskDone ]
+            Expect.equal
+                (TaskCard.ordered lines |> List.map fst)
+                [ "c"; "b"; "a"; "d" ]
+                "failed, running, then done"
+
+        testCase "lines keep their order WITHIN a group" <| fun () ->
+            // So the only thing a finishing command changes is which group it is in: a line
+            // never jumps a place inside one, which is what lets the card be read twice.
+            let lines = [ "a", TaskFailed; "b", TaskFailed; "c", TaskFailed ]
+            Expect.equal (TaskCard.ordered lines |> List.map fst) [ "a"; "b"; "c" ] "chronological within the group"
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
         listTests
         pinTests
         orderTests
         toolTests
+        cardTests
+        tallyTests
         chipTests
         stretchTests
         unchangedTests
