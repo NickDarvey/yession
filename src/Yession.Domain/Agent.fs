@@ -139,6 +139,14 @@ type CommandStatus =
     /// A human has to approve it. Unbounded in principle, so the tool yields a handle rather
     /// than holding the turn — `TerminalCommandAwaitingApproval`'s reasoning, unchanged.
     | CommandAwaitingApproval
+    /// Released and STILL GOING when the deadline fell. `TerminalCommandRunning`'s
+    /// counterpart, and it is here for the reason that one is: waiting on a PERSON and
+    /// waiting on the WORK are bounded differently and end differently, so a wait that
+    /// cannot tell them apart has to report one of them wrongly. It reported the person —
+    /// which sent an agent to ask for an approval of something already happening, that
+    /// nobody had been asked for and no card showed. A yield, not a cancellation: the
+    /// command runs on and the handle resumes it.
+    | CommandRunning
     /// Somebody said no. Comes back to the model as an error rather than a silence, because
     /// a command that vanishes gets retried another way.
     | CommandRefusedBy of by: ActorRef * reason: string option
