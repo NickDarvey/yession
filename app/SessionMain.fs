@@ -353,198 +353,14 @@ let private resolveGitHubToken (credentialActor: ActorRef) : Async<string option
         | _ -> return ambient ()
     }
 
-/// The turn's repo capabilities: the service bound to the agent as acting party and
-/// the TURN ACTOR as credential owner. Denials when the service could not start.
-///
-/// Every mutating verb also INVALIDATES the `repos` query on the way out, which is what
-/// puts the change on the humans' screen without anyone refreshing: a command is the only
-/// thing that can change a query's answer, so a command is the only thing that has to say
-/// it did. Nothing polls.
-let private encodeArgs (values: string list) : string = Codec.toString Codec.gatedArgs values
-
-let private decodeArgs (raw: string) : string list =
-    match Codec.fromString Codec.gatedArgs raw with
-    | Ok values -> values
-    | Error _ -> []
-
-/// Invalidate a query once a command has actually changed its answer. A command is the only
-/// thing that can, so a command is the only thing that has to say so — nothing polls.
-let private andPublish (name: QueryName) (outcome: Async<Result<'a, string>>) : Async<Result<'a, string>> =
-    async {
-        let! result = outcome
-        match result with
-        | Ok _ -> queryRegistry.Invalidate name
-        | Error _ -> ()
-        return result
-    }
-
-/// How each gated command is carried out — the table the gate reads, INCLUDING for an act
-/// some previous process parked (Plan 15, stage 3b). Everything it needs arrives in the
-/// invocation, off the pending act: the arguments, whose credential to run on, and who
-/// released it. Nothing is closed over from the turn that proposed it, which is exactly what
-/// makes an approval outlive that turn.
-///
-/// A malformed invocation FAILS rather than guessing. These come out of a replicated doc,
-/// and "run something adjacent to what was approved" is the one outcome an approval gate
-/// must never produce.
-let private commandDispatch () : CommandDispatch =
-    // Whose credential, asked once: the borrowed authority when there is one, the author
-    // otherwise. It used to be a `defaultArg` per call site with `ActorRef.Agent` written in
-    // as the fallback — which was right only because the agent is what authored every one of
-    // these, a coincidence each site had to keep re-establishing.
-    let repoCaller (invocation: GatedInvocation) =
-        Repos.agentCaller (Authority.effective invocation.Authority) (Authority.approver invocation.Authority)
-    let sandboxCaller (invocation: GatedInvocation) : WorkSandboxes.SandboxCaller =
-        { Actor = Authority.author invocation.Authority
-          Credential = Authority.effective invocation.Authority
-          ApprovedBy = Authority.approver invocation.Authority }
-    Map.ofList
-        [ GatedCommands.addRepo.Tool,
-          fun (invocation: GatedInvocation) ->
-            async {
-                match reposService, decodeArgs invocation.Args with
-                | None, _ -> return Error "this session has no repos"
-                | Some service, [ repo ] ->
-                    match RepoRef.create repo with
-                    | Error e -> return Error (sprintf "not a repo name: %s" e)
-                    | Ok repo ->
-                        return!
-                            andPublish Repos.queryName (
-                                async {
-                                    match! service.AddRepo (repoCaller invocation) repo with
-                                    | Error e -> return Error e
-                                    | Ok listing ->
-                                        return
-                                            Ok (
-                                                sprintf
-                                                    "added %s — the checkout is shared with everyone in this session and visible in the work environment"
-                                                    (RepoListing.describe listing))
-                                })
-                | Some _, other -> return Error (sprintf "add_repo takes one repo, got %d arguments" (List.length other))
-            }
-
-          GatedCommands.switchBranch.Tool,
-          fun (invocation: GatedInvocation) ->
-            async {
-                match reposService, decodeArgs invocation.Args with
-                | None, _ -> return Error "this session has no repos"
-                | Some service, [ repo; branch; create ] ->
-                    match RepoRef.create repo with
-                    | Error e -> return Error (sprintf "not a repo name: %s" e)
-                    | Ok repo ->
-                        return!
-                            andPublish Repos.queryName (
-                                async {
-                                    match! service.SwitchBranch (repoCaller invocation) repo branch (create = "true") with
-                                    | Error e -> return Error e
-                                    | Ok listing -> return Ok (sprintf "now on %s" (RepoListing.describe listing))
-                                })
-                | Some _, other ->
-                    return Error (sprintf "switch_branch takes a repo, a branch and a flag, got %d arguments" (List.length other))
-            }
-
-          GatedCommands.startWorkSandbox.Tool,
-          fun (invocation: GatedInvocation) ->
-            async {
-                match decodeArgs invocation.Args with
-                | name :: forward ->
-                    match SandboxName.create name with
-                    | Error e -> return Error (sprintf "not a sandbox name: %s" e)
-                    | Ok name ->
-                        match! workSandboxes.Ensure (sandboxCaller invocation) name forward with
-                        | Error e -> return Error e
-                        | Ok entry ->
-                            queryRegistry.Invalidate WorkSandboxes.queryName
-                            let forwarding =
-                                match entry.Forwarded with
-                                | [] -> "nothing forwarded into it"
-                                | names -> "forwarding " + String.concat ", " names
-                            return
-                                Ok (
-                                    sprintf
-                                        "sandbox '%s' is up on %s, %s — run things in it with execute_command"
-                                        (SandboxName.value entry.Name)
-                                        entry.Backend
-                                        forwarding)
-                | [] -> return Error "start_work_sandbox takes a sandbox name"
-            }
-
-          GatedCommands.stopWorkSandbox.Tool,
-          fun (invocation: GatedInvocation) ->
-            async {
-                match decodeArgs invocation.Args with
-                | [ name ] ->
-                    match SandboxName.create name with
-                    | Error e -> return Error (sprintf "not a sandbox name: %s" e)
-                    | Ok name ->
-                        match! workSandboxes.Stop (sandboxCaller invocation) name with
-                        | Error e -> return Error e
-                        | Ok () ->
-                            queryRegistry.Invalidate WorkSandboxes.queryName
-                            return Ok (sprintf "sandbox '%s' is stopped; anything running in it is gone" (SandboxName.value name))
-                | other -> return Error (sprintf "stop_work_sandbox takes one sandbox name, got %d arguments" (List.length other))
-            } ]
-
-/// The turn's repo verbs (Plan 14), bound to the acting party. The MUTATING ones are now
-/// three lines each: encode the arguments, render the summary, hand both to the gate. What
-/// they used to do lives in `commandDispatch`, where a process that did not propose the act
-/// can still reach it.
-let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
-    match reposService with
-    | None -> capabilities
-    | Some service ->
-        // Takes a CATALOGUE value, not a name. A gated call site therefore cannot name a
-        // command the settings surface does not render, or the boot configuration cannot
-        // accept — the three read one list, so they cannot drift.
-        let gated (command: GatedCommand) (args: string list) (summary: string) =
-            capabilities.RunGated
-                { Command = command
-                  Args = encodeArgs args
-                  Summary = summary
-                  // The agent acts; the credential is the turn human's (Plan 08). `agentFor`
-                  // TAKES that actor, so an agent-authored call with nobody's authority on it
-                  // is not something this could be written to omit.
-                  Authority = Authority.agentFor turnActor }
-        { capabilities with
-            AddRepo =
-              fun repo ->
-                gated GatedCommands.addRepo [ RepoRef.value repo ] (sprintf "add_repo %s" (RepoRef.value repo))
-            SwitchRepoBranch =
-              fun repo branch create ->
-                let summary =
-                    if create then sprintf "switch_branch %s -> new branch %s" (RepoRef.value repo) branch
-                    else sprintf "switch_branch %s -> %s" (RepoRef.value repo) branch
-                gated GatedCommands.switchBranch [ RepoRef.value repo; branch; (if create then "true" else "false") ] summary
-            // The READS take no gate and no approver: they change nothing, so there is
-            // nothing to approve and nothing to resume.
-            FetchRepo = service.FetchRepo (Repos.agentCaller turnActor None)
-            RepoStatus = service.RepoStatus
-            RepoLog = service.RepoLog
-            RepoDiff = service.RepoDiff }
-
-/// The turn's sandbox commands (Plan 15, stage 2), bound to the acting party.
-let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
-    let gated (command: GatedCommand) (args: string list) (summary: string) =
-        capabilities.RunGated
-            { Command = command
-              Args = encodeArgs args
-              Summary = summary
-              Authority = Authority.agentFor turnActor }
-    { capabilities with
-        StartWorkSandbox =
-          fun name forward ->
-            let summary =
-                match WorkSandboxes.normaliseForward forward with
-                | [] -> sprintf "start_work_sandbox %s" (SandboxName.value name)
-                | names ->
-                    sprintf "start_work_sandbox %s forwarding %s" (SandboxName.value name) (String.concat ", " names)
-            gated GatedCommands.startWorkSandbox (SandboxName.value name :: forward) summary
-        StopWorkSandbox =
-          fun name ->
-            gated
-                GatedCommands.stopWorkSandbox
-                [ SandboxName.value name ]
-                (sprintf "stop_work_sandbox %s" (SandboxName.value name)) }
+/// What the session's gated commands are given: the services they run against, read as
+/// getters because both the table and the per-turn bindings are built from cells the boot
+/// async fills. The commands themselves live in `Commands.fs` — both halves of each, the
+/// proposing one and the carrying-out one, beside each other where a test can reach them.
+let private commandServices : Commands.CommandServices =
+    { Repos = fun () -> reposService
+      Sandboxes = fun () -> workSandboxes
+      Invalidate = fun name -> queryRegistry.Invalidate name }
 
 /// Per-turn credential dispatch (Plan 08): resolve the credential the TURN ACTOR runs
 /// on — the session's own explicit credential first, then the actor's — fresh from the
@@ -553,19 +369,16 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
 let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
-            // The repo verbs are rebound to THIS turn's actor here (Plan 14): the acting
-            // party on the events is the agent, the credential is the turn human's. The
-            // query surface is bound in the same place for a duller reason — the registry
-            // is built in the boot async, and this is where a turn first sees it.
-            let capabilities = repoCapabilitiesFor context.TurnActor capabilities
+            // The command verbs are rebound to THIS turn's actor here (Plan 14, Plan 15
+            // stage 2): the acting party on the events is the agent, the credential is the
+            // turn human's. The query surface is bound in the same place for a duller
+            // reason — the registry is built in the boot async, and this is where a turn
+            // first sees it.
+            let capabilities = Commands.bindFor commandServices context.TurnActor capabilities
             let capabilities =
                 { capabilities with
                     Queries = queryRegistry.Definitions
                     ReadQuery = queryRegistry.Read }
-            // The sandbox commands are bound to THIS turn's actor for the repo verbs'
-            // reason (Plan 15, stage 2): the acting party on the event is the agent, and
-            // the credentials a forwarding start resolves are the turn human's.
-            let capabilities = sandboxCapabilitiesFor context.TurnActor capabilities
             // A dispatch-level failure streams its reason as the message body first:
             // the turn's item is already open (AgentMessageStarted precedes the
             // runner), so this is what makes the reason VISIBLE in the timeline.
@@ -743,7 +556,7 @@ Async.StartImmediate (
         // here — and not by closing over a turn — is what lets the gate honour an approval
         // for an act that a previous process parked: it drains the doc, and this is the only
         // thing it was missing.
-        host.SetCommandDispatch (commandDispatch ())
+        host.SetCommandDispatch (Commands.dispatch commandServices)
         // The operator's gate configuration (Plan 15, stage 3b), SEEDED into the synced
         // register rather than consulted at decision time — which is what leaves exactly one
         // place a mode is ever read from, and lets a human change their mind mid-session

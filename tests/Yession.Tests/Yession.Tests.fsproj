@@ -29,6 +29,10 @@
     <Compile Include="WorkSandboxes.fs" />
     <Compile Include="CommandGates.fs" />
     <Compile Include="Tools.fs" />
+    <!-- A tool call end to end, with no model in the loop: the registry, the per-turn
+         bindings, the gate and the dispatch table, joined. After Tools.fs (the registry
+         alone) and CommandGates.fs (the gate alone), which it is the join of. -->
+    <Compile Include="ToolCalls.fs" />
     <Compile Include="Mcp.fs" />
     <Compile Include="ToolStreams.fs" />
     <Compile Include="SerialEngine.fs" />
