@@ -24,6 +24,12 @@ name: pr
 on:
   pull_request:
     branches: [master]
+  # A merge queue builds base+PR on a temporary ref and dispatches `merge_group` — a required
+  # check that does not run on that event never reports, so every queued pull request sits
+  # until it times out and is kicked back out. This trigger is a no-op until a queue exists,
+  # and it has to be in place BEFORE one is turned on: the failure mode of getting that order
+  # wrong is that nothing can merge at all.
+  merge_group:
 
 jobs:
   test:
