@@ -912,6 +912,47 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+        // What an agent says does not fit a phone: paths, URLs and fenced commands are all
+        // longer than a 326px column and none of them has a space where the break has to go.
+        // The timeline is a scroller on the vertical axis and therefore on both, so anything
+        // that hangs out of the column slides the whole conversation sideways under a header
+        // that stays put — which is what it looked like on iOS: every message shifted a
+        // character or two off the left edge, with no way to put it back.
+        //
+        // The document-level check the case above makes cannot see this: the timeline's own
+        // scrollbox absorbs the overflow, so `documentElement.scrollWidth` stays honest while
+        // the conversation is unreadable. What is asserted is the column, and only the column.
+        testCaseAsync "a message no line break fits inside never scrolls the timeline sideways" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 10)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! ctx =
+                    await (br.NewContextAsync (
+                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 390, Height = 844))))
+                let! page = await (ctx.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 10)))
+                let! width = await (page.EvaluateAsync<int> "() => window.innerWidth")
+                Expect.equal width 390 "a true phone viewport, not a clamped window"
+
+                // The fixture's wide message is present — otherwise this passes by rendering
+                // nothing that could have overflowed.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-message-body] pre")
+                let! sideways =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const timeline = document.querySelector('#shell [data-conversation]')
+                                 return timeline.scrollWidth > timeline.clientWidth + 1
+                               }""")
+                Expect.isFalse sideways "the conversation column does not scroll sideways"
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
         // The split between the two columns is the reader's to set. What is pinned is the
         // PROMISE, not the geometry: that the divider can be moved without a pointer at all.
         // A splitter that only answers a drag is a control a keyboard user cannot reach, and
