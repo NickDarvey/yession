@@ -664,6 +664,20 @@ module Style =
     /// The arguments as recorded. Dim and truncated: this is evidence, not content.
     let chatToolArgs = "font-terminal text-code-sm text-ink-faint truncate min-w-0 flex-1"
 
+    /// One agent burst (Plan 20, stage 4). A `<details>` on the same content column the chips
+    /// and tool runs sit on, for the same reason: a turn that ran twelve commands reads as
+    /// one line until somebody wants the twelve.
+    let chatTaskCard = "w-full max-w-[46rem] pl-[32px] py-0.5"
+    /// Its summary. A real `<summary>`, so the disclosure is the browser's and arrives
+    /// keyboard-operable and correctly announced.
+    let chatTaskSummary =
+        cls [ "flex items-baseline gap-2 cursor-pointer list-none"
+              "text-ink-dim hover:text-ink transition-colors duration-150 ease-out"
+              focusRing ]
+    /// The counts, at the end of the summary line. Baseline-aligned with the sentence beside
+    /// them so the glyphs sit on the text's line rather than floating above it.
+    let chatTaskCounts = "flex items-baseline gap-2 shrink-0"
+
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
     let actNote = "max-w-[46rem] pl-[32px]"

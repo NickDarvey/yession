@@ -186,6 +186,12 @@ module Dom =
         /// says who ran what and how it went.
         let chatToolRun = "data-chat-tool-run"
         let chatTool = "data-chat-tool"
+        /// One agent burst in the CHAT (Plan 20, stage 4): a `<details>` per RUN of
+        /// consecutive commands from one turn, carrying the turn id. Its lines are ordinary
+        /// block chips, addressable by `chatBlock` exactly as an ungrouped one is — a chip
+        /// that moved inside a card is still the same chip, and a test that has to know
+        /// whether it was grouped is a test of the grouping, not of the chip.
+        let chatTaskCard = "data-chat-task-card"
         /// The call's outcome, in the SAME tokens a block's status uses (`running` / `ok` /
         /// `failed`) rather than a parallel vocabulary meaning the same three things.
         let chatToolStatus = "data-chat-tool-status"

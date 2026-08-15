@@ -1103,11 +1103,11 @@ module View =
         // One line: who ran what, and how it went. No output — a tail inline would make the
         // chat noisiest exactly when it is busiest, and would put everything a command
         // printed one glance from anyone in the session rather than one tap.
+        let blockOf (terminalId: TerminalId) (blockId: BlockId) =
+            TerminalProjection.tryFind terminalId model.Terminals
+            |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
         let blockChip (terminalId: TerminalId) (blockId: BlockId) =
-            let found =
-                TerminalProjection.tryFind terminalId model.Terminals
-                |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
-            match found with
+            match blockOf terminalId blockId with
             // Both folds read the same page, so a chip without its block is a page boundary,
             // not a bug: the next page brings it. Rendering nothing beats rendering a stub.
             | None -> Lit.nothing
@@ -1174,6 +1174,39 @@ module View =
                   </summary>
                   {uses |> List.map toolCall}
                 </details>"""
+        // One agent burst: the commands one turn ran, in one row (Plan 20, stage 4). The
+        // lines ARE block chips — same element, same click, same hooks — so a chip does not
+        // change what it is by being grouped, and nothing here has to be kept in step with
+        // the ungrouped case.
+        let taskCard (turn: AgentTurnId) (blocks: (TerminalId * TerminalBlock) list) =
+            let lines =
+                blocks
+                |> List.map (fun (terminalId, block) -> (terminalId, block), TaskCard.stateOf block.Status)
+                |> TaskCard.ordered
+            let tally = TaskCard.tally (lines |> List.map snd)
+            // Each count in the glyph and colour its status already wears on a chip, and only
+            // when it is non-zero: `0 ✗` prints red where nothing is wrong, which is the one
+            // thing this line must never do.
+            let count n inner = if n = 0 then Lit.nothing else inner
+            let failed =
+                count tally.Failed (html $"""<span class="{Style.statusErr}">{Icon.crossSm} {tally.Failed}</span>""")
+            let running =
+                count tally.Running (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>{tally.Running}</span>""")
+            let done' =
+                count tally.Done (html $"""<span class="{Style.statusOk}">{Icon.checkSm} {tally.Done}</span>""")
+            let counts =
+                html $"""<span class="{Style.chatTaskCounts}">{failed}{running}{done'}</span>"""
+            let commands =
+                if tally.Commands = 1 then "1 command" else sprintf "%d commands" tally.Commands
+            html $"""
+                <details class="{Style.chatTaskCard}" data-chat-task-card="{AgentTurnId.value turn}">
+                  <summary class="{Style.chatTaskSummary}">
+                    <span class="{Style.chatChipWho}">{Dom.Text.agent}</span>
+                    <span class="{Style.chatChipText}">ran {commands}</span>
+                    {counts}
+                  </summary>
+                  {lines |> List.map (fun ((terminalId, block), _) -> blockChip terminalId block.BlockId)}
+                </details>"""
         let rows = TimelineProjection.rows model.Conversation model.Timeline
         let items =
             rows
@@ -1190,7 +1223,21 @@ module View =
                         |> List.choose (function
                             | TimelineToolUse (_, id) -> TimelineProjection.toolUse id model.Timeline
                             | _ -> None)
-                    if List.isEmpty uses then Lit.nothing else toolRun turn uses)
+                    if List.isEmpty uses then Lit.nothing else toolRun turn uses
+                | RowTaskCard (turn, items) ->
+                    let blocks =
+                        items
+                        |> List.choose (function
+                            | TimelineBlock (_, terminalId, blockId) ->
+                                blockOf terminalId blockId |> Option.map (fun block -> terminalId, block)
+                            | _ -> None)
+                    // A card at a page boundary can be short a line, exactly as a lone chip
+                    // can be missing: the next page brings it. Below two it is no longer a
+                    // burst, so it draws as the chips it is — never as a card of one.
+                    match blocks with
+                    | [] -> Lit.nothing
+                    | [ (terminalId, block) ] -> blockChip terminalId block.BlockId
+                    | many -> taskCard turn many)
         // A session with nothing in it yet opens on an empty column, and an empty column says
         // nothing about where the conversation starts or that the near-black composer below it
         // is where you type. So the chat carries its OWN idle symbol — a caret standing where

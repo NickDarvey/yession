@@ -129,6 +129,14 @@ let private shellModel : ClientModel =
     /// A CLOSED terminal, for the list's other half — a recording rather than a place to type.
     let doneId : TerminalId = TerminalId.create "term-done" |> expect
     let blockId : BlockId = BlockId.create "block-harness" |> expect
+    /// A burst: three commands ONE agent turn ran, so the chat has a task card to draw
+    /// (Plan 20, stage 4). Three rather than two, and in three different states, because
+    /// what a card does that a chip cannot is count and order them — a burst that was all
+    /// one state would exercise the disclosure and nothing else.
+    let agentTurn : AgentTurnId = AgentTurnId.create "turn-harness" |> expect
+    let burstOk : BlockId = BlockId.create "block-burst-ok" |> expect
+    let burstFailed : BlockId = BlockId.create "block-burst-failed" |> expect
+    let burstRunning : BlockId = BlockId.create "block-burst-running" |> expect
     let peerId : PeerId = PeerId.create "ada" |> expect
     let messageId : MessageId = MessageId.create "msg-harness" |> expect
     let offset (n: int64) : EventOffset = EventOffset.create n |> expect
@@ -145,7 +153,18 @@ let private shellModel : ClientModel =
                     Offset = offset 1L
                     Woke = None } ]
               ActiveAgentMessages = Map.empty; WokenTurn = None }
-        Timeline = { TimelineProjection.empty with TerminalItems = [ TimelineBlock (offset 2L, terminalId, blockId) ] }
+        Timeline =
+            { TimelineProjection.empty with
+                TerminalItems =
+                    [ TimelineBlock (offset 2L, terminalId, blockId)
+                      TimelineBlock (offset 3L, terminalId, burstOk)
+                      TimelineBlock (offset 4L, terminalId, burstFailed)
+                      TimelineBlock (offset 5L, terminalId, burstRunning) ]
+                BlockTurns =
+                    Map.ofList
+                        [ BlockId.value burstOk, agentTurn
+                          BlockId.value burstFailed, agentTurn
+                          BlockId.value burstRunning, agentTurn ] }
         Terminals =
             { Terminals =
                 [ { TerminalId = terminalId
@@ -165,7 +184,31 @@ let private shellModel : ClientModel =
                           Background = false
                           FromSeq = 0
                           ToSeq = Some 2
-                          Status = BlockFinished (CommandSucceeded 0) } ]
+                          Status = BlockFinished (CommandSucceeded 0) }
+                        { BlockId = burstOk
+                          QueueId = None
+                          Authority = Authority.agentFor (PeerRef peerId)
+                          Command = "npm run build"
+                          Background = false
+                          FromSeq = 2
+                          ToSeq = Some 2
+                          Status = BlockFinished (CommandSucceeded 0) }
+                        { BlockId = burstFailed
+                          QueueId = None
+                          Authority = Authority.agentFor (PeerRef peerId)
+                          Command = "npm test"
+                          Background = false
+                          FromSeq = 2
+                          ToSeq = Some 2
+                          Status = BlockFinished (CommandFailed 1) }
+                        { BlockId = burstRunning
+                          QueueId = None
+                          Authority = Authority.agentFor (PeerRef peerId)
+                          Command = "git status"
+                          Background = true
+                          FromSeq = 2
+                          ToSeq = None
+                          Status = BlockRunning } ]
                     DroppedBytes = 0 }
                   { TerminalId = liveId
                     Title = "shell"

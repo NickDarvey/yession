@@ -251,6 +251,29 @@ The grouping is a pure view-level fold over `TimelineProjection`'s output (a
 `ConversationProjection` untouched and byte-identical). Human-authored blocks never group:
 grouping is for work nobody is hand-driving.
 
+**As built.** The pass is not a second one. `rows` is already the view-level fold over the
+projection's output, and it already groups a turn's consecutive tool calls into a row — so
+the card is a second case there (`RowTaskCard`) rather than a `TimelineCards` beside it. The
+two groupings stop at the same boundary for the same reason, and that rule is worth stating
+once: a card that swallowed the message between two commands would tell a reader the wrong
+story about the order.
+
+Three things the sketch did not say, each decided by trying it:
+
+- **A card forms on the SECOND command.** One command from a turn stays a chip. A disclosure
+  around a single line hides the only thing the row has to say behind a click and buys
+  nothing back.
+- **The grouping key is the turn, recorded at the block's START.** `ToolUseFinished` already
+  names the same pair — its `Block` is the block that call became — but a foreground call
+  finishes when its COMMAND does, so that join arrives too late to group a running block. A
+  card whose lines appear only once they are done is empty for exactly as long as it matters.
+  So the fold carries the turn it is inside (`CurrentTurn`, from `AgentTurnStarted`) and
+  stamps it on each block the AGENT starts. The clock says a command happened *during* a
+  turn; only the authority says whose it was.
+- **The summary prints only what is news.** `N commands`, then each non-zero count in its
+  established glyph and colour. `0 ✗` prints red where nothing is wrong, which is the one
+  thing that line must never do.
+
 ## Delivery
 
 Six stages, each independently shippable. Stages 0–1 are pure client/view work and are
@@ -321,12 +344,14 @@ genuinely running commands at once.
 
 ### Stage 4 — task cards
 
-The `TimelineCards` fold; the card render; failure-first collapse ordering; preview
-opening from card lines.
+The card as a `rows` case; the card render; failure-first ordering; preview opening from
+card lines.
 
 *Tests:* cheap tier for the fold (agent bursts group, human blocks never, statuses
-mutate in place, anchor at first start) and for the one availability invariant (a card
-line is a real button). Nothing pins the card's layout.
+mutate in place, anchor at first start) and for what the summary counts. The one
+availability invariant — a card line is a real button, reachable and pressable without a
+pointer — is `Browser` rather than cheap: the chat is not server-rendered, so no string
+this tier can read contains it. Nothing pins the card's layout.
 
 ### Stage 5 — the unified wake vocabulary
 
