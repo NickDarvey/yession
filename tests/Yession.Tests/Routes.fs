@@ -23,6 +23,10 @@ let private every =
       // have to stay exact inverses over both.
       Asset ("K3nR7pQx2wL0", "client.js")
       Asset ("8fZs1mVb4tHc", "fonts/monaspace-neon-latin-300-normal.woff2")
+      // The worker sits at the mount root rather than in the asset set, because a worker
+      // controls its own path and below: under `assets/<build>/` it would control the assets
+      // and nothing else.
+      ServiceWorker
       Signal
       Me
       Login

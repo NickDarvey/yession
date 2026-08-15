@@ -138,6 +138,20 @@ let start
     // assets it names — all fixed at boot — so its validator is too, and a reload costs a 304
     // instead of the whole document.
     let shellEtag = sprintf "\"%s\"" (contentDigest (Some bootstrapHtml))
+    // The worker, computed once with the page for the same reason the page is: it is a pure
+    // function of this build and this mount, and a per-request render could only drift from
+    // the document that registers it.
+    let serviceWorkerScript =
+        WebApp.serviceWorker
+            (AssetBuild.digest assets.Build)
+            (SessionRoute.relative Shell)
+            SessionRoute.assetsPrefix
+            // The set this build actually left on disk, read from the same map the server
+            // answers from. A list written by hand here would be a second thing that has to
+            // agree with the build, which is exactly what the set-wide digest exists to avoid.
+            (assets.Files
+             |> Map.toList
+             |> List.map (fun (path, _) -> SessionRoute.relative (Asset (AssetBuild.digest assets.Build, path))))
     // Every accepted peer connection, so a stopping Host can drain them. Never pruned
     // mid-life (closePeerConnection resolves immediately for already-closed ones, and a
     // session hosts a bounded handful of peers).
@@ -313,6 +327,17 @@ let start
         // Neither is fingerprinted — the document names a fixed address and the manifest
         // names the icon — so both revalidate on the shell's policy rather than being
         // cached under an address whose bytes a release can change.
+        | Some ServiceWorker ->
+            // Same policy as the shell, and for the same reason one level up: this file is
+            // what decides which build's assets survive offline, so a stale copy would pin a
+            // client to a build that is gone. `no-cache` means revalidate, not "do not keep".
+            res.writeHead (
+                200,
+                createObj
+                    [ "content-type", box "text/javascript; charset=utf-8"
+                      "cache-control", box CachePolicy.shell ])
+            |> ignore
+            res.``end`` serviceWorkerScript
         | Some Manifest ->
             res.writeHead (
                 200,

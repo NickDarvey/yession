@@ -130,10 +130,22 @@ agent progress notifications (hints only)
 HTTP is allowed only for: serving the web app, initial local bootstrap, and temporary
 signalling. **HTTP is not the session API.**
 
-One read path is the exception the rule permits, and it is read-only: the event log is
-also served as immutable fixed-size chunks (`GET /events/{n}`) so the browser's own HTTP
-cache becomes the client-side event store. That makes the durable history feed a second,
-independently failing leg, and it is treated as one:
+One read path is the exception the rule permits, and it is read-only: the event log is also
+served over HTTP, by CURSOR (docs/plans/20). A client sends the offset it has folded through
+(`GET /events/after/{n}`, or `/events` from the beginning) and the server answers with a
+redirect to the range it chose (`GET /events/{first}-{last}`), or `204` when that client is
+already current. A range's bounds do not move, so its bytes are the same for ever — the
+growing tail included, which a fixed chunk index could never manage — and that is what makes
+an answer worth keeping. The client keeps them, in a store it can enumerate and ask to
+persist (the Cache API, named for the session); every response on the surface is `no-store`,
+because the copy that matters is the client's and a second one in the HTTP cache would be a
+spare nobody reads.
+
+The client computes none of it: it holds an offset and stores what it is given under the
+address it was given, so there is no arithmetic in it that could address the wrong events.
+
+That makes the durable history feed a second, independently failing leg, and it is treated
+as one:
 
 - a read is `EventOffset option -> Async<Result<EventPage, FeedFault>>`, so a dead feed is
   distinguishable from an empty one — never an empty page standing in for a failure;

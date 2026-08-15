@@ -281,9 +281,13 @@ Items are roughly ordered by how much they matter.
   auth cookie rides each fetch, so URLs — and cache keys — carry no secrets); the
   token-in-URL path remains for Node clients and tests, scoped to per-process minted
   tokens that die with the session.
-- **A session served offline has no app shell**: IndexedDB restores state instantly
-  once the page loads, but the page itself still needs the Session Process (no
-  service worker).
+- **A session opens cold with no network** (Plan 20): a service worker at the mount keeps
+  the shell (network-first, since it names the fingerprinted assets) and this build's assets
+  (cache-first, since their address pins their bytes), and nothing else — the event log is
+  the page's own cache, and `/me`, `/signal` and `/queries` are liveness questions a cached
+  answer would answer wrongly. It needs a secure context, so a session served over plain
+  HTTP at a non-loopback address still cannot: there the settings pane names the missing
+  capability and the flag that restores it.
 - **The history feed degrades explicitly, and only history degrades.** The event feed is
   the one leg that is HTTP rather than the data channel, so it fails on its own — and it
   used to fail silently: a rejected fetch became an empty final page, which the read loop

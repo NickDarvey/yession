@@ -307,9 +307,19 @@ let private toggleSettings () : unit = jsNative
 // outside F#'s reach, so a path embedded here could not be checked against
 // `SessionRoute`. Every fetch below takes its URL from `SessionRoute.relative`, and the
 // browser resolves it against the shell's `<base href>`.
+//
+// A REFUSAL is 401/403 and nothing else. Every other error status — a 502 from the
+// operator's proxy standing in front of a session that is gone, a 503 from one still
+// starting — is the session not being there, which is the other axis entirely. Reading them
+// as "log in" sent a client whose session had stopped off to a login bounce that could only
+// fail, and (once the shell was served from a worker) replaced a perfectly good offline
+// session with a browser error page. The thrown case was already right; this is the same
+// distinction for the answers that arrive.
 [<Emit("""fetch($0, { cache: 'no-store' }).then(
   r => r.ok ? r.json().then(me => ({ reachable: true, authorized: true, token: me.peerToken, detail: '' }))
-            : { reachable: true, authorized: false, token: '', detail: 'HTTP ' + r.status },
+      : (r.status === 401 || r.status === 403)
+        ? { reachable: true, authorized: false, token: '', detail: 'HTTP ' + r.status }
+        : { reachable: false, authorized: false, token: '', detail: 'HTTP ' + r.status },
   e => ({ reachable: false, authorized: false, token: '', detail: String(e) }))""")>]
 let private fetchMe (url: string) : JS.Promise<{| reachable: bool; authorized: bool; token: string; detail: string |}> = jsNative
 
@@ -501,6 +511,19 @@ let private cacheRead (cache: obj) (url: string) : JS.Promise<string option> = j
 // free of anything about how the bytes were obtained.
 [<Emit("$0.put($1, new Response($2, { headers: { 'content-type': 'application/x-ndjson; charset=utf-8' } })).catch(() => undefined)")>]
 let private cacheWrite (cache: obj) (url: string) (body: string) : JS.Promise<unit> = jsNative
+
+/// Register the worker that makes a cold open possible with no network (Plan 20).
+///
+/// Best-effort and deliberately unawaited-for-correctness: a client whose registration fails
+/// (an insecure context, a browser that refuses) is exactly today's client — it just cannot
+/// open cold. Nothing above this waits on it, and nothing breaks if it never resolves.
+/// Returns `unit`, and that is load-bearing rather than stylistic. As a promise-returning
+/// emit whose result was discarded (`|> ignore`), the whole call was dead code to the
+/// compiler and never reached the bundle at all — the registration silently did not ship,
+/// which looks exactly like a worker that will not take control. A unit-returning emit is a
+/// statement, and statements survive.
+[<Emit("""void (navigator.serviceWorker && navigator.serviceWorker.register($0).catch(() => undefined))""")>]
+let private registerWorker (url: string) : unit = jsNative
 
 /// Ask for the store to be kept. A request, not a guarantee — granted for an engaged site on
 /// Chrome, essentially only for an installed app on Safari — and best-effort by design: the
@@ -1290,6 +1313,11 @@ let private start () =
         // this client may CONNECT; it has never had any business deciding whether a client may
         // read what it was already given. That it did is why an offline open rendered an empty
         // conversation rather than the one it had been reading.
+        // The worker first, because it is what makes the NEXT cold open work; this one is
+        // already served. Fire and forget: nothing here depends on it, and a client that
+        // cannot have one loses only the offline open.
+        registerWorker (SessionRoute.relative ServiceWorker)
+
         let! historyCache = openHistoryCache ()
         do! App.EventFetch.replay historyCache (fun msg -> dispatchRef msg)
 
