@@ -150,6 +150,68 @@ let mutable private pageB : IPage = null
 let private await (t: Task<'a>) : Async<'a> = Async.AwaitTask t
 let private awaitU (t: Task) : Async<unit> = Async.AwaitTask t
 
+// --- What the page saw (so a failure can say more than "timed out") ----------------------
+//
+// A browser case can only fail one way: a wait that never settles. That failure names the WAIT
+// and never the reason, so three separate faults in the service worker — a registration
+// eliminated as dead code, an opaque redirect from the sign-in bounce, a precache that could
+// not have happened — all presented as the same thirty-second timeout, and each cost a full
+// run of the gate to tell apart. The page had been saying which was which the whole time.
+//
+// So: keep what it says, and print it when a case fails. It costs nothing on the green path
+// and it is the only way to read a red one in CI, where nothing can be attached afterwards.
+
+type private Evidence () =
+    let lines = ResizeArray<string> ()
+    /// Bounded: a page that is failing tends to say the same thing very fast, and a thousand
+    /// identical lines is not more evidence than fifty.
+    member _.Note (text: string) =
+        lock lines (fun () -> if lines.Count < 100 then lines.Add text)
+    member _.Lines = lock lines (fun () -> List.ofSeq lines)
+
+/// Listen to everything the page can tell us.
+let private watching (page: IPage) =
+    let ev = Evidence ()
+    page.Console.Add (fun m ->
+        if m.Type = "error" || m.Type = "warning" then ev.Note (sprintf "console %s: %s" m.Type m.Text))
+    page.PageError.Add (fun e -> ev.Note ("pageerror: " + e))
+    page.RequestFailed.Add (fun r -> ev.Note (sprintf "requestfailed: %s %s" r.Url r.Failure))
+    // NOT the service worker's own console: Playwright .NET 1.61 exposes `IWorker.Console`,
+    // but only for web workers (`page.Workers`) — there is no `IBrowserContext.ServiceWorkers`
+    // to reach a service worker through. A worker that wants to be heard here has to say it
+    // somewhere the page can see; `console.debug` in it is for a human with devtools open.
+    ev
+
+/// Run a case; if it throws, print what the page saw before letting the failure through.
+let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<unit>) : Async<unit> =
+    async {
+        try
+            do! body
+        with e ->
+            printfn "=== %s failed — what the page saw ===" label
+            for line in ev.Lines do printfn "  %s" line
+            // The page's own state, best-effort: on a navigation failure there is no page left
+            // to ask, and that answer is itself worth printing.
+            let! state =
+                async {
+                    try
+                        return!
+                            await (page.EvaluateAsync<string>
+                                    """() => JSON.stringify({
+                                         url: location.href,
+                                         title: document.title,
+                                         connection: document.querySelector('[data-connection]')?.textContent ?? null,
+                                         conversation: document.querySelector('[data-conversation]')?.textContent?.slice(0, 200) ?? null,
+                                         degraded: document.querySelector('[data-degraded]')?.getAttribute('data-degraded') ?? null
+                                       })""")
+                    with pe -> return "unreadable: " + pe.Message
+                }
+            printfn "  page: %s" state
+            printfn "=== end %s ===" label
+            raise e
+    }
+
+
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
 let private connected = """document.querySelector('[data-connection]')?.textContent === 'Connected'"""
 
@@ -1231,6 +1293,8 @@ let mountedTests =
                     let! context = await (br.NewContextAsync ())
                     let! page = await (context.NewPageAsync ())
                     page.SetDefaultTimeout 20000.0f
+                    let evidence = watching page
+                    do! reporting "the session is gone" page evidence <| async {
                     let! _ = await (page.GotoAsync publicUrl)
                     let! _ = await (page.WaitForFunctionAsync connected)
 
@@ -1275,6 +1339,7 @@ let mountedTests =
                         await (page.WaitForFunctionAsync
                                 """document.querySelector('[data-connection]')?.textContent !== 'Connected'""")
                         |> Async.Ignore
+                    }
                 finally
                     browserToClose |> Option.iter (fun b -> b.CloseAsync () |> ignore)
                     playwrightToDispose |> Option.iter (fun p -> p.Dispose ())
