@@ -792,29 +792,11 @@ let startFull
                         return if List.length lines = wanted then Some lines else None
                     } }
 
-        // The HTTP-cacheable transcript read surface (Plan 13) — the history leg of the
-        // terminal feed, on the same immutability argument as the event chunks.
-        let transcriptEndpoint : Signalling.TranscriptEndpoint =
-            { ValidateToken = peerTokens.Validate >> Option.isSome
-              ReadChunk =
-                fun terminal index ->
-                    async {
-                        // An unparseable id is a terminal that does not exist, which is
-                        // exactly what an unknown one is — same answer, one code path.
-                        match TerminalId.create terminal with
-                        | Ok id -> return transcripts.ReadChunk id index
-                        | Error _ -> return None
-                    }
-              ReadKeyframe =
-                fun terminal seq ->
-                    async {
-                        match TerminalId.create terminal with
-                        | Ok id ->
-                            return
-                                transcripts.ReadKeyframe id seq
-                                |> Option.map (Codec.toString Codec.transcriptKeyframe)
-                        | Error _ -> return None
-                    } }
+        // The transcript read surface (Plan 13, cursored in Plan 22) — the history leg of the
+        // terminal feed, on the same immutability argument as the event ranges. Built by the
+        // store, because every decision in it is about the store's own state.
+        let transcriptEndpoint =
+            TranscriptStore.endpoint (peerTokens.Validate >> Option.isSome) transcripts
 
         let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) (Some transcriptEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin ephemeralStorage port
         // Port 0 asks the OS for a free port, so any number of instances/sessions

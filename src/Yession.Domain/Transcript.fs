@@ -162,38 +162,25 @@ module TranscriptRetention =
         elif incoming.Length <= room then { Keep = incoming; Dropped = 0 }
         else { Keep = incoming.Substring (0, room); Dropped = incoming.Length - room }
 
-/// Fixed-size chunking of a transcript, for HTTP-cacheable reads — the same construction
-/// `EventChunk` applies to the event log, for the same reason and with the same payoff.
+/// How much of a terminal's append-only transcript one HTTP answer carries (docs/plans/22)
+/// — `EventChunk` for the terminal feed, and the same construction for the same reason.
 ///
-/// A transcript is append-only and its chunk bounds are fixed forever, so a chunk holding
-/// all `size` lines is IMMUTABLE and can be cached hard; only the growing tail chunk must
-/// be revalidated. Concatenating chunk 0, 1, 2 … reproduces the file byte for byte, which
-/// is why the header is simply line 0 rather than a value served beside the chunks: any
-/// prefix of chunks is a valid `.cast` file, so replaying half a transcript needs no
-/// special case.
+/// A transcript is read by CURSOR: a client sends the line it has folded through and the
+/// server answers at an address naming the bounds it chose — `terminals/{t}/{first}-{last}`.
+/// Line index IS sequence number for ever, so those bounds never move, that answer is the
+/// same bytes for ever, and a client can keep it — tail included.
 ///
-/// A **sequence number** in this module means a LINE INDEX in that file — the same
-/// currency the event log's offsets are in, so the catch-up logic is the same shape:
-/// hints and live records carry a seq, the client keeps a high-water mark, and anything
-/// at or below it is skipped.
+/// A **sequence number** here means a LINE INDEX in that file, the same currency the event
+/// log's offsets are in: hints and live records carry a seq, the client keeps a high-water
+/// mark, and anything at or below it is skipped. The header sits at line 0 and so arrives
+/// with the first answer, which is what keeps any prefix of answers a valid `.cast`.
+///
+/// This module used to map a seq to a fixed chunk index, and the index was the problem:
+/// `terminals/{t}/3` meant *whatever chunk 3 holds now*, which grows, so the newest lines
+/// could never be kept by anyone.
 module TranscriptChunk =
 
-    /// Lines per chunk. Fixed forever once shipped: chunk URLs are cache keys.
+    /// The most lines one answer carries. Named by the SERVER when it bounds a range, and
+    /// by the router when it refuses an over-long one — never by a client choosing an
+    /// address, because a client never chooses one.
     let size = 500
-
-    /// Cached-full-chunk lifetime: 3 days, matching `EventChunk` — a session resumed over
-    /// a weekend replays its terminals from the browser cache too.
-    let private maxAgeSeconds = 259200
-
-    /// The chunk containing line `seq`.
-    let indexOf (seq: int) : int = seq / size
-
-    /// The first line index of chunk `index`.
-    let firstSeq (index: int) : int = index * size
-
-    /// `private`, like the event chunks: transcripts sit behind the session's per-user
-    /// authorization, so the browser's own cache still serves them and shared caches never
-    /// see them.
-    let cacheControl (isFull: bool) : string =
-        if isFull then sprintf "private, max-age=%d, immutable" maxAgeSeconds
-        else "no-store"
