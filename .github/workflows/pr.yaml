@@ -31,6 +31,24 @@ on:
   # wrong is that nothing can merge at all.
   merge_group:
 
+# One run per pull request. A push supersedes the run it obsoletes, and there is no reason to
+# keep paying for a verdict on a commit nobody will merge: 30 of the last 244 runs were still
+# executing when the next push to their own branch started, for 215 wall-minutes spent on
+# answers about superseded commits.
+#
+# `merge_group` has no `pull_request` payload, so the group falls back to `run_id` — unique per
+# run, a group of one, which nothing can ever cancel. That fallback IS the merge-queue guard,
+# and it is the only one: making `cancel-in-progress` conditional as well would be a second
+# mechanism for the same requirement, and the next reader could not tell which one was load
+# bearing. A queued pull request whose check gets cancelled never reports and sits until it is
+# kicked back out, so this is the sharp edge worth being explicit about.
+#
+# release.yml has its own group with `cancel-in-progress: false`, for the opposite reason: a
+# master run must always finish and publish. Superseding is right here and wrong there.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
