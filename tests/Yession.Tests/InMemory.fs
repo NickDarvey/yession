@@ -364,6 +364,82 @@ let tests =
                 do! host.Stop ()
             }
 
+        // The property stage 3 exists for, proved without a clock (Plan 20). Two of the
+        // agent's terminals must run commands AT THE SAME TIME; a test that asserted it with
+        // timings would be asserting this machine's scheduling, so the commands prove it to
+        // each other instead: the first waits for a signal only the second can give. If the
+        // manager serialized them, the first would never finish and the second would never
+        // start — the case deadlocks rather than passing by luck.
+        testCaseAsync "two of the agent's terminals run commands at the same time" <|
+            async {
+                // A rendezvous both runtimes have. `TaskCompletionSource` is .NET only, and
+                // this suite runs on Node.
+                let mutable released = false
+                let mutable waiting : (unit -> unit) list = []
+                let awaitRelease () =
+                    Async.FromContinuations (fun (cont, _, _) ->
+                        if released then cont () else waiting <- (fun () -> cont ()) :: waiting)
+                let release () =
+                    if not released then
+                        released <- true
+                        let held = waiting
+                        waiting <- []
+                        held |> List.iter (fun resume -> resume ())
+                let environment : SessionEnvironment.SessionEnvironment =
+                    { Ensure = fun _ _ -> async { return EnvironmentAvailable }
+                      Spawn =
+                        fun exec onChunk ->
+                            async {
+                                let line = exec.Arguments |> List.tryLast |> Option.defaultValue ""
+                                onChunk (Stdout, sprintf "ran<%s>" line)
+                                return
+                                    Ok
+                                        { WriteStdin = ignore
+                                          CloseStdin = ignore
+                                          Kill = ignore
+                                          Exited =
+                                            async {
+                                                if line = "wait" then do! awaitRelease ()
+                                                else release ()
+                                                return SandboxExited 0
+                                            } }
+                            }
+                      SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
+                      Stop = fun () -> async { return () }
+                      CurrentRef = fun () -> Some "scripted" }
+                let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
+                let! held = host.Terminals.OpenAgentTerminal SandboxName.defaultName "holds"
+                let! frees = host.Terminals.OpenAgentTerminal SandboxName.defaultName "frees"
+                let holds = held |> expect
+                let releases = frees |> expect
+                Expect.notEqual releases holds "two terminals, which is what makes the rest of this a question"
+                // Backgrounded, so the call returns while the command is still going — the
+                // agent is free to do the second thing, which is the whole point.
+                match!
+                    host.TerminalCommands.Execute
+                        { CommandRequest.ofCommand "wait" with Target = Some (InTerminal holds); Background = true }
+                        agentActing with
+                | Error reason -> failwith reason
+                | Ok waiting ->
+                    // Waited for. It can only finish by releasing the first, and the first can
+                    // only have been running for that to matter.
+                    match!
+                        host.TerminalCommands.Execute
+                            { CommandRequest.ofCommand "release" with Target = Some (InTerminal releases) }
+                            agentActing with
+                    | Error reason -> failwith reason
+                    | Ok freed ->
+                        Expect.equal freed.Status (TerminalCommandRan (CommandSucceeded 0)) "the second ran while the first was running"
+                        match! host.TerminalCommands.Read waiting.Handle with
+                        | Error reason -> failwith reason
+                        | Ok resumed ->
+                            Expect.equal
+                                resumed.Status
+                                (TerminalCommandRan (CommandSucceeded 0))
+                                "and the first finished, because the second let it"
+                do! host.Stop ()
+            }
+
         testCaseAsync "ApproveAgent is now ENFORCEABLE: the agent's call yields, and resumes on the approval" <|
             async {
                 // The defect stage 3b closes. A session could set every terminal to require
