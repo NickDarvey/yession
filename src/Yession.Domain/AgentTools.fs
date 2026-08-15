@@ -195,6 +195,17 @@ module AgentTools =
                     outcome.Summary
                     (QueueId.value handle)
             | None -> sprintf "WAITING FOR A HUMAN TO APPROVE `%s`. It has NOT happened." outcome.Summary
+        // Nobody is being waited for here, and saying otherwise is the failure this case
+        // exists to end: an agent told to go and get an approval for something that is
+        // already running asks a person for a decision they were never offered.
+        | CommandRunning ->
+            match outcome.Handle with
+            | Some handle ->
+                sprintf
+                    "STILL RUNNING: `%s` was approved or needed no approval, and has not finished. Nothing was cancelled and nobody is waiting on you. Call check_pending with handle '%s' to pick it up."
+                    outcome.Summary
+                    (QueueId.value handle)
+            | None -> sprintf "STILL RUNNING: `%s` has not finished. Nothing was cancelled." outcome.Summary
         | CommandRefusedBy (by, reason) ->
             let who = ActorRef.token by
             match reason with

@@ -38,6 +38,8 @@ let all =
         // burst and every later change) is exactly what crosses the wire.
         Tag.needs "Query stream routes" [ Tag.Ports ] (fun () -> Queries.portsTests)
         Tag.needs "Tools" [] (fun () -> Tools.tests)
+        // The layers above join here: what a model calls, and what it is told back.
+        Tag.needs "Tool calls" [] (fun () -> ToolCalls.tests)
         Tag.needs "Mcp" [] (fun () -> Mcp.tests)
         // The contract a provider implements to get a terminal (Plan 19). Pure: what an
         // offer means, what this session will dial, and what a turn may be given.
