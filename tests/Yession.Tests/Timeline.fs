@@ -388,7 +388,9 @@ let private paneTests =
             let html = Support.render model
             let required =
                 [ "the tab", Dom.attr Dom.Hooks.paneTab "block:term-a:b-1"
-                  "its pin", Dom.attr Dom.Hooks.paneTabPin "block:term-a:b-1"
+                  // Previewed, so it says it is keepable and not yet kept. The pin itself is
+                  // a mark that appears only once it is.
+                  "it says it is not kept", Dom.attr Dom.Hooks.paneTabPinned "false"
                   "the panel showing it", Dom.attr Dom.Hooks.panePanel "block:term-a:b-1"
                   "the block's read-only view", Dom.attr Dom.Hooks.paneBlock "b-1"
                   "the command", "ls -la"
