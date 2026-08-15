@@ -56,7 +56,7 @@ let private withAssets (name: string) (body: Assets.AssetSet -> 'a) : 'a =
     rmrf nodeFs dir
     mkdirp nodeFs (dir + "/fonts")
     writeFile nodeFs (dir + "/" + AssetFile.path AssetFile.``app``) "body{color:red}"
-    writeFile nodeFs (dir + "/" + AssetFile.path AssetFile.``xenon-300``) "not really a face, but bytes are bytes"
+    writeFile nodeFs (dir + "/" + AssetFile.path AssetFile.``noto-serif-300``) "not really a face, but bytes are bytes"
     writeFile nodeFs (dir + "/undeclared.txt") "no route to here"
     body (Assets.load dir)
 
@@ -72,7 +72,7 @@ let tests =
                 Expect.equal css.Status 200 "the stylesheet serves"
                 Expect.equal (headerOf css.Headers "content-type") "text/css; charset=utf-8" "as a stylesheet"
 
-                let face = serveInto assets (buildOf assets) (AssetFile.path AssetFile.``xenon-300``)
+                let face = serveInto assets (buildOf assets) (AssetFile.path AssetFile.``noto-serif-300``)
                 Expect.equal face.Status 200 "the face serves"
                 Expect.equal (headerOf face.Headers "content-type") "font/woff2" "as a font")
 
@@ -97,7 +97,7 @@ let tests =
             // together or not at all.
             let before = withAssets "digest" id
             let dir = "tests/Yession.Tests/out/.assets/digest"
-            writeFile nodeFs (dir + "/" + AssetFile.path AssetFile.``xenon-300``) "different bytes entirely"
+            writeFile nodeFs (dir + "/" + AssetFile.path AssetFile.``noto-serif-300``) "different bytes entirely"
             let after = Assets.load dir
             Expect.notEqual after.Build before.Build "a byte anywhere is a new set"
             Expect.equal (Assets.load dir).Build after.Build "and the same set always addresses the same"
