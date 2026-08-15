@@ -25,6 +25,7 @@ let all =
     testList "Yession" [
         Tag.needs "Domain" [] (fun () -> Domain.tests)
         Tag.needs "Routes" [] (fun () -> Routes.tests)
+        Tag.needs "Static assets" [] (fun () -> Assets.tests)
         Tag.needs "Idle reaping" [] (fun () -> Reaper.tests)
         Tag.needs "Cli" [] (fun () -> Cli.tests)
         Tag.needs "Secrets" [] (fun () -> Secrets.tests)
@@ -37,6 +38,8 @@ let all =
         // burst and every later change) is exactly what crosses the wire.
         Tag.needs "Query stream routes" [ Tag.Ports ] (fun () -> Queries.portsTests)
         Tag.needs "Tools" [] (fun () -> Tools.tests)
+        // The layers above join here: what a model calls, and what it is told back.
+        Tag.needs "Tool calls" [] (fun () -> ToolCalls.tests)
         Tag.needs "Mcp" [] (fun () -> Mcp.tests)
         // The contract a provider implements to get a terminal (Plan 19). Pure: what an
         // offer means, what this session will dial, and what a turn may be given.
@@ -74,6 +77,7 @@ let all =
         Tag.needs "Pty integration" [ Tag.Pty ] (fun () -> PtyIntegration.tests)
         Tag.needs "Phase3" [] (fun () -> Phase3.tests)
         Tag.needs "EventsHttp" [] (fun () -> EventsHttp.tests)
+        Tag.needs "TranscriptHttp" [] (fun () -> TranscriptHttp.tests)
         Tag.needs "Transport resilience" [] (fun () -> Resilience.tests)
         Tag.needs "Oidc" [] (fun () -> Oidc.tests)
         Tag.needs "Phase4" [] (fun () -> Phase4.tests)
@@ -96,4 +100,4 @@ let all =
     ]
 
 [<EntryPoint>]
-let main argv = !! Pyxpecto.runTests [||] all
+let main argv = !! Pyxpecto.runTests [||] (Tag.narrowed all)

@@ -18,6 +18,13 @@ open System.Diagnostics
 open System.IO
 open System.Text.RegularExpressions
 
+// The one declaration of what a build ships (`src/Yession.App/AssetFile.fs`), loaded rather
+// than restated. Both halves of the repository are F#, so the build and the server can read
+// the SAME list: the match in `produce` below is exhaustive, which is what makes adding a file
+// a compile error here until this script knows how to make it.
+#load "src/Yession.App/AssetFile.fs"
+open Yession.App
+
 let repoRoot = Path.GetFullPath __SOURCE_DIRECTORY__
 let dist = Path.Combine (repoRoot, "dist")
 let pkg = Path.Combine (dist, "npm")
@@ -268,14 +275,69 @@ let private fable (quiet: bool) (project: string) (outDir: string) =
     else exec "dotnet" [ "fable"; project; "-o"; outDir ]
     declareEsm outDir
 
+// The asset set a build ships. What goes in it is declared once, in `AssetFile` — which this
+// script loads rather than restates, so the build cannot emit a file the servers will not serve
+// and cannot forget one they will. `produce` matches exhaustively: a new case does not compile
+// until this script says how to make it.
+//
+// The directory is rebuilt from empty every time, which is what keeps it EXACTLY this build:
+// the whole set is addressed by one digest of its contents, so a file left behind from an
+// earlier build would be served under an address that claims to describe what the build holds.
+//
+// Nothing rewrites the stylesheet. Tailwind passes `url()` through verbatim, so the
+// `url(fonts/x.woff2)` written in `app/tailwind.css` resolves against wherever the sheet is
+// served — which is inside this directory, next to `fonts/`.
+let private buildAssets (outDir: string) (minify: bool) =
+    let root = Path.Combine (repoRoot, outDir, "assets")
+    if Directory.Exists root then Directory.Delete (root, true)
+    let extra = if minify then [ "--minify" ] else []
+    /// Where a file goes, its directory made — as a repo-relative path, which is what the
+    /// tools take.
+    let at (file: AssetFile) =
+        Directory.CreateDirectory (Path.GetDirectoryName (Path.Combine (root, AssetFile.path file))) |> ignore
+        outDir + "/assets/" + AssetFile.path file
+
+    /// A vendored face, copied from where the faces are kept — which is the set's own path
+    /// under `app/`, so the declaration locates the source as well as the destination.
+    let vendored (file: AssetFile) =
+        at file |> ignore
+        File.Copy (Path.Combine (repoRoot, "app", AssetFile.path file), Path.Combine (root, AssetFile.path file), true)
+
+    let produce (file: AssetFile) =
+        match file with
+        | AssetFile.``client`` ->
+            run esbuild
+                ([ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--outfile=" + at file ] @ extra)
+            |> ignore
+        // The shell's stylesheet scans the F# sources for composed class names; the player's is
+        // its own file because the shell defers it (see `app/player.css`).
+        | AssetFile.``app`` -> run tailwind ([ "-i"; "app/tailwind.css"; "-o"; at file ] @ extra) |> ignore
+        | AssetFile.``player`` -> run tailwind ([ "-i"; "app/player.css"; "-o"; at file ] @ extra) |> ignore
+        | AssetFile.``noto-sans-200``
+        | AssetFile.``noto-sans-300``
+        | AssetFile.``noto-sans-400``
+        | AssetFile.``noto-sans-600``
+        | AssetFile.``neon-400``
+        | AssetFile.``neon-600``
+        | AssetFile.``noto-serif-300``
+        | AssetFile.``noto-serif-400``
+        | AssetFile.``noto-serif-600`` -> vendored file
+
+    AssetFile.all |> List.iter produce
+
+    // A declared file that nothing produced. `produce` is matched exhaustively, but an
+    // unhandled case is only a WARNING in a script (fsi has no warnaserror), so this is what
+    // turns it into a stopped build rather than a 404 someone meets in a browser later.
+    for file in AssetFile.all do
+        if not (File.Exists (Path.Combine (root, AssetFile.path file))) then
+            failwithf "%s is declared in AssetFile but no producer wrote it" (AssetFile.path file)
+
 let compile () =
     printfn "compiling F# -> JS"
     run "dotnet" [ "build"; "Yession.slnx" ] |> ignore
     fable true "app/main/Yession.Host.Main.fsproj" "app/out"
     fable true "app/browser/Yession.Browser.fsproj" "app/out/browser"
-    run esbuild [ "app/out/browser/Browser.js"; "--bundle"; "--format=esm"; "--minify"; "--outfile=app/out/public/client.js" ] |> ignore
-    // Tailwind, built locally into a served stylesheet (no CDN); scans the F# sources.
-    run tailwind [ "-i"; "app/tailwind.css"; "-o"; "app/out/public/app.css"; "--minify" ] |> ignore
+    buildAssets "app/out/public" true
 
 let build () =
     restore ()
@@ -388,9 +450,8 @@ let stage (version: string) =
     compile ()
     printfn "staging yession %s (npm, one package / two bins) -> dist/npm" version
 
-    for required in
-        [ "app/out/Main.js"; "app/SessionMain.js"
-          "app/out/public/client.js"; "app/out/public/app.css" ] do
+    // The two bins. The asset set checks itself, in `buildAssets`, against its declaration.
+    for required in [ "app/out/Main.js"; "app/SessionMain.js" ] do
         if not (File.Exists (Path.Combine (repoRoot, required))) then
             failwithf "missing %s after compile" required
 
@@ -402,9 +463,17 @@ let stage (version: string) =
     bundle version "app/out/Main.js" "manager.js"
     bundle version "app/SessionMain.js" "session.js"
 
-    // Assets (read package-relative at runtime by Interop.readAsset).
-    File.Copy (Path.Combine (repoRoot, "app/out/public/client.js"), Path.Combine (pkg, "assets/client.js"), true)
-    File.Copy (Path.Combine (repoRoot, "app/out/public/app.css"), Path.Combine (pkg, "assets/app.css"), true)
+    // The asset set, copied whole (read package-relative at runtime by `Assets.load`). A
+    // directory rather than a list of files, because which files a build ships is the BUILD's
+    // business — `stage` is the last place that should have an opinion about it.
+    let rec copyInto (source: string) (target: string) =
+        Directory.CreateDirectory target |> ignore
+        for file in Directory.GetFiles source do
+            File.Copy (file, Path.Combine (target, Path.GetFileName file), true)
+        for dir in Directory.GetDirectories source do
+            copyInto dir (Path.Combine (target, Path.GetFileName dir))
+
+    copyInto (Path.Combine (repoRoot, "app/out/public/assets")) (Path.Combine (pkg, "assets"))
 
     // Bin shims. `yession-manager` points the Manager at the packaged session bundle (both live
     // in one install), so it spawns `node session.js` with no PATH assumptions.
@@ -785,7 +854,7 @@ let private runCheckOnce (requested: string list) =
         // The harness renders the REAL shell (Plan 14), so it needs the real stylesheet:
         // without it every Tailwind class is inert, and any layout the browser tier measures
         // there — a phone viewport most of all — is a layout nobody will ever get.
-        exec tailwind [ "-i"; "app/tailwind.css"; "-o"; "tests/browser/out/app.css" ]
+        buildAssets "tests/browser/out" false
         progress "running the browser suite (.NET CLR)"
         exec "dotnet" [ "run"; "--project"; "tests/Yession.Tests/Yession.Tests.fsproj" ]
 
@@ -859,11 +928,28 @@ let private rerunUnderKeyring (caps: string list) : int =
     finally
         File.Delete script
 
-// check [caps…]. Default = cheap tier; each cap adds its suites (Browser, Ports, Native, …).
+/// Split `--only <text>` out of the arguments. What is left is the capability list, which is
+/// what everything downstream expects — a capability the box cannot host still refuses the run,
+/// narrowed or not, because "which box is this" and "which cases do I want" are different
+/// questions and only the first one is a reason to stop.
+let private takeOnly (args: string list) : string list * string option =
+    let rec go acc only remaining =
+        match remaining with
+        | "--only" :: text :: rest -> go acc (Some text) rest
+        | [ "--only" ] -> failwith "check --only: give it something to match (e.g. --only \"session is gone\")"
+        | arg :: rest -> go (arg :: acc) only rest
+        | [] -> List.rev acc, only
+    go [] None args
+
+// check [caps…] [--only <text>]. Default = cheap tier; each cap adds its suites (Browser,
+// Ports, Native, …). `--only` narrows BOTH runtimes to the cases whose full name contains the
+// text — the build is unchanged, so this buys back the running, not the compiling.
 // The gate runs once and is deterministic — the native WebRTC suites used to abort intermittently,
 // but that was a real defect (the addon carried its own C++ runtime; see nix/node-datachannel.nix),
 // now fixed, not inherent flakiness. A failure here is a genuine break, so don't paper it over.
-let check (caps: string list) =
+let check (args: string list) =
+    let caps, only = takeOnly args
+    only |> Option.iter (fun text -> Environment.SetEnvironmentVariable ("YESSION_TEST_ONLY", text))
     if needsKeyringWrap caps then exit (rerunUnderKeyring caps)
     restore ()
     runCheckOnce caps

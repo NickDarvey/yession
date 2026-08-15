@@ -126,6 +126,48 @@ let private reason (need: Need list) : string =
 /// run's `ignored` count instead of inflating `passed`, so the tail of a run says how much of
 /// the suite never executed. A skip that reports itself as a pass is indistinguishable from
 /// coverage, which is how a daemon-less `verify` used to print `383 passed, 0 ignored`.
+/// A substring the run was narrowed to (`check --only …`), or empty for the whole suite.
+let private only : string = (getEnv "YESSION_TEST_ONLY").Trim ()
+
+/// Prune the tree to the cases whose FULL name contains `only`, dropping any list left with
+/// nothing in it — so a narrowed run prints the handful it kept rather than a thousand skips.
+///
+/// The filter lives here rather than in the runner because Pyxpecto has none: its `ConfigArg`
+/// is `FailOnFocused | Silent | DoNotExitWithCode` and nothing else. It lives beside `needs`
+/// because they answer the same question — which of these cases does this run execute — and
+/// two answers to one question in two files is how they drift.
+let rec private narrow (path: string) (test: TestCase) : TestCase option =
+    let full (name: string) = if path = "" then name else path + " - " + name
+    let keep (name: string) = (full name).ToLowerInvariant().Contains (only.ToLowerInvariant ())
+    match test with
+    | SyncTest (name, _, _) -> if keep name then Some test else None
+    | AsyncTest (name, _, _) -> if keep name then Some test else None
+    | TestList (name, cases, focus) ->
+        match cases |> List.choose (narrow (full name)) with
+        | [] -> None
+        | kept -> Some (TestList (name, kept, focus))
+    | TestListSequential (name, cases, focus) ->
+        match cases |> List.choose (narrow (full name)) with
+        | [] -> None
+        | kept -> Some (TestListSequential (name, kept, focus))
+
+/// The suite this run should execute. Unchanged unless `--only` narrowed it.
+///
+/// A narrowing that matches nothing here is NOT an error: the two runtimes run the same
+/// declaration, so `--only` aimed at a browser case legitimately matches nothing on Node. It
+/// says so on its own line instead, because "0 tests run" and "everything passed" print
+/// almost identically and only one of them is good news.
+let narrowed (suite: TestCase) : TestCase =
+    if only = "" then suite
+    else
+        match narrow "" suite with
+        | Some kept ->
+            printfn "tests: narrowed to '%s'" only
+            kept
+        | None ->
+            printfn "tests: narrowed to '%s' — nothing here matches (check the spelling, or it may live on the other runtime)" only
+            TestList ("narrowed", [], Normal)
+
 let needs (label: string) (need: Need list) (suite: unit -> TestCase) : TestCase =
     if canRun need then suite ()
     else testList label [ ptestCase (sprintf "skipped: %s" (reason need)) <| fun () -> () ]

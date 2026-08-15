@@ -190,7 +190,8 @@ module TerminalQueueDrain =
             // know when it started or finished. Holding is the honest answer — draining into
             // an unmarked shell would produce blocks that never close.
             elif Set.contains (TerminalId.value terminal) lost then Choice2Of2 AwaitingIntegration
-            elif ApprovalMode.requiresApproval modeOf entry.Author && Option.isNone entry.ApprovedBy then
+            elif ApprovalMode.requiresApproval modeOf (Authority.author entry.Authority)
+                 && Option.isNone entry.ApprovedBy then
                 Choice2Of2 AwaitingApproval
             else Choice1Of2 (terminal, entry)
 
@@ -641,6 +642,17 @@ module SessionTerminals =
           /// nothing: a session that only talks to a serial port should not start a
           /// container.
           Open : ActorRef -> TerminalSource -> string -> Async<Result<TerminalId, string>>
+          /// The AGENT's terminal in one WorkSandbox, opened on first use (Plan 15, stage 2).
+          ///
+          /// Here rather than in the composition root, where it used to live, because it is a
+          /// rule about which terminals exist and the terminals are here. A caller could not
+          /// break it by forgetting to ask — it IS the asking — and a second caller cannot
+          /// open a rival one, which a `Map` held above could not prevent.
+          ///
+          /// `reason` is the command that needed it, and becomes the title: the strip says
+          /// `npm test` rather than `agent`, a better answer to "what is that terminal for"
+          /// than a label would be.
+          AgentTerminal : SandboxName -> string -> Async<Result<TerminalId, string>>
           /// Close a terminal. Rejected when it is not open.
           Close : TerminalId -> string -> Async<Result<unit, string>>
           /// Run one drained queue entry to completion, recording the block and streaming
@@ -732,6 +744,7 @@ module SessionTerminals =
     /// A session with no terminals: every operation refuses, nothing is ever open.
     let unavailable : SessionTerminals =
         { Open = fun _ _ _ -> async { return Error "this session has no environment" }
+          AgentTerminal = fun _ _ -> async { return Error "this session has no environment" }
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ _ -> async { return () }
           Reject = fun _ _ _ _ -> async { return () }
@@ -792,10 +805,19 @@ module SessionTerminals =
         // capability, so a session given no provider simply cannot attach one — rather than
         // carrying a client for a thing it will never talk to.
         (attach: AttachTerminal)
+        // How a terminal is set to run its queue unapproved (Plan 15, stage 2). The RULE —
+        // that the agent's own terminal is one — lives here with the terminals it governs;
+        // the gate register lives in the doc, which is the composition root's. So the
+        // decision is here and the write is injected, exactly like `onRecord`.
+        (setAutoRun: TerminalId -> unit)
         (openAtBoot: TerminalId list)
         : SessionTerminals =
 
         let live = Collections.Generic.Dictionary<string, LiveTerminal> ()
+        /// The agent's terminal in each sandbox, by sandbox name. Held here beside `live`
+        /// because it is a fact about which terminals exist, and a caller cannot ask for a
+        /// second one — `AgentTerminal` is the only way to name it.
+        let agentTerminals = Collections.Generic.Dictionary<string, TerminalId> ()
 
         /// The block a pty terminal is waiting on: what to call when its `D` mark lands, and
         /// the per-block output accounting the piped path keeps in locals. Keyed by terminal,
@@ -1258,7 +1280,7 @@ module SessionTerminals =
                     busy <- Set.add key busy
                     // The flip policy's input: if this command takes the alternate screen, its
                     // author is the person who now needs the keyboard.
-                    runningAuthor.[key] <- entry.Author
+                    runningAuthor.[key] <- Authority.author entry.Authority
                     let blockId = mintBlockId ()
                     // Taken BEFORE the command is written, which is forced by the anchor
                     // ordering below and is the honest reading anyway: on a pty the shell
@@ -1273,15 +1295,22 @@ module SessionTerminals =
                     // command that silently runs twice.
                     do!
                         appendAs
-                            entry.Author
+                            (Authority.author entry.Authority)
                             (SessionEvent.TerminalBlockStarted
                                 { TerminalId = terminalId
                                   BlockId = blockId
                                   QueueId = Some entry.QueueId
-                                  Author = entry.Author
-                                  ApprovedBy = entry.ApprovedBy |> Option.map PeerRef
+                                  // Carried from the queue entry onto the block, which is
+                                  // what lets the wake decide from the LOG alone: the entry
+                                  // is removed the moment this lands. The approval joins it
+                                  // HERE — a verdict register on the entry while people can
+                                  // still change it, part of the authority once it is what
+                                  // let the command run.
+                                  Authority =
+                                    entry.Authority |> Authority.approvedBy entry.ApprovedBy
                                   Command = command
-                                  FromSeq = fromSeq })
+                                  FromSeq = fromSeq
+                                  Background = entry.Background })
                     // Consumed: the durable fact exists, so the doc key can go. Between
                     // the append and this call the entry is in both places, which the
                     // drain answers by planning against the log-anchored `consumed` set
@@ -1579,7 +1608,7 @@ module SessionTerminals =
                                 { TerminalId = terminalId
                                   QueueId = entry.QueueId
                                   BlockId = mintBlockId ()
-                                  Author = entry.Author
+                                  Author = Authority.author entry.Authority
                                   RejectedBy = PeerRef by
                                   Command = command
                                   Reason = entry.RejectedReason })
@@ -1599,7 +1628,38 @@ module SessionTerminals =
                 leftOpen <- Set.empty
             }
 
+        /// One agent terminal PER SANDBOX (Plan 15, stage 2), keyed rather than single because
+        /// `execute_command` is the only door into a sandbox and a session has several: one
+        /// shared cell would quietly run a command meant for `test` in whichever sandbox
+        /// happened to be first.
+        ///
+        /// It opens in `AutoRun`, NOT the `ApproveAgent` default every other terminal has. If
+        /// it inherited that, the agent's one execution path would silently become an approval
+        /// prompt — a large change to autonomy smuggled in under a refactor. What the gate
+        /// gains instead is teeth: setting `ApproveAgent` on a terminal a human opened now
+        /// stops the agent, because there is no second door.
+        let agentTerminal (sandbox: SandboxName) (reason: string) : Async<Result<TerminalId, string>> =
+            async {
+                let key = SandboxName.value sandbox
+                match agentTerminals.TryGetValue key with
+                | true, id when isOpen id -> return Ok id
+                | _ ->
+                    let label = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
+                    // The sandbox is in the title when it is not the default one: several
+                    // terminals in a strip are navigable only if each says where it is.
+                    let title =
+                        if sandbox = SandboxName.defaultName then label
+                        else sprintf "[%s] %s" key label
+                    match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
+                    | Error reason -> return Error reason
+                    | Ok id ->
+                        agentTerminals.[key] <- id
+                        setAutoRun id
+                        return Ok id
+            }
+
         { Open = openTerminal
+          AgentTerminal = agentTerminal
           Close = closeTerminal
           RunBlock = runBlock
           Reject = reject
@@ -1666,9 +1726,16 @@ module TerminalScheduler =
 
     /// `initialConsumed` seeds the log-anchored exactly-once set from the durable log at
     /// boot — every `QueueId` a `TerminalBlockStarted` already names.
+    ///
+    /// `onBlockFinished` is told after each block's completion is durable. Taken as a seam
+    /// rather than reached for, because what the drain KNOWS is that a block finished; what
+    /// that is worth — the agent may be owed a turn it never asked for (Plan 20, stage 2) —
+    /// belongs to whoever composes this with an agent, and a terminal queue that knew about
+    /// turns would be the wrong thing knowing it.
     let create
         (doc: Yjs.Y.Doc)
         (terminals: SessionTerminals.SessionTerminals)
+        (onBlockFinished: unit -> unit)
         (initialConsumed: Set<string>)
         : TerminalScheduler =
 
@@ -1736,6 +1803,11 @@ module TerminalScheduler =
                             // The terminal is free again: whatever queued behind this
                             // command starts now.
                             drain ()
+                            // ...and the completion is in the log, which is the only place
+                            // the wake reads. Second, so a person's queued command has
+                            // already claimed the terminal before the agent is told anything
+                            // — the queue outranks a turn nobody asked for.
+                            onBlockFinished ()
                         })
 
         let reclaimIdleLeases () =
@@ -1781,14 +1853,17 @@ module TerminalCommands =
     type OnChanged = (unit -> unit) -> (unit -> unit)
 
     type TerminalCommands =
-        { Execute : ExecuteCommand
+        { /// Not `ExecuteCommand`: the agent-facing capability takes no authority argument,
+          /// and this takes the one the per-turn binding supplies. Two shapes because they
+          /// are two audiences — the tool surface must not be able to name a credential.
+          Execute : CommandTarget option -> string -> bool -> Authority -> Async<Result<TerminalCommandOutcome, string>>
           /// Resume a terminal handle. The terminal HALF of `CheckPending` (Plan 15, stage
           /// 3b): the Host joins it to the command gate's half, because a handle names a
           /// request without saying which kind, which is exactly what makes one tool enough.
           Read : QueueId -> Async<Result<TerminalCommandOutcome, string>> }
 
     let unavailable : TerminalCommands =
-        { Execute = fun _ _ -> async { return Error "this session has no terminals" }
+        { Execute = fun _ _ _ _ -> async { return Error "this session has no terminals" }
           Read = fun _ -> async { return Error "this session has no terminals" } }
 
     /// Wake on the next change, or on a short tick. The tick is a floor, not the mechanism:
@@ -1917,7 +1992,16 @@ module TerminalCommands =
                     return! awaitOutcome terminal handle startedAt runningSince
             }
 
-        let execute (requested: CommandTarget option) (command: string) : Async<Result<TerminalCommandOutcome, string>> =
+        let execute
+            (requested: CommandTarget option)
+            (command: string)
+            (background: bool)
+            // Who is behind it (Plan 20). Supplied by the per-turn binding rather than by the
+            // agent, for the reason the authority itself is: an acting party that could name
+            // its own is not gated by one. A value rather than a loose owner, so the binding
+            // cannot hand over an agent command with nobody's authority on it.
+            (authority: Authority)
+            : Async<Result<TerminalCommandOutcome, string>> =
             async {
                 let command = command.Trim ()
                 if command = "" then return Error "a command cannot be empty"
@@ -1945,10 +2029,26 @@ module TerminalCommands =
                             doc
                             handle
                             terminal
-                            ActorRef.Agent
+                            authority
                             (TerminalQueueOrder.nextFor terminal synced.Pending)
                             command
-                        return! awaitOutcome terminal handle (now ()) None
+                            background
+                        if not background then return! awaitOutcome terminal handle (now ()) None
+                        else
+                            // Answer with what is true NOW rather than waiting: the caller
+                            // said it is not waiting, and the outcome reaches it as a wake
+                            // and the digest that turn reads. Not "queued" as a fixed word,
+                            // because the honest answer differs — a refusal or a hold has
+                            // already happened by the time an `AutoRun` terminal drains, and
+                            // reporting those as "queued" is how a model concludes, after a
+                            // silence, that its command failed and tries something else.
+                            let observation = observe terminal handle
+                            let status =
+                                match TerminalCommandWait.step false false observation with
+                                | TerminalCommandWait.Return status -> status
+                                | TerminalCommandWait.Gone | TerminalCommandWait.KeepWaiting ->
+                                    TerminalCommandRunning
+                            return Ok (outcomeOf terminal handle status)
             }
 
         let read (handle: QueueId) : Async<Result<TerminalCommandOutcome, string>> =

@@ -32,6 +32,11 @@ module Dom =
     /// absence is the good deployment, exactly as with the Manager origin above.
     let ephemeralStorageMetaName = "yession-ephemeral-storage"
 
+    /// The attribute marking the replay player's deferred stylesheet in the head, so the
+    /// browser half can find it and turn it on (`Style.deferredHeadTags`, `Replay.mount`).
+    /// A hook rather than a selector spelled twice, for the same reason every other one is.
+    let playerStylesheetHook = "data-player-css"
+
     /// `data-*` hooks on the session client shell (`View`) and its browser delegation.
     module Hooks =
         // Header — the collaborative session title and its secondary id.
@@ -189,10 +194,11 @@ module Dom =
         /// tablist and a test asserting keyboard order should not have to know which is which.
         /// Its value is `PaneTab.key`.
         let paneTab = "data-pane-tab"
-        /// The close control on a tab a person opened. Terminal tabs have none: the strip
-        /// lists every terminal the session has, and "close" there already means something
-        /// else (`terminalClose`).
-        let paneTabClose = "data-pane-tab-close"
+        /// The pin on a tab (Plan 20, stage 1), carrying `PaneTab.key` and its state in
+        /// `aria-pressed`. It replaced a close control, and the difference is the point: this
+        /// one releases a tab and never ends anything, so the strip cannot destroy. Killing a
+        /// terminal is `terminalClose`, on its row in the list.
+        let paneTabPin = "data-pane-tab-pin"
         /// The pane's body, carrying the key of whatever it is showing.
         let panePanel = "data-pane-panel"
         /// A block's read-only view: its command line and everything it printed.
@@ -220,6 +226,28 @@ module Dom =
         /// How far behind live the rewound reader is, growing as the terminal keeps
         /// printing under them.
         let terminalBehind = "data-terminal-behind"
+        /// The terminal LIST (Plan 20, stage 0): every terminal the session has ever had,
+        /// and every verb one of them affords. The toggle carries `list`/`pane` — the face
+        /// it will show, so the browser can hand focus to whichever control replaces the one
+        /// just pressed, exactly as the nav and settings toggles do.
+        let terminalList = "data-terminal-list"
+        let terminalListToggle = "data-terminal-list-toggle"
+        /// One row, carrying its terminal's id — and the control that shows that terminal,
+        /// so a row is keyboard-operable by construction rather than by a handler on a div.
+        let terminalListRow = "data-terminal-list-row"
+        /// The rewind, on a row. Its own hook because the pane keeps a DVR rewind of its own
+        /// (`terminalRewind`) for the terminal it is showing, and the two are different
+        /// controls in different places — unlike the kill and the attach-again, which the
+        /// list is now the ONLY home of (Plan 20, stage 1) and which therefore keep the names
+        /// they have always had: `terminalClose`, `terminalReattach`.
+        ///
+        /// Every row verb is rendered ONLY where `TerminalAffordances` says it applies, so a
+        /// test asserting one is absent is asserting the fold, not a template's mood.
+        let terminalListRewind = "data-terminal-list-rewind"
+        /// A closed row whose recording the per-terminal cap ate. The stated gap, where a
+        /// play affordance would otherwise be — an audit trail's hole is said, never left to
+        /// look like a terminal that printed nothing.
+        let terminalListGone = "data-terminal-list-gone"
 
     /// Observable text/value tokens the session view emits (labels and status words that
     /// tests assert exactly — never free-text message bodies, which are model data).
@@ -264,6 +292,9 @@ module Dom =
         let degradedReconnecting = "reconnecting"
         // The reconnect offer's button (Plan 11).
         let reopenSession = "Reopen session"
+        /// Ask now rather than waiting out the supervised backoff (Plan 20). The wording is
+        /// what a person wants of it, not what it does to the loop.
+        let retryNow = "Try again"
         /// What every degraded state promises: this is a local-first client, so a lost leg
         /// costs sync, not the ability to work.
         let localFallback = "You can keep writing — everything is saved locally and syncs when the session is back."
@@ -273,11 +304,20 @@ module Dom =
         /// meantime. Everything already sent is safe; it is on the server.
         let localFallbackEphemeral =
             "You can keep writing, but this session reopens at a new address — anything written here while it is away will not come back with it."
+        /// Why this client is keeping no history (Plan 20). The Cache API needs a secure
+        /// context; a session reached over plain HTTP at a non-loopback address has none, so
+        /// nothing is kept and — without this — nothing says why, which is indistinguishable
+        /// from a bug. The remedy is the operator's, and it is one flag, so name it.
+        let historyNotKept =
+            "History is not kept on this device: this session is served over plain HTTP, and a browser "
+            + "withholds storage of this kind outside a secure context. Serving it over HTTPS restores it."
         /// What the composer's keys do, shown in the composer while you are in it. Enter is
         /// the send because that is what every chat surface's Enter is; what it used to do
         /// did not disappear, it split in two — a line break and a paragraph, which Enter
         /// alone could never tell apart.
         let composerKeys = "Enter sends · Shift+Enter line · Alt+Enter paragraph"
+        /// What the timeline's pulse means, for a reader who cannot see it pulse (Plan 20).
+        let readingHistory = "Reading this session's history"
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.
@@ -309,6 +349,17 @@ module Dom =
         /// when a person finishes a task, this one when somebody repairs the terminal.
         let queuedAwaitingIntegration = "awaiting-integration"
         let system = "system"
+        /// Why a turn nobody asked for exists (Plan 20, stage 2). The token a test reads off
+        /// `data-message-woke`; the word beside it on screen is `turnWoke`.
+        let wokeCommandFinished = "command-finished"
+        /// What a woken turn wears in the chat, in the slot its siblings — *streaming*,
+        /// *interrupted* — already occupy. A word rather than a new glyph: this design says
+        /// a message's state in one lowercase word, and a mark nobody can decode without a
+        /// tooltip would be a worse semantic than the vocabulary the surface already has.
+        let turnWoke = "woke"
+        /// The same fact, at length, for the reader who wants it. Never the visible label:
+        /// the chat's meta line is three short words wide.
+        let turnWokeCommandFinished = "The agent picked this up on its own: a command it left running in the background finished."
         // Conversation item status.
         let complete = "complete"
         let streaming = "streaming"

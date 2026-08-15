@@ -84,22 +84,20 @@ type PendingAct =
     { QueueId  : QueueId
       /// What the gate is about — which terminal, or which command.
       Subject  : GateSubject
-      /// Who proposed the act. Decides whether the subject's mode demands an approval;
-      /// never changed by an edit, because "who asked for this" is not editable.
-      Author   : ActorRef
+      /// Who proposed the act, and whose authority it would run on (Plan 20). Neither is
+      /// changed by an edit, because "who asked for this" is not editable — and the pair is
+      /// one value so that an agent-proposed act without an owner cannot be written.
+      ///
+      /// No approver on it yet: the verdict registers below are what peers WRITE, and the
+      /// approval becomes part of the authority at the moment of acting, where the drain
+      /// stamps it onto the block it mints.
+      Authority : Authority
       /// A fractional index within its subject's queue — one register write to reorder.
       /// Meaningful where something drains serially (a terminal has one stdin); harmless
       /// where nothing does.
       Order    : float
       /// What is being proposed.
       Payload  : PendingPayload
-      /// Whose credential the act runs on, when that is not the author's own. The
-      /// `SandboxCaller`/`RepoCaller` split, written down: for an agent-issued command the
-      /// AGENT is the acting party and the credential is the turn human's (Plan 08 — no
-      /// borrowing, and an agent has no scope of its own). Recorded here because a restart
-      /// has no turn to ask, and an act resumed against the wrong credential is worse than
-      /// one that does not resume.
-      OnBehalfOf : ActorRef option
       /// The peer who approved it, if one has. Whether an approval is REQUIRED is not
       /// stored: it is computed from the subject's mode and `Author` at the moment of
       /// acting (`ApprovalMode.requiresApproval`), so changing the mode re-decides every
@@ -116,7 +114,16 @@ type PendingAct =
       RejectedBy : PeerId option
       /// Why it was refused, when the peer said. Optional because "no" is a complete
       /// answer; the reason is what makes it a useful one.
-      RejectedReason : string option }
+      RejectedReason : string option
+      /// Whether the author asked for this to run WITHOUT holding their turn open (Plan 20,
+      /// stage 2). Only an agent sets it — a person's composer never waits on anything —
+      /// and it rides the queue entry because the drain is what reads the doc and mints the
+      /// block that records it.
+      ///
+      /// It changes nothing about what runs or who may approve it: a background command is
+      /// queued, editable and refusable exactly as every other one is. What it changes is
+      /// who is waiting, which is why it is here and not in the payload.
+      Background : bool }
 
 module PendingAct =
 

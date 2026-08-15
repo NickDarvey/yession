@@ -155,13 +155,13 @@ let private approvalTests =
 let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order: float) (approved: PeerId option) =
     { QueueId = queue id
       Subject = ForTerminal terminal
-      Author = author
+      Authority = Authority.ofAuthor author
       Order = order
       Payload = CommandLine
-      OnBehalfOf = None
       ApprovedBy = approved
       RejectedBy = None
-      RejectedReason = None }
+      RejectedReason = None
+      Background = false }
 
 /// The same entry, refused. Kept beside `entry` so a test says which of the two verdicts
 /// it is exercising rather than threading a `None` through every call that is not about
@@ -246,10 +246,10 @@ let private drainTests =
                     { TerminalId = terminalA
                       BlockId = block "1"
                       QueueId = Some (queue "a1")
-                      Author = PeerRef ada
-                      ApprovedBy = None
+                      Authority = Authority.ofAuthor (PeerRef ada)
                       Command = "ls"
-                      FromSeq = 0 }
+                      FromSeq = 0
+                      Background = false }
             Expect.equal (TerminalQueueDrain.consumedOf started) (Some "q-a1") "a started block consumes its entry"
             Expect.equal
                 (TerminalQueueDrain.consumedOf (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "x" }))
@@ -267,10 +267,10 @@ let private started (id: TerminalId) (b: string) (command: string) (fromSeq: int
         { TerminalId = id
           BlockId = block b
           QueueId = None
-          Author = PeerRef ada
-          ApprovedBy = None
+          Authority = Authority.ofAuthor (PeerRef ada)
           Command = command
-          FromSeq = fromSeq }
+          FromSeq = fromSeq
+          Background = false }
 
 let private completed (id: TerminalId) (b: string) (result: CommandResult) (toSeq: int) =
     SessionEvent.TerminalBlockCompleted { TerminalId = id; BlockId = block b; Result = result; ToSeq = toSeq }
@@ -581,10 +581,10 @@ let private rejectionTests =
                     { TerminalId = terminalA
                       BlockId = block "1"
                       QueueId = Some (queue "a1")
-                      Author = ActorRef.Agent
-                      ApprovedBy = None
+                      Authority = Authority.agentFor (PeerRef ada)
                       Command = "make"
-                      FromSeq = 0 }
+                      FromSeq = 0
+                      Background = false }
             let rejection = rejectedEvent terminalA "a1" "2" bob None
             for winner in [ started; rejection ] do
                 let consumed =
@@ -606,8 +606,11 @@ let private rejectionTests =
             Expect.equal (view.Blocks |> List.map (fun b -> b.Command)) [ "make"; "rm -rf /" ] "beside what did run"
             let refusal = view.Blocks |> List.last
             Expect.equal refusal.Status (BlockRejected (PeerRef bob, Some "not on prod")) "named, with the reason"
-            Expect.equal refusal.Author ActorRef.Agent "and whose command it was"
-            Expect.equal refusal.ApprovedBy None "nobody approved it — someone did the opposite"
+            Expect.equal (Authority.author refusal.Authority) ActorRef.Agent "and whose command it was"
+            Expect.equal
+                (Authority.approver refusal.Authority)
+                None
+                "nobody approved it — someone did the opposite"
             Expect.equal (refusal.FromSeq, refusal.ToSeq) (0, Some 0) "an empty range, because it produced nothing"
 
         testCase "the rejection fold is idempotent, so overlapping pages are safe" <| fun () ->
@@ -747,7 +750,7 @@ let private retentionTests =
                 (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.IsOpen))
                 (Some false)
                 "the terminal is closed"
-            Expect.isSome (store.ReadChunk terminalA 0) "and its recording is still served"
+            Expect.isSome (store.BoundsAfter terminalA None) "and its recording is still served"
             Expect.equal
                 (store.ReadRange terminalA 0 None |> List.map (fun r -> r.Data))
                 [ "still here" ]
@@ -975,9 +978,9 @@ let private leaseGateTests =
 let private blockOf (status: TerminalBlockStatus) : TerminalBlock =
     { BlockId = block "1"
       QueueId = Some (queue "a1")
-      Author = ActorRef.Agent
-      ApprovedBy = None
+      Authority = Authority.agentFor (PeerRef ada)
       Command = "make"
+      Background = false
       FromSeq = 0
       ToSeq = None
       Status = status }
@@ -1125,7 +1128,7 @@ let private leaseCommandTests =
 let private turnStarted (n: string) =
     SessionEvent.AgentTurnStarted
         { AgentTurnId = AgentTurnId.create ("t-" + n) |> expect
-          TriggeredByMessageId = MessageId.create ("m-" + n) |> expect }
+          TriggeredByMessageId = Some (MessageId.create ("m-" + n) |> expect); Woke = None }
 
 /// A reader that answers from a per-terminal string, so the digest's own slicing is what
 /// is under test rather than a transcript store's.
@@ -1176,10 +1179,10 @@ let private digestTests =
                       { TerminalId = terminalA
                         BlockId = block "1"
                         QueueId = None
-                        Author = ActorRef.Agent
-                        ApprovedBy = Some (PeerRef bob)
+                        Authority = Authority.agentFor (PeerRef ada) |> Authority.approvedBy (Some bob)
                         Command = "rm -rf build"
-                        FromSeq = 0 }
+                        FromSeq = 0
+                        Background = false }
                   completed terminalA "1" (CommandSucceeded 0) 3 ]
             let entry = (digestOf events).Head
             Expect.equal entry.Author ActorRef.Agent "the agent's own command"
@@ -1288,15 +1291,55 @@ let private ansiTests =
 
 // --- The transcript ---------------------------------------------------------------------
 
+/// An in-memory transcript of `records` output lines, plus the header at line 0 — the setup
+/// the cursor cases share. Hoisted rather than repeated, because it is the ARRANGEMENT that
+/// is common to them; what each one asserts is its own.
+let private recorded (records: int) : Yession.Host.TranscriptStore.TranscriptStore =
+    let store = Yession.Host.TranscriptStore.inMemory ()
+    let transcript = store.Open terminalA { Width = 80; Height = 24; Timestamp = 0L }
+    for i in 1 .. records do
+        transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = string i } |> ignore
+    store
+
 let private transcriptTests =
     testList "Transcript" [
-        testCase "chunk bounds are fixed, so a full chunk is immutable" <| fun () ->
-            Expect.equal (TranscriptChunk.indexOf 0) 0 "line 0 is in chunk 0"
-            Expect.equal (TranscriptChunk.indexOf (TranscriptChunk.size - 1)) 0 "and so is the last of chunk 0"
-            Expect.equal (TranscriptChunk.indexOf TranscriptChunk.size) 1 "the next line starts chunk 1"
-            Expect.equal (TranscriptChunk.firstSeq 2) (TranscriptChunk.size * 2) "chunk starts are exact multiples"
-            Expect.isTrue ((TranscriptChunk.cacheControl true).Contains "immutable") "a full chunk caches hard"
-            Expect.equal (TranscriptChunk.cacheControl false) "no-store" "the growing tail never does"
+        // Plan 22. A client numbers an answer from what it ASKED, because a transcript line
+        // cannot carry its own index — the file is an asciicast, and a private index field in
+        // it would stop it being one. So the four cases below are the whole contract that
+        // numbering rests on, and each is pinned alone.
+        testCase "the answer to a cursor begins one line past it" <| fun () ->
+            let store = recorded 10
+            Expect.equal
+                (store.BoundsAfter terminalA (Some 4) |> Option.map fst)
+                (Some 5)
+                "a client sitting at line 4 is answered from line 5"
+
+        testCase "a cursor with no position is answered from the very start" <| fun () ->
+            // Which is what puts the asciicast header — line 0, and nowhere else — in the
+            // first answer, and so in the store of a client that has never read this before.
+            let store = recorded 10
+            Expect.equal
+                (store.BoundsAfter terminalA None |> Option.map fst)
+                (Some 0)
+                "and line 0 is the header"
+
+        testCase "a cursor at the tail asks for nothing rather than for an empty range" <| fun () ->
+            // An empty range would be an address a client keeps for ever, and "nothing yet"
+            // is exactly the thing that stops being true. `None` here is the `204`.
+            let store = recorded 10
+            Expect.equal
+                (store.BoundsAfter terminalA (Some 10)) // the header plus ten records
+                None
+                "a client that has read every line is told to keep its cursor"
+
+        testCase "a range the transcript has not reached is no answer at all" <| fun () ->
+            // Answering short would put a partial answer at an address that named the whole
+            // range — and the client keeps what it is given, for ever.
+            let store = recorded 10
+            Expect.equal
+                (store.ReadLines terminalA 0 99)
+                None
+                "the address promised a hundred lines and the transcript has eleven"
 
         testCase "keyframes live in a SIDECAR, and survive the process that wrote them" <| fun () ->
             // Plan 14, stage 3. Never in the `.cast`: Plan 13 bought a standard, replayable
@@ -1348,7 +1391,7 @@ let private transcriptTests =
         // This drives the real route end to end — write through the store, read the chunks a
         // client reads, decode them as a client decodes them, rebuild — and compares against
         // the recording on disk byte for byte.
-        testCase "a replay rebuilt from fetched chunks IS the recording on disk" <| fun () ->
+        testCase "a replay rebuilt from fetched answers IS the recording on disk" <| fun () ->
             let dir = sprintf "tests/Yession.Tests/out/.data/replay-%s" (string (System.Guid.NewGuid ()))
             let store = Yession.Host.TranscriptStore.openStore dir
             let header = { Width = 120; Height = 40; Timestamp = 1754092800L }
@@ -1360,10 +1403,14 @@ let private transcriptTests =
                   { At = 0.3; Kind = TranscriptResize; Data = "100x30" } ] do
                 transcript.Append record |> ignore
             // What a client holds after fetching: decoded lines, keyed by sequence number.
-            let lines, _ = store.ReadChunk terminalA 0 |> Option.defaultWith (fun () -> failwith "no chunk 0")
+            let first, last =
+                store.BoundsAfter terminalA None |> Option.defaultWith (fun () -> failwith "no lines")
+            let lines =
+                store.ReadLines terminalA first last
+                |> Option.defaultWith (fun () -> failwith "the bounds named lines the store would not read")
             let decoded =
                 lines
-                |> List.mapi (fun i line -> i, Codec.fromString Codec.transcriptLine line)
+                |> List.mapi (fun i line -> first + i, Codec.fromString Codec.transcriptLine line)
                 |> List.choose (fun (seq, line) ->
                     match line with
                     | Ok (TranscriptRecordLine record) -> Some (seq, record)
@@ -1404,10 +1451,10 @@ let private codecTests =
                       { TerminalId = terminalA
                         BlockId = block "1"
                         QueueId = Some (queue "a1")
-                        Author = ActorRef.Agent
-                        ApprovedBy = Some (PeerRef ada)
+                        Authority = Authority.agentFor (PeerRef bob) |> Authority.approvedBy (Some ada)
                         Command = "ls -la"
-                        FromSeq = 3 }
+                        FromSeq = 3
+                        Background = false }
                   completed terminalA "1" CommandTimedOut 9
                   SessionEvent.TerminalTranscriptTruncated
                       { TerminalId = terminalA; BlockId = None; DroppedBytes = 17 }
@@ -1428,6 +1475,41 @@ let private codecTests =
             for event in events do
                 let encoded = Codec.toString Codec.sessionEvent event
                 Expect.equal (Codec.fromString Codec.sessionEvent encoded) (Ok event) ("round-trips: " + encoded)
+
+        // A round-trip cannot see this: nesting the three parties under one key would
+        // round-trip perfectly and make every block ever written unreadable. An event log is
+        // read back for the life of its session, so where the keys SIT is the contract, and
+        // moving the value into `Authority` (Plan 20) had to leave it exactly where it was.
+        testCase "a block's parties stay top-level keys on the wire" <| fun () ->
+            let encoded =
+                SessionEvent.TerminalBlockStarted
+                    { TerminalId = terminalA
+                      BlockId = block "1"
+                      QueueId = Some (queue "a1")
+                      Authority = Authority.agentFor (PeerRef bob) |> Authority.approvedBy (Some ada)
+                      Command = "ls -la"
+                      FromSeq = 3
+                      Background = false }
+                |> Codec.toString Codec.sessionEvent
+            for key in [ "\"author\""; "\"approvedBy\""; "\"onBehalfOf\"" ] do
+                Expect.isTrue (encoded.Contains key) (sprintf "%s is still written: %s" key encoded)
+            Expect.isFalse (encoded.Contains "\"authority\"") "and the F# shape did not reach the wire"
+
+        testCase "a block written before Plan 20 still decodes" <| fun () ->
+            // No `onBehalfOf` and no `background`: what every block in an existing log looks
+            // like. A `Required` field for either would make those pages undecodable, which
+            // is a session that will not open.
+            let old =
+                """{"type":"terminalBlockStarted","payload":{"terminalId":"term-a","blockId":"blk-1","""
+                + """"queueId":null,"author":{"kind":"agent"},"approvedBy":null,"command":"ls","fromSeq":0}}"""
+            match Codec.fromString Codec.sessionEvent old with
+            | Ok (SessionEvent.TerminalBlockStarted decoded) ->
+                Expect.isFalse decoded.Background "it ran in the foreground, which is what its absence means"
+                Expect.equal
+                    (Authority.onBehalfOf decoded.Authority)
+                    None
+                    "and it borrowed nobody's authority, which is what that absence means"
+            | other -> failwithf "a pre-Plan-20 block must still read back, got %A" other
 
         testCase "terminal frames round-trip over the session transport" <| fun () ->
             let codec = Codec.sessionFrame Codec.string
@@ -1611,7 +1693,7 @@ let private mintFrom (ids: string list) =
         if remaining.Count > 1 then remaining.RemoveAt 0
         next
 
-let private makeTerminalsWith attach (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
+let private makeTerminalsGated attach setAutoRun (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
     let mintTerminal = mintFrom [ "term-a"; "term-b" ]
     let mintBlock = mintFrom [ "b-1"; "b-2"; "b-3" ]
     let records = ResizeArray<TerminalId * int * TranscriptRecord> ()
@@ -1640,8 +1722,14 @@ let private makeTerminalsWith attach (log: EventLog<SessionEvent>) environment o
             // while making every manager assertion depend on it.
             ignore
             attach
+            setAutoRun
             openAtBoot
     terminals, records
+
+/// No doc in these fixtures, so nowhere to write a gate. A case that cares about WHICH
+/// terminals the manager asks to run unapproved passes a recorder instead.
+let private makeTerminalsWith attach log environment openTranscript readTranscript openAtBoot =
+    makeTerminalsGated attach ignore log environment openTranscript readTranscript openAtBoot
 
 let private makeTerminals log environment openTranscript readTranscript openAtBoot =
     makeTerminalsWith AttachTerminal.unavailable log environment openTranscript readTranscript openAtBoot
@@ -1777,8 +1865,14 @@ let private managerTests =
                 let! events = eventsOf log
                 let startedEvent =
                     events |> List.pick (function SessionEvent.TerminalBlockStarted e -> Some e | _ -> None)
-                Expect.equal startedEvent.Author ActorRef.Agent "the agent wrote it"
-                Expect.equal startedEvent.ApprovedBy (Some (PeerRef bob)) "and bob approved it"
+                Expect.equal
+                    (Authority.author startedEvent.Authority)
+                    ActorRef.Agent
+                    "the agent wrote it"
+                Expect.equal
+                    (Authority.approver startedEvent.Authority)
+                    (Some (PeerRef bob))
+                    "and bob approved it"
             }
 
         testCaseAsync "runaway output is capped, and the gap is stated rather than hidden" <|
@@ -1848,9 +1942,9 @@ let private schedulerTests =
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
-                let scheduler = TerminalScheduler.create doc terminals Set.empty
+                let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
                 // Queued exactly as the agent's capability queues one — same doc write.
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (PeerRef ada) 1.0 "echo ok"
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.ofAuthor (PeerRef ada)) 1.0 "echo ok" false
                 scheduler.Drain ()
                 do! Async.Sleep 20
 
@@ -1871,8 +1965,8 @@ let private schedulerTests =
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
-                let scheduler = TerminalScheduler.create doc terminals Set.empty
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id ActorRef.Agent 1.0 "rm -rf /"
+                let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.agentFor (PeerRef ada)) 1.0 "rm -rf /" false
                 scheduler.Drain ()
                 do! Async.Sleep 20
                 Expect.isEmpty (List.ofSeq spawned) "nothing ran"
@@ -1905,8 +1999,8 @@ let private schedulerTests =
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 // The crash window: a block start reached the log, the doc removal did not.
-                let scheduler = TerminalScheduler.create doc terminals (Set.singleton "q-a1")
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (PeerRef ada) 1.0 "make"
+                let scheduler = TerminalScheduler.create doc terminals ignore (Set.singleton "q-a1")
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.ofAuthor (PeerRef ada)) 1.0 "make" false
                 scheduler.Drain ()
                 do! Async.Sleep 20
                 Expect.isEmpty (List.ofSeq spawned) "it does not run a second time"
@@ -1921,12 +2015,15 @@ let private syncTests =
     testList "Terminal collaborative state" [
         testCase "a terminal queue entry survives a doc round-trip" <| fun () ->
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 3.0 "git status"
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 3.0 "git status" false
             let synced = syncedOf doc
             let entry = synced.Pending |> Map.find (queue "a1")
             Expect.equal entry.Subject (ForTerminal terminalA) "the subject names its terminal"
             Expect.equal entry.Payload CommandLine "and its payload is an editable command line"
-            Expect.equal entry.Author ActorRef.Agent "the author, as an actor rather than a peer"
+            Expect.equal
+                (Authority.author entry.Authority)
+                ActorRef.Agent
+                "the author, as an actor rather than a peer"
             Expect.equal entry.Order 3.0 "the order"
             Expect.equal entry.ApprovedBy None "and never pre-approved"
             Expect.equal (SyncedStateSync.terminalQueuedText doc (queue "a1")) "git status" "with its command text"
@@ -1934,7 +2031,7 @@ let private syncTests =
         testCase "an unreadable approval reads as NOT approved" <| fun () ->
             // Fail closed: a value we cannot read must never release an agent's command.
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 1.0 "x"
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 1.0 "x" false
             setQueuedFieldInDoc doc (queue "a1") "approvedBy" "   "
             let synced = syncedOf doc
             Expect.equal (synced.Pending |> Map.find (queue "a1")).ApprovedBy None "blank is not an approval"
@@ -1972,7 +2069,7 @@ let private syncTests =
             let entry = synced.Pending |> Map.find (queue "a1")
             Expect.equal entry.Subject (ForTerminal terminalA) "the entry names the terminal it named before"
             Expect.equal entry.Payload CommandLine "as the only payload kind that existed then"
-            Expect.equal entry.Author ActorRef.Agent "with its author"
+            Expect.equal (Authority.author entry.Authority) ActorRef.Agent "with its author"
             Expect.equal entry.Order 3.0 "and its place in the queue"
             Expect.equal (SyncedSessionState.modeOf terminalA synced) ApproveAll "the stricter mode survives"
             // Exactly one live location afterwards, never two that can disagree.
@@ -1980,7 +2077,7 @@ let private syncTests =
 
         testCase "migrating a doc that was never legacy does nothing" <| fun () ->
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA ActorRef.Agent 1.0 "git status"
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 1.0 "git status" false
             Expect.equal (SyncedStateSync.migrateGateRoots doc) (0, 0) "no legacy roots, no work"
             Expect.equal (Map.count (syncedOf doc).Pending) 1 "and the entry it did have is untouched"
     ]
@@ -2118,10 +2215,29 @@ let private sourceTests =
                 Expect.isFalse (terminals.Input id ActorRef.Agent "more") "and the agent stops being able to type"
             }
 
-        // The agent's eyes on a source with no blocks (Plan 19). It answers from the same
-        // transcript the panel renders, and it is refused where blocks already answer —
-        // which is the whole of the rule, so both halves are asserted together.
-        testCaseAsync "a live-only terminal reads back what it said; a shell sends you to its blocks" <|
+        // The agent's eyes on a source with no blocks (Plan 19): it answers from the same
+        // transcript the panel renders.
+        testCaseAsync "a live-only terminal reads back what it said" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+
+                match! terminals.Tail (expect device) with
+                | Error e -> failwithf "a device has nothing but its transcript to read: %s" e
+                | Ok tail ->
+                    // `loopback` greets with "ready\n" on attach, so there is something to read
+                    // without typing at it first.
+                    Expect.stringContains tail.Text "ready" "what the stream said comes back"
+                    Expect.equal tail.Elided 0 "and nothing was left out of a short one"
+            }
+
+        // The recording outlives the terminal — and so does the reason it is readable at all,
+        // which is that its source was never instrumented.
+        testCaseAsync "a closed terminal still reads back, because its recording outlived it" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
@@ -2130,25 +2246,23 @@ let private sourceTests =
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = expect device
-
-                match! terminals.Tail id with
-                | Error e -> failwithf "a device has nothing but its transcript to read: %s" e
-                | Ok tail ->
-                    // `loopback` greets with "ready\n" on attach, so there is something to read
-                    // without typing at it first.
-                    Expect.stringContains tail.Text "ready" "what the stream said comes back"
-                    Expect.equal tail.Elided 0 "and nothing was left out of a short one"
-
-                // Still readable once the stream has ended: a recording outlives the terminal,
-                // and the reason it is readable — the source was never instrumented — outlives
-                // it too.
                 let! closed = terminals.Close id "the device went away"
                 Expect.isOk closed "the terminal closes"
+
                 match! terminals.Tail id with
                 | Error e -> failwithf "a closed device still has a recording: %s" e
                 | Ok tail -> Expect.stringContains tail.Text "ready" "and it still reads"
+            }
 
+        testCaseAsync "reading a terminal that runs blocks is refused, and says where the answer is" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+
                 match! terminals.Tail (expect shell) with
                 | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
                 | Error reason -> Expect.stringContains reason "execute_command" "and it says where the answer is"
@@ -2170,8 +2284,140 @@ let private sourceTests =
             }
     ]
 
+// --- What a terminal's state affords (Plan 20, stage 0) -------------------------------------
+
+/// A terminal in whatever state a case is about. Written out rather than folded from events
+/// because these tests are about the RULE, and building each state through the projection
+/// would make them tests of the projection with the rule as an afterthought.
+let private viewOf (isOpen: bool) (renewable: bool) : TerminalView =
+    { TerminalId = terminalA
+      Title = "build"
+      OpenedBy = PeerRef ada
+      Sandbox = Some SandboxName.defaultName
+      Renewable = renewable
+      IsOpen = isOpen
+      ClosedReason = (if isOpen then None else Some "closed by nick")
+      Lease = None
+      IntegrationLost = false
+      Blocks = []
+      DroppedBytes = 0 }
+
+let private affordanceTests =
+    testList "What a terminal affords (Plan 20, stage 0)" [
+
+        // Each of these is a BICONDITIONAL, and both halves are the invariant: a verb offered
+        // where it works and absent everywhere else. Asserting only the presence would leave a
+        // fold that returns `true` always looking correct, which is the failure mode a
+        // loosened test reads as coverage for.
+
+        testCase "the kill is offered exactly while the terminal is open" <| fun () ->
+            let afforded (view: TerminalView) = (TerminalAffordances.ofView true view).CanKill
+            Expect.isTrue (afforded (viewOf true false)) "a running terminal can be killed"
+            Expect.isFalse (afforded (viewOf false false)) "a closed one has nothing left to kill"
+
+        testCase "the rewind is offered exactly while a live terminal has something recorded" <| fun () ->
+            let afforded recorded view = (TerminalAffordances.ofView recorded view).CanRewind
+            Expect.isTrue (afforded true (viewOf true false)) "live, and there is something behind it"
+            Expect.isFalse (afforded false (viewOf true false)) "a DVR with nothing recorded has nothing to do"
+            Expect.isFalse (afforded true (viewOf false false)) "and a closed terminal is replayed, not rewound"
+
+        testCase "the replay is offered exactly where a closed terminal's recording survives" <| fun () ->
+            let afforded recorded view = (TerminalAffordances.ofView recorded view).CanReplay
+            Expect.isTrue (afforded true (viewOf false false)) "closed, with its recording"
+            // The stated gap: the per-terminal cap ate it. Offering a player over nothing
+            // would be indistinguishable from a terminal that printed nothing.
+            Expect.isFalse (afforded false (viewOf false false)) "closed, with nothing kept"
+            Expect.isFalse (afforded true (viewOf true false)) "and a live terminal is not a recording yet"
+
+        testCase "attaching again is offered exactly on a closed stream whose provider allows it" <| fun () ->
+            let afforded (view: TerminalView) = (TerminalAffordances.ofView true view).CanReattach
+            Expect.isTrue (afforded (viewOf false true)) "closed, and asking again is safe"
+            Expect.isFalse (afforded (viewOf false false)) "a shell terminal has no provider to ask"
+            Expect.isFalse (afforded (viewOf true true)) "and a stream still running needs no second one"
+
+        // Not gated on the recording, and that is the point of asking the PROVIDER rather
+        // than the store: a device is still on the other end of a stream whose recording the
+        // cap ate, and refusing the way back because the RECORD is gone answers a question
+        // nobody asked.
+        testCase "attaching again survives a recording the cap ate" <| fun () ->
+            Expect.isTrue
+                ((TerminalAffordances.ofView false (viewOf false true)).CanReattach)
+                "the way back is about the stream, not about what was kept of it"
+    ]
+
+// The agent's own terminal (Plan 15, stage 2), as a rule the manager owns rather than one the
+// composition root remembered. It used to be a `Map` in `Host.fs`; nothing below could be
+// asserted without building a whole session.
+let private agentTerminalTests =
+    testList "The agent's terminal" [
+
+        testCaseAsync "asking twice in one sandbox gets the same terminal" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! again = terminals.AgentTerminal SandboxName.defaultName "npm run build"
+                Expect.equal again first "the second command lands in the shell the first one used"
+            }
+
+        testCaseAsync "each sandbox gets its own" <|
+            async {
+                // The reason it is keyed at all: `execute_command` is the only door into a
+                // sandbox, and one shared cell would run a command meant for `test` in
+                // whichever sandbox happened to be first.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let other = SandboxName.create "test" |> expect
+                let! default' = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! test = terminals.AgentTerminal other "npm test"
+                Expect.notEqual test default' "a command for `test` cannot land in `default`"
+            }
+
+        testCaseAsync "a closed one is replaced rather than handed back" <|
+            async {
+                // A terminal is a process; a closed one has none. Handing back the dead id
+                // would make the next command fail in a way that reads as the command's fault.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let id = first |> expect
+                let! _ = terminals.Close id "closed by a peer"
+                let! next = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                Expect.notEqual next first "a fresh terminal, because the old one has no process"
+            }
+
+        testCaseAsync "it runs its queue unapproved, and a terminal a person opened does not" <|
+            async {
+                // Plan 15's autonomy line. If the agent's terminal inherited the
+                // `ApproveAgent` default, the agent's one execution path would silently become
+                // an approval prompt for every command.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let unapproved = ResizeArray<TerminalId> ()
+                let terminals, _ =
+                    makeTerminalsGated
+                        AttachTerminal.unavailable unapproved.Add log environment openTranscript readTranscript []
+                let! peers = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let peerTerminal = peers |> expect
+                let! agents = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let agentTerminal = agents |> expect
+                Expect.equal (List.ofSeq unapproved) [ agentTerminal ] "only the agent's own runs unapproved"
+                Expect.isFalse
+                    (unapproved.Contains peerTerminal)
+                    "a terminal a person opened keeps the approval default, which is what gives the gate teeth"
+            }
+    ]
+
 let tests =
     testList "Terminals (Plan 13)" [
+        affordanceTests
         sourceTests
         approvalTests
         drainTests
@@ -2190,6 +2436,7 @@ let tests =
         digestTests
         ansiTests
         transcriptTests
+        agentTerminalTests
         codecTests
         orderTests
         managerTests

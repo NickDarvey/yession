@@ -36,11 +36,14 @@ module private ToolArgs =
     /// `execute_command`'s pair: the line to run, and which named sandbox to run it in.
     /// An absent or empty `sandbox` is the default one, which is what the optional
     /// parameter degrades to.
-    let commandSandbox (json: string) : Result<string * string, string> =
+    /// `execute_command`'s three: the line, where to run it, and whether the caller intends
+    /// to wait for it (Plan 20, stage 2).
+    let commandSandbox (json: string) : Result<string * string * bool, string> =
         read
             (Decode.object (fun get ->
                 get.Required.Field "command" Decode.string,
-                get.Optional.Field "sandbox" Decode.string |> Option.defaultValue ""))
+                get.Optional.Field "sandbox" Decode.string |> Option.defaultValue "",
+                get.Optional.Field "background" Decode.bool |> Option.defaultValue false))
             json
 
     /// `start_work_sandbox`'s pair: the sandbox name, and the credentials to forward.
@@ -149,7 +152,7 @@ module AgentTools =
 
     // The two verbs that produce a BLOCK say so, because the tool-use record needs to know
     // — a call that became a block draws no chip of its own, and only the call can tell.
-    let private executeCommand (capabilities: AgentCapabilities) (command: string) (sandbox: string) : Async<ToolAnswer> =
+    let private executeCommand (capabilities: AgentCapabilities) (command: string) (sandbox: string) (background: bool) : Async<ToolAnswer> =
         async {
             let target =
                 if sandbox = "" then Ok None
@@ -157,7 +160,7 @@ module AgentTools =
             match target with
             | Error e -> return ToolAnswer.text (sprintf "not a sandbox name: %s" e)
             | Ok target ->
-                match! capabilities.ExecuteCommand target command with
+                match! capabilities.ExecuteCommand target command background with
                 | Ok outcome -> return { Text = renderOutcome outcome; Block = outcome.Block; Stream = None }
                 | Error reason -> return ToolAnswer.text (sprintf "could not run the command: %s" reason)
         }
@@ -181,6 +184,17 @@ module AgentTools =
                     outcome.Summary
                     (QueueId.value handle)
             | None -> sprintf "WAITING FOR A HUMAN TO APPROVE `%s`. It has NOT happened." outcome.Summary
+        // Nobody is being waited for here, and saying otherwise is the failure this case
+        // exists to end: an agent told to go and get an approval for something that is
+        // already running asks a person for a decision they were never offered.
+        | CommandRunning ->
+            match outcome.Handle with
+            | Some handle ->
+                sprintf
+                    "STILL RUNNING: `%s` was approved or needed no approval, and has not finished. Nothing was cancelled and nobody is waiting on you. Call check_pending with handle '%s' to pick it up."
+                    outcome.Summary
+                    (QueueId.value handle)
+            | None -> sprintf "STILL RUNNING: `%s` has not finished. Nothing was cancelled." outcome.Summary
         | CommandRefusedBy (by, reason) ->
             let who = ActorRef.token by
             match reason with
@@ -341,12 +355,17 @@ module AgentTools =
             "execute_command"
             "Run a shell command in one of this session's terminals, where the people in the session can see it, edit it, and — depending on the terminal — approve it before it runs. This is the only way to run anything. Pass `sandbox` to run in a named work sandbox (start_work_sandbox creates one); omit it for the default sandbox, which is where everything runs unless you say otherwise. It waits for the result and returns the exit code and output; if it is waiting on a person, or the terminal is busy, or the command is still going, it says so and returns a handle for check_pending instead of hanging. Read what it returns: every answer states which of those happened."
             [ ToolField.required "command" "string" "the shell command line to run, e.g. \"npm test -- --watch=false\""
-              ToolField.optional "sandbox" "string" "the work sandbox to run in, e.g. \"test\"; omit for the default one" ]
+              ToolField.optional "sandbox" "string" "the work sandbox to run in, e.g. \"test\"; omit for the default one"
+              ToolField.optional
+                  "background"
+                  "boolean"
+                  "true to start it and carry on without waiting — use it for long work, and for work that can run alongside other work. You will be told when it finishes." ]
             (fun args ->
                 async {
                     match ToolArgs.commandSandbox args with
                     | Error e -> return Error e
-                    | Ok (command, sandbox) -> return! answered (executeCommand capabilities command sandbox)
+                    | Ok (command, sandbox, background) ->
+                        return! answered (executeCommand capabilities command sandbox background)
                 })
 
           tool

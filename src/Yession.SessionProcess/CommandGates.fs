@@ -86,7 +86,7 @@ module CommandGates =
         // policy that would have released the act must not beat a person who said no.
         match act.RejectedBy, act.ApprovedBy with
         | Some by, _ -> Refused (by, act.RejectedReason)
-        | None, approved when not (ApprovalMode.requiresApproval (SyncedSessionState.gateOf act.Subject synced) act.Author) ->
+        | None, approved when not (ApprovalMode.requiresApproval (SyncedSessionState.gateOf act.Subject synced) (Authority.author act.Authority)) ->
             Approved approved
         | None, Some by -> Approved (Some by)
         | None, None -> Undecided
@@ -143,7 +143,7 @@ module CommandGates =
             async {
                 match verdict with
                 | Undecided -> ()
-                | Refused (by, reason) -> do! refuse handle tool summary act.Author (PeerRef by) reason
+                | Refused (by, reason) -> do! refuse handle tool summary (Authority.author act.Authority) (PeerRef by) reason
                 | Approved approver ->
                     match Map.tryFind tool (dispatch ()) with
                     // A command the running build does not have: refuse it rather than leave
@@ -151,7 +151,7 @@ module CommandGates =
                     // refusal, and this is what a rename or a downgrade looks like from here.
                     | None ->
                         do!
-                            refuse handle tool summary act.Author ActorRef.System
+                            refuse handle tool summary (Authority.author act.Authority) ActorRef.System
                                 (Some (sprintf "this session has no command called '%s'" tool))
                     | Some run ->
                         // The entry goes BEFORE the command runs, for the terminal drain's
@@ -160,7 +160,9 @@ module CommandGates =
                         // approval of the same thing.
                         SyncedStateSync.removePending doc [ handle ]
                         let! result =
-                            run { Args = args; OnBehalfOf = act.OnBehalfOf; ApprovedBy = approver |> Option.map PeerRef }
+                            run
+                                { Args = args
+                                  Authority = act.Authority |> Authority.approvedBy approver }
                         record
                             handle
                             { Handle = Some handle
@@ -199,22 +201,64 @@ module CommandGates =
         // lives as long as the session does, and an act can be approved at any point in it.
         onChanged drain |> ignore
 
-        /// Wait for a parked act for as long as the terminal waits for an approval, then
-        /// yield. Same bound, same reason: a supervised session chains normally, and an
-        /// unsupervised one does not hold the turn open.
-        let rec awaitSettled (call: GatedCall) (handle: QueueId) (startedAt: DateTimeOffset) =
+        /// Whether the act is still parked in the doc — which is the difference between the
+        /// two things a caller can be waiting for. `settleOne` removes it BEFORE it runs the
+        /// command, so an act that is gone with no outcome yet is one being carried out, and
+        /// an act still there is one nobody has released.
+        ///
+        /// A doc that will not decode reads as parked, which is what it is: the drain reads
+        /// the same doc, so nothing is going to settle until it does.
+        let stillParked (handle: QueueId) =
+            match syncedOf () with
+            | Ok synced -> Map.containsKey handle synced.Pending
+            | Error _ -> true
+
+        /// Wait out both phases, then answer — the terminal's arrangement, and now for its
+        /// reason. One deadline bounds waiting on a PERSON, the other bounds waiting on the
+        /// WORK, and which applies is decided by what is actually being waited for.
+        ///
+        /// Collapsing them into the approval grace is what made an ungated `add_repo` whose
+        /// clone took six seconds report "WAITING FOR A HUMAN TO APPROVE IT. It has not
+        /// happened." — two untruths in one sentence, to an agent that then told a person to
+        /// go and approve something that was neither waiting nor on their screen.
+        ///
+        /// The running deadline is measured from the RELEASE rather than from the proposal,
+        /// exactly as the terminal measures the process deadline from the block's start: a
+        /// command that spent an hour parked and then ran still gets the full timeout it
+        /// would have had.
+        let rec awaitSettled
+            (call: GatedCall)
+            (handle: QueueId)
+            (startedAt: DateTimeOffset)
+            (runningSince: DateTimeOffset option)
+            =
             async {
                 match outcomes.TryGetValue (QueueId.value handle) with
                 | true, outcome -> return outcome
-                | false, _ when now () - startedAt >= TerminalCommands.approvalGrace ->
-                    return
-                        { Handle = Some handle
-                          Tool = call.Command.Tool
-                          Summary = call.Summary
-                          Status = CommandAwaitingApproval }
                 | false, _ ->
-                    do! TerminalCommands.nextWake onChanged
-                    return! awaitSettled call handle startedAt
+                    let parked = stillParked handle
+                    let runningSince =
+                        match runningSince, parked with
+                        | None, false -> Some (now ())
+                        | existing, _ -> existing
+                    let yielded =
+                        if parked then
+                            if now () - startedAt >= TerminalCommands.approvalGrace then
+                                Some CommandAwaitingApproval
+                            else None
+                        else
+                            let since = runningSince |> Option.defaultValue startedAt
+                            if now () - since >= TerminalCommands.commandTimeout then Some CommandRunning else None
+                    match yielded with
+                    | Some status ->
+                        return
+                            { Handle = Some handle
+                              Tool = call.Command.Tool
+                              Summary = call.Summary
+                              Status = status }
+                    | None ->
+                        do! TerminalCommands.nextWake onChanged
+                        return! awaitSettled call handle startedAt runningSince
             }
 
         let run (call: GatedCall) =
@@ -234,11 +278,10 @@ module CommandGates =
                         call.Command.Tool
                         call.Args
                         call.Summary
-                        call.Author
-                        call.OnBehalfOf
+                        call.Authority
                         (PendingAct.nextOrder subject synced.Pending)
                     drain ()
-                    let! settled = awaitSettled call handle (now ())
+                    let! settled = awaitSettled call handle (now ()) None
                     return Ok settled
             }
 
@@ -257,9 +300,8 @@ module CommandGates =
                                     { Command = GatedCommands.tryFind tool |> Option.defaultValue { Tool = tool; Title = tool }
                                       Args = ""
                                       Summary = summary
-                                      Author = act.Author
-                                      OnBehalfOf = act.OnBehalfOf }
-                                let! settled = awaitSettled call handle (now ())
+                                      Authority = act.Authority }
+                                let! settled = awaitSettled call handle (now ()) None
                                 return Ok settled
                             | CommandLine -> return Error "that handle names a terminal command"
                         | None -> return Error "no such pending command"

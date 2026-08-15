@@ -173,6 +173,23 @@ let private srtTests =
             Expect.equal (expect listed) [ { Repo = repo; Branch = "main"; Dirty = false } ] "the listing is the filesystem's answer"
         }
 
+        testCaseAsync "a clone brings no hook templates with it" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let service = serviceIn root (freshLog ())
+            let repo = RepoRef.create "octo/hello" |> expect
+            let! added = service.AddRepo caller repo
+            expect added |> ignore
+            // git's default templates are `.git/hooks/*.sample` files, and srt's macOS
+            // profile denies every write under `**/.git/hooks/**` — so a clone that copies
+            // them dies there. Linux denies only what EXISTS when the spawn is wrapped, so
+            // this suite cannot see that failure; what it can see is the flag that avoids
+            // it, which is the absence of the directory the copy would have filled.
+            Expect.isFalse
+                (exists nodeFs (sprintf "%s/repos/octo/hello/.git/hooks" root))
+                "no hooks directory to populate (the clone asks for no templates)"
+        }
+
         testCaseAsync "switch creates and moves branches, and the events say so" <| async {
             let root = mkdtemp nodeFs nodeOs
             makeBareFixture root "hello" |> ignore

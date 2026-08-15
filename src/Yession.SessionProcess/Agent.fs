@@ -23,7 +23,27 @@ module AgentTurn =
         + "before assuming a queued command did nothing. "
         + "Explain meaningful progress to the session."
 
-    /// Run one agent turn for a human `MessageSent`, appending the lifecycle events:
+    /// Why a turn is running (Plan 20, stage 2). A turn has exactly ONE reason to exist,
+    /// which is what makes this a choice rather than two optional arguments free to be both
+    /// set or neither.
+    ///
+    /// Both carry an ACTOR, and it is the same actor in both cases: whoever the turn runs
+    /// for. A message names its author; a wake names the party whose earlier turn queued the
+    /// work that finished. The agent is the acting party either way and has no scope of its
+    /// own (Plan 08), so a turn that could not name one would be a turn with no credentials
+    /// — which is why the wake resolves it from the log before it starts, rather than after.
+    type TurnTrigger =
+        | FromMessage of MessageSent
+        | FromWake of WakeReason * ActorRef
+
+    module TurnTrigger =
+
+        let actor =
+            function
+            | FromMessage message -> message.Author
+            | FromWake (_, actor) -> actor
+
+    /// Run one agent turn, appending the lifecycle events:
     ///
     ///   AgentTurnStarted -> AgentContextBuilt -> AgentMessageStarted
     ///     -> AgentMessageDelta* -> AgentMessageCompleted | AgentTurnFailed
@@ -39,7 +59,9 @@ module AgentTurn =
         (log: EventLog<SessionEvent>)
         (runAgent: RunAgent)
         (signal: AgentAbortSignal)
-        (capabilitiesFor: AgentTurnId -> AgentCapabilities)
+        // Takes the turn's ACTOR as well as its id (Plan 20, stage 2): the credentials a
+        // turn runs on are bound per turn, and a woken turn has no message to read them off.
+        (capabilitiesFor: AgentTurnId -> ActorRef -> AgentCapabilities)
         // Telemetry (Plan 04): fired with the turn's usage on completion. Injected (default
         // `ignore` off the Host) so this module stays OTel-free. Never throws into the turn.
         (emitUsage: AgentTurnId -> AgentUsage -> unit)
@@ -51,7 +73,7 @@ module AgentTurn =
         // caller from the same log page the conversation came from, so the two describe
         // the same instant.
         (terminals: TerminalBlockDigest list)
-        (trigger: MessageSent)
+        (trigger: TurnTrigger)
         : Async<unit> =
         async {
             let turnId = mintTurnId ()
@@ -60,27 +82,43 @@ module AgentTurn =
                     let! _ = log.Append ActorRef.Agent event
                     return ()
                 }
-            do! append (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = trigger.MessageId })
+            let turnActor = TurnTrigger.actor trigger
+            let triggeringMessage =
+                match trigger with
+                | FromMessage message -> Some message
+                | FromWake _ -> None
+            do!
+                append (
+                    AgentTurnStarted
+                        { AgentTurnId = turnId
+                          TriggeredByMessageId = triggeringMessage |> Option.map (fun m -> m.MessageId)
+                          Woke = (match trigger with FromWake (reason, _) -> Some reason | FromMessage _ -> None) })
             try
                 // The agent's context is the event-log-derived projection — by
                 // construction it can never include Yjs/draft state.
                 let currentMessage =
-                    conversation
-                    |> List.tryFind (fun item -> item.MessageId = trigger.MessageId)
-                    |> Option.defaultValue
-                        { MessageId = trigger.MessageId
-                          Author = trigger.Author
-                          Body = trigger.Body
-                          Status = Complete
-                          Kind = ConversationItemKind.Message
-                          // Synthesized from the trigger rather than folded, so it has no
-                          // offset of its own. Nothing here sorts — the agent's context is
-                          // built in the projection's order, and this stands in for an item
-                          // that projection has not caught up to yet.
-                          Offset = EventOffset.zero }
+                    triggeringMessage
+                    |> Option.map (fun message ->
+                        conversation
+                        |> List.tryFind (fun item -> item.MessageId = message.MessageId)
+                        |> Option.defaultValue
+                            { MessageId = message.MessageId
+                              Author = message.Author
+                              Body = message.Body
+                              Status = Complete
+                              Kind = ConversationItemKind.Message
+                              // Synthesized from the trigger rather than folded, so it has no
+                              // offset of its own. Nothing here sorts — the agent's context is
+                              // built in the projection's order, and this stands in for an item
+                              // that projection has not caught up to yet.
+                              Offset = EventOffset.zero
+                              // A turn with a triggering message is by definition a turn
+                              // somebody asked for, so there is nothing here to explain.
+                              Woke = None })
                 let context =
                     { SessionId = sessionId
                       Conversation = conversation
+                      TurnActor = turnActor
                       CurrentMessage = currentMessage
                       Terminals = terminals
                       SystemPrompt = systemPrompt }
@@ -94,7 +132,7 @@ module AgentTurn =
                         Async.StartImmediate (
                             append (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = chunk.Text }))
 
-                let! result = runAgent context (capabilitiesFor turnId) signal onChunk
+                let! result = runAgent context (capabilitiesFor turnId turnActor) signal onChunk
                 if not (signal.IsAborted ()) then
                     match result with
                     | AgentCompleted (body, usage) ->

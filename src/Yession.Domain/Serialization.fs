@@ -97,6 +97,25 @@ module Codec =
                 | "system" -> Decode.succeed System
                 | other -> Decode.fail (sprintf "Unknown actor kind: %s" other)) }
 
+    /// The three parties behind an act, on the wire (Plan 20). Not a nested object: these
+    /// keys sit at the payload's top level and always have, and an event log is read back for
+    /// the life of its session — so what changed is where the value lives in F#, and nothing
+    /// about what is written. One pair of helpers rather than a spelling per event, which is
+    /// how the three came to disagree in the first place.
+    let private authorityFields (authority: Authority) =
+        [ "author", actor.Encode (Authority.author authority)
+          "approvedBy", Encode.option actor.Encode (Authority.approver authority)
+          "onBehalfOf", Encode.option actor.Encode (Authority.onBehalfOf authority) ]
+
+    /// Recovered, never authored — `rehydrate`'s reason. `onBehalfOf` is optional on the way
+    /// in because events written before Plan 20 have no such key, and a `Required` field would
+    /// make those pages undecodable, which is a session that will not open.
+    let private authorityOf (get: Decode.IGetters) : Authority =
+        Authority.rehydrate
+            (get.Required.Field "author" actor.Decode)
+            (get.Optional.Field "onBehalfOf" (Decode.option actor.Decode) |> Option.flatten)
+            (get.Required.Field "approvedBy" (Decode.option actor.Decode))
+
     let private sessionCreated : Codec<SessionCreated> =
         { Encode = fun (p: SessionCreated) -> Encode.object [ "sessionId", sessionId.Encode p.SessionId ]
           Decode =
@@ -137,16 +156,36 @@ module Codec =
                   MessageSent.Author = get.Required.Field "author" actor.Decode
                   MessageSent.Body = get.Required.Field "body" Decode.string }) }
 
+    /// Why a turn ran with nobody speaking (Plan 20, stage 2). A tagged object rather than a
+    /// bare string, because the reasons are a vocabulary that grows — a roster change, a
+    /// stream ending — and each may come to carry what it is about.
+    let private wakeReason : Codec<WakeReason> =
+        { Encode =
+            (fun r ->
+                match r with
+                | CommandFinished -> Encode.object [ "kind", Encode.string "commandFinished" ])
+          Decode =
+            Decode.field "kind" Decode.string
+            |> Decode.andThen (function
+                | "commandFinished" -> Decode.succeed CommandFinished
+                | other -> Decode.fail (sprintf "Unknown wake reason: %s" other)) }
+
     let private agentTurnStarted : Codec<AgentTurnStarted> =
         { Encode =
             fun (p: AgentTurnStarted) ->
                 Encode.object
                     [ "agentTurnId", agentTurnId.Encode p.AgentTurnId
-                      "triggeredByMessageId", messageId.Encode p.TriggeredByMessageId ]
+                      "triggeredByMessageId", Encode.option messageId.Encode p.TriggeredByMessageId
+                      "woke", Encode.option wakeReason.Encode p.Woke ]
           Decode =
             Decode.object (fun get ->
                 { AgentTurnStarted.AgentTurnId = get.Required.Field "agentTurnId" agentTurnId.Decode
-                  AgentTurnStarted.TriggeredByMessageId = get.Required.Field "triggeredByMessageId" messageId.Decode }) }
+                  // Optional on the way in: every turn written before Plan 20 carried a bare
+                  // id, and those pages are read back for the life of their session.
+                  AgentTurnStarted.TriggeredByMessageId =
+                    get.Optional.Field "triggeredByMessageId" (Decode.option messageId.Decode) |> Option.flatten
+                  AgentTurnStarted.Woke =
+                    get.Optional.Field "woke" (Decode.option wakeReason.Decode) |> Option.flatten }) }
 
     let private agentContextBuilt : Codec<AgentContextBuilt> =
         { Encode =
@@ -695,23 +734,29 @@ module Codec =
     let private terminalBlockStarted : Codec<TerminalBlockStarted> =
         { Encode =
             fun (p: TerminalBlockStarted) ->
-                Encode.object
+                Encode.object (
                     [ "terminalId", terminalId.Encode p.TerminalId
                       "blockId", blockId.Encode p.BlockId
                       "queueId", Encode.option queueId.Encode p.QueueId
-                      "author", actor.Encode p.Author
-                      "approvedBy", Encode.option actor.Encode p.ApprovedBy
                       "command", Encode.string p.Command
-                      "fromSeq", Encode.int p.FromSeq ]
+                      "fromSeq", Encode.int p.FromSeq
+                      "background", Encode.bool p.Background ]
+                    @ authorityFields p.Authority)
           Decode =
             Decode.object (fun get ->
                 { TerminalBlockStarted.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalBlockStarted.BlockId = get.Required.Field "blockId" blockId.Decode
                   TerminalBlockStarted.QueueId = get.Required.Field "queueId" (Decode.option queueId.Decode)
-                  TerminalBlockStarted.Author = get.Required.Field "author" actor.Decode
-                  TerminalBlockStarted.ApprovedBy = get.Required.Field "approvedBy" (Decode.option actor.Decode)
+                  TerminalBlockStarted.Authority = authorityOf get
                   TerminalBlockStarted.Command = get.Required.Field "command" Decode.string
-                  TerminalBlockStarted.FromSeq = get.Required.Field "fromSeq" Decode.int }) }
+                  TerminalBlockStarted.FromSeq = get.Required.Field "fromSeq" Decode.int
+                  // Optional on the way IN and required on the way out: every block written
+                  // before Plan 20 ran in the foreground, and an event log is read back for
+                  // the life of its session. A `Required` field here would make those pages
+                  // undecodable — which is a session that will not open, to record a bool
+                  // whose absence already means `false`.
+                  TerminalBlockStarted.Background =
+                    get.Optional.Field "background" Decode.bool |> Option.defaultValue false }) }
 
     let private terminalBlockCompleted : Codec<TerminalBlockCompleted> =
         { Encode =

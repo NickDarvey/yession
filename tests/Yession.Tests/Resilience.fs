@@ -153,9 +153,9 @@ let private guardTests =
 /// The runtime's real `fetch`, shaped exactly as the browser's port is: total, carrying the
 /// status on a refusal and the error text on a transport failure.
 [<Emit("""fetch($0).then(
-  async r => r.ok ? { ok: true, status: r.status, detail: await r.text() } : { ok: false, status: r.status, detail: '' },
-  e => ({ ok: false, status: 0, detail: String(e) }))""")>]
-let private realFetch (url: string) : JS.Promise<{| ok: bool; status: int; detail: string |}> =
+  async r => r.ok ? { ok: true, status: r.status, url: r.url, detail: await r.text() } : { ok: false, status: r.status, url: r.url, detail: '' },
+  e => ({ ok: false, status: 0, url: '', detail: String(e) }))""")>]
+let private realFetch (url: string) : JS.Promise<{| ok: bool; status: int; url: string; detail: string |}> =
     Fable.Core.Util.jsNative
 
 let private realHttpGet : App.HttpGet =
@@ -163,7 +163,7 @@ let private realHttpGet : App.HttpGet =
         async {
             let! reply = realFetch url |> Async.AwaitPromise
             return
-                if reply.ok then Ok reply.detail
+                if reply.ok then Ok { Url = reply.url; Body = reply.detail }
                 elif reply.status = 0 then Error (App.HttpUnreachable reply.detail)
                 else Error (App.HttpStatus reply.status)
         }
@@ -197,7 +197,8 @@ let private classificationTests =
 
         testCaseAsync "a chunk that will not decode is corruption — a value, not a thrown page" <|
             async {
-                let get : App.HttpGet = fun _ -> async { return Ok "{\"not\":\"an envelope\"}" }
+                let get : App.HttpGet =
+                    fun url -> async { return Ok { Url = url; Body = "{\"not\":\"an envelope\"}" } }
                 match! App.EventFetch.overHttp get SessionRoute.relative None None with
                 | Error (App.FeedCorrupt _) -> ()
                 | other -> failwithf "expected FeedCorrupt, got %A" other
@@ -219,7 +220,7 @@ let private classificationTests =
 
 // --- The integration test ----------------------------------------------------------------
 
-/// A stand-in for the Session Process's `/events/{n}` endpoint that can be switched off. When
+/// A stand-in for the Session Process's event cursor that can be switched off. When
 /// up it serves the host's REAL log through the REAL codec — byte-identical to the HTTP route
 /// (app/Host.fs `eventsEndpoint`); when down it fails the way an unreachable session does.
 type private Socket =
@@ -251,14 +252,25 @@ let private fakeSocket (host: Host.SessionHost) : Socket =
                 if offline then
                     return Error (App.HttpUnreachable "ECONNREFUSED")
                 else
-                    // `overHttp` builds `<base>/events/{chunk}`; serve that chunk from the log.
-                    let index = int (url.Substring (url.LastIndexOf '/' + 1))
+                    // `overHttp` builds `<base>/events` or `<base>/events/after/{n}`. The
+                    // real server answers a cursor with a redirect to the range it chose;
+                    // this collapses the two hops, because what is under test here is the
+                    // retry policy around the fetch, not the shape of the address.
                     let after =
-                        if index = 0 then None
-                        else EventOffset.create (EventChunk.firstOffset index - 1L) |> expect |> Some
+                        let last = url.Substring (url.LastIndexOf '/' + 1)
+                        match System.Int64.TryParse last with
+                        | true, offset -> EventOffset.create offset |> expect |> Some
+                        | _ -> None
                     let! page = host.Log.Read after EventChunk.size
+                    // The fake answers at the address that asked — it does not redirect, and
+                    // what is under test here is the retry policy, not the addressing.
                     return
-                        Ok (page.Events |> List.map (Codec.toString Codec.sessionEventEnvelope) |> String.concat "\n")
+                        Ok
+                            { Url = url
+                              Body =
+                                page.Events
+                                |> List.map (Codec.toString Codec.sessionEventEnvelope)
+                                |> String.concat "\n" }
             } }
 
 /// A client whose history arrives over `get` under the SHIPPED policy, with the policy's
@@ -491,7 +503,11 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
         runner.Dispatch (user msg)
     Async.StartImmediate (
         App.SessionLifecycle.run
-            { Open =
+            (Resilience.Schedule.constant System.TimeSpan.Zero 0)
+            { // What this harness drives is the FEED; the session leg makes one pass and stops
+              // rather than supervising, so a refused peer here ends instead of parking.
+              WaitBeforeRetry = fun _ -> async { return false }
+              Open =
                 fun () ->
                     async {
                         opens.Value <- opens.Value + 1
@@ -604,16 +620,22 @@ let private lifecycleTests =
                 do! host.Stop ()
             }
 
-        testCaseAsync "a transport that cannot be opened settles, and does not retry behind the policy" <|
+        testCaseAsync "a transport that cannot be opened keeps being tried, and says so each time" <|
             async {
-                // `Open` is already policy-guarded at the composition site, so an `Error` here is
-                // final: report it and stop. A second attempt would be a retry loop wrapped
-                // around a retry loop.
+                // The policy at the composition site spends its budget on ONE attempt; this is
+                // the slower outer loop, and the difference it draws is between "this attempt
+                // failed" and "give up on the session" — which are not the same claim. A client
+                // that made them the same claim left "reload the tab" as the only cure for a
+                // laptop that had been closed for a minute.
+                //
+                // The wait is a port, so this drives the rule with no clock in it at all.
                 let opens = ref 0
+                let waits = ResizeArray<System.TimeSpan option> ()
                 let dispatched = ResizeArray<ClientMsg> ()
                 let model = ref (ClientModel.init (peer "ada" "Ada"))
                 do!
                     App.SessionLifecycle.run
+                        (App.SessionLifecycle.supervision (fun () -> 0.0))
                         { Open =
                             fun () ->
                                 async {
@@ -622,15 +644,34 @@ let private lifecycleTests =
                                 }
                           Serve = fun _ _ _ -> async { failwith "must not serve a channel it never opened" }
                           ReadPosition = fun () -> None
+                          // Three failures is enough to show it keeps going and to read the
+                          // schedule off; a real client stops when the page does.
+                          WaitBeforeRetry =
+                            fun delay ->
+                                async {
+                                    waits.Add delay
+                                    return waits.Count < 3
+                                }
                           Dispatch =
                             fun msg ->
                                 dispatched.Add msg
                                 model.Value <- ClientModel.update msg model.Value }
-                Expect.equal opens.Value 1 "one attempt, then settled"
+                Expect.equal opens.Value 3 "it kept trying rather than settling on the first failure"
                 Expect.equal
                     (List.ofSeq dispatched)
-                    [ ConnectingMsg; ConnectFailedMsg "the session did not answer" ]
-                    "it announced the attempt, then reported the failure with its reason"
+                    [ ConnectingMsg
+                      ConnectFailedMsg "the session did not answer"
+                      ConnectingMsg
+                      ConnectFailedMsg "the session did not answer"
+                      ConnectingMsg
+                      ConnectFailedMsg "the session did not answer" ]
+                    "each attempt is announced and each failure reported with its reason"
+                Expect.isTrue
+                    (waits |> Seq.forall Option.isSome)
+                    "an unreachable session is a scheduled wait, never the indefinite park"
+                Expect.isTrue
+                    (waits |> Seq.forall (fun d -> d.Value <= System.TimeSpan.FromMinutes 1.0))
+                    "and the backoff is capped, so a session that never returns is not polled less and less for ever"
                 Expect.equal
                     model.Value.Connection
                     (Disconnected (Some "the session did not answer"))
@@ -647,9 +688,11 @@ let private lifecycleTests =
                       AssignedDisplayName = "Ada"
                       LatestOffset = None }
                 let serves = ref 0
+                let waits = ResizeArray<System.TimeSpan option> ()
                 let dispatched = ResizeArray<ClientMsg> ()
                 do!
                     App.SessionLifecycle.run
+                        (App.SessionLifecycle.supervision (fun () -> 0.0))
                         { Open = fun () -> async { return Ok () }
                           Serve =
                             fun _ dispatch _ ->
@@ -660,12 +703,22 @@ let private lifecycleTests =
                                         dispatch (ConnectedMsg accepted)
                                         dispatch DisconnectedMsg
                                     else
-                                        // Refused this time: the loop must end here.
+                                        // Refused this time: no schedule can help, so it parks.
                                         dispatch (RejectedMsg "peer token expired")
                                 }
                           ReadPosition = fun () -> None
+                          WaitBeforeRetry =
+                            fun delay ->
+                                async {
+                                    waits.Add delay
+                                    return false
+                                }
                           Dispatch = dispatched.Add }
-                Expect.equal serves.Value 2 "the ended session earned one more attempt, and the refusal ended it"
+                Expect.equal serves.Value 2 "the ended session earned one more attempt straight away"
+                Expect.equal
+                    (List.ofSeq waits)
+                    [ None ]
+                    "and the refusal waited to be ASKED rather than backing off — a token no amount of waiting fixes"
                 Expect.equal
                     (dispatched |> Seq.filter (fun m -> m = ConnectingMsg) |> Seq.length)
                     1
@@ -677,6 +730,22 @@ let private lifecycleTests =
 
 let private surfaceTests =
     testList "Degradation is visible and never blocking" [
+        testCase "a disconnected client is offered a way to ask again; a connected one is not" <| fun () ->
+            // The affordance GAPS asked for, and the availability invariant behind it: the
+            // supervised loop is already trying, but the one client it deliberately will not
+            // carry — a peer whose token was refused — parks until a person asks, and a park
+            // with nothing to press is a dead end wearing a reason.
+            let model = ClientModel.init (peer "ada" "Ada")
+            let disconnected =
+                Support.render { model with Connection = Disconnected (Some "peer token expired") }
+            Expect.isTrue
+                (disconnected.Contains "data-retry-now")
+                "a settled disconnection offers the ask"
+            let connected = Support.render { model with Connection = Connected }
+            Expect.isFalse
+                (connected.Contains "data-retry-now")
+                "a working session offers nothing to retry"
+
         testCase "a stalled feed shows history paused with its reason, and the composer stays live" <| fun () ->
             let model = ClientModel.init (peer "ada" "Ada")
             let html =

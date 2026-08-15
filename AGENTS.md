@@ -84,6 +84,40 @@ locations, a fallback beside a primary), keep ONLY the one verified working here
 the other. A redundant spare hides which path is live, rots unverified, and turns the next
 failure into an archaeology dig.
 
+## Colocation
+
+**A rule lives with the state it governs.** An invariant that holds only because a CALLER
+remembered to ask first is not an invariant — it is a convention with a good reputation, and
+the next caller has not read it.
+
+`design.md` §1 says composition happens at the top. This is the other half of that sentence:
+what composes at the top must have nothing left to DECIDE. A composition root that computes —
+a bound, a fallback, a refusal, a subtraction — has taken a decision out of the only place it
+could be tested cheaply and put it where no test can reach.
+
+The tell is a member exported for no local reason. `SessionTerminals` briefly grew an
+`Instrumented` predicate that nothing inside it used: it existed so `Host.fs` could ask "does
+this terminal have blocks?", subtract a line window, and cap the answer. Meanwhile the WRITE
+half of that same feature was one verb on the manager with its refusal inside it. Two halves of
+one story in two shapes — and the half that had drifted upward was carrying arithmetic no cheap
+test could see. A bug was living in it: closing a terminal forgot what its source had been, so
+a closed device answered "this runs commands as blocks" about a recording sitting right there.
+
+Three questions, and any `no` means it is in the wrong place:
+
+- **Can a caller break it by not calling something first?** Then those calls are one verb.
+  Take-then-write is `Write`, because an actor that could write without the lease is the second
+  writer the lease exists to prevent.
+- **Would testing it mean building the composition root?** Then move it down to where the state
+  is. The cheap tier is the measure: a rule the cheap tier cannot reach is a rule nobody
+  re-checks.
+- **Does a sibling operation on the same state live somewhere else?** Then one of them has
+  moved. `Write` and `Tail` sit together because the rule that admits one admits the other.
+
+The corollary is that a seam belongs where it is USED. The terminal manager takes a transcript
+reader because `Tail` needs one — not because a layer above it offered to read on its behalf.
+Passing state downward is colocation; reaching upward for it is not.
+
 ## Examples
 
 `examples/` holds integrations built the way somebody OUTSIDE this repository would build
@@ -219,6 +253,9 @@ check Jumpstarter            # + our MCP client driven against the Python exampl
 verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix Srt
                              #    Pty Serial Jumpstarter. Release gate; what CI runs on master.
 lint                         # actionlint over .github/workflows. Runs first in the PR gate.
+check --only "<text>"        # narrow BOTH runtimes to cases whose full name contains <text>.
+                             #   Buys back the RUNNING, not the compiling: 66s -> 44s on the
+                             #   cheap tier, and far more on a tier that spawns browsers.
 ```
 
 `lint` is separate from `check` because it guards a different thing: GitHub only validates a
@@ -253,11 +290,27 @@ Capabilities:
   (this container, CI), it re-execs itself under a private D-Bus session + gnome-keyring
   unlocked with an empty password (both from devenv).
 - `Srt` — OS-level confinement: bubblewrap + socat on Linux, Seatbelt on macOS. Probed by
-  RUNNING it, not by looking for it — installed is not the same as permitted. This
-  container cannot create the nested user namespace the strict profile needs, so the suites
-  run here only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, `check Srt` refuses to
-  start. Never set that variable to make a session pass — weaker confinement is the
-  operator's decision, and production defaults to strict.
+  RUNNING it, not by looking for it — installed is not the same as permitted. This container
+  cannot create the nested user namespace the strict profile needs, so the suites run here
+  only under `YESSION_SANDBOX_NESTED=weak check Srt`; unset, `check Srt` refuses to start.
+
+  **`Srt` is not only the escape probes.** The default work sandbox IS srt, so every suite
+  that runs a real command needs it — including the browser case that types one into a
+  terminal composer. On a box that cannot host a sandbox those do not fail, they HANG: the
+  command never runs, the block never reaches `ok`, and a Playwright timeout eventually
+  reports, in effect, "this machine is not a machine this test can run on". Which is what a
+  capability says in one line and a skip. If a suite you are writing runs a command, it needs
+  `Srt`.
+
+  **When to set the variable, and when it is a lie.** Set it to give a suite a sandbox to
+  RUN in — `YESSION_SANDBOX_NESTED=weak check Browser Ports Native Srt` is how this container
+  runs the whole PR tier, and what is under test there (a composer binding, a command really
+  having run) is untouched by profile strength. Do NOT set it to turn a red run green when
+  the CONFINEMENT is the thing under test: `weak` is srt's `enableWeakerNestedSandbox`, so a
+  green escape probe under it is a green for a profile production never uses. Strict is CI's
+  job — `pr.yaml` clears `kernel.apparmor_restrict_unprivileged_userns` so the probes run for
+  real there — and weaker confinement in production is the operator's decision, never a way
+  to get a passing session here.
 - `Jumpstarter` — uv, and an interpreter it can resolve the `examples/jumpstarter` lock
   against. Probed by BUILDING that environment (`uv sync --frozen`), because "uv is on PATH"
   and "this box can assemble that environment" are different questions and only the second
@@ -282,8 +335,20 @@ window-size clamp makes naive mobile screenshots lie; the skill's CDP driver doe
 
 ### Writing tests
 
-High signal, non-brittle. A test earns its place by failing when behavior regresses — and only
-then:
+**A test pins one invariant, and goes red only when that invariant breaks.** Two promises, and
+a test earns its place by keeping both. The first is what it PROVES; the second is what its red
+MEANS. A suite whose red can also mean "something moved" is a suite people re-run instead of
+read.
+
+One invariant is one arrangement, one action, one assertion of the consequence — and a name
+that says which invariant. A case that asserts three things fails as one, so its red names
+none of them, and the two behaviours nobody touched get dragged into every revision of the
+third. Split it: three cases cost three names and buy three verdicts. What may repeat across
+them is the SETUP, hoisted into a helper — asserting that a call both succeeded and returned
+the right body is one invariant seen from two angles, but asserting that an open terminal reads
+back, a closed one still does, and a shell refuses, is three tests wearing one name.
+
+Then, so that red means what it says:
 
 - Assert observable behavior and contracts, not implementation detail (private state, call
   order, exact log text, incidental DOM structure). A refactor that preserves behavior must
@@ -296,6 +361,31 @@ then:
   test keeps proving it. Verify-once throwaways stay out.
 - Tag suites with the MINIMUM capabilities they truly need, so they run in the cheapest tier
   that can host them and skip (never error) everywhere else.
+
+**A failure that cannot say why is a failure you will pay for repeatedly.** Most tiers here
+fail legibly — an assertion prints what it expected. The browser tier does not: a case can only
+fail by a wait never settling, so its red says which wait, never which fault. Three unrelated
+defects in one feature (a call eliminated as dead code, an opaque redirect, a precache that
+could not have happened) all printed the same thirty-second timeout, and each cost a full run
+of the gate to tell apart — while the page had been saying which was which the whole time.
+
+So instrument the boundary rather than guessing across it, and instrument it to STAY:
+
+- **Fixtures keep what the thing under test said** — console, page errors, failed requests —
+  and print it when a case fails (`Browser.fs`: `watching` / `reporting`). Free on green, and
+  it is the only way to read a red run in CI, where nothing can be attached afterwards.
+- **Anything that decides silently is made to say so.** A service worker choosing between the
+  network and a kept copy leaves no trace anywhere; one `console.debug` at that branch is the
+  difference between reading the answer and inferring it.
+- **Throwaway instrumentation is a smell.** If you add a probe to answer a question, and the
+  question could be asked again, the probe belongs in the fixture — not in a scratch file you
+  delete. The rule is the same one the tests follow: what was verified once by hand is written
+  down so it keeps being verified.
+
+The tell that you are about to pay for this: you are about to run the gate again to test a
+hypothesis. When looking is expensive, guessing and verifying cost the same, so guessing wins
+each time and loses overall. Make looking cheap first — `check --only "<part of a test name>"`
+narrows both runtimes to the cases that match.
 
 **A UI test pins an invariant, never a design.** A rendered surface is the most-revised thing
 in the product. A test that asserts what it currently LOOKS like will be deleted by the next

@@ -11,7 +11,18 @@ namespace Yession.Domain
 type AgentContextPack =
     { SessionId      : SessionId
       Conversation   : ConversationItem list
-      CurrentMessage : ConversationItem
+      /// Whose turn this is: the party whose credentials it runs on (Plan 08 — the agent is
+      /// the acting party and has no scope of its own), stated rather than derived.
+      ///
+      /// It used to be read off `CurrentMessage.Author` by everything that needed it, which
+      /// was fine while every turn began with somebody speaking. A woken turn (Plan 20,
+      /// stage 2) has nobody speaking and still has authority, so the thing three call sites
+      /// actually wanted — WHOSE turn is this — says so itself.
+      TurnActor      : ActorRef
+      /// What was just said, when a turn began with somebody saying something. `None` for a
+      /// turn nothing asked for: the agent was woken because work it started finished, and
+      /// there is no message to point at. What moved arrives through `Terminals` either way.
+      CurrentMessage : ConversationItem option
       /// What the session's terminals did since the previous turn (Plan 13, stage 3a).
       /// A SEPARATE field, deliberately: a command someone ran is not something someone
       /// said, so folding blocks into `Conversation` would make the chat log a place
@@ -111,7 +122,12 @@ type CommandTarget =
     /// makes a started sandbox usable rather than merely listed.
     | InSandbox of SandboxName
 
-type ExecuteCommand = CommandTarget option -> string -> Async<Result<TerminalCommandOutcome, string>>
+/// `background` (Plan 20, stage 2) asks for the command to be queued and left running: the
+/// call answers as soon as there is something to say rather than waiting out the process, and
+/// the completion becomes a wake instead of a returned outcome. It changes who WAITS and
+/// nothing else — a background command is queued, editable and refusable exactly as every
+/// other one is, and it runs through the same one door.
+type ExecuteCommand = CommandTarget option -> string -> bool -> Async<Result<TerminalCommandOutcome, string>>
 
 /// Where a COMMAND the agent asked for has got to (Plan 15, stage 3b). The same three shapes
 /// `TerminalCommandStatus` has, minus the two that are about a process: a command has no pty
@@ -123,6 +139,14 @@ type CommandStatus =
     /// A human has to approve it. Unbounded in principle, so the tool yields a handle rather
     /// than holding the turn — `TerminalCommandAwaitingApproval`'s reasoning, unchanged.
     | CommandAwaitingApproval
+    /// Released and STILL GOING when the deadline fell. `TerminalCommandRunning`'s
+    /// counterpart, and it is here for the reason that one is: waiting on a PERSON and
+    /// waiting on the WORK are bounded differently and end differently, so a wait that
+    /// cannot tell them apart has to report one of them wrongly. It reported the person —
+    /// which sent an agent to ask for an approval of something already happening, that
+    /// nobody had been asked for and no card showed. A yield, not a cancellation: the
+    /// command runs on and the handle resumes it.
+    | CommandRunning
     /// Somebody said no. Comes back to the model as an error rather than a silence, because
     /// a command that vanishes gets retried another way.
     | CommandRefusedBy of by: ActorRef * reason: string option
@@ -151,21 +175,20 @@ type GatedCall =
       /// shows and what a refusal records, rendered once here rather than three times
       /// downstream.
       Summary : string
-      /// Who is asking. Always the agent today; `yession.yaml` will ask too.
-      Author : ActorRef
-      /// Whose credential it runs on, when that is not the author's own (Plan 08: the agent
-      /// acts, the turn human's credential is used). Recorded on the act, because a restart
-      /// has no turn to ask.
-      OnBehalfOf : ActorRef option }
+      /// Who is asking, and on whose authority (Plan 08: the agent acts, the turn human's
+      /// credential is used). One value, so a call cannot be built with an author and no
+      /// authority — and recorded on the act, because a restart has no turn to ask.
+      Authority : Authority }
 
 /// A command being carried out, as its dispatch entry sees it. Everything comes off the
 /// pending act rather than out of a closure, which is what makes an approval survive the
 /// process that proposed it.
 type GatedInvocation =
     { Args : string
-      OnBehalfOf : ActorRef option
-      /// Who released it, when a gate held it. Goes onto the command's own event.
-      ApprovedBy : ActorRef option }
+      /// The three parties, including whoever released it when a gate held it — the approval
+      /// joins the authority at the moment of acting, which is here. `Authority.effective`
+      /// is what a dispatch entry asks for whose credential to run on.
+      Authority : Authority }
 
 /// How a command is actually carried out, by tool name. Built where the capabilities are
 /// composed; read by the gate, including at boot for acts it never proposed.
@@ -351,7 +374,7 @@ module AgentCapabilities =
 
     /// A turn with no environment authority at all (Phase 1 behaviour).
     let none : AgentCapabilities =
-        { ExecuteCommand = fun _ _ -> async { return Error "no terminal capability" }
+        { ExecuteCommand = fun _ _ _ -> async { return Error "no terminal capability" }
           CheckPending = fun _ -> async { return Error "no terminal capability" }
           WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
           ReadTerminal = fun _ -> async { return Error "no terminal capability" }
@@ -403,3 +426,71 @@ module AgentAbortSignal =
 /// Session Process represents them as events, not exceptions. The abort signal may end
 /// the turn early; a well-behaved runner returns promptly once it fires.
 type RunAgent = AgentContextPack -> AgentCapabilities -> AgentAbortSignal -> (AgentResponseChunk -> unit) -> Async<AgentRunResult>
+
+/// Whether the agent is owed a turn nobody asked for (Plan 20, stage 2).
+///
+/// The wake is a MAILBOX ITEM, not a callback: work finishing does not reach into a running
+/// turn, it makes a turn due, and the scheduler that already drains one queue reads this the
+/// same way it reads that one. Which is the only shape that composes with the rest of this
+/// design — a callback would have to exist somewhere while no turn does, and would die with
+/// the process that held it.
+///
+/// It carries NO payload, and that is what makes it cheap: an agent turn's context is built
+/// from a page read before the turn appends its own `AgentTurnStarted`, so
+/// `TerminalDigest.window` already reports every block that started or completed since the
+/// previous turn. The wake decides WHEN a turn runs; the digest is what it then reads.
+module AgentWake =
+
+    /// Due iff some BACKGROUND block completed at or after the last `AgentTurnStarted`.
+    ///
+    /// The digest's own window trick, applied to scheduling: resetting on every
+    /// `AgentTurnStarted` in the page leaves exactly what moved since the previous one, so no
+    /// cursor is stored anywhere and a process that died between the completion and the turn
+    /// re-derives the same pending wake from the log at boot. Restart-safety for free, rather
+    /// than as a mechanism.
+    ///
+    /// Coalescing is free for the same reason: five commands finishing over two minutes make
+    /// ONE wake, and everything that landed before the turn starts is inside that turn's
+    /// digest window. A wake is idempotent by construction, which is what makes it safe to
+    /// compute on every drain rather than deliver exactly once.
+    ///
+    /// A block that completed and was never `Background` does not wake anything: somebody was
+    /// already waiting on it, and their tool call is what carries the outcome back.
+    /// The actor a woken turn would run AS, or `None` when nothing is owed.
+    ///
+    /// One fold answering both halves, because they are one question: a turn that is due but
+    /// has nobody to run as is not due. Every turn resolves its repo credential, its sandbox
+    /// credential and its Claude account from whoever it is FOR, and a woken turn has no
+    /// triggering message to read that from — so it carries the actor of the turn that queued
+    /// the work, which the block recorded as `OnBehalfOf`. That invents no authority: it
+    /// continues the one the queuing turn already had.
+    ///
+    /// A background block with no recorded owner therefore wakes nothing. That is the same
+    /// safe direction an unreadable owner already takes elsewhere — run on nothing rather
+    /// than on somebody else's credential — and the alternative, picking whoever spoke most
+    /// recently, would run one person's work as another.
+    let pending (events: SessionEvent list) : ActorRef option =
+        events
+        |> List.fold
+            (fun (background: Map<string, ActorRef>, woken: ActorRef option) event ->
+                match event with
+                // A new turn takes everything before it: whatever those blocks did, that
+                // turn's digest reported it.
+                | AgentTurnStarted _ -> Map.empty, None
+                | SessionEvent.TerminalBlockStarted b when b.Background ->
+                    match Authority.onBehalfOf b.Authority with
+                    | Some owner -> Map.add (BlockId.value b.BlockId) owner background, woken
+                    | None -> background, woken
+                | SessionEvent.TerminalBlockCompleted b ->
+                    // The FIRST owed turn wins, and the rest coalesce into it: they are all
+                    // reported by the digest of whichever turn runs, so a second wake would
+                    // be a second turn reading the same window.
+                    let owner = Map.tryFind (BlockId.value b.BlockId) background
+                    background, (match woken with Some _ -> woken | None -> owner)
+                | _ -> background, woken)
+            (Map.empty, None)
+        |> snd
+
+    /// Whether a turn is owed at all. `pending` says who; this says whether, for the readers
+    /// that only need the question answered.
+    let due (events: SessionEvent list) : bool = pending events |> Option.isSome

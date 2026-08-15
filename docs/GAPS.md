@@ -281,9 +281,13 @@ Items are roughly ordered by how much they matter.
   auth cookie rides each fetch, so URLs — and cache keys — carry no secrets); the
   token-in-URL path remains for Node clients and tests, scoped to per-process minted
   tokens that die with the session.
-- **A session served offline has no app shell**: IndexedDB restores state instantly
-  once the page loads, but the page itself still needs the Session Process (no
-  service worker).
+- **A session opens cold with no network** (Plan 20): a service worker at the mount keeps
+  the shell (network-first, since it names the fingerprinted assets) and this build's assets
+  (cache-first, since their address pins their bytes), and nothing else — the event log is
+  the page's own cache, and `/me`, `/signal` and `/queries` are liveness questions a cached
+  answer would answer wrongly. It needs a secure context, so a session served over plain
+  HTTP at a non-loopback address still cannot: there the settings pane names the missing
+  capability and the flag that restores it.
 - **The history feed degrades explicitly, and only history degrades.** The event feed is
   the one leg that is HTTP rather than the data channel, so it fails on its own — and it
   used to fail silently: a rejected fetch became an empty final page, which the read loop
@@ -296,9 +300,11 @@ Items are roughly ordered by how much they matter.
   Process restart does not bring every peer back in lockstep — and a settled failure
   parks the loop and surfaces as `FeedHealth`: a sidebar line, a banner, and a header
   status. Nothing is disabled while it is down, because writing is CRDT state in the
-  local doc. What is still missing is a *manual* retry affordance: recovery waits for the
-  next availability hint or reconnect, which a peer with a permanently rejected token
-  (401) will never get, so that peer must reload to re-authorize.
+  local doc. Recovery is no longer only a hint away (Plan 20): the session leg is driven by
+  one supervised loop, capped at a minute, poked by the browser's `online` event and by a
+  *Try again* control on the status line — and a REFUSED peer, which no schedule can help
+  because the same token would be refused again, parks until somebody asks rather than
+  ending. That control is the affordance this entry used to say was missing.
 
 ## Browser client
 
@@ -356,9 +362,11 @@ Items are roughly ordered by how much they matter.
   - **A pasted PAT bypasses the App-installation scope rule.** The device-flow token
     is a GitHub App user-to-server token, so it can only reach repos where the App is
     installed; a pasted `github_pat_`/`ghp_` answers to no such bound.
-  - **The stored token does not rotate.** Device flow + static storage (the broker is
-    a PKCE public client; GitHub's code exchange wants the App secret) means the App
-    must have user-token expiration disabled and revocation happens at GitHub.
+  - **A GitHub token rotates only if the App expires it**
+    ([Plan 21](plans/21-expiring-tokens.md)): a device-flow grant is stored as a grant now
+    and the Manager refreshes it on use, but an App registered with user-token expiration
+    disabled still yields a permanent token, and revocation is at GitHub either way.
+    Nothing tells an operator which of the two they have registered.
   - **`git push` in a WorkSandbox terminal has no forwarded credential yet** — v1
     terminals do local git only; forwarding becomes `.yession.yml` configuration in a
     later plan. Commit/push attribution machinery (author = requesting user,
@@ -367,6 +375,31 @@ Items are roughly ordered by how much they matter.
     operator's explicitly lax choice, as everywhere `host` is chosen. The per-invocation
     hardening (hooks/fsmonitor/ext off, no global config, protocol pinned) still
     applies; the filesystem and egress boundaries do not.
+  - **Every srt sandbox may write a checkout's `.git/config`.** srt denies that write by
+    default; a `git clone` makes it, so the flag is on. It cannot be scoped to the git
+    sandbox: srt reads it from the session config that whichever sandbox came up first
+    initialized the process-wide manager with, and ignores the per-spawn one. So the
+    WorkSandbox and the
+    agent can write a `.git/config` too — planting a `core.fsmonitor`, an alias, or a
+    pager that runs when git next runs in that checkout. Inside the session that is the
+    shared-trust boundary already stated above, and the verbs themselves are immune (the
+    per-invocation `GIT_CONFIG_*` hardening wins over any repo config); OUTSIDE it, a
+    human running git in the checkout on their own host is not. `.git/hooks` — the other
+    half of the same vector — stays denied.
+  - **The clone verb runs with no filesystem confinement.** srt refuses writes to
+    `.vscode`, `.idea`, `.claude/commands|agents`, `.mcp.json`, `.gitmodules`, `.git/hooks`
+    and the shell rc names WHEREVER they appear, and no allow-path outranks that refusal —
+    so a confined process cannot materialize a checkout containing any of them, and srt
+    scopes the exemption per SPAWN, never per path. So `add_repo`'s clone has its own
+    sandbox with srt's filesystem rules off: for that one command git can read and write
+    whatever the session's user can, including the credential files srt would otherwise
+    mask. Egress stays pinned to github.com, the env stays the hardened one, and every
+    other verb keeps the confined policy — none of them writes a path srt objects to.
+    macOS enforces the refusal as patterns and Linux as a scan of what already exists, so
+    a Linux clone would have been fine confined; it is exempt there too rather than ship a
+    production path no CI here exercises. Both of these go away the day srt can exempt a
+    subtree rather than a spawn, or reads `allowGitConfig` per spawn — the clone takes the
+    ordinary confined policy again and `FilesystemConfinement` loses its only caller.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **The session's imperative API is split, and only half of it is built**
@@ -386,7 +419,12 @@ Items are roughly ordered by how much they matter.
     (Plan 15 stage 2), readable by everyone in the session and by everything running in
     it — the same shared trust boundary Plan 14 states. Revoking at the provider does
     not claw back what was injected; `stop_work_sandbox` is what removes it. Only
-    `github` is forwardable so far.
+    `github` is forwardable so far. Now that such a token can EXPIRE
+    ([Plan 21](plans/21-expiring-tokens.md)), the same freeze cuts the other way: a
+    refreshed token never reaches a sandbox already running, so terminal git in one older
+    than the token's life starts failing auth and a new sandbox is the fix. Withholding
+    refreshable credentials instead would break terminal git for everyone today to fix it
+    for the long-lived case.
   - **A third-party MCP server's read-only tools do not reach the registry.** The
     identification convention is the spec's own annotation, deliberately, so nothing
     yession-specific is in the way; the client machinery and a JSON-Schema-subset

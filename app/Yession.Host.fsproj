@@ -12,6 +12,7 @@
   <ItemGroup>
     <Compile Include="Version.fs" />
     <Compile Include="Interop.fs" />
+    <Compile Include="Assets.fs" />
     <Compile Include="Cli.fs" />
     <Compile Include="Sse.fs" />
     <Compile Include="WebRtc.fs" />
@@ -35,6 +36,10 @@
     <!-- The session's named WorkSandboxes (Plan 15, stage 2). After Queries (it declares
          one) and Sandboxes (it composes them); before Host, which wires terminals to it. -->
     <Compile Include="WorkSandboxes.fs" />
+    <!-- The gated commands (Plan 14, Plan 15): both halves of each — what a turn calls and
+         what the gate calls once a verdict is in — beside each other, and out of the entry
+         module where no test could reach them. After the services they run against. -->
+    <Compile Include="Commands.fs" />
     <Compile Include="Agent.fs" />
     <Compile Include="ManagerStore.fs" />
     <Compile Include="SecretsCipher.fs" />

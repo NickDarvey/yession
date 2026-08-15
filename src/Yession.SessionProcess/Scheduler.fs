@@ -26,7 +26,19 @@ module Scheduler =
           /// currently running (the interrupt-vs-completion race is decided here).
           RequestInterrupt : PeerId -> AgentTurnId -> Result<unit, string>
           /// The turn currently running, if any.
-          RunningTurn : unit -> AgentTurnId option }
+          RunningTurn : unit -> AgentTurnId option
+          /// Re-examine whether the LOG owes the agent a turn nobody asked for (Plan 20,
+          /// stage 2) — a background command finished while the agent was not running.
+          ///
+          /// Called where the answer can change and nowhere else: when a terminal block
+          /// completes, once at boot (a completion the previous process never got to act on
+          /// is still owed), and at the end of every turn — a completion that lands while the
+          /// agent is busy fires this against a taken slot, and would otherwise be a debt
+          /// nothing ever collects. Deliberately not on every doc update, which is what a
+          /// drain is: the answer lives in the log, a doc update cannot move it, and reading
+          /// the whole log on every keystroke somebody types into a draft would be a poll
+          /// with a nicer name.
+          Wake : unit -> unit }
 
     /// Create the scheduler for one session. `initialConsumed` seeds the log-anchored
     /// dedup set (every QueueId already named by a `MessageSent` in the durable log —
@@ -43,7 +55,7 @@ module Scheduler =
         (doc: Yjs.Y.Doc)
         (log: EventLog<SessionEvent>)
         (runAgent: unit -> RunAgent option)
-        (capabilitiesFor: AgentTurnId -> AgentCapabilities)
+        (capabilitiesFor: AgentTurnId -> ActorRef -> AgentCapabilities)
         // Telemetry sink (Plan 04): passed straight to `AgentTurn.run`. Default `ignore`.
         (emitUsage: AgentTurnId -> AgentUsage -> unit)
         (mintTurnId: unit -> AgentTurnId)
@@ -112,6 +124,7 @@ module Scheduler =
                             // 3. Run one coalesced turn, triggered by the batch tail.
                             match runAgent (), lastMessage with
                             | Some agent, Some trigger ->
+                                let trigger = AgentTurn.FromMessage trigger
                                 generation <- generation + 1
                                 let turn =
                                     { Generation = generation
@@ -142,12 +155,81 @@ module Scheduler =
                                 | Some current when current.Generation = turn.Generation ->
                                     running <- None
                                     drain ()
+                                    // A background block may have finished WHILE this turn
+                                    // ran, and the wake it fired found the slot taken. The
+                                    // debt is in the log, so re-reading it here is what keeps
+                                    // a completion from being lost to bad timing — and it
+                                    // costs nothing when none is owed. After `drain`, because
+                                    // a person who spoke meanwhile outranks it (and, having
+                                    // taken the slot, silences this).
+                                    wake ()
                                 | _ -> ()
                             | _ ->
                                 drainBusy <- false
                                 // Re-arm: anything enqueued during the appends drains now.
                                 drain ()
                         })
+
+        /// Run the turn the log owes, if it owes one. Same shape as the message path's turn
+        /// — one page, read BEFORE this turn's `AgentTurnStarted`, so the digest window is
+        /// "since the previous turn" without a cursor — and the same slot, so a wake can
+        /// never run beside a turn somebody asked for.
+        and wake () =
+            if drainBusy || Option.isSome running then () else
+            match runAgent () with
+            | None -> ()
+            | Some agent ->
+                drainBusy <- true
+                Async.StartImmediate (
+                    async {
+                        let! page = log.Read None System.Int32.MaxValue
+                        let events = page.Events |> List.map (fun envelope -> envelope.Event)
+                        match AgentWake.pending events with
+                        | None -> drainBusy <- false
+                        | Some turnActor ->
+                            generation <- generation + 1
+                            let turn =
+                                { Generation = generation
+                                  TurnId = mintTurnId ()
+                                  Aborted = false
+                                  AbortCallbacks = [] }
+                            running <- Some turn
+                            drainBusy <- false
+                            let projection, _ =
+                                ConversationProjection.applyEvents None page.Events ConversationProjection.empty
+                            let terminals =
+                                events
+                                |> List.fold TerminalProjection.applyEvent TerminalProjection.empty
+                                |> TerminalDigest.build
+                                    (fun id fromSeq toSeq -> readTranscript id fromSeq toSeq |> Transcript.printed)
+                                    (TerminalDigest.window events)
+                            do!
+                                AgentTurn.run
+                                    log
+                                    agent
+                                    (signalFor turn)
+                                    capabilitiesFor
+                                    emitUsage
+                                    (fun () -> turn.TurnId)
+                                    mintMessageId
+                                    sessionId
+                                    projection.Items
+                                    terminals
+                                    (AgentTurn.FromWake (CommandFinished, turnActor))
+                            match running with
+                            | Some current when current.Generation = turn.Generation ->
+                                running <- None
+                                // A person may have said something while the woken turn ran,
+                                // and their turn is the one that outranks everything.
+                                drain ()
+                                // A second background command may have finished while this
+                                // woken turn ran. Same re-read as the message path's, and it
+                                // terminates: `AgentWake.pending` resets at every
+                                // `AgentTurnStarted`, so a wake that consumed the debt leaves
+                                // nothing for the next one to find.
+                                wake ()
+                            | _ -> ()
+                    })
 
         // Terminal event first (durable), then the abort signal, then an immediate
         // drain — queued messages start their turn now. The slot is released BEFORE
@@ -176,4 +258,5 @@ module Scheduler =
 
         { Drain = drain
           RequestInterrupt = requestInterrupt
-          RunningTurn = fun () -> running |> Option.map (fun t -> t.TurnId) }
+          RunningTurn = fun () -> running |> Option.map (fun t -> t.TurnId)
+          Wake = wake }

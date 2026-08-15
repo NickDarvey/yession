@@ -193,7 +193,7 @@ let private frameSerializationTests =
                   PeerLeft { PeerId = peerId }
                   MessageSent { MessageId = messageId; QueueId = None; Author = PeerRef peerId; Body = "hi" }
                   MessageSent { MessageId = messageId; QueueId = Some (QueueId.create "q-1" |> expect); Author = ActorRef.System; Body = "" }
-                  AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = messageId }
+                  AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (messageId); Woke = None }
                   AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }
                   AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId }
                   AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "d" }
@@ -328,9 +328,59 @@ let private repoTests =
             Expect.equal (proj.Items |> List.map (fun i -> i.Author)) [ PeerRef ada; ActorRef.Agent; PeerRef ada ] "attributed to the acting party"
     ]
 
+// Who is behind an act (Plan 20). The type exists because these three were loose fields
+// every site re-spelled, and one site drifted: agent terminal commands recorded no owner at
+// all, so Plan 08's no-borrowing rule held in two places and was absent in a third.
+let private authorityTests =
+    let ada = PeerId.create "ada" |> expect
+    let bob = PeerId.create "bob" |> expect
+    testList "Authority (Plan 20)" [
+
+        testCase "a person's act borrows nothing, so it resolves to themselves" <| fun () ->
+            let authority = Authority.ofAuthor (PeerRef ada)
+            Expect.equal (Authority.onBehalfOf authority) None "there is no authority to state"
+            Expect.equal (Authority.effective authority) (PeerRef ada) "and it runs as its own author"
+
+        testCase "an agent's act resolves to the authority it was built with, never to itself" <| fun () ->
+            // The rule that went missing, as the only thing `agentFor` can produce: the agent
+            // is the acting party and the credential is the turn human's. There is no
+            // agent-authored act without one, so the omission would not compile.
+            let authority = Authority.agentFor (PeerRef ada)
+            Expect.equal (Authority.author authority) ActorRef.Agent "the agent is who acted"
+            Expect.equal (Authority.effective authority) (PeerRef ada) "on the turn human's credential"
+
+        testCase "an approval joins the authority without moving who acted or whose it was" <| fun () ->
+            let authority = Authority.agentFor (PeerRef ada) |> Authority.approvedBy (Some bob)
+            Expect.equal (Authority.approver authority) (Some (PeerRef bob)) "the peer who released it"
+            Expect.equal (Authority.author authority) ActorRef.Agent "still the agent's act"
+            Expect.equal (Authority.effective authority) (PeerRef ada) "still on ada's credential"
+
+        testCase "no approval is not an approval" <| fun () ->
+            // Every call site holds the queue entry's register, and `None` there means nobody
+            // had to say yes. Identity, so an ungated act does not record a blank approver.
+            let authority = Authority.agentFor (PeerRef ada)
+            Expect.equal
+                (Authority.approvedBy None authority)
+                authority
+                "an act nobody had to release is unchanged"
+
+        testCase "an act recovered without its owner invents no other one" <| fun () ->
+            // The decode path's safe direction, and why it does not go through the authoring
+            // constructors: a doc entry whose owner did not read back is a fact to recover,
+            // not a state to refuse — and refusing it would turn a corrupt field into a
+            // missing act. What must never happen is a substitute owner appearing.
+            let recovered = Authority.rehydrate ActorRef.Agent None None
+            Expect.equal (Authority.onBehalfOf recovered) None "no authority is conjured"
+            Expect.equal
+                (Authority.effective recovered)
+                ActorRef.Agent
+                "so it resolves to the agent, which has no scope of its own — not to a person"
+    ]
+
 let tests =
     testList "Domain" [
         identityTests
+        authorityTests
         envelopeSerializationTests
         conversationProjectionTests
         repoTests

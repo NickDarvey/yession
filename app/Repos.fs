@@ -12,7 +12,10 @@ module Yession.Host.Repos
 //
 // Git itself runs through the sandbox seam under the AGENT backend (`host` is the
 // explicitly lax choice; `srt` confines each spawn to the repos directory and the
-// allowlisted egress). On top of the confinement, repo-controlled EXECUTION is disabled
+// allowlisted egress). CLONE is the one exception, and it is a whole sandbox rather
+// than a flag on a spawn: it writes a work tree whose names are the repo's, and srt
+// refuses some of those names anywhere on the disk. See `unconfined` below.
+// On top of the confinement, repo-controlled EXECUTION is disabled
 // per invocation — hooks, fsmonitor, ext transport — because the WorkSandbox can write
 // the repos directory by design, so a poisoned `.git/config` is assumed and made inert
 // rather than trusted-by-placement.
@@ -151,26 +154,43 @@ let create (config: ReposConfig) : Result<ReposService, string> =
               WritePaths = [ config.ReposDir ]
               AllowedDomains = Some config.AllowedDomains
               Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-              WorkingDirectory = Some config.ReposDir }
+              WorkingDirectory = Some config.ReposDir
+              Filesystem = Confined }
 
-        // One sandbox for the service's life, created on first use — under srt that is
-        // an argv-rewriting wrapper, not a container, so per-verb spawns stay cheap.
-        let mutable sandbox : Sandbox option = None
-        let ensureSandbox () : Async<Result<Sandbox, string>> =
-            async {
-                match sandbox with
-                | Some ready -> return Ok ready
-                | None ->
-                    match! createSandbox policy with
-                    | Error e -> return Error (sprintf "git sandbox: %s" e)
-                    | Ok created ->
-                        sandbox <- Some created
-                        return Ok created
-            }
+        // A sandbox per policy, created on first use — under srt that is an
+        // argv-rewriting wrapper, not a container, so per-verb spawns stay cheap.
+        let lazySandbox (policy: SandboxPolicy) : unit -> Async<Result<Sandbox, string>> =
+            let mutable sandbox : Sandbox option = None
+            fun () ->
+                async {
+                    match sandbox with
+                    | Some ready -> return Ok ready
+                    | None ->
+                        match! createSandbox policy with
+                        | Error e -> return Error (sprintf "git sandbox: %s" e)
+                        | Ok created ->
+                            sandbox <- Some created
+                            return Ok created
+                }
 
-        let runGit (token: string option) (args: string list) : Async<Result<GitRun, string>> =
+        let confined = lazySandbox policy
+
+        /// The clone's sandbox, and nothing else's: a checkout can contain a `.vscode`,
+        /// a `.mcp.json`, a `.gitmodules` — names srt refuses to write anywhere, over any
+        /// allow-path — so the one verb that materializes a work tree runs with the
+        /// filesystem unenforced. Egress stays pinned to `AllowedDomains`, the env stays
+        /// the hardened one, and every other verb keeps the policy above: none of them
+        /// writes a path srt objects to. Undo the moment srt can exempt a subtree instead
+        /// of a whole spawn — `clone` goes back to `confined` and this sandbox goes away.
+        let unconfined = lazySandbox { policy with Filesystem = Unconfined }
+
+        let runGit
+            (sandboxFor: unit -> Async<Result<Sandbox, string>>)
+            (token: string option)
+            (args: string list)
+            : Async<Result<GitRun, string>> =
             async {
-                match! ensureSandbox () with
+                match! sandboxFor () with
                 | Error e -> return Error e
                 | Ok sandbox ->
                     let mutable stdout = ""
@@ -192,9 +212,13 @@ let create (config: ReposConfig) : Result<ReposService, string> =
             }
 
         /// Run and demand exit 0; a failure surfaces git's own words, capped.
-        let runOk (token: string option) (args: string list) : Async<Result<GitRun, string>> =
+        let runOk
+            (sandboxFor: unit -> Async<Result<Sandbox, string>>)
+            (token: string option)
+            (args: string list)
+            : Async<Result<GitRun, string>> =
             async {
-                match! runGit token args with
+                match! runGit sandboxFor token args with
                 | Error e -> return Error e
                 | Ok run when run.Code <> 0 ->
                     let said = if run.Stderr.Trim () <> "" then run.Stderr else run.Stdout
@@ -207,10 +231,10 @@ let create (config: ReposConfig) : Result<ReposService, string> =
 
         let listingOf (repo: RepoRef) : Async<Result<RepoListing, string>> =
             async {
-                match! runOk None [ "-C"; pathOf repo; "rev-parse"; "--abbrev-ref"; "HEAD" ] with
+                match! runOk confined None [ "-C"; pathOf repo; "rev-parse"; "--abbrev-ref"; "HEAD" ] with
                 | Error e -> return Error e
                 | Ok branch ->
-                    match! runOk None [ "-C"; pathOf repo; "status"; "--porcelain" ] with
+                    match! runOk confined None [ "-C"; pathOf repo; "status"; "--porcelain" ] with
                     | Error e -> return Error e
                     | Ok status ->
                         return Ok { Repo = repo; Branch = branch.Stdout.Trim (); Dirty = status.Stdout.Trim () <> "" }
@@ -242,7 +266,13 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                     return! listingOf repo
                 else
                     let! token = config.ResolveToken caller.Credential
-                    match! runOk token [ "clone"; "--no-recurse-submodules"; config.CloneUrl repo; RepoRef.relativePath repo ] with
+                    // `--template=` is empty deliberately: git's default templates are a
+                    // set of `.git/hooks/*.sample` files, and srt's macOS profile denies
+                    // every write under `**/.git/hooks/**` unconditionally — so the copy
+                    // that populates them is what fails, and a clone that asks for no
+                    // templates never attempts it. Nothing here wants a hooks directory
+                    // anyway: repo-controlled execution is off by construction.
+                    match! runOk unconfined token [ "clone"; "--no-recurse-submodules"; "--template="; config.CloneUrl repo; RepoRef.relativePath repo ] with
                     | Error e -> return Error e
                     | Ok _ ->
                         match! listingOf repo with
@@ -285,7 +315,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                     | Ok branch ->
                         let args =
                             [ "-C"; pathOf repo; "switch" ] @ (if create then [ "-c" ] else []) @ [ branch ]
-                        match! runOk None args with
+                        match! runOk confined None args with
                         | Error e -> return Error e
                         | Ok _ ->
                             match! listingOf repo with
@@ -299,7 +329,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
             requirePresent repo (fun () ->
                 async {
                     let! token = config.ResolveToken caller.Credential
-                    match! runOk token [ "-C"; pathOf repo; "fetch"; "--prune"; "--no-recurse-submodules"; "origin" ] with
+                    match! runOk confined token [ "-C"; pathOf repo; "fetch"; "--prune"; "--no-recurse-submodules"; "origin" ] with
                     | Error e -> return Error e
                     | Ok run ->
                         // Fetch narrates on stderr; an up-to-date fetch says nothing.
@@ -310,7 +340,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
         let inspect (args: string -> string list) (repo: RepoRef) : Async<Result<string, string>> =
             requirePresent repo (fun () ->
                 async {
-                    match! runOk None (args (pathOf repo)) with
+                    match! runOk confined None (args (pathOf repo)) with
                     | Error e -> return Error e
                     | Ok run ->
                         let said = run.Stdout.Trim ()

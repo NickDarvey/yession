@@ -150,6 +150,68 @@ let mutable private pageB : IPage = null
 let private await (t: Task<'a>) : Async<'a> = Async.AwaitTask t
 let private awaitU (t: Task) : Async<unit> = Async.AwaitTask t
 
+// --- What the page saw (so a failure can say more than "timed out") ----------------------
+//
+// A browser case can only fail one way: a wait that never settles. That failure names the WAIT
+// and never the reason, so three separate faults in the service worker — a registration
+// eliminated as dead code, an opaque redirect from the sign-in bounce, a precache that could
+// not have happened — all presented as the same thirty-second timeout, and each cost a full
+// run of the gate to tell apart. The page had been saying which was which the whole time.
+//
+// So: keep what it says, and print it when a case fails. It costs nothing on the green path
+// and it is the only way to read a red one in CI, where nothing can be attached afterwards.
+
+type private Evidence () =
+    let lines = ResizeArray<string> ()
+    /// Bounded: a page that is failing tends to say the same thing very fast, and a thousand
+    /// identical lines is not more evidence than fifty.
+    member _.Note (text: string) =
+        lock lines (fun () -> if lines.Count < 100 then lines.Add text)
+    member _.Lines = lock lines (fun () -> List.ofSeq lines)
+
+/// Listen to everything the page can tell us.
+let private watching (page: IPage) =
+    let ev = Evidence ()
+    page.Console.Add (fun m ->
+        if m.Type = "error" || m.Type = "warning" then ev.Note (sprintf "console %s: %s" m.Type m.Text))
+    page.PageError.Add (fun e -> ev.Note ("pageerror: " + e))
+    page.RequestFailed.Add (fun r -> ev.Note (sprintf "requestfailed: %s %s" r.Url r.Failure))
+    // NOT the service worker's own console: Playwright .NET 1.61 exposes `IWorker.Console`,
+    // but only for web workers (`page.Workers`) — there is no `IBrowserContext.ServiceWorkers`
+    // to reach a service worker through. A worker that wants to be heard here has to say it
+    // somewhere the page can see; `console.debug` in it is for a human with devtools open.
+    ev
+
+/// Run a case; if it throws, print what the page saw before letting the failure through.
+let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<unit>) : Async<unit> =
+    async {
+        try
+            do! body
+        with e ->
+            printfn "=== %s failed — what the page saw ===" label
+            for line in ev.Lines do printfn "  %s" line
+            // The page's own state, best-effort: on a navigation failure there is no page left
+            // to ask, and that answer is itself worth printing.
+            let! state =
+                async {
+                    try
+                        return!
+                            await (page.EvaluateAsync<string>
+                                    """() => JSON.stringify({
+                                         url: location.href,
+                                         title: document.title,
+                                         connection: document.querySelector('[data-connection]')?.textContent ?? null,
+                                         conversation: document.querySelector('[data-conversation]')?.textContent?.slice(0, 200) ?? null,
+                                         degraded: document.querySelector('[data-degraded]')?.getAttribute('data-degraded') ?? null
+                                       })""")
+                    with pe -> return "unreadable: " + pe.Message
+                }
+            printfn "  page: %s" state
+            printfn "=== end %s ===" label
+            raise e
+    }
+
+
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
 let private connected = """document.querySelector('[data-connection]')?.textContent === 'Connected'"""
 
@@ -241,6 +303,14 @@ let tests =
         // (the slot rule, the queue, the approval gate, the drain, the transcript) is covered
         // in the cheap tier; what is under test here is the binding itself, and that the
         // command really runs in the session's sandbox.
+        //
+        // `Srt` because of that last clause, and it is not a formality: the product's default
+        // work sandbox IS srt (`SessionMain.fs`, `YESSION_WORK_SANDBOX`), so on a box that
+        // cannot host one the command never runs, the block never reaches `ok`, and this waits
+        // out its timeout — thirty seconds to report, in effect, "this machine is not a
+        // machine this test can run on", which is precisely what a capability is for. It cost
+        // an agent a stash-and-re-run to discover that once.
+        Tag.needs "a command that really runs" [ Tag.Browser; Tag.Native; Tag.Srt ] (fun () ->
         testCaseAsync "a command typed in the terminal composer converges, runs in the sandbox, and both peers see the block" <|
             async {
                 // The column starts shut, so the header control is the way back in — and
@@ -291,7 +361,7 @@ let tests =
                     await (pageA.WaitForFunctionAsync
                             "document.querySelector(\"[data-terminal-input^='term-draft:']:not([readonly])\")?.value === ''")
                     |> Async.Ignore
-            }
+            })
 
         // Plan 11. THE discriminating check for the manager origin: this fixture sets no
         // YESSION_MANAGER_URL, so `PublicAccess.managerUrl` alone answers None here and an
@@ -615,7 +685,7 @@ let editorTests =
         // Neither is visible to a rendered string, and both are the WCAG floor rather than a
         // nicety: a chip that opens a pane and leaves focus behind, or a close that strands
         // focus on a control it just removed, is exactly the failure the floor names.
-        testCaseAsync "a chat chip opens a pane tab that plays, the strip walks, and closing hands focus back" <|
+        testCaseAsync "a chat chip opens a pane tab that plays, and the strip walks" <|
             async {
                 let server = serveStatic harnessRoot (EDITOR_PORT + 4)
                 let! pw = await (Playwright.CreateAsync ())
@@ -657,12 +727,6 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         """document.querySelector('#shell [data-pane-block]')?.textContent.includes('total 0') === true""")
-
-                // Closing the tab hands focus back to the chip that opened it, rather than
-                // stranding it on a control that has just left the document.
-                do! awaitU (page.ClickAsync "#shell [data-pane-tab-close]")
-                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-pane-block]')""")
-                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()
@@ -984,6 +1048,104 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+
+        // Pins (Plan 20, stage 1). The pin's STATE is a rendered attribute the cheap tier can
+        // read; what needs a browser is the keyboard release — Delete on a focused tab
+        // removes that tab from the document, and focus has to land on what took its place
+        // rather than on `body`. Same floor the DVR's control swap answers, in the surface a
+        // keyboard user actually walks.
+        testCaseAsync "a tab is kept by its pin and released from the keyboard, without stranding focus" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 9)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 9)))
+
+                // A chip's tab arrives previewed — kept by nothing.
+                do! awaitU (page.ClickAsync "#shell [data-chat-block]")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-tab^='block:']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-pane-tab-pin^='block:']")?.getAttribute('aria-pressed') === 'false'""")
+
+                // Pinning says so where anything that cannot see colour can read it.
+                do! awaitU (page.ClickAsync "#shell [data-pane-tab-pin^='block:']")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-pane-tab-pin^='block:']")?.getAttribute('aria-pressed') === 'true'""")
+
+                // Move on to something else. The pinned tab stays, which is what a pin is
+                // for — a preview would have been replaced here.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-harness']")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-tab^='block:']")
+
+                // Delete on the focused tab releases it. The tab leaves the strip, and focus
+                // lands on whatever took its position — never nowhere.
+                do! awaitU (page.FocusAsync "#shell [data-pane-tab^='block:']")
+                do! awaitU (page.Keyboard.PressAsync "Delete")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelectorAll("#shell [data-pane-tab^='block:']").length === 0""")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.activeElement?.closest('[role="tab"]') !== null""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+
+        // The terminal list (Plan 20, stage 0). WHICH verbs a row offers is a fold the cheap
+        // tier already pins; what only a browser can answer is the DOM swap — the list
+        // replaces the strip and the pane's body at once, so choosing a row removes the
+        // control that was pressed, and focus has to land on what replaced it rather than
+        // on `body`. That is the WCAG floor, not a nicety.
+        testCaseAsync "the list opens a terminal and hands focus to the pane it replaced itself with" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 8)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 8)))
+
+                do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-list-toggle='list']")
+
+                // One surface at a time: the tablist promises a panel showing one of its
+                // tabs, and it must not be left standing over a list that replaced it.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-list]")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [role='tablist']")""")
+
+                // Every terminal the session has is reachable here, whether or not the strip
+                // would have carried it.
+                let! rows = await (page.EvaluateAsync<int> "() => document.querySelectorAll('#shell [data-terminal-list-row]').length")
+                Expect.equal rows 3 "every terminal the harness has, the closed one included"
+
+                // Choosing a row shows that terminal AND leaves the list — one act — so the
+                // row that was pressed is gone from the document by the time focus moves.
+                // Driven from the KEYBOARD, because that is the half of this a click cannot
+                // answer: a row has to be a real control somebody can reach and press
+                // without a pointer, and the focus move afterwards is what the floor asks
+                // for when the pressed control leaves the document.
+                do! awaitU (page.FocusAsync "#shell [data-terminal-list-row='term-live']")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! _ = await (page.WaitForFunctionAsync """!document.querySelector('#shell [data-terminal-list]')""")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel') === 'terminal:term-live'""")
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
     ]
 
 // --- A path-mounted session in a real browser (docs/plans/10) ---------------------------
@@ -1094,6 +1256,86 @@ let private startMountedHost () : unit =
     mountedHost <- p
     if not (ready.Task.Wait 30000) then failwith "mounted host never reported readiness"
     if mountSessionPort = 0 then failwith "the readiness line carried no session port"
+
+// --- Reopening a session that is gone (Plan 20, Plan 22) ---------------------------------
+// The arrangement every offline-reopen case shares: a mounted session behind a proxy, a
+// browser on it, something done that makes history, the worker confirmed running, the session
+// killed, and a reload. Hoisted because it is the SETUP that repeats — what each case then
+// asserts about the page that came back is its own, and its red names it alone.
+
+let private saidInTimeline = "still here when the session is not"
+
+let private inTimeline =
+    sprintf
+        """document.querySelector('[data-conversation]')?.textContent?.includes('%s') === true"""
+        saidInTimeline
+
+let private printedInTerminal = "printed-before-the-session-died"
+
+let private terminalPrinted =
+    sprintf
+        """[...document.querySelectorAll('[data-terminal-output]')].some(o => o.textContent.includes('%s'))"""
+        printedInTerminal
+
+/// `make` runs against a live session and leaves history behind; `check` runs against the
+/// page that came back with the session dead.
+let private offlineReopen (name: string) (make: IPage -> Async<unit>) (check: IPage -> Async<unit>) =
+    testCaseAsync name <|
+        async {
+            if Directory.Exists mountDataDir then Directory.Delete (mountDataDir, true)
+            startMountedHost ()
+            let proxy = startMountProxy MOUNT_PROXY_PORT (fun () -> mountSessionPort)
+            let mutable browserToClose : IBrowser option = None
+            let mutable playwrightToDispose : IPlaywright option = None
+            try
+                let publicUrl = sprintf "http://127.0.0.1:%d/s/%s/" MOUNT_PROXY_PORT MOUNT_SESSION
+                let! pw = await (Playwright.CreateAsync ())
+                playwrightToDispose <- Some pw
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (
+                            ExecutablePath = chromiumPath (),
+                            Args = [| "--disable-features=WebRtcHideLocalIpsWithMdns" |])))
+                browserToClose <- Some br
+                let! context = await (br.NewContextAsync ())
+                let! page = await (context.NewPageAsync ())
+                page.SetDefaultTimeout 20000.0f
+                let evidence = watching page
+                do! reporting name page evidence <| async {
+                let! _ = await (page.GotoAsync publicUrl)
+                let! _ = await (page.WaitForFunctionAsync connected)
+
+                do! make page
+
+                // The worker has to be RUNNING before the session goes, or the reload has
+                // nothing serving it. Waiting on the registration is the difference between
+                // testing this and testing a race.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                            "navigator.serviceWorker.ready.then(r => !!r.active)")
+
+                // Gone, and staying gone. The proxy stays up, which is the honest shape of a
+                // reaped session behind an operator's front door — and it means the shell
+                // request comes back 502 rather than failing outright, which the worker has
+                // to treat as the failure it is.
+                mountedHost.Kill true
+                mountedHost.WaitForExit ()
+
+                let! _ = await (page.ReloadAsync ())
+
+                // The page loaded at all — the whole of what the worker adds, and the
+                // precondition every case here is really about rather than the thing it
+                // asserts.
+                let! _ = await (page.WaitForSelectorAsync "[data-conversation]")
+
+                do! check page
+                }
+            finally
+                browserToClose |> Option.iter (fun b -> b.CloseAsync () |> ignore)
+                playwrightToDispose |> Option.iter (fun p -> p.Dispose ())
+                proxy.Stop ()
+                try mountedHost.Kill true with _ -> ()
+        }
 
 let mountedTests =
     testList "Path-mounted session (browser)" [
@@ -1211,6 +1453,77 @@ let mountedTests =
                     proxy.Stop ()
                     try mountedHost.Kill true with _ -> ()
             }
+
+        // THE bug report, and the last thing plan 20 owed: open a session you have read
+        // before, with the session gone, and read it. Plan 22 adds the terminal.
+        //
+        // Everything it needs was built in the four steps before this one — the log addressed
+        // so its tail can be kept, the client keeping it, the replay that runs before the
+        // client knows whether it may connect, and a timeline that does not claim emptiness
+        // it has not checked. What was missing was a PAGE: the shell is `no-cache`, and a dead
+        // host cannot answer a revalidation, so until the worker there was nothing to render
+        // any of it into. That is why this case could not go green before now, and why it
+        // merges with the worker rather than sitting red beside it.
+        offlineReopen
+            "the session is gone, the page is still there, and so is its conversation"
+            (fun page ->
+                async {
+                    // Say something, so there is history to lose.
+                    let composerSel = """[data-rich-readonly="false"] .ProseMirror"""
+                    let! _ = await (page.WaitForSelectorAsync composerSel)
+                    do! awaitU (page.ClickAsync composerSel)
+                    do! awaitU (page.Keyboard.TypeAsync saidInTimeline)
+                    do! awaitU (page.Locator("[data-send-draft]").First.ClickAsync ())
+                    do! await (page.WaitForFunctionAsync inTimeline) |> Async.Ignore
+                })
+            (fun page ->
+                async {
+                    // It has what this client had been reading. Scoped to the conversation
+                    // element: a page-level match is satisfied by the roster and by the
+                    // composer this text was typed into.
+                    do! await (page.WaitForFunctionAsync inTimeline) |> Async.Ignore
+                })
+
+        // The connection state is its own promise, and its own way to break: a client that
+        // replayed its history out of its own store and then claimed to be CONNECTED to the
+        // session it replayed without would be lying about the one leg that is down.
+        offlineReopen
+            "a client reading its own history does not claim to be connected"
+            (fun _ -> async { return () })
+            (fun page ->
+                async {
+                    do!
+                        await (page.WaitForFunctionAsync
+                                """document.querySelector('[data-connection]')?.textContent !== 'Connected'""")
+                        |> Async.Ignore
+                })
+
+        // Plan 22, and the other half of the bug report: the conversation came back offline
+        // and the terminal under it did not. `Srt` because this really runs a command — on a
+        // box that cannot host a sandbox the block never reaches `ok` and this would HANG
+        // rather than fail.
+        Tag.needs "a terminal that really ran something" [ Tag.Browser; Tag.Native; Tag.Srt ] (fun () ->
+        offlineReopen
+            "the session is gone, the page is still there, and so is what its terminal printed"
+            (fun page ->
+                async {
+                    do! awaitU (page.Locator("[data-terminal-toggle='show']").First.ClickAsync ())
+                    do! awaitU (page.Locator("[data-terminal-new]").First.ClickAsync ())
+                    let composerInput = "[data-terminal-input^='term-draft:']:not([readonly])"
+                    let! _ = await (page.WaitForSelectorAsync composerInput)
+                    do! awaitU (page.ClickAsync composerInput)
+                    do! awaitU (page.Keyboard.TypeAsync (sprintf "echo %s" printedInTerminal))
+                    do! awaitU (page.ClickAsync "[data-terminal-send]")
+                    do! await (page.WaitForFunctionAsync terminalPrinted) |> Async.Ignore
+                })
+            (fun page ->
+                async {
+                    // The column starts shut on a fresh load, so this also says the replayed
+                    // records are there to be shown BEFORE anyone opens it — which is what a
+                    // store read before the network buys.
+                    do! awaitU (page.Locator("[data-terminal-toggle='show']").First.ClickAsync ())
+                    do! await (page.WaitForFunctionAsync terminalPrinted) |> Async.Ignore
+                }))
     ]
 
 #else

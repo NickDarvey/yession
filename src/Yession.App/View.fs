@@ -70,6 +70,13 @@ type ViewActions =
       /// Imperative because it is a navigation, and a navigation is not a state change this
       /// document survives to fold.
       ReopenSession : unit -> unit
+      /// Try the session again NOW, rather than when the supervised loop next would.
+      ///
+      /// A trigger, never a second schedule (Plan 20): it shortens the wait the lifecycle is
+      /// already in. It earns its place on the one client the loop deliberately will not
+      /// carry — a peer whose token was refused, which no amount of waiting fixes and which
+      /// therefore parks until somebody asks.
+      RetryNow : unit -> unit
       /// Ask the Session Process to open a terminal (Plan 13). A command, so imperative:
       /// the terminal's id is minted by the Process and comes back as an event.
       OpenTerminal : string -> unit
@@ -135,6 +142,7 @@ module ViewActions =
           GitHubPasteToken = ignore
           GitHubDisconnect = ignore
           ReopenSession = ignore
+          RetryNow = ignore
           OpenTerminal = ignore
           CloseTerminal = ignore
           SendTerminalDraft = fun _ _ -> ()
@@ -290,7 +298,13 @@ module View =
         let connectionReason =
             match model.Connection with
             | Disconnected (Some reason) ->
-                html $"""<span class="{Style.small}" data-connection-reason>{reason}</span>"""
+                // The reason, and the one thing a person can do about it. The supervised loop
+                // is already trying; this is for the client it will not carry — a refused peer
+                // parks until asked — and for anyone who would rather not wait out a backoff.
+                html $"""
+                  <span class="{Style.small}" data-connection-reason>{reason}</span>
+                  <button type="button" class="{Style.btn}" data-retry-now
+                          @click={Ev(fun _ -> actions.RetryNow ())}>{Dom.Text.retryNow}</button>"""
             | _ -> Lit.nothing
         let feedLine =
             match consumer.Feed with
@@ -606,6 +620,19 @@ module View =
     /// the way out at the foot (where `settings ›` sits), and the column's own collapse control
     /// in the same corner on both faces — chrome that belongs to the column, not to a face, so
     /// it never disappears under you.
+    /// Said only where it is true, and only once: a client that cannot keep history keeps
+    /// none, and the alternative to saying so is a session that silently stops remembering.
+    /// Not in the degraded strip — that reports LEGS that are down, and this is a property of
+    /// how the page was served, fixed for the whole life of the document.
+    let private historyStoreNote (model: ClientModel) : TemplateResult =
+        if model.CanKeepHistory then Lit.nothing
+        else
+            html $"""
+                <section class="{Style.sideSection}" data-history-store="none">
+                  <span class="{Style.label}">history</span>
+                  <span class="{Style.small}">{Dom.Text.historyNotKept}</span>
+                </section>"""
+
     let private settingsPane (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
         html $"""
             <div class="{Style.settingsPane}" data-settings-panel>
@@ -617,6 +644,7 @@ module View =
               {githubSection actions dispatch model.GitHub}
               {queriesSection model.Queries}
               {gatesSection dispatch model}
+              {historyStoreNote model}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>
             </div>"""
@@ -1042,6 +1070,15 @@ module View =
         let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
             let whoClass = if isAgent then Style.whoAgent else Style.who
+            // Why this turn exists, when nobody asked for it (Plan 20, stage 2). Beside the
+            // author rather than in the body: it is attribution, and attribution belongs on
+            // the line that says who — the body is what the agent said, and a sentence the
+            // agent did not say does not go in it.
+            let wokeInner =
+                match item.Woke with
+                | None -> Lit.nothing
+                | Some CommandFinished ->
+                    html $"""<span class="{Style.statusFaint}" data-message-woke="{Dom.Text.wokeCommandFinished}" title="{Dom.Text.turnWokeCommandFinished}">{Dom.Text.turnWoke}</span>"""
             let statusInner =
                 match item.Status with
                 | Complete -> Lit.nothing
@@ -1052,10 +1089,11 @@ module View =
                 match item.Status with
                 | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
                 | _ -> Style.messageBody, Lit.nothing
+            let bodyClass = Style.cls [ bodyClass; Style.messageVoice isAgent ]
             html $"""
                 <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
                   <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
-                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorName model item.Author}</span>{statusInner}</div>
+                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorName model item.Author}</span>{wokeInner}{statusInner}</div>
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
         let message (item: ConversationItem) =
@@ -1080,7 +1118,7 @@ module View =
                             data-chat-block-status="{terminalBlockStatusLabel block.Status}"
                             data-terminal-id="{TerminalId.value terminalId}"
                             @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
-                      <span class="{Style.chatChipWho}">{authorName model block.Author}</span>
+                      <span class="{Style.chatChipWho}">{authorName model (Authority.author block.Authority)}</span>
                       <span class="{Style.terminalPrompt}">$</span>
                       <code class="{Style.chatChipCommand}">{block.Command}</code>
                       <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
@@ -1167,8 +1205,20 @@ module View =
         // `aria-hidden`, because it is a typographic mark rather than content: a reader that
         // cannot see it is told the timeline is empty by the timeline being empty.
         let body =
-            match rows with
-            | [] ->
+            match rows, model.HistoryRead with
+            // Nothing here, and this client has not looked yet — which after the local store
+            // (Plan 20) is the ordinary cold open. The idle caret would say "nothing was ever
+            // said here", so it says the opposite of what is known. A pulse says the true
+            // thing: someone is reading. `role="status"` because it is a state, not a mark —
+            // a reader that cannot see the pulse is told in words.
+            | [], false ->
+                [ html $"""<div class="{Style.timelineIdle}" role="status" data-history-loading>
+                       <span class="{Style.caretReading}"></span>
+                       <span class="{Style.srOnly}">{Dom.Text.readingHistory}</span>
+                     </div>""" ]
+            // Looked, and there is genuinely nothing: the caret now only ever means what it
+            // has always said, which is why it can stay wordless and decorative.
+            | [], true ->
                 [ html $"""<div class="{Style.timelineIdle}" aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
             | _ -> items
         html $"""<section class="{Style.timeline}" data-conversation>{body}</section>"""
@@ -1206,14 +1256,15 @@ module View =
         // command the AGENT ran is the thing a person scanning a scrollback is looking for,
         // and with the facts behind a disclosure there was nothing on the line to say so.
         let author =
-            if block.Author = ActorRef.PeerRef model.Peer.PeerId then Lit.nothing
+            let who = Authority.author block.Authority
+            if who = ActorRef.PeerRef model.Peer.PeerId then Lit.nothing
             else
                 html $"""
-                    <span class="{Style.cls [ Style.avatarSm; authorAvatar block.Author ]}" title="{authorName model block.Author}"
-                          data-terminal-block-author="{authorLabel block.Author}"></span>"""
+                    <span class="{Style.cls [ Style.avatarSm; authorAvatar who ]}" title="{authorName model who}"
+                          data-terminal-block-author="{authorLabel who}"></span>"""
         // The facts that used to have nowhere to go, or nowhere better than a status beside
         // the command: who ran it, who let it through, and how it ended. Behind a
-        // disclosure, because a scrollback is read for its OUTPUT and the provenance is what
+        // disclosure, because a scrollback is read for its OUTPUT and who was behind it is what
         // you go looking for afterwards — and it is a real `<details>`, so going looking is
         // a keypress and an announcement rather than a click handler.
         let fact (text: string) = html $"""<span class="{Style.terminalBlockFact}">{text}</span>"""
@@ -1226,8 +1277,8 @@ module View =
             | BlockRejected (by, _) -> [ fact (sprintf "refused by %s" (authorName model by)) ]
             | BlockRunning -> []
         let facts =
-            [ fact (sprintf "ran by %s" (authorName model block.Author))
-              match block.ApprovedBy with
+            [ fact (sprintf "ran by %s" (authorName model (Authority.author block.Authority)))
+              match Authority.approver block.Authority with
               | Some by -> fact (sprintf "approved by %s" (authorName model by))
               | None -> ()
               yield! exitFact ]
@@ -1363,7 +1414,7 @@ module View =
               <div class="{Style.terminalQueuedRow}">
                 {statusLine}
                 {subject}
-                <span class="{Style.small}">{authorName model entry.Author}</span>
+                <span class="{Style.small}">{authorName model (Authority.author entry.Authority)}</span>
                 <div class="ml-auto flex items-center gap-2">
                   {reject}
                   {approval}
@@ -1629,6 +1680,35 @@ module View =
 })()""")>]
     let private moveTabFocus (e: obj) : unit = Fable.Core.Util.jsNative
 
+    /// Delete/Backspace on a focused tab — the keyboard's unpin (Plan 20, stage 1). Returns
+    /// the tab's key, or `""` when this keypress is not that: the strip's other keys are the
+    /// arrow walk above, and typing must not unpin anything.
+    [<Fable.Core.Emit("""(() => {
+  if ($0.key !== 'Delete' && $0.key !== 'Backspace') return ''
+  const tab = document.activeElement?.closest('[data-pane-tab]')
+  if (!tab) return ''
+  $0.preventDefault()
+  return tab.getAttribute('data-pane-tab')
+})()""")>]
+    let private unpinKeyOn (e: obj) : string = Fable.Core.Util.jsNative
+
+    /// Move focus to the tab that will take the released one's place — BEFORE the release,
+    /// which is what makes it need no timing assumption at all.
+    ///
+    /// Focusing afterwards is the obvious shape and it does not work: the strip has to be
+    /// re-rendered first, and when that happens is the renderer's business. Measured on both
+    /// attempts — synchronously, focus landed on the node about to be removed and the browser
+    /// moved it to `body`; on `requestAnimationFrame`, a headless browser that paints no
+    /// frames never ran the callback at all. Going first has neither problem: the neighbour
+    /// exists right now, and a node that keeps focus keeps it across the patch.
+    [<Fable.Core.Emit("""(() => {
+  const tabs = Array.from($0.currentTarget.querySelectorAll('[role="tab"]'))
+  const here = tabs.indexOf(document.activeElement?.closest('[role="tab"]'))
+  if (here < 0 || tabs.length < 2) return
+  tabs[Math.min(here, tabs.length - 2)].focus()
+})()""")>]
+    let private focusNeighbourTab (e: obj) : unit = Fable.Core.Util.jsNative
+
     /// One block's read-only view, as a tab opened from its chip shows it: the command, and
     /// everything it printed, from the chunks this client already has.
     ///
@@ -1725,6 +1805,101 @@ module View =
               {player}
             </section>"""
 
+    /// The terminal LIST (Plan 20, stage 0): every terminal the session has ever had, and
+    /// every verb one of them affords.
+    ///
+    /// The verbs are rendered from `TerminalAffordances` and from nothing else — a row wears
+    /// exactly the controls its terminal's state allows, and a control that does not apply is
+    /// ABSENT rather than disabled. That is the same rule the pane's own controls already
+    /// followed by hand in three places; here it is one fold, which is what lets a test assert
+    /// "kill is never offered over a closed terminal" without building a browser.
+    ///
+    /// Every state a row can be in is carried by a MARK rather than by a sentence: a pulsing
+    /// blue dot is a command running, a peer's own colour is that peer typing, a play outline
+    /// is a recording, and the one state with no glyph — a recording the cap ate — is the only
+    /// one that says a word, in the voice this design keeps for facts that are wrong.
+    let private terminalListView (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        let row (view: TerminalView) =
+            let id = TerminalId.value view.TerminalId
+            let affords = ClientModel.affordances view model
+            let running = TerminalProjection.runningBlock view |> Option.isSome
+            let state =
+                if not view.IsOpen then
+                    if affords.CanReplay then
+                        html $"""<span class="{Style.statusFaint}" title="Recording">{Icon.playSm}</span>"""
+                    else
+                        // No recording and no glyph for the absence of one: a hole in an audit
+                        // trail is stated, in the voice reserved for a fact that is wrong.
+                        html $"""<span class="{Style.statusErr}" data-terminal-list-gone="{id}">not kept</span>"""
+                elif running then
+                    html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span></span>"""
+                else
+                    match view.Lease with
+                    // Whoever is typing, in their own colour — the same dot the roster and the
+                    // tabs wear, so one person is one mark on every surface at once.
+                    | Some (PeerRef peer) ->
+                        html $"""<span class="{Style.syncDot}" style="background:{PeerColour.ofPeer peer}"
+                                       title="{authorName model (PeerRef peer)}"></span>"""
+                    | Some holder ->
+                        html $"""<span class="{Style.statusRun}" title="{authorName model holder}"><span class="{Style.statusDot}"></span></span>"""
+                    | None -> html $"""<span class="{Style.statusFaint}"><span class="{Style.statusDot}"></span></span>"""
+            let peers =
+                ClientModel.peersInTerminal view.TerminalId model
+                |> List.map (fun (peer, name) ->
+                    html $"""
+                        <span class="{Style.draftEditorDot}" style="background:{PeerColour.ofPeer peer}"
+                              title="{name}" data-terminal-tab-peer="{PeerId.value peer}"></span>""")
+            let rewind =
+                if not affords.CanRewind then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.btnIcon}" data-terminal-list-rewind="{id}"
+                                aria-label="Rewind {view.Title}"
+                                @click={Ev(fun _ ->
+                                              dispatch (RewindTerminalMsg view.TerminalId)
+                                              dispatch (SelectFromListMsg view.TerminalId)
+                                              actions.FocusPane ())}>{Icon.rewind}</button>"""
+            let reattach =
+                if not affords.CanReattach then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.btnIcon}" data-terminal-reattach="{id}"
+                                aria-label="Attach {view.Title} again"
+                                @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>{Icon.attach}</button>"""
+            let kill =
+                if not affords.CanKill then Lit.nothing
+                else
+                    html $"""
+                        <button type="button" class="{Style.btnIconDanger}" data-terminal-close="{id}"
+                                aria-label="Kill {view.Title}"
+                                @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>{Icon.stop}</button>"""
+            let nameClass = if view.IsOpen then Style.terminalListName else Style.terminalListNameClosed
+            html $"""
+                <div class="{Style.terminalListRow}" role="listitem">
+                  {state}
+                  <span class="min-w-0 flex items-center">
+                    <button type="button" class="{nameClass}" data-terminal-list-row="{id}"
+                            @click={Ev(fun _ -> dispatch (SelectFromListMsg view.TerminalId); actions.FocusPane ())}>{view.Title}</button>
+                    <span class="{Style.terminalTabPeers}">{peers}</span>
+                  </span>
+                  <span class="{Style.terminalListVerbs}">{rewind}{reattach}{kill}</span>
+                </div>"""
+        match ClientModel.terminalRows model with
+        | [] ->
+            html $"""
+                <div class="{Style.terminalListEmpty}" data-terminal-list>
+                  <span class="font-terminal text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
+                  <button type="button" class="{Style.btnPrimary}" data-terminal-new
+                          @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
+                </div>"""
+        | rows ->
+            let items = rows |> List.map row
+            html $"""
+                <div class="{Style.terminalListBody}" data-terminal-list role="list"
+                     aria-label="Every terminal in this session">
+                  {items}
+                </div>"""
+
     /// The side pane: a tab strip over three kinds of thing — a terminal, a block's
     /// read-only view, and a stretch's replay (Plan 14, stage 2).
     ///
@@ -1781,26 +1956,50 @@ module View =
                 |> Option.map (fun b -> b.Command)
                 |> Option.defaultValue (BlockId.value blockId)
             | StretchTab stretch -> sprintf "%s · %s" (authorName model stretch.Holder) stretch.Title
-        let openedTabButton (tab: PaneTab) =
+        let readonlyTabButton (tab: PaneTab) =
             let on = isOn tab
             let label = tabLabel tab
             html $"""
-                <span class="{Style.paneTabGroup}">
-                  <button type="button" role="tab" class="{if on then Style.terminalTabActive else Style.terminalTab}"
-                          data-pane-tab="{PaneTab.key tab}"
-                          aria-selected="{if on then "true" else "false"}" tabindex="{if on then "0" else "-1"}"
-                          @click={Ev(fun _ -> dispatch (SelectPaneTabMsg tab))}>{label}</button>
-                  <button type="button" class="{Style.paneTabClose}" data-pane-tab-close="{PaneTab.key tab}"
-                          aria-label="Close this view of {label}"
-                          @click={Ev(fun _ -> dispatch (ClosePaneTabMsg tab); actions.FocusChat (PaneTab.key tab))}>{Icon.close}</button>
-                </span>"""
+                <button type="button" role="tab" class="{if on then Style.terminalTabActive else Style.terminalTab}"
+                        data-pane-tab="{PaneTab.key tab}"
+                        aria-selected="{if on then "true" else "false"}" tabindex="{if on then "0" else "-1"}"
+                        @click={Ev(fun _ -> dispatch (SelectPaneTabMsg tab))}>{label}</button>"""
+        /// The pin, on every tab that can be kept (Plan 20, stage 1).
+        ///
+        /// Offered where a pin would MEAN something: a live terminal, or a recording somebody
+        /// opened from the chat. A closed terminal appears here only as the preview — its
+        /// home is the list — so pinning one would be kept by nothing, and a control whose
+        /// effect is undone by the next event is worse than no control.
+        let pinToggle (tab: PaneTab) (label: string) =
+            if not (PaneTab.isLive model.Terminals tab) then Lit.nothing
+            else
+                let pinned = ClientModel.isPinned tab model
+                // The name states the CONSEQUENCE, because the vocabulary this control
+                // replaced — a tab's `✕` — means "gone", and someone who reads it that way
+                // would think they were killing a terminal.
+                let name = if pinned then sprintf "Unpin %s — keeps running" label else sprintf "Pin %s" label
+                html $"""
+                    <button type="button" class="{if pinned then Style.paneTabPinned else Style.paneTabPin}"
+                            data-pane-tab-pin="{PaneTab.key tab}"
+                            aria-pressed="{if pinned then "true" else "false"}" aria-label="{name}"
+                            @click={Ev(fun _ -> dispatch (TogglePinMsg tab))}>{Icon.pin}</button>"""
         let tabButton (tab: PaneTab) =
-            match tab with
-            | TerminalTab id ->
-                match TerminalProjection.tryFind id model.Terminals with
-                | Some view -> terminalTabButton view
-                | None -> Lit.nothing
-            | BlockTab _ | StretchTab _ -> openedTabButton tab
+            let inner =
+                match tab with
+                | TerminalTab id ->
+                    match TerminalProjection.tryFind id model.Terminals with
+                    | Some view -> terminalTabButton view
+                    | None -> Lit.nothing
+                | BlockTab _ | StretchTab _ -> readonlyTabButton tab
+            let label =
+                match tab with
+                | TerminalTab id ->
+                    TerminalProjection.tryFind id model.Terminals
+                    |> Option.map (fun v -> v.Title)
+                    |> Option.defaultValue (TerminalId.value id)
+                | BlockTab (_, blockId) -> BlockId.value blockId
+                | StretchTab stretch -> stretch.Title
+            html $"""<span class="{Style.paneTabGroup}">{inner}{pinToggle tab label}</span>"""
         let terminalBody (view: TerminalView) =
             let feed = ClientModel.terminalFeed view.TerminalId model
             let truncated =
@@ -1900,7 +2099,10 @@ module View =
                  // against what you are watching: the way back is "jump to live", above.
                  elif rewound then Lit.nothing
                  else terminalComposer actions dispatch model view.TerminalId}"""
-        let body =
+        // A thunk, because the list renders INSTEAD of this: a pane body built on every
+        // render while the list is showing would walk a terminal's whole block history to
+        // produce markup nothing mounts, on every keystroke and every arriving record.
+        let body () =
             match selected with
             // The empty pane wears the terminal's own symbol — an idle prompt, display-sized
             // — and the one button that fills it. What a terminal IS was a paragraph here;
@@ -1908,7 +2110,7 @@ module View =
             | None ->
                 html $"""
                     <div class="{Style.terminalEmpty}">
-                      <span class="font-mono text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
+                      <span class="font-terminal text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
                       <button type="button" class="{Style.btnPrimary}" data-terminal-new
                               @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
                     </div>"""
@@ -1929,25 +2131,6 @@ module View =
                          data-pane-panel="{PaneTab.key tab}">
                       {inner}
                     </div>"""
-        // Offered only for a terminal that is actually open: a "close" on a closed one either
-        // does nothing or reports an error, and both are worse than not being there.
-        let closeSelected =
-            match selected with
-            | Some (TerminalTab id) ->
-                match TerminalProjection.tryFind id model.Terminals with
-                | Some view when view.IsOpen ->
-                    html $"""
-                        <button type="button" class="{Style.terminalBarDanger}" data-terminal-close="{TerminalId.value view.TerminalId}"
-                                aria-label="Close terminal" @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>close</button>"""
-                // A closed stream, and a provider that said asking again is safe (Plan 19).
-                // Shown ONLY when both are true: a control that mostly refuses teaches people
-                // not to press it, and this one has to work the time somebody needs it.
-                | Some view when view.Renewable ->
-                    html $"""
-                        <button type="button" class="{Style.terminalBarAct}" data-terminal-reattach="{TerminalId.value view.TerminalId}"
-                                aria-label="Attach this stream again" @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>attach again</button>"""
-                | _ -> Lit.nothing
-            | _ -> Lit.nothing
         // What this terminal IS, and the acts that are about the terminal rather than about
         // the command you are writing. The approval readout is the reason the bar exists: it
         // is a property of the terminal — read constantly, changed twice a session — and it
@@ -2003,7 +2186,7 @@ module View =
                                 <button type="button" class="{Style.terminalBarAct}" data-terminal-rewind="{TerminalId.value view.TerminalId}"
                                         @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>rewind</button>"""
                         else Lit.nothing
-                    html $"""{approval}<span class="{Style.terminalBarActs}">{take}{rewind}{closeSelected}</span>"""
+                    html $"""{approval}<span class="{Style.terminalBarActs}">{take}{rewind}</span>"""
             | _ -> Lit.nothing
         // The bar names the SELECTED tab, which is the thing a reader cannot work out for
         // themselves. It used to say "terminals" — the largest text on a phone screen, telling
@@ -2012,6 +2195,53 @@ module View =
             match selected with
             | Some tab -> tabLabel tab
             | None -> "terminals"
+        // The strip's kill and its attach-again are GONE (Plan 20, stage 1): both are verbs
+        // about a terminal rather than about which tab you are reading, and both now live on
+        // that terminal's row in the list, offered from the one fold that decides what a
+        // terminal's state allows. What the strip keeps is navigation and the pin — so the
+        // strip has become incapable of destroying anything, and a person closing tabs out of
+        // habit can no longer kill somebody's build by reflex.
+        //
+        // The strip and the list are alternatives, never both at once, and that is an ARIA
+        // requirement rather than a preference: `role="tablist"` promises a tabpanel showing
+        // one of its tabs, and a strip left standing over the list would be promising a panel
+        // that is not in the document. One surface at a time; the toggle is how you swap them.
+        let strip =
+            html $"""
+                <div class="{Style.terminalTabs}">
+                  <div class="{Style.terminalTabList}" role="tablist" aria-label="Terminals and recordings"
+                       @keydown={Ev(fun e ->
+                                        moveTabFocus e
+                                        // Delete/Backspace unpins what is focused. The index
+                                        // is taken BEFORE the dispatch and the focus handed
+                                        // back after it, because the tab being released may
+                                        // be the one leaving the document.
+                                        match unpinKeyOn e with
+                                        | "" -> ()
+                                        | key ->
+                                            tabs
+                                            |> List.tryFind (fun tab -> PaneTab.key tab = key)
+                                            |> Option.filter (fun tab -> ClientModel.isPinned tab model)
+                                            |> Option.iter (fun tab ->
+                                                focusNeighbourTab e
+                                                dispatch (TogglePinMsg tab)))}>
+                    {tabs |> List.map tabButton}
+                  </div>
+                  <button type="button" class="{Style.terminalTabNew}" data-terminal-new
+                          @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
+                </div>"""
+        // ONE control with two faces rather than a pair that swap places: it never leaves the
+        // document, so pressing it can never strand the focus that is on it — the stranded-focus
+        // case the DVR's pair needs `FocusDvr` to answer. Its value is the face it will show,
+        // which is the same contract `data-nav-toggle` and `data-settings-toggle` carry.
+        let listToggle =
+            let showingList = model.TerminalList
+            html $"""
+                <button type="button" class="{Style.cls [ Style.btnIcon; "w-8 h-8 ml-auto" ]}"
+                        data-terminal-list-toggle="{if showingList then "pane" else "list"}"
+                        aria-pressed="{if showingList then "true" else "false"}"
+                        aria-label="Every terminal in this session"
+                        @click={Ev(fun _ -> dispatch ToggleTerminalListMsg)}>{Icon.list}</button>"""
         html $"""
             <aside class="{Style.terminalPanel}" data-terminal-panel>
               <!-- The split, as a real separator: `aria-valuenow` and the arrow keys are what
@@ -2024,6 +2254,7 @@ module View =
                 <div class="{Style.terminalHead}">
                   <span class="{Style.terminalHeadName}">{paneName}</span>
                   {properties}
+                  {listToggle}
                   <button type="button" class="{Style.navChevronForward}" aria-label="Back to the chat"
                           data-terminal-toggle="hide"
                           @click={Ev(fun _ ->
@@ -2033,15 +2264,8 @@ module View =
                                         // reader came from, exactly as closing a tab does.
                                         selected |> Option.iter (PaneTab.key >> actions.FocusChat))}>{Icon.right}</button>
                 </div>
-                <div class="{Style.terminalTabs}">
-                  <div class="{Style.terminalTabList}" role="tablist" aria-label="Terminals and recordings"
-                       @keydown={Ev(fun e -> moveTabFocus e)}>
-                    {tabs |> List.map tabButton}
-                  </div>
-                  <button type="button" class="{Style.terminalTabNew}" data-terminal-new aria-label="New terminal"
-                          @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+</button>
-                </div>
-                {body}
+                {if model.TerminalList then Lit.nothing else strip}
+                {if model.TerminalList then terminalListView actions dispatch model else body ()}
               </div>
             </aside>"""
 

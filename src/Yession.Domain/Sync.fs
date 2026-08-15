@@ -146,8 +146,10 @@ module SyncedStateSync =
               "args", Encode.string (AVal.constant args)
               "summary", Encode.string (AVal.constant summary)
               "onBehalfOf",
-              Encode.string (AVal.constant (q.OnBehalfOf |> Option.map ActorRef.token |> Option.defaultValue ""))
-              "author", Encode.string (AVal.constant (ActorRef.token q.Author))
+              Encode.string
+                  (AVal.constant
+                      (Authority.onBehalfOf q.Authority |> Option.map ActorRef.token |> Option.defaultValue ""))
+              "author", Encode.string (AVal.constant (ActorRef.token (Authority.author q.Authority)))
               "order", Encode.float (AVal.constant q.Order)
               "approvedBy",
               Encode.string (AVal.constant (q.ApprovedBy |> Option.map PeerId.value |> Option.defaultValue ""))
@@ -227,7 +229,11 @@ module SyncedStateSync =
           Order : float
           ApprovedBy : string
           RejectedBy : string
-          RejectedReason : string }
+          RejectedReason : string
+          /// Whether the author is waiting on this one (Plan 20, stage 2). A string on the
+          /// doc side like every other field here — the doc carries text, and the domain
+          /// type is where it becomes a bool.
+          Background : string }
 
     /// A terminal draft entry: the queue key it becomes when sent. Both ids come from the
     /// map key, so only this crosses.
@@ -250,6 +256,7 @@ module SyncedStateSync =
             let! approvedBy = Decode.object.optional "approvedBy" Decode.string
             let! rejectedBy = Decode.object.optional "rejectedBy" Decode.string
             let! rejectedReason = Decode.object.optional "rejectedReason" Decode.string
+            let! background = Decode.object.optional "background" Decode.string
             return
                 { Subject = subject
                   Payload = defaultArg payload ""
@@ -261,7 +268,8 @@ module SyncedStateSync =
                   Order = defaultArg order 0.0
                   ApprovedBy = defaultArg approvedBy ""
                   RejectedBy = defaultArg rejectedBy ""
-                  RejectedReason = defaultArg rejectedReason "" }
+                  RejectedReason = defaultArg rejectedReason ""
+                  Background = defaultArg background "" }
         }
 
     let private decodeTerminalSize<'m> : Decoder<'m, TerminalSize> =
@@ -347,16 +355,26 @@ module SyncedStateSync =
                     id
                     { QueueId = id
                       Subject = subject
-                      Author = author
                       Order = f.Order
                       Payload = payload
-                      // An unreadable credential owner reads as NONE, which makes the act
-                      // run on nothing rather than on somebody else's — the safe direction,
-                      // and the dispatch refuses it with a reason.
-                      OnBehalfOf = (if f.OnBehalfOf = "" then None else ActorRef.ofToken f.OnBehalfOf)
+                      // Recovered rather than authored: an unreadable credential owner reads
+                      // as NONE, which makes the act run on nothing rather than on somebody
+                      // else's — the safe direction, and the dispatch refuses it with a
+                      // reason. The authoring constructors cannot express that state, which
+                      // is exactly why decoding does not go through them.
+                      Authority =
+                        Authority.rehydrate
+                            author
+                            (if f.OnBehalfOf = "" then None else ActorRef.ofToken f.OnBehalfOf)
+                            // The approval is a verdict register on the entry, below — it
+                            // joins the authority when the drain acts on it, not before.
+                            None
                       ApprovedBy = approvedBy
                       RejectedBy = rejectedBy
-                      RejectedReason = (if f.RejectedReason = "" then None else Some f.RejectedReason) }
+                      RejectedReason = (if f.RejectedReason = "" then None else Some f.RejectedReason)
+                      // Absent reads as foreground, which is what every entry a person
+                      // writes is and what every entry written before Plan 20 was.
+                      Background = (f.Background = "true") }
             | _ -> acc)
 
     let private terminalSizesToDomain (h: HashMap<string, TerminalSize>) : Map<TerminalId, TerminalSize> =
@@ -501,7 +519,8 @@ module SyncedStateSync =
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
                   ApprovedBy = entryString entry "approvedBy"
                   RejectedBy = entryString entry "rejectedBy"
-                  RejectedReason = entryString entry "rejectedReason" })
+                  RejectedReason = entryString entry "rejectedReason"
+                  Background = entryString entry "background" })
         let gatesH = foldRoot doc "gates" (fun entry -> entryString entry "mode")
         let terminalSizesH =
             foldRoot doc "terminalSizes" (fun entry ->
@@ -622,9 +641,21 @@ module SyncedStateSync =
         (doc: Yjs.Y.Doc)
         (id: QueueId)
         (terminal: TerminalId)
-        (author: ActorRef)
+        // Who is behind it (Plan 20). ONE value, and the only agent-shaped way to build one
+        // names whose authority it runs on — so the omission this replaced, an agent command
+        // enqueued with no owner at all, is no longer something a caller can forget.
+        //
+        // What a woken turn resolves its authority from, too: a command queued for nobody can
+        // start no turn, which is the safe direction and the one an unreadable owner already
+        // takes.
+        (authority: Authority)
         (order: float)
         (command: string)
+        // Whether the author will wait on it (Plan 20, stage 2). On the entry rather than
+        // held by the caller, because the DRAIN is what mints the block that records it and
+        // the drain reads the doc — a flag the caller kept would not survive the hop, nor a
+        // restart between the enqueue and the run.
+        (background: bool)
         : unit =
         doc.transact (
             (fun _ ->
@@ -634,8 +665,11 @@ module SyncedStateSync =
                 queue.set (QueueId.value id, box entry) |> ignore
                 entry.set ("subject", box (GateSubject.describe (ForTerminal terminal))) |> ignore
                 entry.set ("payload", box "line") |> ignore
-                entry.set ("author", box (ActorRef.token author)) |> ignore
+                entry.set ("author", box (ActorRef.token (Authority.author authority))) |> ignore
                 entry.set ("order", box order) |> ignore
+                if background then entry.set ("background", box "true") |> ignore
+                Authority.onBehalfOf authority
+                |> Option.iter (fun actor -> entry.set ("onBehalfOf", box (ActorRef.token actor)) |> ignore)
                 // Never approved on arrival: whether an approval is REQUIRED is the mode's
                 // question, and pre-answering it here would let the agent approve itself.
                 entry.set ("approvedBy", box "") |> ignore),
@@ -655,8 +689,7 @@ module SyncedStateSync =
         (tool: string)
         (args: string)
         (summary: string)
-        (author: ActorRef)
-        (onBehalfOf: ActorRef option)
+        (authority: Authority)
         (order: float)
         : unit =
         doc.transact (
@@ -669,8 +702,11 @@ module SyncedStateSync =
                 entry.set ("tool", box tool) |> ignore
                 entry.set ("args", box args) |> ignore
                 entry.set ("summary", box summary) |> ignore
-                entry.set ("onBehalfOf", box (onBehalfOf |> Option.map ActorRef.token |> Option.defaultValue "")) |> ignore
-                entry.set ("author", box (ActorRef.token author)) |> ignore
+                entry.set
+                    ("onBehalfOf",
+                     box (Authority.onBehalfOf authority |> Option.map ActorRef.token |> Option.defaultValue ""))
+                |> ignore
+                entry.set ("author", box (ActorRef.token (Authority.author authority))) |> ignore
                 entry.set ("order", box order) |> ignore
                 // Never approved on arrival, for `enqueueTerminalCommand`'s reason: whether
                 // an approval is REQUIRED is the mode's question, and pre-answering it here

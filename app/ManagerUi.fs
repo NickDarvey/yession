@@ -26,9 +26,12 @@ open Lit
 /// their controls on the same right rail. The name column takes whatever is left.
 module private Col =
     let table = "w-full text-left border-collapse table-fixed"
-    /// Wide enough for a whole Crockford id in 12px mono — a half id identifies nothing,
-    /// so this column is sized to never truncate. The first thing to go on a phone.
-    let id = "w-[204px] max-md:hidden"
+    /// Wide enough for a whole Crockford id — a half id identifies nothing, so this column is
+    /// sized never to truncate. MEASURED, because the number depends on the face: 26 characters
+    /// of 12px Monaspace Neon is 194px, plus the cell's own 16px gutter. It was 204px when the
+    /// ids were set in whatever monospace a box happened to have, and the switch to a shipped
+    /// face made them 6px too wide for it. The first thing to go on a phone.
+    let id = "w-[210px] max-md:hidden"
     /// Holds the status word plus `port · pid` uncut; on a phone, just the word.
     let status = "w-[256px] max-md:w-[100px]"
     /// One `h-8` control, full-bleed in its column, plus the cell's left gutter. The
@@ -48,7 +51,7 @@ let private statusView (status: ProcessManager.SessionStatus) : TemplateResult =
         html $"""<span class="{Style.statusFaint}" data-status="{Dom.Manager.statusStopped}">stopped</span>"""
     | ProcessManager.Running (port, pid) ->
         html
-            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-mono text-code-sm text-ink-faint tabular-nums ml-2.5 max-md:hidden">port {port} · pid {pid}</span>"""
+            $"""<span class="{Style.statusOk}" data-status="{Dom.Manager.statusRunning}"><span class="{Style.statusDotPulse}"></span>running</span><span class="font-terminal text-code-sm text-ink-faint tabular-nums ml-2.5 max-md:hidden">port {port} · pid {pid}</span>"""
     | ProcessManager.Exited code ->
         let reason = code |> Option.map string |> Option.defaultValue "signal"
         html $"""<span class="{Style.statusErr}" data-status="{Dom.Manager.statusExited}">exited ({reason})</span>"""
@@ -102,7 +105,7 @@ let private rowTemplate (access: PublicAccess) (view: ProcessManager.SessionView
     html $"""
         <tr class="border-b border-hair hover:bg-surface transition-colors" data-session="{id}">
           <td class="py-3 pr-4 align-middle truncate" title="{view.Record.DisplayName}">{nameView access view}</td>
-          <td class="py-3 pr-4 align-middle font-mono text-code text-ink-faint truncate max-md:hidden">{id}</td>
+          <td class="py-3 pr-4 align-middle font-terminal text-code text-ink-faint truncate max-md:hidden">{id}</td>
           <td class="py-3 pr-4 align-middle truncate">{statusView view.Status}</td>
           <td class="py-3 pl-4 align-middle">{actions view}</td>
         </tr>"""
@@ -224,7 +227,7 @@ let private mcpRowTemplate (views: ProcessManager.SessionView list) (declaration
     html $"""
         <tr class="border-b border-hair hover:bg-surface transition-colors" data-mcp-server="{name}">
           <td class="py-3 pr-4 align-middle {Style.body} truncate" title="{name}">{name}</td>
-          <td class="py-3 pr-4 align-middle font-mono text-code text-ink-faint truncate max-md:hidden"
+          <td class="py-3 pr-4 align-middle font-terminal text-code text-ink-faint truncate max-md:hidden"
               title="{McpTransport.describe declaration.Server.Transport}">{McpTransport.describe declaration.Server.Transport}</td>
           <td class="py-3 pr-4 align-middle {Style.small} truncate" title="{audience}">{audience}</td>
           <td class="py-3 pl-4 align-middle">
@@ -270,20 +273,22 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
               <div class="flex flex-col gap-1.5">
                 <label class="{Style.label}" for="mcp-name">name</label>
                 <input id="mcp-name" name="name" placeholder="serial" autocomplete="off" required
-                  class="w-40 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+                  class="{Style.fieldOf "w-40 max-w-full"}">
               </div>
               <div class="flex flex-col gap-1.5">
                 <label class="{Style.label}" for="mcp-url">address</label>
                 <input id="mcp-url" name="url" type="url" placeholder="http://127.0.0.1:7333" autocomplete="off" required
-                  class="w-72 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+                  class="{Style.fieldOf "w-72 max-w-full"}">
               </div>
               <div class="flex flex-col gap-1.5">
                 <label class="{Style.label}" for="mcp-audience">reaches</label>
-                <select id="mcp-audience" name="session"
-                  class="w-56 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
-                  <option value="">any session</option>
-                  {options}
-                </select>
+                <div class="{Style.fieldSelectWrapOf "w-56 max-w-full"}">
+                  <select id="mcp-audience" name="session" class="{Style.fieldSelect}">
+                    <option value="">any session</option>
+                    {options}
+                  </select>
+                  <span class="{Style.fieldSelectMark}">{Icon.down}</span>
+                </div>
               </div>
               <button type="submit" class="{Style.btnPrimary}">Declare</button>
             </div>
@@ -316,7 +321,7 @@ let private bodyTemplate
               <label class="{Style.label}" for="new-session-name">new session</label>
               <div class="flex flex-wrap items-center gap-3">
                 <input id="new-session-name" name="name" placeholder="display name" autocomplete="off"
-                  class="w-72 max-w-full bg-surface {Style.body} px-3 py-2 outline-none border border-hair focus:border-blue transition-colors">
+                  class="{Style.fieldOf "w-72 max-w-full"}">
                 <button type="submit" class="{Style.btnPrimary}">Create</button>
               </div>
             </form>
@@ -353,18 +358,17 @@ let private pathnameOf (url: string) : string = Fable.Core.Util.jsNative
 [<Fable.Core.Emit("Object.fromEntries(new URLSearchParams($0))[$1] ?? ''")>]
 let private formField (body: string) (name: string) : string = Fable.Core.Util.jsNative
 
-[<Fable.Core.ImportAll("node:fs")>]
-let private fs : obj = Fable.Core.Util.jsNative
+/// Where the built asset set lives when this is not an installed package. One variable for
+/// the whole directory (`Assets`), which is also why this page can link a stylesheet whose
+/// faces this file has never heard of.
+let private assetsDir = envOr "YESSION_ASSETS" "app/out/public/assets"
 
-let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
+/// The same static asset service the Session Process runs, over this process's OWN set — read
+/// and addressed once at boot rather than per request, so every render of this page (it is
+/// rendered per request) names the same bytes.
+let private assets = Assets.load assetsDir
 
-/// The same stylesheet the session shell serves, read and addressed once at boot rather than
-/// per request — the Manager page is rendered per request, so this is what keeps every render
-/// naming the same bytes. Addressed by `Interop.contentDigest`, the same function the session
-/// uses, so one stylesheet never has two spellings.
-let private css = readAsset "app.css" cssPath fs
-
-let private cssUrl = SessionRoute.relative (AppCss (contentDigest css))
+let private cssUrl = Assets.url assets AssetFile.``app``
 
 /// The icon's constant is base64 (it lives in source); the wire wants the PNG. Same decode
 /// the session server does, for the same reason — `res.end` takes what Node's `end` takes.
@@ -474,17 +478,18 @@ let tryHandle
         match req.``method``, path with
         | "GET", "/" ->
             Some (fun () -> html res (page cssUrl pm.Public (pm.Sessions ()) (pm.McpServers ())))
-        | "GET", path when path = "/" + cssUrl ->
-            // The same locally built stylesheet the session shell uses — shared style, no CDN
-            // — and the one management response that is cacheable, because it is addressed by
-            // a digest of its own bytes. An address that is not the current one is never
-            // served: see `Signalling.serveAsset` for why answering it would be worse than a
-            // 404. The Manager has no `<base href>` and always sits at its origin root, so the
-            // relative URL the page emits resolves to exactly this path.
-            Some (fun () ->
-                match css with
-                | Some body -> respondWith res 200 "text/css; charset=utf-8" CachePolicy.asset body
-                | None -> respond res 404 "text/plain" "stylesheet not built (run: build)")
+        | "GET", path when path.StartsWith ("/" + SessionRoute.assetsPrefix) ->
+            // Everything static this build ships, served by path and by nothing else — the
+            // same service the Session Process runs, over this process's own set. The Manager
+            // page links the stylesheet, and the stylesheet names its own faces; neither this
+            // route nor this file knows what those are, which is the point: a build that adds
+            // an asset adds a file, not a case.
+            //
+            // The Manager has no `<base href>` and always sits at its origin root, so the
+            // relative addresses the page and the stylesheet emit resolve to exactly here.
+            match SessionRoute.parse "GET" path with
+            | Some (Asset (build, file)) -> Some (fun () -> Assets.serve assets build file res)
+            | _ -> None
         | "GET", path when path = "/" + SessionRoute.relative Icon ->
             // The same mark the session shells wear, from the same constant — the Manager
             // sits at its origin root, so the relative address the page emits is this path.

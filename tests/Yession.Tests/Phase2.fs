@@ -237,6 +237,24 @@ let private sandboxPolicyTests =
                     Support.emptyPolicy
             Expect.equal unrestricted.AllowedDomains [] "a policy naming no domains gets no egress, never all of it"
 
+        testCase "the srt config opens .git/config, which a clone cannot avoid writing" <| fun () ->
+            let config =
+                Sandboxes.SrtSandbox.configFor
+                    { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
+                    None
+                    Support.emptyPolicy
+            Expect.isTrue config.AllowGitConfig "srt's default denies the write every `git clone` makes"
+
+        testCase "an unconfined policy turns srt's filesystem rules off, and only that policy does" <| fun () ->
+            let tools : Sandboxes.SrtTools =
+                { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
+            let configFor filesystem =
+                Sandboxes.SrtSandbox.configFor tools None { Support.emptyPolicy with Filesystem = filesystem }
+            Expect.isFalse (configFor Confined).FilesystemDisabled "every ordinary sandbox is confined"
+            Expect.isTrue
+                (configFor Unconfined).FilesystemDisabled
+                "the clone's sandbox is not — a checkout carries names srt refuses to write"
+
         testCase "the confinement tools: named, blank is absent, and weakening is never a guess" <| fun () ->
             let tools =
                 Sandboxes.SrtSandbox.toolsFrom
@@ -374,8 +392,8 @@ let private lazyLifecycleTests =
                 let taskAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! first = capabilities.ExecuteCommand None "true"
-                            let! second = capabilities.ExecuteCommand None "true"
+                            let! first = capabilities.ExecuteCommand None "true" false
+                            let! second = capabilities.ExecuteCommand None "true" false
                             match first, second with
                             | Ok _, Ok _ ->
                                 onChunk { Text = "environment is up" }
@@ -540,7 +558,7 @@ let private commandTests =
                 let devAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            match! capabilities.ExecuteCommand None "echo hello from the env" with
+                            match! capabilities.ExecuteCommand None "echo hello from the env" false with
                             | Ok outcome when outcome.Status = TerminalCommandRan (CommandSucceeded 0) ->
                                 onChunk { Text = "ran it" }
                                 return AgentCompleted ("ran it", None)
@@ -619,7 +637,7 @@ let private acceptanceTests =
                           Body = "hi" }
                       AgentTurnStarted
                         { AgentTurnId = AgentTurnId.create "t1" |> expect
-                          TriggeredByMessageId = MessageId.create "m1" |> expect }
+                          TriggeredByMessageId = Some (MessageId.create "m1" |> expect); Woke = None }
                       EnvironmentNeedIdentified { Reason = "task"; AgentTurnId = None }
                       EnvironmentStarted { EnvironmentId = "env"; ContainerRef = "ctr" }
                       SessionEvent.TerminalOpened
@@ -628,10 +646,10 @@ let private acceptanceTests =
                         { TerminalId = TerminalId.create "t1" |> expect
                           BlockId = BlockId.create "b1" |> expect
                           QueueId = None
-                          Author = ActorRef.Agent
-                          ApprovedBy = None
+                          Authority = Authority.agentFor (PeerRef ada)
                           Command = "true"
-                          FromSeq = 0 }
+                          FromSeq = 0
+                          Background = false }
                       SessionEvent.TerminalBlockCompleted
                         { TerminalId = TerminalId.create "t1" |> expect
                           BlockId = BlockId.create "b1" |> expect
@@ -653,7 +671,7 @@ let private acceptanceE2eTests =
                 let devAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! _ = capabilities.ExecuteCommand None "echo made progress"
+                            let! _ = capabilities.ExecuteCommand None "echo made progress" false
                             onChunk { Text = "done" }
                             return AgentCompleted ("done", None)
                         }

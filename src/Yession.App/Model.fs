@@ -187,13 +187,11 @@ module TerminalFeed =
 /// contribute a hundred tabs.
 type PaneTab =
     /// A terminal itself: its composer while it is open, its recording once it is closed.
-    /// Every terminal the session has ever had is always in the strip, so these are never
-    /// "opened" and never closed — they are the strip's furniture.
     | TerminalTab of TerminalId
     /// One block, read-only: the command and what it printed. Opened by tapping its chip in
-    /// the chat, and closeable.
+    /// the chat.
     | BlockTab of TerminalId * BlockId
-    /// One stretch of live mode. Opened from its chat item, and closeable.
+    /// One stretch of live mode. Opened from its chat item.
     | StretchTab of TerminalStretch
 
 module PaneTab =
@@ -214,12 +212,17 @@ module PaneTab =
         | BlockTab (id, _) -> id
         | StretchTab stretch -> stretch.TerminalId
 
-    /// Whether this tab is one a person opened and can close. Terminal tabs are not: the
-    /// strip lists every terminal the session has, and a "close" on one of those already
-    /// means something else entirely (closing the terminal).
-    let isClosable =
+    /// Whether this tab is a LIVE terminal's, given the terminals as they stand (Plan 20,
+    /// stage 1) — what the strip may keep.
+    ///
+    /// The strip holds the working set, and a recording is not one: a closed terminal leaves
+    /// the strip and stays in the list, which is where every terminal the session has ever
+    /// had now lives. A pin on a recording is a person keeping something to READ, which is
+    /// what a block or stretch tab is, and those stay however their terminal ends.
+    let isLive (terminals: TerminalProjection) =
         function
-        | TerminalTab _ -> false
+        | TerminalTab id ->
+            TerminalProjection.tryFind id terminals |> Option.map (fun t -> t.IsOpen) |> Option.defaultValue false
         | BlockTab _ | StretchTab _ -> true
 
 /// What a pane tab's player should be handed (Plan 14, stage 4) — a whole recording, or a
@@ -265,6 +268,26 @@ type ClientModel =
       /// Static for the life of the page, like `Manager`: a fact about the deployment that
       /// served this document, never a message and never folded.
       EphemeralStorage : bool
+      /// Whether this client can keep the history it is given (Plan 20). The store is the
+      /// Cache API, which needs a secure context — loopback and every `https://` mount are
+      /// one, a session reached over plain HTTP at a LAN address is not.
+      ///
+      /// Defaults to TRUE, and the browser says otherwise: the server renders this shell too,
+      /// and a default of false would have every server-rendered page announce a missing store
+      /// before the client that knows has had a chance to look.
+      CanKeepHistory : bool
+      /// Whether this client has finished reading the history it already had (Plan 20).
+      ///
+      /// It exists because an empty timeline had two opposite meanings wearing one mark: the
+      /// idle caret says *nothing was ever said here*, and it was also what a client showed
+      /// while it had not yet looked. After the local store landed, the second is the common
+      /// case on a cold open — so the caret was telling most people the opposite of the truth.
+      ///
+      /// One flag rather than a `Pending | Restoring | Restored`: the view asks one question,
+      /// "has this client looked yet", and a state nothing distinguishes is a state nobody
+      /// can act on. Starts FALSE, including on the server-rendered shell, because at first
+      /// paint no client has looked.
+      HistoryRead : bool
       Synced        : SyncedSessionState
       Conversation  : ConversationProjection
       /// The terminal half of the chat (Plan 14, stage 1): block chips and lease-stretch
@@ -305,16 +328,24 @@ type ClientModel =
       /// the cursor, and what it DISPLAYS is a projection of what it emitted. The transcript
       /// stays the record; this is the view.
       TerminalScreens : Map<TerminalId, string>
-      /// The read-only tabs this client opened from the chat, oldest first (Plan 14, stage
-      /// 2). Terminal tabs are NOT here: every terminal the session has is always in the
-      /// strip, and these are the ones a person added by tapping a chip.
+      /// What this client PINNED to the strip, in pin order (Plan 20, stage 1).
       ///
-      /// LOCAL to this client, never synced. Opening a recording to read it must not move
-      /// anyone else's screen — that is reading, not collaborating. Presence still shows who
-      /// is IN a terminal, because that is about the shared thing.
-      PaneTabs      : PaneTab list
-      /// Which tab the pane is showing. `None` = the first open terminal, resolved by
-      /// `selectedPane`.
+      /// The strip used to be a census — every terminal the session ever had, for ever,
+      /// because it was the only door to a recording. The list is that door now, so the
+      /// strip can be what a person is actually working with: their pins, and whatever they
+      /// are looking at.
+      ///
+      /// A LIST rather than a set, because pin order is what a reader's tabs sit in and a
+      /// set would re-order them on any change. LOCAL to this client, never synced: pinning
+      /// is reading, not collaborating.
+      Pins          : PaneTab list
+      /// Which tab the pane is showing. `None` = the first pinned or open terminal, resolved
+      /// by `selectedPane`.
+      ///
+      /// This IS the preview slot (Plan 20, stage 1): a choice that is not pinned is
+      /// transient, and opening anything else replaces it. One reusable slot, with no second
+      /// field to keep in step with this one — a pinned tab and a previewed tab differ by
+      /// whether the pin list names it, which is the only fact there is.
       PaneChoice    : PaneTab option
       /// Where a whole-terminal recording should start playing, when a chip stepped out to
       /// it (Plan 14, stage 4). The transcript line, turned into a time by the records the
@@ -329,6 +360,10 @@ type ClientModel =
       /// Whether the terminals panel is open. View state, never synced: two people in one
       /// session may reasonably want different columns on screen.
       TerminalsOpen : bool
+      /// Whether the pane is showing the terminal LIST rather than the selected tab (Plan
+      /// 20, stage 0) — every terminal the session has ever had, and every verb one of them
+      /// affords. Local like every other tab fact: reading the census is not collaborating.
+      TerminalList  : bool
       /// The Claude connection panel's state (Plan 08), driven by the /claude routes.
       Claude        : ClaudeViewState
       /// The GitHub connection panel's state (Plan 14), driven by the /github routes.
@@ -353,6 +388,20 @@ type ClientMsg =
     /// A read-only event page from the Session Process (Step 07): the conversation is
     /// built by folding pages through the shared projection; offsets track progress.
     | EventsPageMsg of EventPage<SessionEvent>
+    /// A page this client had already been given and kept (Plan 20): replayed out of its own
+    /// store at boot, before any network read and without a session.
+    ///
+    /// Folded through exactly the same projection as `EventsPageMsg` — the events are the
+    /// same events — and differing in one thing, which is the reason it is a separate case:
+    /// it says NOTHING about the feed. A page off the network proves the feed works; a page
+    /// off the local store proves only that this client kept it, and an offline client
+    /// reporting a live history feed would be lying about the one leg that is down.
+    | LocalHistoryMsg of EventPage<SessionEvent>
+    /// The client has finished reading what it already had (Plan 20) — whether that was a
+    /// full conversation, or nothing at all because it keeps nothing. Either way it has now
+    /// LOOKED, which is what the timeline needs to know before it can claim a session is
+    /// empty.
+    | HistoryReadMsg
     /// The event feed's health changed: a read failed and is being retried (reported by the
     /// resilience policy composed with the transport), or it failed for good (reported by
     /// the read loop, which is the one place that knows a read is over). A successful page
@@ -428,12 +477,14 @@ type ClientMsg =
     | SelectTerminalMsg of TerminalId
     /// Bring an already-open tab forward (Plan 14, stage 2).
     | SelectPaneTabMsg of PaneTab
-    /// Open a read-only tab from the chat — a block's view or a stretch's replay — and show
-    /// it. Idempotent on the tab's key.
+    /// Show a read-only tab from the chat — a block's view or a stretch's replay — in the
+    /// PREVIEW slot (Plan 20, stage 1). Whatever was being previewed is replaced; a person
+    /// reading twenty chips ends with one tab, not twenty.
     | OpenPaneTabMsg of PaneTab
-    /// Close one. Only tabs a person opened can be closed; a terminal's own tab is the
-    /// strip's furniture, and "close" on one of those already means closing the terminal.
-    | ClosePaneTabMsg of PaneTab
+    /// Keep this tab, or stop keeping it (Plan 20, stage 1). Unpinning is not closing:
+    /// unpinning a terminal leaves it running and leaves its row in the list, and the one
+    /// verb that ends a terminal lives on that row.
+    | TogglePinMsg of PaneTab
     /// Step out from a block's sliced view to the terminal's WHOLE recording, landing on
     /// that block (Plan 14, stage 4). Two paths on purpose: the slice answers "what did this
     /// command print", the whole answers "what was going on around it".
@@ -445,6 +496,12 @@ type ClientMsg =
     | JumpToLiveMsg of TerminalId
     /// Open or close the terminals column.
     | ToggleTerminalsMsg
+    /// Show the terminal list, or go back to the selected tab (Plan 20, stage 0).
+    | ToggleTerminalListMsg
+    /// Show this terminal, from the list — the list's own way back to a tab, so that
+    /// selecting a row and leaving the list are one act rather than two the caller must
+    /// remember to pair.
+    | SelectFromListMsg of TerminalId
     /// Ensure the composer slot for (terminal, author) exists, carrying the queue key it
     /// becomes when sent. The author's own call, exactly as for a message draft.
     | EnsureTerminalDraftMsg of TerminalId * PeerId * QueueId
@@ -490,6 +547,8 @@ module ClientModel =
           Session = None
           Manager = None
           EphemeralStorage = false
+          CanKeepHistory = true
+          HistoryRead = false
           Synced = SyncedSessionState.empty
           Conversation = ConversationProjection.empty
           Timeline = TimelineProjection.empty
@@ -509,11 +568,12 @@ module ClientModel =
           TerminalFeeds = Map.empty
           TerminalKeyframes = Map.empty
           TerminalScreens = Map.empty
-          PaneTabs = []
+          Pins = []
           PaneChoice = None
           PaneStartAt = None
           PaneRewound = None
           TerminalsOpen = false
+          TerminalList = false
           Claude =
             { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = None }
               Flow = ClaudeIdle }
@@ -584,27 +644,55 @@ module ClientModel =
         |> List.filter (fun (_, presence) -> presence.Focus.Field = DraftBody peer)
         |> List.map (fun (editor, presence) -> editor, presence.DisplayName)
 
-    /// The tab strip, in the order it renders: every terminal the session has ever had,
-    /// then the read-only tabs this client opened from the chat.
-    ///
-    /// Closed terminals stay in the strip (Plan 13, stage 3e) — a closed terminal is where
-    /// its recording is read, so dropping it the moment its shell exits would put the audit
-    /// out of reach exactly when it starts to matter.
-    let paneTabs (model: ClientModel) : PaneTab list =
-        (model.Terminals.Terminals |> List.map (fun t -> TerminalTab t.TerminalId)) @ model.PaneTabs
+    /// Whether this client is keeping a tab.
+    let isPinned (tab: PaneTab) (model: ClientModel) : bool =
+        model.Pins |> List.exists (fun pinned -> PaneTab.key pinned = PaneTab.key tab)
 
-    /// Which tab the pane shows: the stored choice while it is still in the strip, else the
-    /// first OPEN terminal. Resolved rather than stored, for the same reason `composerTarget`
-    /// is: a choice that outlives what it pointed at is a blank pane nobody asked for. The
-    /// default lands somewhere you can type.
-    let selectedPane (model: ClientModel) : PaneTab option =
-        let known = paneTabs model |> List.map PaneTab.key
+    /// The tab strip, in the order it renders (Plan 20, stage 1): the pins that are still
+    /// live, in pin order, then whatever is being previewed.
+    ///
+    /// The preview is at the END and never in the middle, so a person reading one recording
+    /// after another watches one tab change rather than their pins shuffling under them.
+    /// A closed terminal is not here at all — its row in the list is where its recording is
+    /// read now, which is what lets the strip stop being a census.
+    let rec paneTabs (model: ClientModel) : PaneTab list =
+        // No filter here: a pin on a terminal that has closed is dropped where the close is
+        // FOLDED, so the strip is simply the pins. Filtering again at render would be a
+        // second mechanism for one fact, free to disagree with the first.
+        //
+        // The preview is the RESOLVED selection rather than the stored choice, because a
+        // client that has pinned nothing still shows a terminal — whatever `selectedPane`
+        // fell back to — and a strip that omitted it would be a tablist with no tab for the
+        // panel it is sitting above.
+        let previewed =
+            match selectedPane model with
+            | Some chosen when not (isPinned chosen model) -> [ chosen ]
+            | _ -> []
+        model.Pins @ previewed
+
+    /// Which tab the pane shows: the stored choice while what it names still exists, else the
+    /// first pinned live terminal, else the first open one. Resolved rather than stored, for
+    /// the same reason `composerTarget` is: a choice that outlives what it pointed at is a
+    /// blank pane nobody asked for. The default lands somewhere you can type.
+    ///
+    /// A choice naming a CLOSED terminal survives, and that is not an oversight: it is how
+    /// the list opens a recording. What it must not survive is naming a terminal the session
+    /// does not have.
+    and selectedPane (model: ClientModel) : PaneTab option =
+        let exists (tab: PaneTab) =
+            match tab with
+            | TerminalTab id -> TerminalProjection.tryFind id model.Terminals |> Option.isSome
+            | BlockTab _ | StretchTab _ -> true
         match model.PaneChoice with
-        | Some chosen when List.contains (PaneTab.key chosen) known -> Some chosen
+        | Some chosen when exists chosen -> Some chosen
         | _ ->
-            TerminalProjection.openTerminals model.Terminals
-            |> List.map (fun t -> TerminalTab t.TerminalId)
-            |> List.tryHead
+            let pinnedTerminal = model.Pins |> List.tryPick (function TerminalTab _ as tab -> Some tab | _ -> None)
+            match pinnedTerminal with
+            | Some tab -> Some tab
+            | None ->
+                TerminalProjection.openTerminals model.Terminals
+                |> List.map (fun t -> TerminalTab t.TerminalId)
+                |> List.tryHead
 
     /// Which terminal the pane is about — the selected tab's, whichever kind it is. A block
     /// tab and a stretch tab still belong to a terminal, which is what the composer, the
@@ -786,6 +874,37 @@ module ClientModel =
     let terminalFeed (terminal: TerminalId) (model: ClientModel) : TerminalFeed =
         model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
 
+    /// Whether this client holds anything of a terminal's recording (Plan 20, stage 0) — the
+    /// one client-local input `TerminalAffordances.ofView` takes.
+    ///
+    /// Either signal counts, because they are the same fact reaching this client two ways: a
+    /// LIVE terminal's length arrives as a catch-up hint before any chunk is fetched, and a
+    /// CLOSED one's records arrive as chunks with no live hint behind them. Asking only one
+    /// would offer the rewind on a terminal whose records had not been fetched, or refuse the
+    /// replay on a recording sitting in the feed.
+    let hasRecording (terminal: TerminalId) (model: ClientModel) : bool =
+        let feed = terminalFeed terminal model
+        feed.KnownLength > 0 || not (Map.isEmpty feed.Records)
+
+    /// What a terminal's row offers this reader.
+    let affordances (view: TerminalView) (model: ClientModel) : TerminalAffordances =
+        TerminalAffordances.ofView (hasRecording view.TerminalId model) view
+
+    /// The terminal list, in the order it renders (Plan 20, stage 0): the OPEN terminals in
+    /// open order, then the closed ones most recently opened first.
+    ///
+    /// Two orders because the two halves answer different questions. The open half is the
+    /// working set and mirrors the strip exactly — two surfaces listing the same live
+    /// terminals in two orders would be a difference a reader has to hold in their head. The
+    /// closed half is history, and history reads newest first.
+    ///
+    /// Ordered by OPEN order rather than by last activity, which the projection cannot
+    /// answer: a `TerminalView` carries no clock, and inventing one from block ranges would
+    /// make the list's order a function of how much a terminal printed.
+    let terminalRows (model: ClientModel) : TerminalView list =
+        let opened, closed = model.Terminals.Terminals |> List.partition (fun t -> t.IsOpen)
+        opened @ List.rev closed
+
     /// A terminal's queued commands in run order.
     let terminalQueue (terminal: TerminalId) (model: ClientModel) : PendingAct list =
         TerminalQueueOrder.sortedFor terminal model.Synced.Pending
@@ -816,7 +935,9 @@ module ClientModel =
     /// the Session Process will actually do. Keyed by SUBJECT, so it answers for a command
     /// act exactly as it does for a terminal's (Plan 15, stage 3).
     let awaitsApproval (entry: PendingAct) (model: ClientModel) : bool =
-        ApprovalMode.requiresApproval (SyncedSessionState.gateOf entry.Subject model.Synced) entry.Author
+        ApprovalMode.requiresApproval
+            (SyncedSessionState.gateOf entry.Subject model.Synced)
+            (Authority.author entry.Authority)
         && Option.isNone entry.ApprovedBy
 
     /// Whether a queued command is held because a peer is typing in its terminal (Plan 13,
@@ -923,7 +1044,10 @@ module ClientModel =
             { model with Connection = Disconnected (Some reason) }
         | EventsAvailableMsg latest ->
             { model with EventConsumer = withLatestKnown (Some latest) model.EventConsumer }
-        | EventsPageMsg page ->
+        // One fold, reached by two messages. The events are the same events and the
+        // projection is the same projection; what differs is what arriving PROVED, and that
+        // is `Feed`, decided below rather than in here.
+        | EventsPageMsg page | LocalHistoryMsg page ->
             // The offset-gated projection fold makes overlapping/duplicate pages
             // idempotent: events at or below the processed offset are skipped.
             let conversation, highWater =
@@ -972,6 +1096,29 @@ module ClientModel =
                     model.EventConsumer.LastProcessedOffset
                     page.Events
                     model.Timeline
+            // The pins move with the terminals (Plan 20, stage 1), in the step that folds
+            // the events rather than at render: a terminal I opened is one I asked for and
+            // is therefore in my hands, and a terminal that has closed has nothing left to
+            // keep. Doing it here means the strip is simply the pins — one rule, one place,
+            // and no filter at render free to disagree with it.
+            //
+            // "I opened it" is `PeerRef` against this client's own peer, which is how every
+            // other surface here decides whose something is (the lease bar, the queue's
+            // authorship). A session whose actors are Manager-verified users attributes them
+            // as `UserRef`, and this does not pin those — stated rather than papered over,
+            // because inventing a second identity rule for one convenience is how two
+            // answers to "is this mine" start disagreeing.
+            let pins =
+                let mine = ActorRef.PeerRef model.Peer.PeerId
+                let opened =
+                    freshEvents
+                    |> List.choose (fun e ->
+                        match e.Event with
+                        | SessionEvent.TerminalOpened t when t.OpenedBy = mine -> Some (TerminalTab t.TerminalId)
+                        | _ -> None)
+                (model.Pins @ opened)
+                |> List.filter (fun tab -> PaneTab.isLive terminals tab)
+                |> List.distinctBy PaneTab.key
             let latestKnown = EventOffset.maxOption model.EventConsumer.LatestKnownOffset highWater
             { model with
                 Conversation = conversation
@@ -979,6 +1126,7 @@ module ClientModel =
                 Agent = agent
                 Environment = environment
                 Terminals = terminals
+                Pins = pins
                 Peers = peers
                 EventConsumer =
                     { LastProcessedOffset = highWater
@@ -988,9 +1136,15 @@ module ClientModel =
                       // was about to say.
                       CatchUpIsSlow =
                         isBehind highWater latestKnown && model.EventConsumer.CatchUpIsSlow
-                      // A page arrived, so the feed is live by construction — recovery from
-                      // a stall needs no separate signal.
-                      Feed = FeedLive } }
+                      // A page off the NETWORK is proof the feed works, so recovery from a
+                      // stall needs no separate signal. A page off the local store proves
+                      // only that this client kept it — the feed is whatever it already
+                      // was, which offline is exactly the truth the strip is showing.
+                      Feed =
+                        match msg with
+                        | EventsPageMsg _ -> FeedLive
+                        | _ -> model.EventConsumer.Feed } }
+        | HistoryReadMsg -> { model with HistoryRead = true }
         | EventFeedMsg health ->
             { model with EventConsumer = { model.EventConsumer with Feed = health } }
         | CatchUpSlowMsg slow ->
@@ -1139,24 +1293,50 @@ module ClientModel =
                 PaneStartAt = Some (terminal, fromSeq)
                 TerminalsOpen = true }
         | OpenPaneTabMsg tab ->
-            // Idempotent on the tab's key: tapping the same chip twice brings its tab
-            // forward rather than opening a second one that says exactly the same thing.
-            let already = model.PaneTabs |> List.exists (fun t -> PaneTab.key t = PaneTab.key tab)
+            // Straight into the preview slot, which is simply the choice while nothing pins
+            // it. Tapping the same chip twice brings it forward, tapping a different one
+            // replaces it, and neither accumulates — the tab strip a person reading their
+            // way down a busy chat ends up with is exactly one wide.
             { model with
-                PaneTabs = if already then model.PaneTabs else model.PaneTabs @ [ tab ]
                 PaneChoice = Some tab
                 PaneStartAt = None
                 PaneRewound = None
                 TerminalsOpen = true }
-        | ClosePaneTabMsg tab ->
-            // The selection falls back through `selectedPane` — a choice naming a tab that
-            // is no longer in the strip resolves to the first open terminal, which is the
-            // same rule a closed terminal already relies on. Clearing it here as well would
-            // be a second mechanism for one fact.
-            { model with PaneTabs = model.PaneTabs |> List.filter (fun t -> PaneTab.key t <> PaneTab.key tab) }
+        | TogglePinMsg tab ->
+            let key = PaneTab.key tab
+            // Unpinning leaves the CHOICE alone: what you were reading stays on screen, now
+            // as the preview. Pressing unpin should say "stop keeping this", never "take it
+            // away from me while I am looking at it".
+            if isPinned tab model then
+                { model with Pins = model.Pins |> List.filter (fun pinned -> PaneTab.key pinned <> key) }
+            else { model with Pins = model.Pins @ [ tab ] }
         | ToggleTerminalsMsg ->
             { model with TerminalsOpen = not model.TerminalsOpen }
+        | ToggleTerminalListMsg ->
+            // The column comes with it. Reaching the list from a shut column is exactly the
+            // case where a person is looking for a terminal they cannot see.
+            { model with TerminalList = not model.TerminalList; TerminalsOpen = true }
+        | SelectFromListMsg terminal ->
+            // Selecting and leaving the list are ONE act: a row that selected a terminal and
+            // left the reader in the list would have them press twice for one intention, and
+            // a caller who forgot the second press would leave the pane showing the census
+            // over the terminal it had just chosen.
+            { model with
+                PaneChoice = Some (TerminalTab terminal)
+                PaneStartAt = None
+                PaneRewound = None
+                TerminalList = false
+                TerminalsOpen = true }
         | EnsureTerminalDraftMsg (terminal, author, queueId) ->
+            // Typing in a terminal pins it, for the person typing (Plan 20, stage 1). The
+            // rule that makes the agent's terminals safe to leave unpinned: watching one and
+            // joining one are a keystroke apart, and the moment you take a seat at it, it is
+            // in your strip. Applied before the idempotence check below, because a slot that
+            // already exists is somebody coming BACK to a terminal — which is the same claim.
+            let model =
+                if author = model.Peer.PeerId && not (isPinned (TerminalTab terminal) model) then
+                    { model with Pins = model.Pins @ [ TerminalTab terminal ] }
+                else model
             // Idempotent, and the queue key of an existing slot is never re-minted: every
             // co-editor's send depends on it staying the one the slot was published with.
             if Map.containsKey (terminal, author) model.Synced.TerminalDrafts then model
@@ -1181,18 +1361,22 @@ module ClientModel =
                 let entry =
                     { QueueId = draft.QueueId
                       Subject = ForTerminal terminal
+                      Order = TerminalQueueOrder.nextFor terminal model.Synced.Pending
+                      Payload = CommandLine
                       // The author is the PEER who wrote it. Attribution to a verified user
                       // happens at the durable append, where the Session Process knows the
                       // binding — the doc only ever knows connections.
-                      Author = PeerRef author
-                      Order = TerminalQueueOrder.nextFor terminal model.Synced.Pending
-                      Payload = CommandLine
-                      // A terminal command runs as its own author: it is a shell line in a
-                      // sandbox, not a call against somebody's credential.
-                      OnBehalfOf = None
+                      //
+                      // `ofAuthor`, so it runs as its own author: a terminal command is a
+                      // shell line in a sandbox, not a call against somebody's credential —
+                      // and a person's act cannot accidentally carry one.
+                      Authority = Authority.ofAuthor (PeerRef author)
                       ApprovedBy = None
                       RejectedBy = None
-                      RejectedReason = None }
+                      RejectedReason = None
+                      // A person's composer never waits on a command, so there is nothing
+                      // for a background flag to spare them (Plan 20, stage 2).
+                      Background = false }
                 model
                 |> withSynced
                     { model.Synced with

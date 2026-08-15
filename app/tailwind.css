@@ -1,19 +1,110 @@
-/* The single stylesheet entry, built by the Tailwind CLI (see mise `build`/`verify`) into
-   app/out/public/app.css, served locally at /app.css — no CDN. Tailwind v4 is CSS-first:
-   the theme lives here (there is no tailwind.config.js). The F#-authored `Style` values
-   compose these utilities, so `@source` points the scanner at the F# sources. */
+/* The shell's stylesheet, built by the Tailwind CLI into the build's asset set — where it is
+   `AssetFile.``app```, served under that set's own address and never from a CDN. Tailwind v4
+   is CSS-first: the theme lives here (there is no tailwind.config.js). The F#-authored `Style`
+   values compose these utilities, so `@source` points the scanner at the F# sources. */
 
 @import "tailwindcss";
 
-/* The asciinema player's own stylesheet (Plan 13, stage 3e), inlined here rather than
-   emitted as a second artefact. One stylesheet is what the shell serves and what the
-   package ships; a CSS import from the esbuild bundle would produce a second file that
-   every consumer then has to know about. */
-@import "../node_modules/asciinema-player/dist/bundle/asciinema-player.css";
+/* The asciinema player's own stylesheet is NOT here: it is `app/player.css`, built beside this
+   one and linked inert in the shell until a replay is mounted. It is 16KB that most sessions
+   never render, and this sheet is render-blocking.
+
+   Every typeface the product wears is vendored under `app/fonts/` rather than fetched — same
+   rule as everything else the shell serves, no CDN. Both are SIL OFL 1.1; the two licences sit
+   beside the faces.
+
+   Four voices, three families, one rule: SANS IS THE MACHINE — the chrome, and the agent,
+   which is part of it — and SERIF IS THE PERSON. The terminal keeps Monaspace Neon, because
+   a terminal is columns.
+
+   The chrome is Noto Sans, which is where the Segoe UI this design was drawn around went:
+   Segoe cannot be redistributed, and Noto descends from the same designer's humanist line, so
+   a box without Segoe stops guessing and every box reads the same. A person's words are Noto
+   Serif, its sibling — same superfamily, so the two share proportion and vertical metrics and
+   a conversation reads as one voice in two registers rather than two typefaces arguing.
+
+   That similarity is the point, and it is also the trap. The first attempt at these two put
+   the conversation in Monaspace Xenon and Krypton, whose difference lives in letterform
+   DETAIL: at 15px they differ in their zero and nothing else, which is not attribution. What
+   survives body size is a difference of CLASS, on a shared skeleton — which is exactly what a
+   sans and its own serif are.
+
+   Each face is declared in `AssetFile` and copied beside this sheet by the build; the
+   `url()`s below are passed through verbatim — Tailwind does not rewrite them — and resolve
+   against wherever the sheet is served, which is inside the asset set next to `fonts/`. A
+   face named here and missing from that declaration is a 404; one declared and not produced
+   stops the build.
+
+   The weights are exactly what the surfaces wear, no more: the chrome sets four (the
+   extralight wordmark, light body, normal, semibold caps), a message three, and a terminal
+   two — 400, and 600 because that is what ANSI bold renders as. */
+@font-face {
+  font-family: 'Noto Sans';
+  font-style: normal;
+  font-weight: 200;
+  font-display: swap;
+  src: url('fonts/noto-sans-latin-200-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Sans';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('fonts/noto-sans-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/noto-sans-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/noto-sans-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Serif';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('fonts/noto-serif-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Serif';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/noto-serif-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Serif';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/noto-serif-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Neon';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/monaspace-neon-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Monaspace Neon';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/monaspace-neon-latin-600-normal.woff2') format('woff2');
+}
 
 /* Theme — mirrors what the old tailwind.config.js `theme.extend` registered. Namespaced
    custom properties auto-generate utilities (`--color-blue` -> `bg-blue`/`text-blue`,
-   `--font-mono` -> `font-mono`, `--animate-pulse2` -> `animate-pulse2`). */
+   `--font-ui` -> `font-ui`, `--animate-pulse2` -> `animate-pulse2`). */
 @theme {
   --color-bg: #000;
   --color-panel: #0a0a0a;
@@ -63,8 +154,34 @@
   --color-term-cyan-bright: #8cebf5;
   --color-term-white-bright: #fff;
 
-  --font-sans: 'Segoe UI', 'Segoe UI Variable', 'Segoe WP', 'Frutiger', 'Helvetica Neue', system-ui, sans-serif;
-  --font-mono: 'Cascadia Code', 'Consolas', monospace;
+  /* WHO IS TALKING, said by the typeface. Four voices over three families — the agent wears
+     the system's — and every face is one this build ships, so the product reads the same on
+     every machine. `--font-sans` and `--font-mono` are gone because they named a CATEGORY and
+     resolved to whatever Microsoft fonts a box happened to have; these name a ROLE and resolve
+     to bytes we ship.
+
+     Every surface wears exactly one of them, and each is written here once. */
+  /* What a browser falls back to for the moment before a face arrives, or forever if it
+     never does. Deliberately NOT in the `--font-*` namespace: they are not voices, and naming
+     them there would mint `font-*` utilities nothing should ever compose. The sans one still
+     names Segoe first — on the machines this design was drawn around, the fallback should be
+     the face it was drawn with. */
+  --fallback-sans: 'Segoe UI', system-ui, sans-serif;
+  --fallback-serif: Georgia, 'Times New Roman', serif;
+  --fallback-mono: ui-monospace, monospace;
+
+  --font-ui: 'Noto Sans', var(--fallback-sans);
+  --font-terminal: 'Monaspace Neon', var(--fallback-mono);
+  --font-human: 'Noto Serif', var(--fallback-serif);
+  /* The agent speaks in the system's face, so this is not a second declaration of it — it is
+     the same voice, named for the thing that wears it. If the agent ever needs its own face,
+     one line here changes and nothing else does. */
+  --font-agent: var(--font-ui);
+
+  /* Retired, so a leftover `font-sans`/`font-mono` cannot silently pick up Tailwind's own
+     defaults instead of a voice above. */
+  --font-sans: initial;
+  --font-mono: initial;
 
   /* The type ramp, as size + line-height pairs on the 4px rhythm — `text-<step>` sets
      both, so a size can never drift from its line box. `leading-*` still composes over
@@ -93,6 +210,12 @@
   /* Structural dimensions with names, so the layouts that must agree on them compose
      one token instead of repeating a literal: the shared header band (`h-band`) and
      the sidebar column (`w-side`). */
+  /* The height of a CONTROL — every button, every field, every select. One token because
+     they sit in rows together and must agree: a 42px input beside a 32px button is not a
+     row, and the difference came from deriving one height from padding and the other from
+     a box. Both are the box now. */
+  --spacing-control: 32px;
+
   --spacing-band: 88px;
   --spacing-side: 280px;
   /* The terminals column (Plan 13). Wider than the sidebar because it holds 80-column

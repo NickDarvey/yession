@@ -42,8 +42,10 @@ let private merge (events: EventEnvelope<SessionEvent> list) : TimelineItem list
     let timeline, _ = TimelineProjection.applyEvents None events TimelineProjection.empty
     TimelineProjection.items conversation timeline
 
-let private opened (id: TerminalId) (title: string) =
-    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = PeerRef ada; Title = title; Sandbox = Some SandboxName.defaultName; Renewable = false }
+let private openedBy (by: ActorRef) (id: TerminalId) (title: string) =
+    SessionEvent.TerminalOpened { TerminalId = id; OpenedBy = by; Title = title; Sandbox = Some SandboxName.defaultName; Renewable = false }
+
+let private opened (id: TerminalId) (title: string) = openedBy (PeerRef ada) id title
 
 let private sent (n: string) (body: string) =
     MessageSent { MessageId = message n; QueueId = None; Author = PeerRef ada; Body = body }
@@ -53,10 +55,10 @@ let private started (id: TerminalId) (n: string) (author: ActorRef) (command: st
         { TerminalId = id
           BlockId = block n
           QueueId = None
-          Author = author
-          ApprovedBy = None
+          Authority = Authority.ofAuthor author
           Command = command
-          FromSeq = fromSeq }
+          FromSeq = fromSeq
+          Background = false }
 
 let private completed (id: TerminalId) (n: string) (result: CommandResult) (toSeq: int) =
     SessionEvent.TerminalBlockCompleted { TerminalId = id; BlockId = block n; Result = result; ToSeq = toSeq }
@@ -310,7 +312,7 @@ let private unchangedTests =
             let turnId = AgentTurnId.create "turn-1" |> expect
             let messageId = message "agent"
             let events =
-                [ at 1L 0.0 (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = message "1" })
+                [ at 1L 0.0 (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (message "1"); Woke = None })
                   at 2L 1.0 (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId })
                   at 3L 2.0 (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "hel" })
                   at 4L 3.0 (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = "hello" }) ]
@@ -340,15 +342,6 @@ let private stripKeys (model: ClientModel) = ClientModel.paneTabs model |> List.
 
 let private paneTests =
     testList "The pane's tabs (Plan 14, stage 2)" [
-        testCase "every terminal is furniture in the strip; opened tabs come after" <| fun () ->
-            let model = clientOf (oneBlock @ [ at 4L 3.0 (opened terminalB "logs") ])
-            Expect.equal (stripKeys model) [ "terminal:term-a"; "terminal:term-b" ] "the terminals, in open order"
-            let withTab = ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1"))) model
-            Expect.equal
-                (stripKeys withTab)
-                [ "terminal:term-a"; "terminal:term-b"; "block:term-a:b-1" ]
-                "and the opened tab after them"
-
         testCase "opening a tab shows it, and opens the column it is in" <| fun () ->
             let model = clientOf oneBlock
             Expect.isFalse model.TerminalsOpen "the column starts shut"
@@ -358,37 +351,6 @@ let private paneTests =
                 (Some "block:term-a:b-1")
                 "the tab that was just opened is the one showing"
             Expect.isTrue opened'.TerminalsOpen "and the column came with it"
-
-        testCase "tapping the same chip twice brings its tab forward, not a second copy" <| fun () ->
-            let model =
-                clientOf oneBlock
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
-                |> ClientModel.update (SelectTerminalMsg terminalA)
-                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
-            Expect.equal (List.length model.PaneTabs) 1 "one tab"
-            Expect.equal
-                (ClientModel.selectedPane model |> Option.map PaneTab.key)
-                (Some "block:term-a:b-1")
-                "and it is showing again"
-
-        testCase "closing a tab falls back to the first OPEN terminal" <| fun () ->
-            // Through the same resolver a closed terminal already relies on: a choice naming
-            // something no longer in the strip resolves to somewhere you can type. Clearing
-            // the choice as well would be a second mechanism for one fact.
-            let tab = BlockTab (terminalA, block "1")
-            let model =
-                clientOf oneBlock
-                |> ClientModel.update (OpenPaneTabMsg tab)
-                |> ClientModel.update (ClosePaneTabMsg tab)
-            Expect.isEmpty model.PaneTabs "the tab is gone"
-            Expect.equal
-                (ClientModel.selectedPane model |> Option.map PaneTab.key)
-                (Some "terminal:term-a")
-                "and the pane landed somewhere usable"
-
-        testCase "a terminal's own tab cannot be closed — the strip is where every terminal is" <| fun () ->
-            Expect.isFalse (PaneTab.isClosable (TerminalTab terminalA)) "furniture"
-            Expect.isTrue (PaneTab.isClosable (BlockTab (terminalA, block "1"))) "a block view is a person's"
 
         testCase "a block tab and its terminal have DIFFERENT keys drawn from the same ids" <| fun () ->
             // The reason a tab's key is prefixed per kind: a block id and a terminal id come
@@ -426,7 +388,7 @@ let private paneTests =
             let html = Support.render model
             let required =
                 [ "the tab", Dom.attr Dom.Hooks.paneTab "block:term-a:b-1"
-                  "its close control", Dom.attr Dom.Hooks.paneTabClose "block:term-a:b-1"
+                  "its pin", Dom.attr Dom.Hooks.paneTabPin "block:term-a:b-1"
                   "the panel showing it", Dom.attr Dom.Hooks.panePanel "block:term-a:b-1"
                   "the block's read-only view", Dom.attr Dom.Hooks.paneBlock "b-1"
                   "the command", "ls -la"
@@ -996,8 +958,179 @@ let private toolTests =
             | other -> failwithf "expected one tool-use item, got %A" other
     ]
 
+// --- The terminal list (Plan 20, stage 0) --------------------------------------------------
+
+let private closedNow (id: TerminalId) =
+    SessionEvent.TerminalClosed { TerminalId = id; Reason = "closed by a peer" }
+
+let private listTests =
+    testList "The terminal list (Plan 20, stage 0)" [
+
+        testCase "the open terminals lead, in the order the strip shows them" <| fun () ->
+            // The list's open half and the strip are the same terminals, and two surfaces
+            // listing them in two orders is a difference a reader has to hold in their head.
+            let model = clientOf [ at 1L 0.0 (opened terminalA "build"); at 2L 1.0 (opened terminalB "logs") ]
+            Expect.equal
+                (ClientModel.terminalRows model |> List.map (fun t -> TerminalId.value t.TerminalId))
+                [ "term-a"; "term-b" ]
+                "open order, exactly as the strip"
+
+        testCase "closed terminals follow the open ones, most recently opened first" <| fun () ->
+            // The closed half is history, and history reads newest first — the one place the
+            // list deliberately disagrees with the strip's order, because it is answering a
+            // different question.
+            let model =
+                clientOf
+                    [ at 1L 0.0 (opened terminalA "build")
+                      at 2L 1.0 (opened terminalB "logs")
+                      at 3L 2.0 (closedNow terminalA)
+                      at 4L 3.0 (closedNow terminalB) ]
+            Expect.equal
+                (ClientModel.terminalRows model |> List.map (fun t -> TerminalId.value t.TerminalId))
+                [ "term-b"; "term-a" ]
+                "the newest recording first"
+
+        testCase "a terminal is recorded for this reader whichever way its transcript arrived" <| fun () ->
+            // A LIVE terminal's length arrives as a catch-up hint before any chunk is
+            // fetched; a CLOSED one's records arrive as chunks with no live hint behind
+            // them. Asking only one of the two would refuse the verb the other one earns.
+            let model = clientOf [ at 1L 0.0 (opened terminalA "build") ]
+            Expect.isFalse (ClientModel.hasRecording terminalA model) "nothing has arrived yet"
+            let byHint = ClientModel.update (TerminalAvailableMsg (terminalA, 12)) model
+            Expect.isTrue (ClientModel.hasRecording terminalA byHint) "a live terminal's length"
+            let byRecord =
+                ClientModel.update
+                    (TerminalRecordMsg (terminalA, 0, { At = 0.0; Kind = TranscriptOutput; Data = "hi" }))
+                    model
+            Expect.isTrue (ClientModel.hasRecording terminalA byRecord) "a fetched record"
+
+        testCase "choosing a row shows that terminal and leaves the list" <| fun () ->
+            // One act, not two: a row that selected a terminal and left the reader in the
+            // census would have them press twice for one intention.
+            let model =
+                clientOf [ at 1L 0.0 (opened terminalA "build"); at 2L 1.0 (opened terminalB "logs") ]
+                |> ClientModel.update ToggleTerminalListMsg
+                |> ClientModel.update (SelectFromListMsg terminalB)
+            Expect.isFalse model.TerminalList "the list stepped aside"
+            Expect.equal
+                (ClientModel.selectedPane model |> Option.map PaneTab.key)
+                (Some "terminal:term-b")
+                "showing what was chosen"
+
+        testCase "reaching the list opens the column it is in" <| fun () ->
+            // Looking for a terminal you cannot see is exactly the case where the column is
+            // shut, so the toggle brings it with it.
+            let model = clientOf [ at 1L 0.0 (opened terminalA "build") ]
+            Expect.isFalse model.TerminalsOpen "the column starts shut"
+            let listed = ClientModel.update ToggleTerminalListMsg model
+            Expect.isTrue listed.TerminalList "the list is showing"
+            Expect.isTrue listed.TerminalsOpen "and the column came with it"
+    ]
+
+// --- Pins, and the preview slot (Plan 20, stage 1) ------------------------------------------
+
+let private pinTests =
+    testList "Pins and the preview (Plan 20, stage 1)" [
+
+        testCase "the strip holds the pins, and closed terminals are not among them" <| fun () ->
+            // The whole reason the strip can stop being a census: a terminal that has closed
+            // is read from its row in the list, so keeping it here would be the census again
+            // under another name.
+            let model =
+                clientOf
+                    [ at 1L 0.0 (opened terminalA "build")
+                      at 2L 1.0 (opened terminalB "logs")
+                      at 3L 2.0 (closedNow terminalA) ]
+            Expect.equal (stripKeys model) [ "terminal:term-b" ] "only what is still running"
+
+        testCase "a terminal I opened is pinned; one somebody else opened is not" <| fun () ->
+            // Rule one, and the rule that makes an agent's terminals safe to leave out of the
+            // strip: you asked for it, so it is in your hands.
+            let mine =
+                SessionEvent.TerminalOpened
+                    { TerminalId = terminalA; OpenedBy = PeerRef ada; Title = "mine"
+                      Sandbox = Some SandboxName.defaultName; Renewable = false }
+            let theirs =
+                SessionEvent.TerminalOpened
+                    { TerminalId = terminalB; OpenedBy = ActorRef.Agent; Title = "running the tests"
+                      Sandbox = Some SandboxName.defaultName; Renewable = false }
+            let model = clientOf [ at 1L 0.0 mine; at 2L 1.0 theirs ]
+            Expect.equal (model.Pins |> List.map PaneTab.key) [ "terminal:term-a" ] "mine, and only mine"
+
+        testCase "typing in a terminal pins it for the person typing" <| fun () ->
+            // Rule three. Watching the agent work and joining it are one keystroke apart.
+            let queueId = QueueId.create "q-draft" |> expect
+            let model = clientOf [ at 1L 0.0 (openedBy ActorRef.Agent terminalB "running the tests") ]
+            Expect.isFalse (ClientModel.isPinned (TerminalTab terminalB) model) "not pinned by watching"
+            let typing = ClientModel.update (EnsureTerminalDraftMsg (terminalB, ada, queueId)) model
+            Expect.isTrue (ClientModel.isPinned (TerminalTab terminalB) typing) "pinned by taking a seat at it"
+
+        testCase "somebody else's typing does not pin their terminal to my strip" <| fun () ->
+            let queueId = QueueId.create "q-draft-bob" |> expect
+            let model =
+                clientOf [ at 1L 0.0 (openedBy ActorRef.Agent terminalB "running the tests") ]
+                |> ClientModel.update (EnsureTerminalDraftMsg (terminalB, bob, queueId))
+            Expect.isFalse (ClientModel.isPinned (TerminalTab terminalB) model) "pins are one reader's"
+
+        testCase "reading one recording after another leaves ONE tab, not a row of them" <| fun () ->
+            // The preview slot: the choice, while nothing pins it. Twenty chips tapped in a
+            // busy chat used to leave twenty tabs nobody closed.
+            let model =
+                clientOf oneBlock
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "2")))
+            Expect.equal
+                (stripKeys model |> List.filter (fun key -> key.StartsWith "block:"))
+                [ "block:term-a:b-2" ]
+                "the second replaced the first"
+
+        testCase "pinning what is previewed keeps it when the next thing is opened" <| fun () ->
+            let kept = BlockTab (terminalA, block "1")
+            let model =
+                clientOf oneBlock
+                |> ClientModel.update (OpenPaneTabMsg kept)
+                |> ClientModel.update (TogglePinMsg kept)
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "2")))
+            Expect.equal
+                (stripKeys model |> List.filter (fun key -> key.StartsWith "block:"))
+                [ "block:term-a:b-1"; "block:term-a:b-2" ]
+                "the kept one, and the new preview after it"
+
+        testCase "unpinning leaves what you are reading on screen" <| fun () ->
+            // Unpin says "stop keeping this", never "take it away while I am looking at it" —
+            // it becomes the preview, exactly as it would have been had it never been pinned.
+            let tab = BlockTab (terminalA, block "1")
+            let model =
+                clientOf oneBlock
+                |> ClientModel.update (OpenPaneTabMsg tab)
+                |> ClientModel.update (TogglePinMsg tab)
+                |> ClientModel.update (TogglePinMsg tab)
+            Expect.isFalse (ClientModel.isPinned tab model) "no longer kept"
+            Expect.equal
+                (ClientModel.selectedPane model |> Option.map PaneTab.key)
+                (Some "block:term-a:b-1")
+                "and still the thing on screen"
+
+        testCase "unpinning a terminal leaves it running" <| fun () ->
+            // The distinction the pin exists to make. Ending a terminal is one verb, on its
+            // row in the list, and this is not it.
+            let model =
+                clientOf [ at 1L 0.0 (opened terminalA "build") ]
+                |> ClientModel.update (TogglePinMsg (TerminalTab terminalA))
+            Expect.isFalse (ClientModel.isPinned (TerminalTab terminalA) model) "out of my strip"
+            Expect.isTrue
+                (TerminalProjection.tryFind terminalA model.Terminals |> Option.map (fun t -> t.IsOpen) |> Option.defaultValue false)
+                "and still running for everyone"
+            Expect.equal
+                (ClientModel.terminalRows model |> List.map (fun t -> TerminalId.value t.TerminalId))
+                [ "term-a" ]
+                "still in the list, which is where every terminal is"
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
+        listTests
+        pinTests
         orderTests
         toolTests
         chipTests

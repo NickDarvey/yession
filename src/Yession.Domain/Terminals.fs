@@ -51,11 +51,16 @@ type TerminalBlock =
       /// a block does not exist until the command runs, so resuming a command that is still
       /// waiting has to be keyed on the request, and this is what joins the two afterwards.
       QueueId : QueueId option
-      /// Who wrote the command.
-      Author : ActorRef
-      /// Who approved it, when the mode required one.
-      ApprovedBy : ActorRef option
+      /// The parties behind the command (Plan 20): who wrote it, whose credential it ran on,
+      /// who released it. Carried whole rather than split back into fields, because a
+      /// projection that re-spells the value is another place the three can drift apart.
+      Authority : Authority
       Command : string
+      /// Whether the agent asked for this one in the background (Plan 20, stage 2) — it did
+      /// not hold a turn open, and its completion is something the agent is waiting to be
+      /// told about. Projected so a surface can SAY so while it runs: work nobody is sitting
+      /// in front of is the work most worth marking.
+      Background : bool
       /// First transcript line of this block's output.
       FromSeq : int
       /// One past its last transcript line; `None` while it is still running.
@@ -93,6 +98,54 @@ type TerminalView =
       /// Output this terminal produced that the transcript did not keep. Non-zero means
       /// the record has a stated gap.
       DroppedBytes : int }
+
+/// What a terminal's state affords a reader RIGHT NOW (Plan 20, stage 0) — the verbs its row
+/// in the terminal list offers.
+///
+/// Here rather than in the view because it is a rule about a terminal's state, and a rule
+/// lives with the state it governs. The same rule used to be spelled out by hand in three
+/// templates — "offered only for a terminal that is actually open", "a live terminal's
+/// recording is still being written", "shown ONLY when both are true" — each correct, each
+/// re-derived, and each testable only by building the whole client and reading HTML back. As
+/// one fold it is four booleans the cheap tier pins directly, and "a destructive control is
+/// not offered over nothing" stops being a convention three templates happen to remember.
+///
+/// Stage 1 deleted those three with the strip's own verbs, so this is now the only place
+/// that decides.
+///
+/// Absent verbs are ABSENT, never disabled: a control that mostly refuses teaches people not
+/// to press it, and this list's controls have to work the time somebody needs them.
+type TerminalAffordances =
+    { /// End the process. Open terminals only — a "close" on a closed one either does
+      /// nothing or reports an error, and both are worse than not being there.
+      CanKill : bool
+      /// Step back through what a LIVE terminal has recorded so far (Plan 14, stage 7). A
+      /// DVR with nothing behind it is a control with nothing to do.
+      CanRewind : bool
+      /// Play a CLOSED terminal's recording. False with the terminal closed is the stated
+      /// gap — the per-terminal cap ate it — which the surface says rather than opening an
+      /// empty player.
+      CanReplay : bool
+      /// Ask the provider for the stream again (Plan 19, step 4). Closed, and its source
+      /// said asking again is safe; a shell terminal is never renewable, because a second
+      /// shell is a second terminal and opening one already exists.
+      CanReattach : bool }
+
+module TerminalAffordances =
+
+    /// `recorded` is whether this READER holds anything of the terminal's recording. The one
+    /// input that is not a fact about the terminal, and it cannot be: a recording lives in
+    /// the transcript store, so no fold over the event log can answer it — which is exactly
+    /// why it is a named parameter rather than something this module reaches for.
+    let ofView (recorded: bool) (view: TerminalView) : TerminalAffordances =
+        { CanKill = view.IsOpen
+          CanRewind = view.IsOpen && recorded
+          CanReplay = not view.IsOpen && recorded
+          // Not gated on `recorded`, and that is the point of asking the provider rather than
+          // the store: a terminal whose recording the cap ate can still have a live device on
+          // the other end, and refusing the way back because the RECORD is gone would answer
+          // a question nobody asked.
+          CanReattach = not view.IsOpen && view.Renewable }
 
 /// Every terminal this session has had, in the order they were opened.
 type TerminalProjection = { Terminals : TerminalView list }
@@ -157,9 +210,9 @@ module TerminalProjection =
                             t.Blocks
                             @ [ { BlockId = e.BlockId
                                   QueueId = e.QueueId
-                                  Author = e.Author
-                                  ApprovedBy = e.ApprovedBy
+                                  Authority = e.Authority
                                   Command = e.Command
+                                  Background = e.Background
                                   FromSeq = e.FromSeq
                                   ToSeq = None
                                   Status = BlockRunning } ] })
@@ -177,10 +230,11 @@ module TerminalProjection =
                             t.Blocks
                             @ [ { BlockId = e.BlockId
                                   QueueId = Some e.QueueId
-                                  Author = e.Author
+                                  // A command that never ran was never anybody's wait.
+                                  Background = false
                                   // Nobody approved it; someone did the opposite, and that
                                   // is on the status rather than smuggled in here.
-                                  ApprovedBy = None
+                                  Authority = Authority.ofAuthor e.Author
                                   Command = e.Command
                                   // An EMPTY range, not a missing one: a command that never
                                   // ran produced no output, so every reader that slices
@@ -324,8 +378,8 @@ module TerminalDigest =
                     { TerminalId = terminal.TerminalId
                       Title = terminal.Title
                       BlockId = block.BlockId
-                      Author = block.Author
-                      ApprovedBy = block.ApprovedBy
+                      Author = Authority.author block.Authority
+                      ApprovedBy = Authority.approver block.Authority
                       Command = block.Command
                       Status = block.Status
                       OutputTail = (if elided > 0 then output.Substring elided else output)

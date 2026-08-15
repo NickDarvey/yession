@@ -126,6 +126,8 @@ let private shellModel : ClientModel =
     /// keystrokes (Plan 14, stage 6). Its own terminal rather than the first one's, so the
     /// block-mode flows above keep a block-mode terminal to run in.
     let liveId : TerminalId = TerminalId.create "term-live" |> expect
+    /// A CLOSED terminal, for the list's other half — a recording rather than a place to type.
+    let doneId : TerminalId = TerminalId.create "term-done" |> expect
     let blockId : BlockId = BlockId.create "block-harness" |> expect
     let peerId : PeerId = PeerId.create "ada" |> expect
     let messageId : MessageId = MessageId.create "msg-harness" |> expect
@@ -140,8 +142,9 @@ let private shellModel : ClientModel =
                     Body = "ship it"
                     Status = Complete
                     Kind = ConversationItemKind.Message
-                    Offset = offset 1L } ]
-              ActiveAgentMessages = Map.empty }
+                    Offset = offset 1L
+                    Woke = None } ]
+              ActiveAgentMessages = Map.empty; WokenTurn = None }
         Timeline = { TimelineProjection.empty with TerminalItems = [ TimelineBlock (offset 2L, terminalId, blockId) ] }
         Terminals =
             { Terminals =
@@ -157,9 +160,9 @@ let private shellModel : ClientModel =
                     Blocks =
                       [ { BlockId = blockId
                           QueueId = None
-                          Author = PeerRef peerId
-                          ApprovedBy = None
+                          Authority = Authority.ofAuthor (PeerRef peerId)
                           Command = "ls -la"
+                          Background = false
                           FromSeq = 0
                           ToSeq = Some 2
                           Status = BlockFinished (CommandSucceeded 0) } ]
@@ -172,6 +175,21 @@ let private shellModel : ClientModel =
                     IsOpen = true
                     ClosedReason = None
                     Lease = Some (PeerRef peerId)
+                    IntegrationLost = false
+                    Blocks = []
+                    DroppedBytes = 0 }
+                  // A finished one, so the terminal LIST (Plan 20, stage 0) has both its
+                  // halves here: the working set, and the history it is a census of. Without
+                  // it the list would be exercised over open terminals only, which is the
+                  // half that was never the problem.
+                  { TerminalId = doneId
+                    Title = "install"
+                    OpenedBy = PeerRef peerId
+                    Sandbox = Some SandboxName.defaultName
+                    Renewable = false
+                    IsOpen = false
+                    ClosedReason = Some "exit 0"
+                    Lease = None
                     IntegrationLost = false
                     Blocks = []
                     DroppedBytes = 0 } ] }
@@ -195,10 +213,20 @@ let private shellModel : ClientModel =
                             1, { At = 0.2; Kind = TranscriptOutput; Data = "vim ~/notes\r\n" } ]
                     KnownLength = 2
                     ReadThrough = 2
+                    Header = Some { Width = 80; Height = 24; Timestamp = 0L } }
+                  doneId,
+                  { Records = Map.ofList [ 0, { At = 0.0; Kind = TranscriptOutput; Data = "installed\r\n" } ]
+                    KnownLength = 1
+                    ReadThrough = 1
                     Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
         // SHUT to begin with, like a fresh client: the phone case is about what happens when
         // a chip brings the pane on screen, which is nothing to watch if it is already there.
         TerminalScreens = Map.ofList [ liveId, "\u001b[32mvim ~/notes\u001b[0m" ]
+        // The two terminals this peer opened, pinned as the events fold would have pinned
+        // them (Plan 20, stage 1). Set by hand because this model is BUILT rather than folded
+        // — and without them the strip would hold only whatever is being previewed, which is
+        // a fresh client's state rather than a working one.
+        Pins = [ TerminalTab terminalId; TerminalTab liveId ]
         TerminalsOpen = false }
 
 /// Every byte the live screen decided to send, for the E2E to read back. The keystroke

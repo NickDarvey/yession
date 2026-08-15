@@ -39,7 +39,8 @@ let private runOnPty (executable: string) (arguments: string list) : Async<Resul
               WritePaths = []
               AllowedDomains = None
               Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-              WorkingDirectory = None }
+              WorkingDirectory = None
+              Filesystem = Confined }
         match! Sandboxes.HostSandbox.create () policy with
         | Error e -> return Error e
         | Ok sandbox ->
@@ -82,7 +83,8 @@ let private withLiveTerminal
               WritePaths = []
               AllowedDomains = None
               Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-              WorkingDirectory = None }
+              WorkingDirectory = None
+              Filesystem = Confined }
         match! Sandboxes.HostSandbox.create () policy with
         | Error e -> failwith e
         | Ok sandbox ->
@@ -134,6 +136,8 @@ let private withLiveTerminal
                     (fun _ _ _ -> ())
                     (fun () -> reDrains <- reDrains + 1)
                     AttachTerminal.unavailable
+                    // No doc in this fixture, and no gate to write into one.
+                    ignore
                     []
             match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxName.defaultName) name with
             | Error e -> failwith e
@@ -146,13 +150,13 @@ let private withLiveTerminal
 let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : PendingAct =
     { QueueId = QueueId.create n |> expect
       Subject = ForTerminal terminal
-      Author = author
+      Authority = Authority.ofAuthor author
       Order = 1.0
       Payload = CommandLine
-      OnBehalfOf = None
       ApprovedBy = None
       RejectedBy = None
-      RejectedReason = None }
+      RejectedReason = None
+      Background = false }
 
 /// Poll until `condition` holds or the budget runs out. Bounded rather than a fixed sleep:
 /// a shell's timing is not ours to predict, and a test that sleeps long enough to be safe is
@@ -429,7 +433,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Map.empty
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->
@@ -477,7 +482,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->
@@ -506,7 +512,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->
@@ -545,7 +552,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->
@@ -609,7 +617,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->

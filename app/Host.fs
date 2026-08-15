@@ -315,49 +315,15 @@ let startFull
                 // a configurable one: the wire is part of the seam's contract, so a second
                 // way to attach would be a second contract nobody wrote down.
                 AttachWs.attach
+                // The gate register lives in the doc, which is this root's; WHICH terminals
+                // run unapproved is the manager's rule, and it decides that for itself.
+                (fun id -> SyncedStateSync.setGate doc (ForTerminal id) AutoRun)
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 
         // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
         // people can see it and then WAITS — bounded twice over, once for a person and once
         // for a process — so the agent gets its answer back without a turn ever hanging on
         // somebody pressing Approve.
-        // One agent terminal PER SANDBOX (Plan 15, stage 2). Keyed rather than single,
-        // because `execute_command` is the only door into a sandbox and a session now has
-        // several: one shared cell would have quietly run a command meant for `test` in
-        // whichever sandbox happened to be first.
-        let agentTerminalIds : Map<string, TerminalId> ref = ref Map.empty
-
-        /// The session's agent terminal in one sandbox, opened on first use.
-        ///
-        /// Its title is the command that needed it, which is what the retired
-        /// `ensure_environment`'s `reason` argument becomes — the strip says "npm test" rather
-        /// than "agent", a better answer to "what is that terminal for" than the tool gave.
-        ///
-        /// It opens in `AutoRun`, NOT the `ApproveAgent` default every other terminal has. If
-        /// it inherited that, replacing the old tool would silently turn every agent command
-        /// into an approval prompt — a large change to autonomy smuggled in under a refactor.
-        /// What changes is that the gate becomes REAL: setting `ApproveAgent` on a terminal a
-        /// human opened now stops the agent, because there is no second door.
-        let openAgentTerminal (sandbox: SandboxName) (reason: string) : Async<Result<TerminalId, string>> =
-            async {
-                let key = SandboxName.value sandbox
-                match Map.tryFind key agentTerminalIds.Value with
-                | Some id when terminals.IsOpen id -> return Ok id
-                | _ ->
-                    let label = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
-                    // The sandbox is in the title when it is not the default one: four
-                    // terminals in a strip are navigable only if each says where it is.
-                    let title =
-                        if sandbox = SandboxName.defaultName then label
-                        else sprintf "[%s] %s" key label
-                    match! terminals.Open ActorRef.Agent (SandboxShell sandbox) title with
-                    | Error reason -> return Error reason
-                    | Ok id ->
-                        agentTerminalIds.Value <- Map.add key id agentTerminalIds.Value
-                        SyncedStateSync.setGate doc (ForTerminal id) AutoRun
-                        return Ok id
-            }
-
         let terminalCommands =
             TerminalCommands.create
                 doc
@@ -365,7 +331,7 @@ let startFull
                 (fun () -> terminalProjection)
                 (fun () -> SyncedStateSync.ofDoc doc)
                 (fun id fromSeq toSeq -> transcripts.ReadRange id fromSeq toSeq |> Transcript.printed)
-                openAgentTerminal
+                terminals.AgentTerminal
                 (fun () ->
                     match QueueId.create (string (Guid.NewGuid ())) with
                     | Ok id -> id
@@ -467,8 +433,14 @@ let startFull
                 { Open = fun offer -> terminals.Open ActorRef.Agent (Attached offer) offer.Ticket.Label
                   IsOpen = terminals.IsOpen }
 
-        let capabilitiesFor (turnId: AgentTurnId) : AgentCapabilities =
-            { ExecuteCommand = terminalCommands.Execute
+        let capabilitiesFor (turnId: AgentTurnId) (turnActor: ActorRef) : AgentCapabilities =
+            { // Bound to THIS turn's actor (Plan 20), which is what a queued command records
+              // as the authority it borrows and what a WOKEN turn later resolves its own from.
+              // The agent cannot name it: an acting party that could choose whose credential
+              // it runs on is not gated by one.
+              ExecuteCommand =
+                fun target command background ->
+                    terminalCommands.Execute target command background (Authority.agentFor turnActor)
               CheckPending = checkPending
               // The agent's hand in a terminal that has no blocks (Plan 19). It takes the
               // lease like a peer, so a human watching sees who is typing and can take it
@@ -534,7 +506,10 @@ let startFull
         let drain () = scheduler.Drain ()
         let requestInterrupt = scheduler.RequestInterrupt
 
-        let terminalScheduler = TerminalScheduler.create doc terminals initialTerminalConsumed
+        // A terminal block finishing is the one thing outside the agent's own turn that can
+        // make the log owe it a turn nobody asked for (Plan 20, stage 2). The terminal
+        // scheduler is what knows one finished; the wake is what that is worth here.
+        let terminalScheduler = TerminalScheduler.create doc terminals scheduler.Wake initialTerminalConsumed
         let drainTerminals () = terminalScheduler.Drain ()
         reDrainTerminals <- drainTerminals
         // The bound on the starvation a live holder can cause (Plan 13, stage 3c). Reclaims
@@ -650,6 +625,9 @@ let startFull
         // reads the projection — and before the terminal drain, which must not try to run a
         // command in a terminal that is gone.
         do! terminals.ReconcileAtBoot ()
+        // The boot half of the same arm: a completion the previous process never acted on is
+        // still owed, and the wake re-derives it from the log rather than losing it.
+        scheduler.Wake ()
 
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the
@@ -747,48 +725,56 @@ let startFull
                     signalSessionEnded ()
                 })
 
-        // The HTTP-cacheable event read surface: chunk n = the JSONL envelopes at
-        // offsets [n*size, (n+1)*size). Full chunks are immutable (append-only log),
-        // so browsers cache them hard and cold loads replay history from disk.
+        // The event read surface (docs/plans/20): a client sends the offset it has folded
+        // through, and this answers with the bounds of what came next — an address whose
+        // bytes never change, so the client can keep it, the growing tail included.
+        //
+        // Both operations are `log.Read`, and the cursor deliberately reads the page it
+        // then only reports the bounds of. The alternative is a length the log does not
+        // expose, and the read is over an in-memory log: one extra read per NEW range is
+        // not worth a second way to ask how long the log is.
+        let encodeLines (page: EventPage<SessionEvent>) =
+            page.Events |> List.map (Codec.toString Codec.sessionEventEnvelope)
+
         let eventsEndpoint : Signalling.EventsEndpoint =
             { ValidateToken = peerTokens.Validate >> Option.isSome
-              ReadChunk =
-                fun index ->
+              BoundsAfter =
+                fun after ->
                     async {
-                        let after =
-                            if index = 0 then None
-                            else
-                                match EventOffset.create (EventChunk.firstOffset index - 1L) with
-                                | Ok o -> Some o
-                                | Error e -> failwithf "chunk offset invariant violated: %s" e
                         let! page = log.Read after EventChunk.size
-                        let lines = page.Events |> List.map (Codec.toString Codec.sessionEventEnvelope)
-                        return lines, List.length lines = EventChunk.size
+                        // Empty means the caller is current. The bounds come from the
+                        // events themselves rather than from arithmetic over the cursor,
+                        // so a capped page and a short one are the same code path.
+                        match page.Events, page.LastOffset with
+                        | first :: _, Some last ->
+                            return Some (EventOffset.value first.Offset, EventOffset.value last)
+                        | _ -> return None
+                    }
+              ReadRange =
+                fun first last ->
+                    async {
+                        let! after =
+                            if first = 0L then async.Return None
+                            else
+                                async {
+                                    match EventOffset.create (first - 1L) with
+                                    | Ok o -> return Some o
+                                    | Error e -> return failwithf "range bound invariant violated: %s" e
+                                }
+                        let wanted = int (last - first + 1L)
+                        let! page = log.Read after wanted
+                        let lines = encodeLines page
+                        // Short means the log has not reached `last` yet. Answering with
+                        // what exists would put a partial answer at an address that
+                        // promises the whole range, and the client keeps that for ever.
+                        return if List.length lines = wanted then Some lines else None
                     } }
 
-        // The HTTP-cacheable transcript read surface (Plan 13) — the history leg of the
-        // terminal feed, on the same immutability argument as the event chunks.
-        let transcriptEndpoint : Signalling.TranscriptEndpoint =
-            { ValidateToken = peerTokens.Validate >> Option.isSome
-              ReadChunk =
-                fun terminal index ->
-                    async {
-                        // An unparseable id is a terminal that does not exist, which is
-                        // exactly what an unknown one is — same answer, one code path.
-                        match TerminalId.create terminal with
-                        | Ok id -> return transcripts.ReadChunk id index
-                        | Error _ -> return None
-                    }
-              ReadKeyframe =
-                fun terminal seq ->
-                    async {
-                        match TerminalId.create terminal with
-                        | Ok id ->
-                            return
-                                transcripts.ReadKeyframe id seq
-                                |> Option.map (Codec.toString Codec.transcriptKeyframe)
-                        | Error _ -> return None
-                    } }
+        // The transcript read surface (Plan 13, cursored in Plan 22) — the history leg of the
+        // terminal feed, on the same immutability argument as the event ranges. Built by the
+        // store, because every decision in it is about the store's own state.
+        let transcriptEndpoint =
+            TranscriptStore.endpoint (peerTokens.Validate >> Option.isSome) transcripts
 
         let! server, closeConnections = Signalling.start sessionId onConnection (Some eventsEndpoint) (Some transcriptEndpoint) auth extraHttpRoutes peerTokens.Mint mount managerOrigin ephemeralStorage port
         // Port 0 asks the OS for a free port, so any number of instances/sessions

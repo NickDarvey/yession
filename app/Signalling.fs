@@ -1,12 +1,14 @@
 module Yession.Host.Signalling
 
-// HTTP serves static app bootstrap, temporary WebRTC signalling, and ONE read-only
-// data surface: the event log as immutable, cache-friendly chunks (`/events/{n}`).
-// Everything interactive stays on the data channel (design.md §2.3); the chunk
-// endpoint exists precisely because HTTP caching is the point — full chunks of the
-// append-only log never change, so the browser's cache becomes the client-side event
-// store. `/signal` accepts a peer's offer and returns the Session Process's answer;
-// the established data channel becomes a session `FrameChannel`.
+// HTTP serves static app bootstrap, temporary WebRTC signalling, and the read-only history
+// surfaces — the event log (docs/plans/20) and the terminal transcripts (docs/plans/22),
+// both read by cursor. A client sends the position it has folded through
+// (`/events/after/{n}`, `/terminals/{t}/after/{n}`) and this redirects to the range it chose
+// (`/events/{first}-{last}`, `/terminals/{t}/{first}-{last}`), whose bounds do not move — so
+// those bytes are the same for ever and a client can keep them, the growing tail included.
+// Everything interactive stays
+// on the data channel (design.md §2.3). `/signal` accepts a peer's offer and returns the
+// Session Process's answer; the established data channel becomes a session `FrameChannel`.
 
 open Fable.Core.JsInterop
 open Yession.Domain
@@ -21,7 +23,7 @@ open Yession.App
 /// randomly in the browser, so the server-rendered placeholder is left blank. The page
 /// embeds the serving session's id, so the browser can key its local doc store by
 /// session before (and without) any connection.
-let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) (ephemeralStorage: bool) (assets: AssetDigests) =
+let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin: string option) (ephemeralStorage: bool) (assets: AssetBuild) =
     let placeholderPeer =
         match PeerId.create "browser" with
         | Ok peerId -> { PeerId = peerId; DisplayName = "" }
@@ -30,40 +32,11 @@ let private bootstrapHtml (sessionId: SessionId) (mount: string) (managerOrigin:
     // browser re-learns it from `PeerAccepted` once connected).
     Ssr.page sessionId mount managerOrigin ephemeralStorage assets { ClientModel.init placeholderPeer with Session = Some sessionId }
 
-let private bundlePath = envOr "YESSION_CLIENT_BUNDLE" "app/out/public/client.js"
-let private cssPath = envOr "YESSION_APP_CSS" "app/out/public/app.css"
-
-[<Fable.Core.ImportAll("node:fs")>]
-let private fs : obj = Fable.Core.Util.jsNative
-
-// From the package's assets/ when installed; from the build output in development.
-let private readBundle () : string option = readAsset "client.js" bundlePath fs
-let private readCss () : string option = readAsset "app.css" cssPath fs
-
-/// Serve a fingerprinted asset, but only at its own address.
-///
-/// A `requested` digest that is not `ours` is a stale shell asking for a build this process no
-/// longer is. Answering it with CURRENT bytes would write them into an `immutable` cache entry
-/// under the old address — wrong for a year, and unfixable from the server. The 404 sends the
-/// browser back to the shell, which revalidates and names the asset that does exist.
-let private serveAsset
-    (requested: string)
-    (ours: string)
-    (content: string option)
-    (contentType: string)
-    (what: string)
-    (res: ServerResponse)
-    =
-    match content with
-    | None ->
-        res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-        res.``end`` (sprintf "%s not built (run: build)" what)
-    | Some _ when requested <> ours ->
-        res.writeHead (404, createObj [ "content-type", box "text/plain" ]) |> ignore
-        res.``end`` (sprintf "stale %s address (reload)" what)
-    | Some body ->
-        res.writeHead (200, createObj [ "content-type", box contentType; "cache-control", box CachePolicy.asset ]) |> ignore
-        res.``end`` body
+/// Where the built asset set lives when this is not an installed package (`Assets` looks
+/// beside the running bundle first). One variable for the whole directory, not one per file:
+/// a deployment that could point the stylesheet and its faces at different builds is a
+/// deployment that could serve a stylesheet its faces do not match.
+let private assetsDir = envOr "YESSION_ASSETS" "app/out/public/assets"
 
 /// The app icon's bytes. The constant is base64 (`WebApp.iconPngBase64`) because it lives in
 /// source; the wire wants the PNG, and `res.end` is typed to the string case it is used with
@@ -82,26 +55,36 @@ let private pathnameOf (url: string) : string = Fable.Core.Util.jsNative
 [<Fable.Core.Emit("new URL($0, 'http://local').searchParams.get($1)")>]
 let private queryOf (url: string) (name: string) : string option = Fable.Core.Util.jsNative
 
-/// The auth-gated, HTTP-cacheable event-log read surface.
+[<Fable.Core.Emit("encodeURIComponent($0)")>]
+let private encodeUriComponent (value: string) : string = Fable.Core.Util.jsNative
+
+/// The auth-gated event-log read surface: a cursor, and the ranges it resolves to.
 type EventsEndpoint =
     { /// Validates a `?token=` peer token (minted by this process via `/me`) — the
       /// cookie-less access path (Node tests, headless clients).
       ValidateToken : string -> bool
-      /// Read chunk `n`: the JSONL-encoded envelope lines, plus whether the chunk is
-      /// full (and therefore immutable).
-      ReadChunk : int -> Async<string list * bool> }
+      /// The bounds of the answer to a cursor — `None` when the caller is already
+      /// current, which is what makes `204` rather than an empty range the answer to
+      /// "nothing has happened since". The server picks these; no client ever does.
+      BoundsAfter : EventOffset option -> Async<(int64 * int64) option>
+      /// The JSONL-encoded envelope lines at offsets `[first, last]`, or `None` when the
+      /// log has not reached `last` — a range that does not exist yet is not a short
+      /// answer, it is a 404.
+      ReadRange : int64 -> int64 -> Async<string list option> }
 
-/// The same surface for a terminal's transcript (Plan 13) — separate because the resource
-/// is a terminal's, not the session's, so a read can legitimately answer "no such
-/// terminal". A missing transcript is a 404 and an empty one is an empty 200: a client
-/// catching up must be able to tell "this terminal has printed nothing yet" from "this
-/// terminal does not exist".
+/// The same surface for a terminal's transcript (Plan 13, cursored in Plan 22) — separate
+/// because the resource is a terminal's, not the session's, so every read takes the id it
+/// belongs to. What a missing transcript means depends on which leg asked: a CURSOR answers
+/// `204` (there are no lines you have not seen, and there being none at all is one way for
+/// that to be true), while a RANGE answers `404` (this address promised lines that are not
+/// there).
 type TranscriptEndpoint =
     { ValidateToken : string -> bool
       /// The raw terminal segment off the path, deliberately unvalidated here — parsing it
       /// into a `TerminalId` is the endpoint's job, and an unparseable one is simply a
       /// terminal that does not exist.
-      ReadChunk : string -> int -> Async<(string list * bool) option>
+      BoundsAfter : string -> int option -> Async<(int * int) option>
+      ReadRange : string -> int -> int -> Async<string list option>
       /// The keyframe for one transcript line (Plan 14, stage 3), as its encoded JSON.
       /// `None` covers both "no such terminal" and "no keyframe at that line" — a client
       /// asking for one it cannot get plays the range without it, and says so.
@@ -109,9 +92,9 @@ type TranscriptEndpoint =
 
 /// Start the HTTP bootstrap + signalling server. For each offer posted to `/signal`, an
 /// answering peer connection is created; when its data channel opens, the resulting frame
-/// channel is handed to `onConnection`. When `events` is given, `GET /events/{n}` serves
-/// the log in fixed-size chunks with cache headers derived from immutability, gated by
-/// the auth cookie or a minted `?token=`. When `auth` is given, the login surface
+/// channel is handed to `onConnection`. When `events` is given, the event cursor and the
+/// ranges it resolves to are served, gated by the auth cookie or a minted `?token=`. When
+/// `auth` is given, the login surface
 /// (`/login`, `/callback`, `/me`) rides the same server; the SHELL stays ungated and
 /// cacheable — offline-first — because it is a pure function of the session id with no
 /// content and no secrets; authorization gates the data surfaces, and the browser client
@@ -127,8 +110,9 @@ let start
     (sessionId: SessionId)
     (onConnection: FrameChannel<string> -> unit)
     (events: EventsEndpoint option)
-    // `GET /terminals/{id}/{n}`, when this session has terminals (Plan 13). Gated by the
-    // same cookie-or-token check the event chunks use, and cached on the same argument.
+    // The per-terminal transcript cursor and its ranges, when this session has terminals
+    // (Plan 13, Plan 22). Gated by the same cookie-or-token check the event surface uses,
+    // and read the same way: a cursor in, a range back, kept by the client.
     (transcripts: TranscriptEndpoint option)
     (auth: SessionAuth.Auth option)
     (extraRoutes: (IncomingMessage -> ServerResponse -> bool) option)
@@ -150,16 +134,28 @@ let start
     // Read and address the assets ONCE, here, rather than per request. Three things follow,
     // and all three are the point: the shell can name the exact bytes the server will hand
     // out (a per-request read could drift from the document that named it), the immutable
-    // URLs are stable for the life of the process, and the two static routes stop doing a
+    // URLs are stable for the life of the process, and the static route stops doing a
     // synchronous `readFileSync` on every hit.
-    let bundle = readBundle ()
-    let css = readCss ()
-    let assets = { Bundle = contentDigest bundle; Css = contentDigest css }
-    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin ephemeralStorage assets
+    let assets = Assets.load assetsDir
+    let bootstrapHtml = bootstrapHtml sessionId mount managerOrigin ephemeralStorage assets.Build
     // The shell is a pure function of the session id, the mount, the Manager origin, and the
     // assets it names — all fixed at boot — so its validator is too, and a reload costs a 304
     // instead of the whole document.
     let shellEtag = sprintf "\"%s\"" (contentDigest (Some bootstrapHtml))
+    // The worker, computed once with the page for the same reason the page is: it is a pure
+    // function of this build and this mount, and a per-request render could only drift from
+    // the document that registers it.
+    let serviceWorkerScript =
+        WebApp.serviceWorker
+            (AssetBuild.digest assets.Build)
+            (SessionRoute.relative Shell)
+            SessionRoute.assetsPrefix
+            // The set this build actually left on disk, read from the same map the server
+            // answers from. A list written by hand here would be a second thing that has to
+            // agree with the build, which is exactly what the set-wide digest exists to avoid.
+            (assets.Files
+             |> Map.toList
+             |> List.map (fun (path, _) -> SessionRoute.relative (Asset (AssetBuild.digest assets.Build, path))))
     // Every accepted peer connection, so a stopping Host can drain them. Never pruned
     // mid-life (closePeerConnection resolves immediately for already-closed ones, and a
     // session hosts a bounded handful of peers).
@@ -178,41 +174,110 @@ let start
         res.writeHead (404, createObj [ "content-type", box "text/plain"; "cache-control", box "no-store" ]) |> ignore
         res.``end`` "not found"
 
-    /// Write a JSONL chunk with the cache policy its fullness implies. Shared by the event
-    /// log and the transcripts, because the caching argument is identical: fixed bounds
-    /// over an append-only sequence make a full chunk immutable for ever.
-    let writeChunk (cacheControl: bool -> string) (lines: string list) (isFull: bool) (res: ServerResponse) =
+    /// Write a JSONL range. Shared by the event log and the transcripts, because the argument
+    /// is identical: bounds that never move over an append-only sequence make the answer the
+    /// same bytes for ever, and the copy that matters is the client's own.
+    let writeLines (lines: string list) (res: ServerResponse) =
         res.writeHead (
             200,
             createObj
                 [ "content-type", box "application/x-ndjson; charset=utf-8"
-                  "cache-control", box (cacheControl isFull) ])
+                  "cache-control", box "no-store" ])
         |> ignore
         res.``end`` (lines |> List.map (fun l -> l + "\n") |> String.concat "")
 
-    let serveChunk (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (index: int) (res: ServerResponse) =
+    /// Redirect a cursor to the range that answers it. An absolute-path Location, built from
+    /// the mount this session is served under: a RELATIVE one would resolve against the
+    /// cursor's own path (`…/events/after/99`, `…/terminals/t/after/99`) and land two
+    /// segments deep. The token rides along when the caller used one — a redirect drops the
+    /// query, and the cookie-less path would arrive unauthorized.
+    ///
+    /// One function for both feeds, because both cursors mean the same thing and a second
+    /// copy of this would be a second chance to get the mount or the token wrong.
+    let redirectTo (url: string) (route: SessionRoute) (res: ServerResponse) =
+        let path = (if mount = "" then "" else mount) + "/" + SessionRoute.relative route
+        let target =
+            match queryOf url "token" with
+            | Some token -> sprintf "%s?token=%s" path (encodeUriComponent token)
+            | None -> path
+        res.writeHead (307, createObj [ "location", box target; "cache-control", box "no-store" ]) |> ignore
+        res.``end`` ""
+
+    /// A cursor whose caller is already current. `204` rather than an empty range, because
+    /// an empty range is a resource a client would keep, and "nothing yet" is exactly the
+    /// thing that stops being true.
+    let noContent (res: ServerResponse) =
+        res.writeHead (204, createObj [ "cache-control", box "no-store" ]) |> ignore
+        res.``end`` ""
+
+    /// The cursor. Never carries events and never caches: it answers where the events
+    /// this caller has not seen are, and that moves.
+    let serveCursor (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (after: EventOffset option) (res: ServerResponse) =
         if not (authorized req url endpoint.ValidateToken) then unauthorized res
         else
             Async.StartImmediate (
                 async {
-                    let! lines, isFull = endpoint.ReadChunk index
-                    writeChunk EventChunk.cacheControl lines isFull res
+                    match! endpoint.BoundsAfter after with
+                    | None -> noContent res
+                    | Some (first, last) -> redirectTo url (Events (first, last)) res
                 })
 
-    let serveTranscript
+    /// The events themselves, at an address that names its bounds — the same answer for
+    /// ever, which is why the client keeps it. `no-store` all the same: the copy that
+    /// matters is the one the client puts in its own store, and a second one in the HTTP
+    /// cache would be a spare nobody reads (docs/plans/20).
+    let serveRange (endpoint: EventsEndpoint) (req: IncomingMessage) (url: string) (first: int64) (last: int64) (res: ServerResponse) =
+        if not (authorized req url endpoint.ValidateToken) then unauthorized res
+        else
+            Async.StartImmediate (
+                async {
+                    match! endpoint.ReadRange first last with
+                    | Some lines -> writeLines lines res
+                    | None -> notFound res
+                })
+
+    /// A terminal's cursor, and its range — the event pair one feed over (docs/plans/22).
+    /// The two differ from their event counterparts in exactly one place, the terminal id,
+    /// and in nothing about what a cursor or a range MEANS.
+    let serveTranscriptCursor
         (endpoint: TranscriptEndpoint)
         (req: IncomingMessage)
         (url: string)
         (terminal: string)
-        (index: int)
+        (after: int option)
         (res: ServerResponse)
         =
         if not (authorized req url endpoint.ValidateToken) then unauthorized res
         else
             Async.StartImmediate (
                 async {
-                    match! endpoint.ReadChunk terminal index with
-                    | Some (lines, isFull) -> writeChunk TranscriptChunk.cacheControl lines isFull res
+                    match! endpoint.BoundsAfter terminal after with
+                    // A terminal with no transcript answers the same as one with nothing new:
+                    // a cursor is asked "where are the lines I have not seen", and "there are
+                    // none" is the honest answer to both. A 404 here would tell a client that
+                    // a terminal it can SEE does not exist.
+                    | None -> noContent res
+                    | Some (first, last) -> redirectTo url (TerminalTranscriptRange (terminal, first, last)) res
+                })
+
+    let serveTranscriptRange
+        (endpoint: TranscriptEndpoint)
+        (req: IncomingMessage)
+        (url: string)
+        (terminal: string)
+        (first: int)
+        (last: int)
+        (res: ServerResponse)
+        =
+        if not (authorized req url endpoint.ValidateToken) then unauthorized res
+        else
+            Async.StartImmediate (
+                async {
+                    match! endpoint.ReadRange terminal first last with
+                    // `no-store` for the same reason the event ranges are: the copy that
+                    // matters is the one the client puts in its own store, and a second one
+                    // in the HTTP cache would be a spare nobody reads.
+                    | Some lines -> writeLines lines res
                     | None -> notFound res
                 })
 
@@ -229,15 +294,12 @@ let start
             Async.StartImmediate (
                 async {
                     match! endpoint.ReadKeyframe terminal seq with
-                    // `immutable` on the same argument the full chunks earn it on: a
-                    // keyframe is written once, at a position that never moves, so its
-                    // bytes can never change.
                     | Some json ->
                         res.writeHead (
                             200,
                             createObj
                                 [ "content-type", box "application/json; charset=utf-8"
-                                  "cache-control", box (TranscriptChunk.cacheControl true) ])
+                                  "cache-control", box CachePolicy.keyframe ])
                         |> ignore
                         res.``end`` json
                     | None -> notFound res
@@ -287,18 +349,28 @@ let start
                           "etag", box shellEtag ])
                 |> ignore
                 res.``end`` bootstrapHtml
-        | Some (ClientBundle digest) ->
-            // The browser client bundle, built by `build` (esbuild output).
-            serveAsset digest assets.Bundle bundle "text/javascript; charset=utf-8" "client bundle" res
-        | Some (AppCss digest) ->
-            // The locally built Tailwind stylesheet (no CDN).
-            serveAsset digest assets.Css css "text/css; charset=utf-8" "stylesheet" res
+        | Some (Asset (build, path)) ->
+            // Whatever this build left in its asset directory — the bundle, the stylesheet, a
+            // typeface, something added after this line was written. A `build` that is not
+            // ours holds nothing, so a stale shell gets a 404 and reloads.
+            Assets.serve assets build path res
         // The two an INSTALL reads (`WebApp`), and the only routes here served to nobody in
         // particular: a browser fetches a manifest without credentials, and there is nothing
         // in either that a person outside the session could not see from the login page.
         // Neither is fingerprinted — the document names a fixed address and the manifest
         // names the icon — so both revalidate on the shell's policy rather than being
         // cached under an address whose bytes a release can change.
+        | Some ServiceWorker ->
+            // Same policy as the shell, and for the same reason one level up: this file is
+            // what decides which build's assets survive offline, so a stale copy would pin a
+            // client to a build that is gone. `no-cache` means revalidate, not "do not keep".
+            res.writeHead (
+                200,
+                createObj
+                    [ "content-type", box "text/javascript; charset=utf-8"
+                      "cache-control", box CachePolicy.shell ])
+            |> ignore
+            res.``end`` serviceWorkerScript
         | Some Manifest ->
             res.writeHead (
                 200,
@@ -313,13 +385,21 @@ let start
                 createObj [ "content-type", box "image/png"; "cache-control", box CachePolicy.shell ])
             |> ignore
             res.``end`` (decodeBase64 WebApp.iconPngBase64)
-        | Some (Events index) ->
+        | Some (EventsAfter after) ->
             match events with
-            | Some endpoint -> serveChunk endpoint req req.url index res
+            | Some endpoint -> serveCursor endpoint req req.url after res
             | None -> notFound res
-        | Some (TerminalTranscript (terminal, index)) ->
+        | Some (Events (first, last)) ->
+            match events with
+            | Some endpoint -> serveRange endpoint req req.url first last res
+            | None -> notFound res
+        | Some (TerminalTranscriptAfter (terminal, after)) ->
             match transcripts with
-            | Some endpoint -> serveTranscript endpoint req req.url terminal index res
+            | Some endpoint -> serveTranscriptCursor endpoint req req.url terminal after res
+            | None -> notFound res
+        | Some (TerminalTranscriptRange (terminal, first, last)) ->
+            match transcripts with
+            | Some endpoint -> serveTranscriptRange endpoint req req.url terminal first last res
             | None -> notFound res
         | Some (TerminalKeyframe (terminal, seq)) ->
             match transcripts with

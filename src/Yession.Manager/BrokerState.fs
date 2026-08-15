@@ -51,6 +51,10 @@ type OAuthGrant =
     { AccessToken : string
       RefreshToken : string option
       ExpiresAt : DateTimeOffset option
+      /// When the REFRESH token itself lapses, where a provider states one (GitHub gives
+      /// them six months). Past it there is nothing to retry: the answer is to sign in
+      /// again, and saying so beats a refresh that can only ever fail.
+      RefreshExpiresAt : DateTimeOffset option
       TokenUrl : string
       ClientId : string
       Dialect : TokenRequestDialect }
@@ -70,6 +74,7 @@ module BrokeredCredentialCodec =
                     [ "accessToken", Encode.string g.AccessToken
                       "refreshToken", Encode.option Encode.string g.RefreshToken
                       "expiresAt", Encode.option Codec.timestamp.Encode g.ExpiresAt
+                      "refreshExpiresAt", Encode.option Codec.timestamp.Encode g.RefreshExpiresAt
                       "tokenUrl", Encode.string g.TokenUrl
                       "clientId", Encode.string g.ClientId
                       "dialect", Encode.string (TokenRequestDialect.describe g.Dialect) ]
@@ -78,6 +83,11 @@ module BrokeredCredentialCodec =
                 { OAuthGrant.AccessToken = get.Required.Field "accessToken" Decode.string
                   OAuthGrant.RefreshToken = get.Required.Field "refreshToken" (Decode.option Decode.string)
                   OAuthGrant.ExpiresAt = get.Required.Field "expiresAt" (Decode.option Codec.timestamp.Decode)
+                  // Optional for the same reason `dialect` is: an envelope stored before
+                  // refresh-token lifetimes were recorded simply does not know one.
+                  OAuthGrant.RefreshExpiresAt =
+                    get.Optional.Field "refreshExpiresAt" (Decode.option Codec.timestamp.Decode)
+                    |> Option.flatten
                   OAuthGrant.TokenUrl = get.Required.Field "tokenUrl" Decode.string
                   OAuthGrant.ClientId = get.Required.Field "clientId" Decode.string
                   // Optional: envelopes stored before dialects existed are form-encoded
@@ -202,6 +212,9 @@ module BrokerFlow =
                   OAuthGrant.ExpiresAt =
                     get.Optional.Field "expires_in" Decode.float
                     |> Option.map (fun seconds -> now.AddSeconds seconds)
+                  OAuthGrant.RefreshExpiresAt =
+                    get.Optional.Field "refresh_token_expires_in" Decode.float
+                    |> Option.map (fun seconds -> now.AddSeconds seconds)
                   OAuthGrant.TokenUrl = tokenUrl
                   OAuthGrant.ClientId = clientId
                   OAuthGrant.Dialect = dialect })
@@ -210,11 +223,12 @@ module BrokerFlow =
     /// A refresh response may omit `refresh_token`; the previous one stays valid then
     /// (providers that rotate always send the successor).
     let merged (previous: OAuthGrant) (fresh: OAuthGrant) : OAuthGrant =
-        { fresh with
-            RefreshToken =
-                match fresh.RefreshToken with
-                | Some _ -> fresh.RefreshToken
-                | None -> previous.RefreshToken }
+        match fresh.RefreshToken with
+        | Some _ -> fresh
+        // The lifetime travels with the token it describes: keeping the old refresh token
+        // while adopting a `None` lifetime beside it would say "this one never lapses",
+        // which is the opposite of what was recorded.
+        | None -> { fresh with RefreshToken = previous.RefreshToken; RefreshExpiresAt = previous.RefreshExpiresAt }
 
     /// Refresh margin: treat a token as due five minutes before its recorded expiry, so
     /// a turn never starts on a token about to lapse mid-flight.
@@ -230,6 +244,18 @@ module BrokerFlow =
             match grant.RefreshToken, grant.ExpiresAt with
             | Some _, Some expiresAt -> now >= expiresAt.AddSeconds (-marginSeconds)
             | _ -> false
+
+    /// Whether the refresh token itself has lapsed — a state no retry escapes, and the
+    /// one refusal that has to say "sign in again" rather than "try later". Unknown
+    /// lifetimes are not expired: a provider that states none is saying it does not
+    /// expire on a clock we can read.
+    let refreshExpired (now: DateTimeOffset) (credential: BrokeredCredential) : bool =
+        match credential with
+        | BrokeredStatic _ -> false
+        | BrokeredOAuth grant ->
+            match grant.RefreshExpiresAt with
+            | Some expiresAt -> now >= expiresAt
+            | None -> false
 
     let kindOf (credential: BrokeredCredential) : ConnectionKind =
         match credential with

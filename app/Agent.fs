@@ -229,12 +229,23 @@ let private promptOf (context: AgentContextPack) : string =
             sprintf
                 "\n\nTerminal activity since your last turn (you did not see this before now):\n%s"
                 (blocks |> List.map render |> String.concat "\n\n")
-    sprintf
-        "Conversation so far:\n%s%s\n\nReply to the latest message from %s:\n%s"
-        transcript
-        terminals
-        (label context.CurrentMessage.Author)
-        context.CurrentMessage.Body
+    match context.CurrentMessage with
+    | Some message ->
+        sprintf
+            "Conversation so far:\n%s%s\n\nReply to the latest message from %s:\n%s"
+            transcript
+            terminals
+            (label message.Author)
+            message.Body
+    // A turn nobody asked for (Plan 20, stage 2): work this agent started finished while it
+    // was not running. There is no message to reply to, and inventing one — "the system says
+    // your build finished" — would put words in somebody's mouth on a shared transcript. It
+    // is told what it is, and the terminal activity above is what it acts on.
+    | None ->
+        sprintf
+            "Conversation so far:\n%s%s\n\nNobody has said anything new. You are running because work you started in the background finished — the terminal activity above is that work. Carry on with it, and say what it means for what you were doing."
+            transcript
+            terminals
 
 /// The registry's descriptors, as plain objects the Emit block can walk. The only place
 /// the two representations meet, and it is a projection — nothing is decided here.
@@ -261,6 +272,29 @@ let private invokeOf (registry: ToolRegistry) : string -> string -> string -> JS
         }
         |> Async.StartAsPromise
 
+/// Every tool ONE turn can reach, assembled once: the session's own registry, plus a
+/// namespace per MCP server it was given (Plan 17), wrapped in the audit seam (Plan 16,
+/// part C) over the merged whole — applying it per server would let a provider added later
+/// arrive with its own logging, or with none.
+///
+/// It lives here rather than inside the runner below because "what can this turn call, and
+/// what happens when it does" is a question worth answering without a model in the loop: a
+/// harness that drives a tool call drives THIS, so the thing it exercises is the thing a
+/// turn exercises rather than a second assembly that resembles it.
+///
+/// A merge refusal can only be a BUG — resolution already made the names unique — so it is
+/// reported and the turn proceeds on the session's own tools rather than failing. A turn
+/// that cannot reach a printer is a smaller problem than a turn that will not run.
+let registryFor (capabilities: AgentCapabilities) : ToolRegistry =
+    let own = AgentTools.registry capabilities
+    let merged =
+        match ToolRegistry.mergeAll (own :: capabilities.ForeignTools) with
+        | Ok registry -> registry
+        | Error reason ->
+            eprintfn "mcp: two registries claim one namespace (%s); using the session's own tools" reason
+            own
+    merged |> ToolUseLog.wrap capabilities.RecordToolUse
+
 /// The Claude Agent SDK–backed `RunAgent`, parameterized by the turn's credential:
 /// `None` = the ambient credential variables pass through (the documented last resort
 /// — how CI's LiveAgent tier feeds the agent); `Some (envVar, value)` = the spawned
@@ -280,24 +314,9 @@ let runWith (credential: (string * string) option) : RunAgent =
             Fs.ensureDir home
             let ambient = Sandboxes.ambientEnv ()
             let env = Sandboxes.AgentSandbox.envFor ambient home credential
-            // The registry, then the audit — in that order and only once, so every tool the turn
-            // can reach passes the same seam whether we wrote it or a provider did.
-            // The session's own tools, plus one namespace per MCP server it was given
-            // (Plan 17). Wrapped ONCE, over the merged whole: applying the audit per server
-            // would let a provider added later arrive with its own logging, or with none.
-            //
-            // A merge refusal can only be a BUG here — resolution already made the names
-            // unique — so it is reported and the turn proceeds on the session's own tools
-            // rather than failing. A turn that cannot reach a printer is a smaller problem
-            // than a turn that will not run.
-            let own = AgentTools.registry capabilities
-            let merged =
-                match ToolRegistry.mergeAll (own :: capabilities.ForeignTools) with
-                | Ok registry -> registry
-                | Error reason ->
-                    eprintfn "mcp: two registries claim one namespace (%s); using the session's own tools" reason
-                    own
-            let registry = merged |> ToolUseLog.wrap capabilities.RecordToolUse
+            // What this turn can call, assembled where every driver of a tool call assembles
+            // it — the registry, then the audit, in that order and only once.
+            let registry = registryFor capabilities
             let! outcome =
                 runQuery
                     {| system = context.SystemPrompt; prompt = promptOf context |}

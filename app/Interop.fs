@@ -165,12 +165,11 @@ let sha256Base64Url (input: string) : string = sha256B64u nodeCrypto input
 /// enough to read in a network panel. 72 bits; a collision needs two builds whose hashes agree
 /// there, which no real edit produces.
 ///
-/// `None` — the build output is missing — has nothing to address. The empty string renders as
-/// the bare `client.js`/`app.css`, so a developer meets the "not built (run: build)" 404
-/// rather than a 404 on a hash of nothing.
+/// `None` has nothing to address, and renders as the empty string.
 ///
-/// Used for the two static assets and for the shell's `ETag`, which is the same question
-/// ("are these the bytes you already have?") asked of a document instead of a file.
+/// Used for the shell's `ETag` — "are these the bytes you already have?", asked of a document.
+/// The static files are addressed by `Assets`, which asks the same question of a whole
+/// directory at once so that a stylesheet and the faces it names can never answer differently.
 let contentDigest (content: string option) : string =
     match content with
     | Some text -> (sha256Base64Url text).Substring (0, 12)
@@ -217,16 +216,6 @@ let envOr (name: string) (fallback: string) : string = jsNative
 /// build its OAuth redirect URI and to know the path it is mounted under.
 let publicAccess () : Result<Yession.Domain.PublicAccess, string> =
     Yession.Domain.PublicAccess.create (envOr "YESSION_MANAGER_URL" "") (envOr "YESSION_SESSION_URL" "")
-
-/// Read a bundled asset: from the npm package's `assets/` directory (next to the
-/// bundled entry — the packaged case), else from the dev filesystem fallback path.
-/// None when neither exists. `import.meta.url` resolves to the running module, which is
-/// the package-root bundle once esbuild has flattened everything into one file.
-[<Emit("""(() => {
-  try { return $2.readFileSync(new URL('./assets/' + $0, import.meta.url), 'utf8') } catch {}
-  try { return $2.readFileSync($1, 'utf8') } catch { return null }
-})()""")>]
-let readAsset (assetName: string) (fallbackPath: string) (fs: obj) : string option = jsNative
 
 /// Terminate the Node process with an exit code.
 [<Emit("process.exit($0)")>]

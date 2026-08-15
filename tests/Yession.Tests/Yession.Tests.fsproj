@@ -19,6 +19,7 @@
     <Compile Include="Version.fs" />
     <Compile Include="Domain.fs" />
     <Compile Include="Routes.fs" />
+    <Compile Include="Assets.fs" />
     <Compile Include="Reaper.fs" />
     <Compile Include="Secrets.fs" />
     <Compile Include="SessionProcess.fs" />
@@ -28,6 +29,10 @@
     <Compile Include="WorkSandboxes.fs" />
     <Compile Include="CommandGates.fs" />
     <Compile Include="Tools.fs" />
+    <!-- A tool call end to end, with no model in the loop: the registry, the per-turn
+         bindings, the gate and the dispatch table, joined. After Tools.fs (the registry
+         alone) and CommandGates.fs (the gate alone), which it is the join of. -->
+    <Compile Include="ToolCalls.fs" />
     <Compile Include="Mcp.fs" />
     <Compile Include="ToolStreams.fs" />
     <Compile Include="SerialEngine.fs" />
@@ -51,6 +56,7 @@
     <Compile Include="PtyIntegration.fs" />
     <Compile Include="Phase3.fs" />
     <Compile Include="EventsHttp.fs" />
+    <Compile Include="TranscriptHttp.fs" />
     <Compile Include="Resilience.fs" />
     <Compile Include="Oidc.fs" />
     <Compile Include="Phase4.fs" />

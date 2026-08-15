@@ -50,6 +50,16 @@ let private blobUrl (text: string) : string = jsNative
 [<Emit("URL.revokeObjectURL($0)")>]
 let private revoke (url: string) : unit = jsNative
 
+/// Turn on the player's stylesheet, which the shell links inert (`Style.deferredHeadTags`):
+/// most sessions never open a recording, and a second render-blocking sheet in the head would
+/// make all of them pay for the ones that do. Flipped at the first mount, when the sheet has
+/// long since arrived — so this costs a style recalculation, not a round trip.
+///
+/// Idempotent, and a no-op where no such link exists: a page may mount a replay without being
+/// the shell (the editor harness does).
+[<Emit("(() => { const link = document.querySelector('[' + $0 + ']'); if (link) link.media = 'all' })()")>]
+let private enableStylesheet (hook: string) : unit = jsNative
+
 /// One mounted replay, and how to take it down.
 type Mounted =
     { Dispose : unit -> unit }
@@ -72,11 +82,15 @@ type Mounted =
 /// to live rather than leaving them on a stale final frame. `None` for every recording
 /// whose end really is the end.
 let mount (element: Browser.Types.Element) (replay: PaneReplay) (caughtUp: (unit -> unit) option) : Mounted =
+    enableStylesheet Dom.playerStylesheetHook
     let url = blobUrl replay.Cast
     let options =
         [ "fit" ==> "width"
           "idleTimeLimit" ==> 2
-          "terminalFontFamily" ==> "ui-monospace, monospace" ]
+          // The same face a live terminal wears. A literal here meant a recording replayed in
+          // a different typeface than the terminal beside it — invisible on a box where both
+          // fell back to the platform mono, plain on any box where they did not.
+          "terminalFontFamily" ==> "var(--font-terminal)" ]
         @ (if List.isEmpty replay.Markers then []
            else [ "markers" ==> (replay.Markers |> List.map (fun (at, label) -> box [| box at; box label |]) |> Array.ofList) ])
         @ (match replay.StartAt with Some at -> [ "startAt" ==> at ] | None -> [])

@@ -38,6 +38,12 @@ let private representativeModel : ClientModel =
       Manager = Some "http://127.0.0.1:8321"
       // Path-mounted unless a case says otherwise: the address survives a restart.
       EphemeralStorage = false
+      // A representative client is one that can keep what it is given; the case that cannot
+      // is the exception, and says so where it matters.
+      CanKeepHistory = true
+      // A representative client has been to look; the timeline it renders is the session's,
+      // not a placeholder for one it has not read.
+      HistoryRead = true
       Synced =
         // Draft/queue bodies are rich-text `Y.XmlFragment`s mounted by the browser editor,
         // not fields on the model — so the SSR fixture carries only the slot's identity; the
@@ -57,13 +63,16 @@ let private representativeModel : ClientModel =
                 [ terminalQueueId,
                   { QueueId = terminalQueueId
                     Subject = ForTerminal terminalId
-                    Author = ActorRef.Agent
+                    // What the product actually writes for an agent command: the agent acts,
+                    // on the turn human's authority. There is no other agent-shaped way to
+                    // build one.
+                    Authority = Authority.agentFor (PeerRef ada)
                     Order = 1.0
                     Payload = CommandLine
-                    OnBehalfOf = None
                     ApprovedBy = None
                     RejectedBy = None
-                    RejectedReason = None } ]
+                    RejectedReason = None
+                    Background = false } ]
           Gates = Map.empty
           TerminalSizes = Map.empty }
       Conversation =
@@ -73,14 +82,17 @@ let private representativeModel : ClientModel =
                 Body = "ship it"
                 Status = Complete
                 Kind = ConversationItemKind.Message
-                Offset = EventOffset.create 1L |> expect }
+                Offset = EventOffset.create 1L |> expect
+                Woke = None }
               { MessageId = MessageId.create "msg-agent" |> expect
                 Author = ActorRef.Agent
                 Body = "Sounds go"
                 Status = Streaming
                 Kind = ConversationItemKind.Message
-                Offset = EventOffset.create 4L |> expect } ]
-          ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ] }
+                Offset = EventOffset.create 4L |> expect
+                Woke = None } ]
+          ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ]
+          WokenTurn = None }
       // The terminal half of the chat (Plan 14): the fixture's one block, anchored between
       // the two messages — so the checklist renders a chip in the middle of the conversation
       // rather than only at the end, which is the ordering the merge exists for.
@@ -115,9 +127,9 @@ let private representativeModel : ClientModel =
                 Blocks =
                   [ { BlockId = blockId
                       QueueId = None
-                      Author = PeerRef ada
-                      ApprovedBy = None
+                      Authority = Authority.ofAuthor (PeerRef ada)
                       Command = "ls -la"
+                      Background = false
                       FromSeq = 0
                       ToSeq = Some 2
                       Status = BlockFinished (CommandSucceeded 0) } ]
@@ -136,11 +148,13 @@ let private representativeModel : ClientModel =
                 Header = Some { Width = 80; Height = 24; Timestamp = 0L } } ]
       TerminalKeyframes = Map.empty
       TerminalScreens = Map.empty
-      PaneTabs = []
+      Pins = []
       PaneChoice = None
       PaneStartAt = None
       PaneRewound = None
       TerminalsOpen = true
+      // The pane shows a TAB by default; the list is what the cases below turn on.
+      TerminalList = false
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = Some false }
           Flow = ClaudeIdle }
@@ -228,7 +242,7 @@ let private lostIntegrationModel : ClientModel =
             { representativeModel.Synced with
                 Pending =
                     representativeModel.Synced.Pending
-                    |> Map.map (fun _ entry -> { entry with Author = PeerRef ada }) }
+                    |> Map.map (fun _ entry -> { entry with Authority = Authority.ofAuthor (PeerRef ada) }) }
         Terminals =
             { Terminals =
                 representativeModel.Terminals.Terminals
@@ -383,6 +397,51 @@ let private uiChecklistTests =
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
 
+        testCase "an empty timeline says whether it has looked, and the caret means one thing again" <| fun () ->
+            // Two opposite facts used to wear the same mark. The idle caret says "nothing was
+            // ever said here"; it was also what a client showed BEFORE it had read anything,
+            // which after the local store is the ordinary cold open. So the caret was telling
+            // most people the opposite of the truth, and neither state could be told from the
+            // other on screen.
+            let empty =
+                { representativeModel with
+                    Conversation = ConversationProjection.empty
+                    Timeline = TimelineProjection.empty }
+            let looking = Support.render { empty with HistoryRead = false }
+            Expect.isTrue
+                (looking.Contains "data-history-loading")
+                "a client that has not looked yet says it is reading, rather than claiming emptiness"
+            Expect.isTrue
+                (looking.Contains Dom.Text.readingHistory)
+                "and says it in words too, since the pulse alone reaches nobody who cannot see it"
+            let looked = Support.render { empty with HistoryRead = true }
+            Expect.isFalse
+                (looked.Contains "data-history-loading")
+                "a client that has looked and found nothing is not still reading"
+            // The other half, and the reason this is worth pinning: a session that HAS messages
+            // never shows either, whether or not the client has finished looking.
+            let full = Support.render { representativeModel with HistoryRead = false }
+            Expect.isFalse
+                (full.Contains "data-history-loading")
+                "a timeline with messages in it is not an empty one"
+
+        testCase "a client that cannot keep history says so; one that can says nothing" <| fun () ->
+            // The availability invariant, not the wording: a client whose context denies it a
+            // store keeps no history, and the alternative to saying so is a session that
+            // quietly stops remembering with nothing on screen to explain it. The note is
+            // ABSENT for every ordinary client, which is the half that keeps it meaningful.
+            let ordinary = Support.render representativeModel
+            Expect.isFalse
+                (ordinary.Contains "data-history-store")
+                "a client that keeps history has nothing to explain"
+            let denied = Support.render { representativeModel with CanKeepHistory = false }
+            Expect.isTrue
+                (denied.Contains "data-history-store")
+                "a client that cannot keep history says which capability is missing"
+            Expect.isTrue
+                (denied.Contains "HTTPS")
+                "and names the remedy, which is the operator's and is one flag"
+
         testCase "live mode: the lease bar names the holder and offers the steal" <| fun () ->
             let html = Support.render leasedTerminalModel
             let required =
@@ -411,7 +470,7 @@ let private uiChecklistTests =
                         { leasedTerminalModel.Synced with
                             Pending =
                                 leasedTerminalModel.Synced.Pending
-                                |> Map.map (fun _ entry -> { entry with Author = PeerRef ada }) } }
+                                |> Map.map (fun _ entry -> { entry with Authority = Authority.ofAuthor (PeerRef ada) }) } }
             let html = Support.render model
             Expect.isTrue
                 (html.Contains (Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingTerminal))
@@ -449,23 +508,10 @@ let private uiChecklistTests =
             Expect.isFalse
                 (html.Contains (Dom.attr Dom.Hooks.terminalInput (BodyKey.terminalDraft terminalId ada)))
                 "no command line"
-            Expect.isFalse
-                (html.Contains (Dom.attr "data-terminal-close" (TerminalId.value terminalId)))
-                "and no offer to close what is already closed"
-            // Nor a way back, for a terminal whose bytes came from this session's own
-            // sandbox: there is no provider to ask (Plan 19, step 4).
-            Expect.isFalse
-                (html.Contains (Dom.attr Dom.Hooks.terminalReattach (TerminalId.value terminalId)))
-                "and no offer to attach a stream that never was one"
-
-        // A control that mostly refuses teaches people not to press it, so this one is
-        // offered exactly where it works: a closed stream whose provider said asking again is
-        // safe. Both halves are the invariant — offered there, absent everywhere else.
-        testCase "a closed stream offers a way back when its provider said there is one" <| fun () ->
-            let html = Support.render renewableTerminalModel
-            Expect.isTrue
-                (html.Contains (Dom.attr Dom.Hooks.terminalReattach (TerminalId.value terminalId)))
-                "the control that asks the provider again"
+            // The kill and the attach-again used to be asserted here, against the STRIP.
+            // They live on the terminal's row in the list now (Plan 20, stage 1), and the
+            // list's own cases pin both halves of each. Re-asserting their absence from a
+            // strip that offers no verbs at all would be a test that cannot fail.
 
         testCase "terminal work sits in the chat WHERE it happened, not at the end" <| fun () ->
             // Plan 14, stage 1. The fixture's block is anchored at offset 2, between the two
@@ -614,7 +660,8 @@ let private uiChecklistTests =
                   Body = "# Heading one\n\nText with **bold** and `code`.\n\n- item one\n- item two"
                   Status = Complete
                   Kind = ConversationItemKind.Message
-                  Offset = EventOffset.create 1L |> expect }
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ richItem ] } }
@@ -644,7 +691,8 @@ let private uiChecklistTests =
                   Body = "added repo octo/hello (branch main)"
                   Status = Complete
                   Kind = ConversationItemKind.ActNote
-                  Offset = EventOffset.create 1L |> expect }
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }
@@ -654,6 +702,40 @@ let private uiChecklistTests =
             let noteStart = html.IndexOf "data-act-note"
             let article = html.Substring (html.LastIndexOf ("<article", noteStart), 300)
             Expect.isFalse (article.Contains "data-message-body") "no message body — it is not something someone said"
+
+        // A turn nobody asked for (Plan 20, stage 2). The agent may now speak with nobody
+        // having spoken to it, and on a shared surface that reads as the agent deciding
+        // things on its own unless the item itself says otherwise. What is pinned is that
+        // the mark is ON the woken item and on nothing else — not what it looks like.
+        testCase "what a woken turn said is attributed as a turn nobody asked for" <| fun () ->
+            let asked = MessageId.create "msg-asked" |> expect
+            let woken = MessageId.create "msg-woken" |> expect
+            let agentItem (messageId: MessageId) (woke: WakeReason option) : ConversationItem =
+                { MessageId = messageId
+                  Author = ActorRef.Agent
+                  Body = "the build finished"
+                  Status = Complete
+                  Kind = ConversationItemKind.Message
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = woke }
+            let model =
+                { representativeModel with
+                    Conversation =
+                        { representativeModel.Conversation with
+                            Items = [ agentItem asked None; agentItem woken (Some CommandFinished) ] } }
+            let html = Support.render model
+            // Scoped to each article, because a whole-page render contains both and a bare
+            // `Contains` would pass with the mark on the wrong one.
+            let article (messageId: MessageId) =
+                let start = html.IndexOf (sprintf "data-message-id=\"%s\"" (MessageId.value messageId))
+                Expect.isTrue (start > 0) "the message renders"
+                html.Substring (start, html.IndexOf ("</article>", start) - start)
+            Expect.isTrue
+                ((article woken).Contains Dom.Text.wokeCommandFinished)
+                "the woken turn's message says why it exists"
+            Expect.isFalse
+                ((article asked).Contains "data-message-woke")
+                "and a turn somebody asked for says nothing — there is nothing to explain"
 
         // The generated read surface (Plan 15). One renderer draws every query, so this
         // pins the RENDERER — a section per declared query, each shape drawn the way its
@@ -735,6 +817,73 @@ let private uiChecklistTests =
             Expect.isFalse (html.Contains "data-repo-add-input") "the add input is gone"
             Expect.isFalse (html.Contains "data-repo-remove") "the remove control is gone"
             Expect.isFalse (html.Contains "data-repo-switch") "the branch switch is gone"
+    ]
+
+// The terminal list (Plan 20, stage 0). What is pinned here is AVAILABILITY — which verbs a
+// row offers over which state — and nothing about how a row looks: the marks, the tones and
+// the order of the controls are the design, and a test that quoted them would go red on the
+// next improvement while saying the design was wrong.
+let private terminalListTests =
+    testList "The terminal list" [
+        let listed (model: ClientModel) = Support.render { model with TerminalList = true }
+        let id = TerminalId.value terminalId
+
+        // Every case below is the same shape deliberately: the verb where it works, and its
+        // absence where it does not. Only asserting the presence would leave a row that
+        // offered everything to everyone looking correct.
+
+        testCase "a row offers the kill while its terminal is running, and never once it has stopped" <| fun () ->
+            Expect.isTrue
+                ((listed representativeModel).Contains (Dom.attr Dom.Hooks.terminalClose id))
+                "a running terminal can be killed from its row"
+            Expect.isFalse
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalClose id))
+                "a closed one has nothing left to kill"
+
+        testCase "a row offers the rewind while its terminal is live, and never over a recording" <| fun () ->
+            Expect.isTrue
+                ((listed representativeModel).Contains (Dom.attr Dom.Hooks.terminalListRewind id))
+                "a live terminal with something recorded can be stepped back through"
+            Expect.isFalse
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListRewind id))
+                "a closed terminal is replayed, not rewound"
+
+        testCase "a row offers the way back only where a provider said there is one" <| fun () ->
+            Expect.isTrue
+                ((listed renewableTerminalModel).Contains (Dom.attr Dom.Hooks.terminalReattach id))
+                "a closed stream whose provider allows asking again"
+            Expect.isFalse
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalReattach id))
+                "and never for a shell terminal, which has no provider to ask"
+
+        testCase "a recording the cap ate is stated on its row rather than left to look empty" <| fun () ->
+            // The gap is the one state with no mark of its own, because the absence of a
+            // recording has no glyph — so it is the one that says a word.
+            Expect.isTrue
+                ((listed forgottenTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListGone id))
+                "the hole in the audit trail is said"
+            Expect.isFalse
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListGone id))
+                "and a recording that survived says nothing of the sort"
+
+        // An ARIA requirement rather than a layout preference: `role="tablist"` promises a
+        // tabpanel showing one of its tabs, and a strip left standing over the list would be
+        // promising a panel that is not in the document.
+        testCase "the strip and the list are never on screen together" <| fun () ->
+            Expect.isTrue
+                ((Support.render representativeModel).Contains "role=\"tablist\"")
+                "the strip, while the pane is showing a tab"
+            Expect.isFalse
+                ((listed representativeModel).Contains "role=\"tablist\"")
+                "and no tablist promising a panel the list has replaced"
+
+        testCase "every terminal the session has had is reachable from the list, open or not" <| fun () ->
+            // The reason the strip can stop being a census (Plan 20, stage 1): the row IS the
+            // way to a closed terminal's recording, so nothing is lost by dropping it from
+            // the strip.
+            Expect.isTrue
+                ((listed closedTerminalModel).Contains (Dom.attr Dom.Hooks.terminalListRow id))
+                "a closed terminal has a row that opens it"
     ]
 
 // The offer to bring a stopped session back (Plan 11). It replaces the connection status
@@ -823,9 +972,9 @@ let private reconnectOfferTests =
 // into a string check nobody wrote.
 let private shellTests =
     testList "Bootstrap shell" [
-        // Digests the shell merely carries into its asset URLs; this suite is about the
-        // manager meta tag, so any pair does.
-        let assets : AssetDigests = { Bundle = "testbundle01"; Css = "testcss0001" }
+        // The build the shell merely carries into its asset URLs; this suite is about the
+        // manager meta tag, so any address does.
+        let assets = AssetBuild "testbuild001"
 
         let pageWith (managerOrigin: string option) (ephemeralStorage: bool) =
             Yession.Host.Ssr.page sessionId "" managerOrigin ephemeralStorage assets representativeModel
@@ -999,13 +1148,18 @@ let private chromeTests =
 
         let shell = Support.render representativeModel
         let settingsShell = Support.render { representativeModel with Claude = { representativeModel.Claude with Flow = ClaudeAwaitingCode ("https://claude.ai/auth", "mine") } }
+        // The terminal list (Plan 20, stage 0) replaces the pane's body, so no other render
+        // contains its controls. Scanned HERE rather than pinned again beside the list's own
+        // tests: the accessibility floor is asserted once and centrally, and a surface that
+        // is invisible to the scan is a surface the floor does not cover.
+        let listShell = Support.render { representativeModel with TerminalList = true }
 
         // Every input either wears the ONE field face (a ring that goes blue on focus) or
         // wears nothing at all, because the row around it carries the stroke. What is ruled
         // out is the third thing: a control that invents its own border, or one that draws a
         // box with no focus state.
         testCase "every input draws the one field face, or draws nothing" <| fun () ->
-            for classes in classesOf [ "input"; "select"; "textarea" ] (shell + settingsShell) do
+            for classes in classesOf [ "input"; "select"; "textarea" ] (shell + settingsShell + listShell) do
                 let isField = classes.Contains "focus:border-blue"
                 let isBare = classes.Contains "border-0"
                 Expect.isTrue (isField || isBare) (sprintf "an input is neither the field face nor bare: %s" classes)
@@ -1014,7 +1168,7 @@ let private chromeTests =
         // The failure this pins is silent by nature: a control with `outline-2` and no
         // `outline` draws nothing, and you only find out with a keyboard.
         testCase "every button and link declares a visible focus ring" <| fun () ->
-            for classes in classesOf [ "button"; "a " ] (shell + settingsShell) do
+            for classes in classesOf [ "button"; "a " ] (shell + settingsShell + listShell) do
                 Expect.isTrue
                     (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
                     (sprintf "a control has no visible focus ring: %s" classes)
@@ -1058,8 +1212,9 @@ let private semanticsTests =
                             Body = "on it"
                             Status = Complete
                             Kind = ConversationItemKind.Message
-                            Offset = EventOffset.create 1L |> expect } ]
-                      ActiveAgentMessages = Map.empty }
+                            Offset = EventOffset.create 1L |> expect
+                            Woke = None } ]
+                      ActiveAgentMessages = Map.empty; WokenTurn = None }
                 Timeline = TimelineProjection.empty }
 
         // A peer id is a token, not a person. The roster, the draft summaries and the lease
@@ -1116,6 +1271,7 @@ let private semanticsTests =
 let tests =
     testList "Acceptance" [
         uiChecklistTests
+        terminalListTests
         presenceTests
         syncStatusTests
         chromeTests

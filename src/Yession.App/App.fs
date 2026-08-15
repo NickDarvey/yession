@@ -108,7 +108,87 @@ module App =
         | HttpStatus of status: int
         | HttpUnreachable of detail: string
 
-    type HttpGet = string -> Async<Result<string, HttpFailure>>
+    /// What a GET actually returned: the bytes, and the address they came back FROM.
+    ///
+    /// Those are two different things now that the event log is read by cursor: the caller
+    /// asks `events/after/41` and the answer arrives from `events/42-136`, which is the
+    /// address whose bytes never change and therefore the only one worth keeping (Plan 20).
+    /// A port that returned bytes alone made the client invent that address, which is the
+    /// one thing this design exists to stop it doing.
+    type HttpAnswer =
+        { Url  : string
+          Body : string }
+
+    type HttpGet = string -> Async<Result<HttpAnswer, HttpFailure>>
+
+    /// A client's own copy of the answers it has been given, oldest first. The browser backs
+    /// this with the Cache API — whole responses, keyed by the address they came from,
+    /// enumerable and persistable — but nothing above this type knows that.
+    ///
+    /// Total, like the feed: a store that cannot be opened reads empty, and the client is
+    /// exactly the client it is today, asking the network from its cursor.
+    type HistoryCache =
+        { /// Every address kept, oldest first (insertion order IS fetch order, which is
+          /// ascending — so a replay never parses an address to sort them).
+          Stored : unit -> Async<string list>
+          /// One kept answer's body, or `None` when it is no longer there.
+          Read   : string -> Async<string option>
+          /// Keep this answer under the address it came back from.
+          Write  : string -> string -> Async<unit> }
+
+    module HistoryCache =
+
+        /// The client that keeps nothing: every replay is empty and every write is dropped.
+        /// What an insecure context gets (`window.caches` needs one), and what every
+        /// non-browser peer gets, without either having to care.
+        let none : HistoryCache =
+            { Stored = fun () -> async.Return []
+              Read = fun _ -> async.Return None
+              Write = fun _ _ -> async.Return () }
+
+    /// One terminal's kept answers (Plan 22). `HistoryCache` with one field more, and that
+    /// field is the whole difference between the two feeds: an event envelope carries its own
+    /// offset, so the event store never has to be told where an answer starts. A transcript
+    /// line cannot — the file is an asciicast and a private index field in it would stop it
+    /// being one — so the seq is kept BESIDE the bytes, taken from what the client asked for
+    /// rather than parsed back out of the address it was given.
+    type TranscriptCache =
+        { /// Every address kept, oldest first (insertion order IS fetch order, which is
+          /// ascending — so a replay never parses an address to sort them).
+          Stored : unit -> Async<string list>
+          /// One kept answer: the line its first line is, and the bytes.
+          Read   : string -> Async<(int * string) option>
+          /// Keep this answer under the address it came back from, at the line it starts on.
+          Write  : string -> int -> string -> Async<unit> }
+
+    /// Every terminal's store, one per terminal.
+    ///
+    /// Not one store with everything in it, and the reason is the replay. `Stored` answers in
+    /// insertion order, which is what lets a walk be "read them in order" with no sorting and
+    /// no address parsing. Two terminals' answers in one store interleave by whichever fetched
+    /// first, and a walk over that would have to ask, of every entry, whose it is — which
+    /// means parsing an address. The store's own name answers it instead, before the walk
+    /// starts.
+    type TranscriptCaches =
+        { /// The store for one terminal.
+          For  : TerminalId -> Async<TranscriptCache>
+          /// Every terminal this client has kept anything for, read from the stores' own
+          /// names — never from the model, which this same startup path has only just filled.
+          Kept : unit -> Async<TerminalId list> }
+
+    module TranscriptCache =
+
+        let none : TranscriptCache =
+            { Stored = fun () -> async.Return []
+              Read = fun _ -> async.Return None
+              Write = fun _ _ _ -> async.Return () }
+
+    module TranscriptCaches =
+
+        /// The client that keeps nothing: every replay is empty and every write is dropped.
+        let none : TranscriptCaches =
+            { For = fun _ -> async.Return TranscriptCache.none
+              Kept = fun () -> async.Return [] }
 
     /// Why an event-feed read failed. The cases exist to be classified: a refused
     /// connection may well come back, an unauthorized read needs a fresh login, and a chunk
@@ -143,75 +223,166 @@ module App =
     type EventFeed = EventOffset option -> Async<Result<EventPage<SessionEvent>, FeedFault>>
 
     /// Reading a terminal's transcript over HTTP — the history leg of the terminal feed
-    /// (Plan 13), and a deliberate copy of `EventFetch`'s shape because it is the same
-    /// problem: immutable fixed-size chunks, so the browser's own cache is the store and
-    /// only the growing tail reaches the network.
+    /// (Plan 13), read by cursor since Plan 22 and a deliberate copy of `EventFetch`'s shape
+    /// because it is the same problem: a position in, an answer whose bounds never move back,
+    /// and a store the client keeps it in.
     ///
     /// One difference from the event feed, and it is the reason this is a separate module
     /// rather than a reuse: a transcript's first line is its asciicast header, not a
-    /// record. Chunk 0 therefore yields one fewer record than it has lines, and every
-    /// record's sequence number is its LINE index — which is what keeps a fetched chunk and
-    /// a live frame talking about the same thing.
+    /// record. The first answer therefore yields one fewer record than it has lines, and
+    /// every record's sequence number is its LINE index — which is what keeps a fetched
+    /// answer and a live frame talking about the same thing.
     module TranscriptFetch =
 
         /// One fetched page: the records it carried with their sequence numbers, and
-        /// whether the transcript continues past this chunk.
+        /// whether the transcript continues past it.
         type TranscriptPage =
             { Records : (int * TranscriptRecord) list
-              /// The transcript's own header, when this page carried it (line 0, so chunk 0
-              /// alone). Kept rather than discarded because the replay view (Plan 13, stage
-              /// 3e) rebuilds a `.cast` from these records, and a `.cast` without its header
-              /// is not one — the recorded width and height are what make a replay come out
-              /// the shape the terminal actually was.
+              /// The transcript's own header, when this page carried it (line 0, so the
+              /// answer from a client with nothing yet, and no other). Kept rather than
+              /// discarded because the replay view (Plan 13, stage 3e) rebuilds a `.cast`
+              /// from these records, and a `.cast` without its header is not one — the
+              /// recorded width and height are what make a replay come out the shape the
+              /// terminal actually was.
               Header : TranscriptHeader option
-              /// One past the last line this chunk covered.
+              /// One past the last line this page covered.
               NextSeq : int
-              /// A full chunk means more may exist; a partial chunk IS the current tail.
+              /// A capped answer means the server had more to give; anything shorter — a
+              /// `204`, which arrives here as no lines at all — is the transcript's tail.
               IsEnd : bool }
 
         type TranscriptFeed = TerminalId -> int -> Async<Result<TranscriptPage, FeedFault>>
 
         /// Build a feed over the platform's HTTP GET, resolving routes with `urlOf` (the
         /// browser passes `SessionRoute.relative` and lets `<base href>` do the rest).
-        let overHttp (get: HttpGet) (urlOf: SessionRoute -> string) (token: string option) : TranscriptFeed =
+        /// The lines of one answer, numbered from `first` — the seq of its first line.
+        ///
+        /// ONE decoder, used by the network read and by the replay of what was kept, for the
+        /// reason `EventFetch.decodeLines` is one: what is kept IS what the network returned,
+        /// verbatim, and a store holding anything else would be a second wire format.
+        ///
+        /// A line that will not decode fails the whole answer: a partially decoded transcript
+        /// is not history, it is a guess.
+        let decodeLines (first: int) (body: string) : Result<TranscriptPage, FeedFault> =
+            let lines = body.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
+            let rec decode i acc header =
+                if i >= lines.Length then Ok (List.rev acc, header)
+                else
+                    match Codec.fromString Codec.transcriptLine lines.[i] with
+                    | Ok (TranscriptRecordLine record) -> decode (i + 1) ((first + i, record) :: acc) header
+                    // The header is line 0 and carries no output, so it is no record — but
+                    // it is KEPT, because a replay needs it.
+                    | Ok (TranscriptHeaderLine h) -> decode (i + 1) acc (Some h)
+                    | Error e -> Error (FeedCorrupt e)
+            match decode 0 [] None with
+            | Error fault -> Error fault
+            | Ok (records, header) ->
+                Ok
+                    { Records = records
+                      Header = header
+                      NextSeq = first + lines.Length
+                      IsEnd = lines.Length < TranscriptChunk.size }
+
+        /// Build a feed over the platform's HTTP GET, resolving routes with `urlOf` (the
+        /// browser passes `SessionRoute.relative` and lets `<base href>` do the rest).
+        ///
+        /// The cursor, and nothing else: the line this client has folded through, sent as-is.
+        /// The server picks the bounds of the answer and redirects to them, so no arithmetic
+        /// here can address the wrong lines — there is none to get wrong.
+        ///
+        /// The ONE number this computes is where the answer starts, and it comes from what it
+        /// ASKED rather than from where the answer lives: the answer to `after n` begins at
+        /// line `n + 1`. A transcript line cannot carry its own index — the file is an
+        /// asciicast and a private index field in it would stop it being one — so the cursor
+        /// contract is what numbering rests on, and it has a test of its own (docs/plans/22).
+        /// `caches` is where a settled answer is kept — `TranscriptCaches.none` for a client
+        /// with no store, which is then exactly today's client, asking the network from its
+        /// cursor.
+        ///
+        /// Keeping happens HERE rather than in a wrapper around the GET, as the event feed's
+        /// does, because the two things that have to be written down together are known in
+        /// two different places: the address comes back with the answer, and the line it
+        /// starts on is what this call asked for. A wrapper around the GET can see only one
+        /// of them.
+        let overHttp
+            (caches: TranscriptCaches)
+            (get: HttpGet)
+            (urlOf: SessionRoute -> string)
+            (token: string option)
+            : TranscriptFeed =
             fun terminal fromSeq ->
                 async {
-                    let index = TranscriptChunk.indexOf (max 0 fromSeq)
+                    let first = max 0 fromSeq
+                    let after = if first = 0 then None else Some (first - 1)
                     let tokenSuffix =
                         token
                         |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
                         |> Option.defaultValue ""
-                    let url = urlOf (TerminalTranscript (TerminalId.value terminal, index)) + tokenSuffix
+                    let url = urlOf (TerminalTranscriptAfter (TerminalId.value terminal, after)) + tokenSuffix
                     match! get url with
                     | Error (HttpUnreachable detail) -> return Error (FeedUnreachable detail)
                     | Error (HttpStatus status) -> return Error (FeedRefused status)
-                    | Ok text ->
-                        let lines = text.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
-                        let first = TranscriptChunk.firstSeq index
-                        // Decode line by line, keeping each one's LINE index as its seq.
-                        // A line that will not decode fails the page: a partially decoded
-                        // transcript is not history, it is a guess — the same rule the
-                        // event feed applies to a corrupt chunk.
-                        let rec decode i acc header =
-                            if i >= lines.Length then Ok (List.rev acc, header)
-                            else
-                                match Codec.fromString Codec.transcriptLine lines.[i] with
-                                | Ok (TranscriptRecordLine record) ->
-                                    decode (i + 1) ((first + i, record) :: acc) header
-                                // The header is line 0 and carries no output, so it is no
-                                // record — but it is KEPT, because a replay needs it.
-                                | Ok (TranscriptHeaderLine h) -> decode (i + 1) acc (Some h)
-                                | Error e -> Error (FeedCorrupt e)
-                        match decode 0 [] None with
+                    | Ok answer ->
+                        match decodeLines first answer.Body with
                         | Error fault -> return Error fault
-                        | Ok (records, header) ->
-                            return
-                                Ok
-                                    { Records = records |> List.filter (fun (seq, _) -> seq >= fromSeq)
-                                      Header = header
-                                      NextSeq = first + lines.Length
-                                      IsEnd = lines.Length < TranscriptChunk.size }
+                        | Ok page ->
+                            // An answer with no lines is the `204` — the caller is current.
+                            // There is nothing to keep, and keeping it would put an empty
+                            // entry in the store under the CURSOR's address (no redirect
+                            // happened, so that is where this came back from), which the
+                            // replay would then read as a hole in the recording.
+                            if answer.Body.Trim().Length > 0 then
+                                let! cache = caches.For terminal
+                                do! cache.Write answer.Url first answer.Body
+                            return Ok page
                 }
+
+        /// Fold what this client has already been given for every terminal it kept anything
+        /// for, oldest first, before anything asks the network.
+        ///
+        /// Runs AFTER the event replay, never beside it: a terminal exists because an event
+        /// said so, and records folded before that event has been folded have nowhere to
+        /// land.
+        ///
+        /// **A gap stops that terminal's walk, and is noticed in the SEQUENCE rather than in
+        /// the addresses.** An entry evicted from the middle leaves the rest in the store, so
+        /// the walk reaches an answer whose first line is not one past the last folded. The
+        /// walk stops there because `ReadThrough` is both "shown through" and "resume from",
+        /// and advancing it over unread lines would skip them for ever — but only for THAT
+        /// terminal, which is the other thing one store per terminal buys.
+        let replay (caches: TranscriptCaches) (dispatch: ClientMsg -> unit) : Async<unit> =
+            async {
+                let! terminals = caches.Kept ()
+                for terminal in terminals do
+                    let! cache = caches.For terminal
+                    let! stored = cache.Stored ()
+                    // One past the last line folded. `0` before anything, because line 0 is
+                    // the header and a first answer always carries it.
+                    let mutable expected = 0
+                    let mutable stop = false
+                    for url in stored do
+                        if not stop then
+                            match! cache.Read url with
+                            // An address the store listed and then could not answer is a gap
+                            // like any other: the next entry's first line will say so.
+                            | None -> ()
+                            | Some (first, body) ->
+                                if first > expected then stop <- true
+                                else
+                                    match decodeLines first body with
+                                    // A recording that will not decode is not history, it is
+                                    // a guess — and unlike the event log there is no feed
+                                    // health to report it on, because a terminal's history
+                                    // failing costs that terminal and nothing else.
+                                    | Error _ -> stop <- true
+                                    | Ok page ->
+                                        page.Header
+                                        |> Option.iter (fun h -> dispatch (TerminalHeaderMsg (terminal, h)))
+                                        for (seq, record) in page.Records do
+                                            dispatch (TerminalRecordMsg (terminal, seq, record))
+                                        dispatch (TerminalReadThroughMsg (terminal, page.NextSeq))
+                                        expected <- max expected page.NextSeq
+            }
 
     /// How a connection consumes the event log (Step 07).
     type ConnectOptions =
@@ -247,7 +418,12 @@ module App =
           /// Asking the model instead makes that unrepresentable: a model that lost a
           /// fold is visibly behind, so the next hint re-reads it. The fold is
           /// offset-gated, so a re-read costs a round trip and changes nothing else.
-          ReadPosition : (unit -> EventOffset option) option }
+          ReadPosition : (unit -> EventOffset option) option
+          /// How far the MODEL has read one terminal's transcript, for the same reason and on
+          /// the same terms as `ReadPosition` above. Without it, a client that replayed a
+          /// terminal out of its own store would start its first read at line 0 and fetch
+          /// every line it already has.
+          TranscriptReadPosition : (TerminalId -> int) option }
 
     module ConnectOptions =
         let defaults : ConnectOptions =
@@ -256,16 +432,53 @@ module App =
               FetchEvents = None
               FetchTranscripts = None
               OnTerminalSnapshot = fun _ _ _ -> ()
-              ReadPosition = None }
+              ReadPosition = None
+              TranscriptReadPosition = None }
 
-    /// The HTTP event feed for `ConnectOptions.FetchEvents`: translates "events after
-    /// offset X" into the Session Process's immutable-chunk URL scheme (`/events/{n}`) and
-    /// decodes the JSONL envelopes. Because full chunks are served immutable, an HTTP cache
-    /// in front of `get` (the browser's) makes history replay local; only the growing tail
-    /// chunk hits the network. Also home to the shipped resilience policy for that feed —
-    /// the policy is a value here so the composition site is one line and the TEST runs the
-    /// same policy that ships.
+    /// The HTTP event feed for `ConnectOptions.FetchEvents`: sends "events after offset X"
+    /// as exactly that — a cursor (`/events/after/{n}`) — and decodes the JSONL envelopes
+    /// of whatever the server redirects it to. The address it lands on names its own
+    /// bounds and so never changes its bytes, which is what lets a client keep the answer
+    /// (docs/plans/20); this function does not keep anything itself. Also home to the
+    /// shipped resilience policy for that feed — the policy is a value here so the
+    /// composition site is one line and the TEST runs the same policy that ships.
     module EventFetch =
+
+        /// The envelope lines of one answer, or the first one that would not decode.
+        ///
+        /// ONE decoder, used by the network read and by the replay of what was kept, because
+        /// what is kept IS what the network returned — verbatim. A store holding anything
+        /// else would be a second wire format only this client can write and only this client
+        /// can read.
+        ///
+        /// A line that will not decode fails the whole answer: a partially decoded page is
+        /// not history, it is a guess.
+        let decodeLines (body: string) : Result<EventEnvelope<SessionEvent> list, FeedFault> =
+            let lines = body.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
+            let rec decode remaining acc =
+                match remaining with
+                | [] -> Ok (List.rev acc)
+                | line :: rest ->
+                    match Codec.fromString Codec.sessionEventEnvelope line with
+                    | Ok envelope -> decode rest (envelope :: acc)
+                    | Error e -> Error (FeedCorrupt e)
+            decode (List.ofArray lines) []
+
+        /// Keep every settled answer under the address it came back from.
+        ///
+        /// Composed around the GET rather than around the feed, because by the time an answer
+        /// is an `EventPage` the address it arrived from is gone — and that address, which the
+        /// server chose and whose bounds never move, is the only thing worth keying by. Only
+        /// successes are kept, so a retried fetch stores once.
+        let storing (cache: HistoryCache) (get: HttpGet) : HttpGet =
+            fun url ->
+                async {
+                    match! get url with
+                    | Ok answer ->
+                        do! cache.Write answer.Url answer.Body
+                        return Ok answer
+                    | Error failure -> return Error failure
+                }
 
         /// Build a feed over the platform's HTTP GET. `urlOf` resolves a route for this
         /// platform: a browser passes `SessionRoute.relative` and lets `<base href>` do the
@@ -280,30 +493,20 @@ module App =
         let overHttp (get: HttpGet) (urlOf: SessionRoute -> string) (token: string option) : EventFeed =
             fun after ->
                 async {
-                    let nextOffset =
-                        match after with
-                        | Some o -> EventOffset.value o + 1L
-                        | None -> 0L
                     let tokenSuffix =
                         token
                         |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
                         |> Option.defaultValue ""
-                    let url = urlOf (Events (EventChunk.indexOf nextOffset)) + tokenSuffix
+                    // The cursor, and nothing else: the offset this client has folded
+                    // through, sent as-is. The server picks the bounds of the answer and
+                    // redirects to them, so no arithmetic here can address the wrong
+                    // events — there is none to get wrong.
+                    let url = urlOf (EventsAfter after) + tokenSuffix
                     match! get url with
                     | Error (HttpUnreachable detail) -> return Error (FeedUnreachable detail)
                     | Error (HttpStatus status) -> return Error (FeedRefused status)
-                    | Ok text ->
-                        let lines = text.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
-                        // Stop at the FIRST line that will not decode: a partially decoded
-                        // chunk is not a page, it is a guess.
-                        let rec decode remaining acc =
-                            match remaining with
-                            | [] -> Ok (List.rev acc)
-                            | line :: rest ->
-                                match Codec.fromString Codec.sessionEventEnvelope line with
-                                | Ok envelope -> decode rest (envelope :: acc)
-                                | Error e -> Error (FeedCorrupt e)
-                        match decode (List.ofArray lines) [] with
+                    | Ok answer ->
+                        match decodeLines answer.Body with
                         | Error fault -> return Error fault
                         | Ok envelopes ->
                             let fresh =
@@ -316,10 +519,77 @@ module App =
                                 Ok
                                     { Events = fresh
                                       LastOffset = fresh |> List.tryLast |> Option.map (fun e -> e.Offset)
-                                      // A full chunk means more may exist beyond it; a partial
-                                      // chunk IS the log's current tail.
-                                      IsEnd = Array.length lines < EventChunk.size }
+                                      // A capped answer means the server had more to give;
+                                      // anything shorter — a `204` included, which arrives
+                                      // here as no lines at all — is the log's current tail.
+                                      IsEnd = List.length envelopes < EventChunk.size }
                 }
+
+        /// Fold what this client has already been given, oldest first, before anything asks
+        /// the network — and before the client even knows whether it may connect.
+        ///
+        /// This is not part of the read loop and must not become part of it: that loop chases
+        /// a moving remote end, and a replay has no remote end to chase. It is a pure drain of
+        /// what is already here, which is why it can run with no transport, no session, and no
+        /// answer from `/me`.
+        ///
+        /// **A gap stops the fold, and is noticed in the events rather than in the
+        /// addresses.** An entry evicted from the middle leaves the rest in the store, so the
+        /// walk reaches an answer whose first offset is not one past the last folded. That
+        /// discontinuity is the detection; nothing parses an address to find it. The fold stops
+        /// there because `LastProcessedOffset` is both "shown through" and "resume from", and
+        /// advancing it over unread offsets would skip them for ever — but the gap is
+        /// REPORTED, and the cursor is left sitting exactly where the fill has to start, so the
+        /// next ordinary request repairs it.
+        let replay (cache: HistoryCache) (dispatch: ClientMsg -> unit) : Async<unit> =
+            async {
+                let! stored = cache.Stored ()
+                let mutable folded : EventOffset option = None
+                let mutable stop = false
+                for url in stored do
+                    if not stop then
+                        match! cache.Read url with
+                        // An address the store listed and then could not answer is a gap like
+                        // any other: keep walking, and let the offsets say so.
+                        | None -> ()
+                        | Some body ->
+                            match decodeLines body with
+                            | Error fault ->
+                                dispatch (EventFeedMsg (FeedStalled (FeedFault.describe fault)))
+                                stop <- true
+                            | Ok [] -> ()
+                            | Ok envelopes ->
+                                let first = EventOffset.value (List.head envelopes).Offset
+                                let expected =
+                                    match folded with
+                                    | Some o -> EventOffset.value o + 1L
+                                    | None -> 0L
+                                if first > expected then
+                                    dispatch (
+                                        EventFeedMsg (
+                                            FeedStalled (
+                                                sprintf
+                                                    "%d event(s) missing locally from offset %d"
+                                                    (first - expected)
+                                                    expected)))
+                                    stop <- true
+                                else
+                                    dispatch (
+                                        LocalHistoryMsg
+                                            { Events = envelopes
+                                              LastOffset =
+                                                envelopes |> List.tryLast |> Option.map (fun e -> e.Offset)
+                                              // The end of what is KEPT, never a claim about the
+                                              // log: the cursor decides that, and it has not
+                                              // been asked yet.
+                                              IsEnd = true })
+                                    folded <-
+                                        EventOffset.maxOption folded (Some (List.last envelopes).Offset)
+                // Looked. Said even when nothing was kept and even when a gap cut the walk
+                // short: what the timeline needs to know is whether this client has been to
+                // look, not whether looking found anything.
+                dispatch HistoryReadMsg
+            }
 
         /// The shipped resilience policy for the HTTP feed: five retries, exponentially
         /// backed off from 250ms with a 10s ceiling, jittered by up to half so a Session
@@ -493,10 +763,16 @@ module App =
         // client ends up with a hole it will never fetch.
         let transcriptRead = System.Collections.Generic.Dictionary<string, int> ()
 
+        // Where this terminal's transcript has actually been read to. The model's answer when
+        // the composition gave one; the loop's own bookkeeping otherwise (a peer with no model
+        // behind it) — the same two sources, for the same reason, as the event cursor above.
         let readPositionOf (terminal: TerminalId) =
-            match transcriptRead.TryGetValue (TerminalId.value terminal) with
-            | true, seq -> seq
-            | _ -> 0
+            match options.TranscriptReadPosition with
+            | Some position -> position terminal
+            | None ->
+                match transcriptRead.TryGetValue (TerminalId.value terminal) with
+                | true, seq -> seq
+                | _ -> 0
 
         let fetchTranscript (terminal: TerminalId) =
             match options.FetchTranscripts with
@@ -681,30 +957,73 @@ module App =
               Serve : EventOffset option -> (ClientMsg -> unit) -> 'channel -> Async<unit>
               /// How far event consumption has got — where a reconnect resumes from.
               ReadPosition : unit -> EventOffset option
+              /// Wait before the next attempt, and say whether to make one.
+              ///
+              /// `Some delay` is the supervised schedule. `None` is "wait to be asked" — the
+              /// park a REFUSED peer gets, because no schedule can help it: the same token
+              /// would be refused again, and only a person (a fresh login, a button) can
+              /// change the answer.
+              ///
+              /// Returning early is how a trigger shortens a wait — the network came back,
+              /// someone pressed retry — WITHOUT becoming a second schedule. `false` ends the
+              /// lifecycle, which is how a page that is going away stops it.
+              WaitBeforeRetry : System.TimeSpan option -> Async<bool>
               /// The lifecycle's own reporting.
               Dispatch : ClientMsg -> unit }
 
+        /// How long to wait before trying to open a transport again, once the policy at the
+        /// composition site has spent its own budget on the attempt that just failed.
+        ///
+        /// It never runs out, and that is the point: a session that is not there YET may still
+        /// come back — a laptop closed on a train, a Process restarting, a tunnel dropping —
+        /// and the client that gave up after four seconds made "reload the tab" the only cure.
+        /// The one outcome that earns no further attempt is a refusal, and it parks rather
+        /// than backing off, because waiting longer cannot fix a token.
+        ///
+        /// Jittered for the reason the feed's policy is: a Process restart drops every peer at
+        /// the same instant, and an unjittered backoff brings them all back in lockstep.
+        let supervision (random: unit -> float) : Resilience.Schedule =
+            Resilience.Schedule.exponential
+                (System.TimeSpan.FromSeconds 1.0)
+                2.0
+                (System.TimeSpan.FromMinutes 1.0)
+                System.Int32.MaxValue
+            |> Resilience.Schedule.jittered 0.5 random
+
         /// Drive the session leg to a settled state and keep it there.
         ///
-        /// A channel that closes after the session was ACCEPTED is an ended session — a
-        /// Process restart, a sleeping laptop, a network blip — so come back, resuming
-        /// consumption from where the read position got to. A channel that closes without ever
-        /// being accepted was refused (a stale token); the model holds that reason and
-        /// reconnecting would only be refused again, so stop.
+        /// Three outcomes, and each earns a different next move:
         ///
-        /// Those two cases are the whole design, and why this cannot spin: only an accepted
-        /// session earns another attempt, and every other outcome ends here.
-        let run (ports: Ports<'channel>) : Async<unit> =
-            let rec attempt (isFirst: bool) (resumeAfter: EventOffset option) =
+        /// * **Accepted, then the channel closed** — an ended session (a Process restart, a
+        ///   sleeping laptop, a network blip). Come straight back, resuming consumption from
+        ///   where the read position got to.
+        /// * **Never opened** — the session is not reachable. Keep trying on `supervision`,
+        ///   which never runs out. The policy at the composition site has already spent its
+        ///   budget on the attempt that just failed; this is the slower outer loop, and it is
+        ///   not a retry loop wrapped around a retry loop — it is the difference between "this
+        ///   attempt failed" and "give up on the session", which are not the same claim.
+        /// * **Opened but refused** — a stale token. No schedule can help, because the same
+        ///   token would be refused again, so PARK: wait to be asked, and let a person supply
+        ///   the one thing that can change the answer.
+        ///
+        /// That is also why this cannot spin. Every path either succeeds, backs off, or waits
+        /// for a human, and the only unbounded one is bounded by a minute.
+        let run (supervision: Resilience.Schedule) (ports: Ports<'channel>) : Async<unit> =
+            let rec attempt (announce: bool) (failures: int) (resumeAfter: EventOffset option) =
                 async {
-                    // Announce the FIRST attempt: until a channel exists the model would read
-                    // `Disconnected`, and opening one costs a handshake plus whatever retries
-                    // the policy spends. A reconnect needs no announcement — `Reconnecting` is
-                    // already the truer word, and the connection driver says `Connecting`
-                    // itself the moment a channel is up.
-                    if isFirst then ports.Dispatch ConnectingMsg
+                    // Announce an attempt that follows a wait: until a channel exists the model
+                    // would read `Disconnected`, and opening one costs a handshake plus whatever
+                    // retries the policy spends. A reconnect after an ACCEPTED session needs no
+                    // announcement — `Reconnecting` is already the truer word, and the driver
+                    // says `Connecting` itself the moment a channel is up.
+                    if announce then ports.Dispatch ConnectingMsg
                     match! ports.Open () with
-                    | Error fault -> ports.Dispatch (ConnectFailedMsg (ChannelFault.describe fault))
+                    | Error fault ->
+                        ports.Dispatch (ConnectFailedMsg (ChannelFault.describe fault))
+                        let attempts = failures + 1
+                        match! ports.WaitBeforeRetry (supervision attempts) with
+                        | true -> return! attempt true attempts resumeAfter
+                        | false -> return ()
                     | Ok channel ->
                         // Acceptance is learned from the message that carries it, as it passes.
                         let mutable accepted = false
@@ -714,6 +1033,13 @@ module App =
                             | _ -> ()
                             ports.Dispatch msg
                         do! ports.Serve resumeAfter observing channel
-                        if accepted then return! attempt false (ports.ReadPosition ())
+                        if accepted then
+                            // A session that worked resets the backoff: the next failure is
+                            // this client's first, not the continuation of an old streak.
+                            return! attempt false 0 (ports.ReadPosition ())
+                        else
+                            match! ports.WaitBeforeRetry None with
+                            | true -> return! attempt true 0 resumeAfter
+                            | false -> return ()
                 }
-            attempt true None
+            attempt true 0 None

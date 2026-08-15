@@ -1,5 +1,7 @@
 namespace Yession.App
 
+open Yession.Domain
+
 /// The HTTP contract of a Session Process: every path it serves, declared once. The
 /// server matches on these, the shell emits them, and the browser client fetches them —
 /// the same role `Dom` plays for markup hooks, one level up. Before this, `/client.js`
@@ -38,11 +40,30 @@ type GitHubAction =
 type SessionRoute =
     /// The client shell itself — the served page IS the app.
     | Shell
-    /// The browser client bundle, addressed by a digest of the bytes served. A build is a
-    /// new address, which is what lets those bytes be cached forever.
-    | ClientBundle of digest: string
-    /// The locally built stylesheet (no CDN), addressed the same way.
-    | AppCss of digest: string
+    /// Any static file this build ships — `assets/<build>/<path>`, where `<build>` is a
+    /// digest over the WHOLE asset set and `<path>` is the file's place inside it.
+    ///
+    /// One case, deliberately. This used to be four — the bundle, the stylesheet, the replay
+    /// player's stylesheet, a typeface — and every asset added to the product cost a case
+    /// here, a rendering, a parse, a case in each of the two servers, and a line in `stage`.
+    /// That is a build serving what the ROUTER knows about, and it is backwards: a session
+    /// upgraded on its own can bring a typeface, a sheet, an image that this Manager's
+    /// binary has never heard of, and it must be able to serve them. So the route names a
+    /// path and nothing else, and the server answers from whatever its own build left in the
+    /// asset directory (`Assets`).
+    ///
+    /// The digest is on the DIRECTORY rather than on each file, which is what lets a
+    /// stylesheet reference a face by a plain relative name: `url(fonts/x.woff2)` inside
+    /// `assets/<build>/app.css` resolves to `assets/<build>/fonts/x.woff2` with no build-time
+    /// rewriting, and immutability still holds because any change to any file changes
+    /// `<build>` and so changes every address in the set.
+    | Asset of build: string * path: string
+    /// The service worker that makes a COLD open possible with no network (Plan 20). Served
+    /// at the mount root and nowhere else: a worker's scope is its own path, so the same file
+    /// under `assets/<build>/` would control the asset directory and nothing else — which is
+    /// why this is not a fingerprinted asset. It carries the build digest in its BODY instead,
+    /// so a new build is a byte-different worker and the browser updates it.
+    | ServiceWorker
     /// The web manifest, which is what makes the shell installable — and, once installed,
     /// what makes it launch without the browser's chrome (`WebApp`). NOT fingerprinted: a
     /// browser re-reads it by the address the document names, and the document names this.
@@ -58,15 +79,31 @@ type SessionRoute =
     | Login
     /// Land the bounce back here.
     | Callback
-    /// Immutable chunk `index` of the event log. Named `Events` after the path, not
+    /// The event log's cursor: "what has happened after this offset?", `None` meaning
+    /// from the beginning — the same `EventOffset option` the client's feed already takes.
+    /// It carries no events and is never cached; it answers with a redirect to the
+    /// `Events` range that does, or `204` when the caller is already current. This is the
+    /// ONLY thing a client has to know how to build (docs/plans/20).
+    | EventsAfter of after: EventOffset option
+    /// The events at offsets `[first, last]`, which is the same answer for ever: the log
+    /// is append-only and these bounds do not move. Named `Events` after the path, not
     /// after `EventChunk` — that module already exists in the domain, and one identifier
     /// meaning two things is what makes F# symbols hard to find.
-    | Events of index: int
-    /// Immutable chunk `index` of a terminal's transcript (Plan 13) — the history leg of
-    /// the terminal feed, cacheable on exactly the same argument as `Events`. The terminal
-    /// is carried as a raw string because a route is a PATH, and validating it into a
-    /// `TerminalId` is the server's job at dispatch, not the router's at parse.
-    | TerminalTranscript of terminal: string * index: int
+    ///
+    /// Only the server ever names one of these. A client receives the address in a
+    /// redirect and keeps what came back under it, so it never has to know that a range
+    /// has a size, a boundary, or an alignment.
+    | Events of first: int64 * last: int64
+    /// A terminal transcript's cursor (Plan 22): "what has this terminal printed after line
+    /// `after`?", `None` meaning from the beginning. The event log's `EventsAfter` for the
+    /// history leg of the terminal feed, and the only transcript address a client builds.
+    /// The terminal is carried as a raw string because a route is a PATH, and validating it
+    /// into a `TerminalId` is the server's job at dispatch, not the router's at parse.
+    | TerminalTranscriptAfter of terminal: string * after: int option
+    /// A terminal's transcript lines `[first, last]` — the same answer for ever, because a
+    /// transcript is append-only and line index IS sequence number. Named for the range it
+    /// carries, and reached only through the cursor's redirect.
+    | TerminalTranscriptRange of terminal: string * first: int * last: int
     /// The keyframe for transcript line `seq` of a terminal (Plan 14, stage 3) — the screen
     /// a ranged replay starts from. Immutable on the same argument the chunks are: a
     /// keyframe is written once, at a position that never moves.
@@ -91,30 +128,21 @@ type SessionRoute =
 
 module SessionRoute =
 
-    /// `<name>.<digest>.<ext>`, or the bare `<name>.<ext>` for the empty digest.
-    ///
-    /// The empty digest is NOT a second caching policy — it is the only address a shell has
-    /// when the build output is missing, which is what keeps the "not built (run: build)"
-    /// 404 reachable in development instead of rendering a page that asks for a hash of
-    /// nothing.
-    let private fingerprinted (name: string) (ext: string) (digest: string) : string =
-        if digest = "" then sprintf "%s.%s" name ext
-        else sprintf "%s.%s.%s" name digest ext
+    /// Where every static file sits, relative to whatever the session is mounted at.
+    /// Public because the Manager serves its own set from its own origin root and has to
+    /// recognise the same addresses — the two servers agreeing by inspection is exactly what
+    /// this type exists to prevent.
+    let assetsPrefix = "assets/"
 
-    /// The digest in `<name>.<digest>.<ext>`; `Some ""` for the bare `<name>.<ext>`; None for
-    /// anything else. An EMPTY middle (`client..js`) is None deliberately: it would render
-    /// back as `client.js`, and `relative` and `parse` are exact inverses.
-    ///
-    /// Splitting on `.` is safe because a digest is base64url, whose alphabet has no dot.
-    let private fingerprintOf (name: string) (ext: string) (segment: string) : string option =
-        let prefix = name + "."
-        let suffix = "." + ext
-        if segment = prefix + ext then Some ""
-        elif segment.StartsWith prefix
-             && segment.EndsWith suffix
-             && segment.Length > prefix.Length + suffix.Length
-        then Some (segment.Substring (prefix.Length, segment.Length - prefix.Length - suffix.Length))
-        else None
+    /// A path inside the asset set, as a build emits it. Segments are ordinary file names, so
+    /// anything outside that shape is simply not a route — which is also what keeps a path
+    /// the server may look up from carrying a dot-segment.
+    let private isAssetPath (segments: string list) =
+        let ok (c: char) =
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+            || c = '.' || c = '-' || c = '_'
+        not segments.IsEmpty
+        && segments |> List.forall (fun s -> s <> "" && not (s.Contains "..") && Seq.forall ok s)
 
     let private claudeSegment (action: ClaudeAction) =
         match action with
@@ -136,16 +164,20 @@ module SessionRoute =
     let relative (route: SessionRoute) : string =
         match route with
         | Shell -> ""
-        | ClientBundle digest -> fingerprinted "client" "js" digest
-        | AppCss digest -> fingerprinted "app" "css" digest
+        | Asset (build, path) -> assetsPrefix + build + "/" + path
+        | ServiceWorker -> "sw.js"
         | Manifest -> "manifest.webmanifest"
         | Icon -> "icon.png"
         | Signal -> "signal"
         | Me -> "me"
         | Login -> "login"
         | Callback -> "callback"
-        | Events index -> sprintf "events/%d" index
-        | TerminalTranscript (terminal, index) -> sprintf "terminals/%s/%d" terminal index
+        | EventsAfter None -> "events"
+        | EventsAfter (Some after) -> sprintf "events/after/%d" (EventOffset.value after)
+        | Events (first, last) -> sprintf "events/%d-%d" first last
+        | TerminalTranscriptAfter (terminal, None) -> sprintf "terminals/%s" terminal
+        | TerminalTranscriptAfter (terminal, Some after) -> sprintf "terminals/%s/after/%d" terminal after
+        | TerminalTranscriptRange (terminal, first, last) -> sprintf "terminals/%s/%d-%d" terminal first last
         | TerminalKeyframe (terminal, seq) -> sprintf "terminals/%s/keyframes/%d" terminal seq
         | ClaudeStatus -> "claude"
         | Claude action -> "claude/" + claudeSegment action
@@ -170,21 +202,58 @@ module SessionRoute =
         | "GET", [ "" ] -> Some Shell
         | "POST", [ "signal" ] -> Some Signal
         | "GET", [ "me" ] -> Some Me
+        | "GET", [ "sw.js" ] -> Some ServiceWorker
         | "GET", [ "manifest.webmanifest" ] -> Some Manifest
         | "GET", [ "icon.png" ] -> Some Icon
+        // Everything static, by path, with no opinion about what is in there.
+        | "GET", "assets" :: build :: path when isAssetPath (build :: path) ->
+            Some (Asset (build, String.concat "/" path))
         | "GET", [ "login" ] -> Some Login
         | "GET", [ "callback" ] -> Some Callback
-        | "GET", [ "events"; index ] ->
-            match System.Int32.TryParse index with
-            | true, parsed when parsed >= 0 -> Some (Events parsed)
+        | "GET", [ "events" ] -> Some (EventsAfter None)
+        | "GET", [ "events"; "after"; offset ] ->
+            match System.Int64.TryParse offset with
+            | true, parsed ->
+                // An unparseable offset is not this route, and a negative one is not an
+                // offset at all — `EventOffset.create` owns that rule, so it is not
+                // restated here.
+                match EventOffset.create parsed with
+                | Ok o -> Some (EventsAfter (Some o))
+                | Error _ -> None
+            | _ -> None
+        | "GET", [ "events"; range ] ->
+            // `{first}-{last}`. Both bounds are required and the pair is validated here,
+            // because an inverted or over-long range is not an address this server has —
+            // and a request for one must 404 rather than be answered with something
+            // shorter, which a client would then keep for ever as if it were the whole
+            // range. (`Assets.serve` 404s a build that is not ours for the same reason.)
+            match range.Split '-' with
+            | [| first; last |] ->
+                match System.Int64.TryParse first, System.Int64.TryParse last with
+                | (true, f), (true, l) when f >= 0L && l >= f && l - f < int64 EventChunk.size ->
+                    Some (Events (f, l))
+                | _ -> None
             | _ -> None
         | "GET", [ "terminals"; terminal; "keyframes"; seq ] ->
             match System.Int32.TryParse seq with
             | true, parsed when parsed >= 0 && terminal <> "" -> Some (TerminalKeyframe (terminal, parsed))
             | _ -> None
-        | "GET", [ "terminals"; terminal; index ] ->
-            match System.Int32.TryParse index with
-            | true, parsed when parsed >= 0 && terminal <> "" -> Some (TerminalTranscript (terminal, parsed))
+        | "GET", [ "terminals"; terminal ] when terminal <> "" -> Some (TerminalTranscriptAfter (terminal, None))
+        | "GET", [ "terminals"; terminal; "after"; seq ] ->
+            match System.Int32.TryParse seq with
+            | true, parsed when parsed >= 0 && terminal <> "" ->
+                Some (TerminalTranscriptAfter (terminal, Some parsed))
+            | _ -> None
+        | "GET", [ "terminals"; terminal; range ] ->
+            // `{first}-{last}`, validated here on exactly the argument the event ranges are:
+            // an inverted or over-long range is not an address this server has, and must 404
+            // rather than be answered with something shorter than the address promised.
+            match range.Split '-' with
+            | [| first; last |] ->
+                match System.Int32.TryParse first, System.Int32.TryParse last with
+                | (true, f), (true, l) when terminal <> "" && f >= 0 && l >= f && l - f < TranscriptChunk.size ->
+                    Some (TerminalTranscriptRange (terminal, f, l))
+                | _ -> None
             | _ -> None
         | "GET", [ "claude" ] -> Some ClaudeStatus
         | "POST", [ "claude"; "begin" ] -> Some (Claude ClaudeAction.Begin)
@@ -197,12 +266,6 @@ module SessionRoute =
         | "POST", [ "github"; "token" ] -> Some (GitHub GitHubAction.Token)
         | "POST", [ "github"; "disconnect" ] -> Some (GitHub GitHubAction.Disconnect)
         | "GET", [ "queries" ] -> Some Queries
-        // Last among the single-segment GETs, because a fingerprinted name is matched by
-        // shape rather than by literal and would otherwise shadow the fixed paths above.
-        | "GET", [ segment ] ->
-            match fingerprintOf "client" "js" segment with
-            | Some digest -> Some (ClientBundle digest)
-            | None -> fingerprintOf "app" "css" segment |> Option.map AppCss
         | _ -> None
 
     /// The route a request is for when this session is served under `mount` (`""` at an
@@ -216,11 +279,26 @@ module SessionRoute =
         elif path.StartsWith (mount + "/") then parse method (path.Substring mount.Length)
         else None
 
-/// The digests a shell needs to address its own assets, carried together so a renderer cannot
-/// take them in the wrong order — two bare strings would be silently swappable.
-type AssetDigests =
-    { Bundle: string
-      Css: string }
+/// Which build's asset set a document should name: a digest over every static file this
+/// process ships. It used to be one digest per asset, which meant a renderer had to be handed
+/// each of them and a new asset changed the type. A set has one address, so a document that
+/// has this can name ANY file in it — including one this code has never heard of.
+type AssetBuild =
+    | AssetBuild of digest: string
+
+module AssetBuild =
+
+    /// Where `file` is served for this build — the URL a document should name. Relative, like
+    /// every route: it resolves against the shell's `<base href>`, and the stylesheet's own
+    /// relative `url()`s then resolve against IT. Takes the declared file rather than a path,
+    /// so a document cannot name one this build does not ship.
+    let url (AssetBuild digest) (file: AssetFile) : string =
+        SessionRoute.relative (Asset (digest, AssetFile.path file))
+
+    /// The set's own address, for the one consumer that names no file: the service worker,
+    /// which keeps a cache PER BUILD and drops the others (Plan 20). It is the digest and
+    /// nothing else, so a new build is a new cache name and a byte-different worker.
+    let digest (AssetBuild d) = d
 
 /// What the two static surfaces may be cached for, stated once because the session server and
 /// the Manager UI both serve them and the pair only works together: the shell is the document
@@ -228,14 +306,26 @@ type AssetDigests =
 /// was rendered against — which is exactly the bug that produced these values (a 24-hour
 /// window on stable URLs made every release invisible for a day).
 ///
-/// Alongside `EventChunk.cacheControl`, which is the same idea for the event log.
+/// The event log and the transcripts are deliberately NOT here. Their answers are kept by
+/// the client itself, in a store it can enumerate and ask to persist, so every response on
+/// those surfaces is `no-store` — a header inviting a second copy into the HTTP cache would
+/// be the redundant spare, not a belt (docs/plans/20, docs/plans/22).
 module CachePolicy =
 
     /// A fingerprinted asset: the address changes whenever the bytes do, so a cache entry can
-    /// never be stale — only unused. `public`, unlike the event chunks' `private`: these are
+    /// never be stale — only unused. `public`, unlike the session's own surfaces: these are
     /// ungated static bytes, identical for every user.
     let asset = "public, max-age=31536000, immutable"
 
     /// The shell. `no-cache` is "revalidate before every use", NOT "do not store" — the
     /// browser keeps the copy and asks; an `ETag` turns the usual answer into a 304.
     let shell = "no-cache"
+
+    /// A transcript keyframe: written once, at a line that never moves, so its bytes can
+    /// never change. `private`, because it sits behind the session's per-user authorization
+    /// and no shared cache may hold a screen from someone's terminal.
+    ///
+    /// The one session surface still served out of the HTTP cache, and it stays there for
+    /// the reason the ranges left: a keyframe is fetched only by a replay a person opened,
+    /// so there is nothing to read back offline that they did not just ask for.
+    let keyframe = "private, max-age=259200, immutable"
