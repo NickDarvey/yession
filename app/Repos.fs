@@ -91,6 +91,11 @@ type private GitRun =
 type ReposConfig =
     { Backend : SandboxBackend
       ReposDir : string
+      /// The same directory as a TERMINAL sees it (`Sandboxes.reposVisibleAt`): the host
+      /// path itself under the host-family backends, the mount target under docker. Every
+      /// listing carries it, because the only reason to clone a repo is to work in it and
+      /// the work happens in a terminal.
+      VisibleAt : string
       /// Paths beyond `ReposDir` the git sandbox may READ. Empty in production; the
       /// test harness names its local bare-repo fixtures here. None of them may be an
       /// ANCESTOR of `ReposDir`: when both sit under a read-denied region (a HOME, which
@@ -237,7 +242,12 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                     match! runOk confined None [ "-C"; pathOf repo; "status"; "--porcelain" ] with
                     | Error e -> return Error e
                     | Ok status ->
-                        return Ok { Repo = repo; Branch = branch.Stdout.Trim (); Dirty = status.Stdout.Trim () <> "" }
+                        return
+                            Ok
+                                { Repo = repo
+                                  Branch = branch.Stdout.Trim ()
+                                  Dirty = status.Stdout.Trim () <> ""
+                                  Path = sprintf "%s/%s" config.VisibleAt (RepoRef.relativePath repo) }
             }
 
         let mintMessageId () : MessageId =
@@ -385,14 +395,15 @@ let private queryDef : QueryDef =
     { Name = queryName
       Title = "repos"
       Description =
-        "The repos checked out in this session, each with the branch it is on and whether \
-         it has uncommitted changes. Read from the checkouts themselves, so it always agrees \
-         with git."
+        "The repos checked out in this session, each with the branch it is on, whether it \
+         has uncommitted changes, and the path a terminal here reaches it at. Read from the \
+         checkouts themselves, so it always agrees with git."
       Shape =
         Rows
             [ QueryColumn.create "repo" "repo"
               QueryColumn.create "branch" "branch"
-              QueryColumn.create "dirty" "uncommitted changes" ] }
+              QueryColumn.create "dirty" "uncommitted changes"
+              QueryColumn.create "path" "path" ] }
 
 /// Register the listing as a query. The service keeps its typed `ListRepos` — the query
 /// is a projection of it, not a replacement — so the shape lives beside the thing it
@@ -411,5 +422,6 @@ let query (service: ReposService) : Queries.QueryRegistration =
                             |> List.map (fun listing ->
                                 [ "repo", CellText (RepoRef.value listing.Repo)
                                   "branch", CellText listing.Branch
-                                  "dirty", CellFlag listing.Dirty ])))
+                                  "dirty", CellFlag listing.Dirty
+                                  "path", CellText listing.Path ])))
             } }

@@ -520,7 +520,7 @@ module AgentTools =
 
           tool
               "add_repo"
-              "Clone a GitHub repo into this session's shared repos directory (visible to everyone here, and inside the work environment). Takes owner/repo — never a URL — and only repos the session's GitHub credential can reach. Read-only bootstrap: to commit or push, use execute_command in a terminal. Already-added repos just report their current state."
+              "Clone a GitHub repo into this session's shared repos directory (visible to everyone here, and inside the work environment). Takes owner/repo — never a URL — and only repos the session's GitHub credential can reach. Answers with the path the checkout is at: that is the path to cd to in a terminal, so use it rather than guessing one. Read-only bootstrap: to commit or push, use execute_command in a terminal. Already-added repos just report their current state."
               [ ToolField.required "repo" "string" "the repo as owner/name, e.g. \"octocat/hello-world\"" ]
               (ofRepo (addRepo capabilities))
 

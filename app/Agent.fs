@@ -86,7 +86,7 @@ type private JsToolAnswer =
       prompt: $0.prompt,
       options: {
         systemPrompt: $0.system,
-        maxTurns: 8,
+        maxTurns: $9,
         settingSources: [],
         includePartialMessages: true,
         mcpServers,
@@ -129,6 +129,10 @@ type private JsToolAnswer =
         cacheCreationTokens = u.cache_creation_input_tokens || 0
         if (m.modelUsage) { const ks = Object.keys(m.modelUsage); if (ks.length) model = ks[0] }
         if (m.subtype === 'success') body = (typeof m.result === 'string' && m.result !== '') ? m.result : streamed
+        // The step ceiling is the one ending a person can do something about, so it says
+        // what happened in words rather than handing back an SDK subtype nobody outside
+        // this file has ever read.
+        else if (m.subtype === 'error_max_turns') failed = 'this turn stopped at its step limit of ' + $9 + ' model turns without finishing — say so and I will carry on from here'
         else failed = 'agent run ended: ' + m.subtype
       }
     }
@@ -150,8 +154,21 @@ let private runQuery
     (onChunk: string -> unit)
     (registerAbort: (unit -> unit) -> unit)
     (claudeSpawner: obj)
+    (maxTurns: int)
     : JS.Promise<RunOutcome> =
     jsNative
+
+/// How many model turns one session turn may take before the SDK stops it.
+///
+/// A bound belongs here — a turn that loops is a turn spending somebody's money — but the
+/// old one was 8, which is fewer steps than the shortest real errand this session offers.
+/// "Clone a repo and look at it" is add_repo, a status, a sandbox, a command, the command's
+/// result, and an answer: six before anything goes wrong, and every recovery from a wrong
+/// guess costs two more. Hitting the ceiling is not a soft landing either — the SDK returns
+/// no result, so the turn FAILS and everything it did is presented as a crash. So the
+/// ceiling is set where an errand that goes badly twice still finishes, and the reason a
+/// turn hit it is now said out loud (`error_max_turns` above, `Conversation.applyEvent`).
+let maxTurns = 32
 
 /// Some sandboxes disallow the SDK's own vendored executable; `YESSION_CLAUDE_PATH`
 /// points the SDK at a system Claude Code install instead. Empty = SDK default.
@@ -328,6 +345,7 @@ let runWith (credential: (string * string) option) : RunAgent =
                     (fun text -> onChunk { Text = text })
                     signal.OnAbort
                     (Sandboxes.AgentSandbox.claudeSpawnerFor (agentBackend ()) ambient home env)
+                    maxTurns
                 |> Interop.awaitPromise
             let usage =
                 { InputTokens = outcome.inputTokens
