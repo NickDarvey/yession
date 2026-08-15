@@ -85,8 +85,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v30
         with:
+          # devenv's own binary cache, and it is this job's single largest cost. The Linux job
+          # reaches the dev shell through the `devenv` CLI, which adds this substituter to every
+          # nix invocation it makes — so devenv's Rust tree substitutes there and nobody had to
+          # ask. This job enters the shell with a bare `nix develop` (below), which is not the
+          # CLI and inherits none of its options, so the same tree had no cache to come from and
+          # was COMPILED: 872 derivations from source, 414 of them crate2nix `rust_*` crates
+          # (devenv-tasks, sqlx, reqwest, syn, ...), ~8.4 min of a ~12 min step. The nixpkgs
+          # flake.nix pins is the same nixos-unstable channel devenv builds against, so the
+          # paths match and the whole tree arrives prebuilt.
           extra_nix_config: |
             experimental-features = nix-command flakes
+            extra-substituters = https://devenv.cachix.org
+            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
       # Deliberately `nix build` and not devenv: this is the `nix profile install
       # github:NickDarvey/yession` path a user actually takes, and it must stay pure.
       - name: Build the installable package
