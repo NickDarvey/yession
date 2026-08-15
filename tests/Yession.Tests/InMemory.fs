@@ -20,9 +20,9 @@ open Yession.Tests.Support
 
 /// What the per-turn binding hands `Execute` in production (Plan 20): the agent acting, on
 /// the turn human's authority. These cases drive the capability directly, so they stand in
-/// for that binding — and there is no agent-shaped provenance without somebody named on it.
+/// for that binding — and there is no agent-shaped act without somebody named on it.
 let private agentActing =
-    ActProvenance.agentFor (PeerRef (PeerId.create "turn-human" |> expect))
+    Authority.agentFor (PeerRef (PeerId.create "turn-human" |> expect))
 
 let private sid () = SessionId.create "in-memory-session" |> expect
 

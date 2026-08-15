@@ -393,11 +393,11 @@ let private commandDispatch () : CommandDispatch =
     // as the fallback — which was right only because the agent is what authored every one of
     // these, a coincidence each site had to keep re-establishing.
     let repoCaller (invocation: GatedInvocation) =
-        Repos.agentCaller (ActProvenance.effective invocation.Provenance) (ActProvenance.approver invocation.Provenance)
+        Repos.agentCaller (Authority.effective invocation.Authority) (Authority.approver invocation.Authority)
     let sandboxCaller (invocation: GatedInvocation) : WorkSandboxes.SandboxCaller =
-        { Actor = ActProvenance.author invocation.Provenance
-          Credential = ActProvenance.effective invocation.Provenance
-          ApprovedBy = ActProvenance.approver invocation.Provenance }
+        { Actor = Authority.author invocation.Authority
+          Credential = Authority.effective invocation.Authority
+          ApprovedBy = Authority.approver invocation.Authority }
     Map.ofList
         [ GatedCommands.addRepo.Tool,
           fun (invocation: GatedInvocation) ->
@@ -504,7 +504,7 @@ let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabi
                   // The agent acts; the credential is the turn human's (Plan 08). `agentFor`
                   // TAKES that actor, so an agent-authored call with nobody's authority on it
                   // is not something this could be written to omit.
-                  Provenance = ActProvenance.agentFor turnActor }
+                  Authority = Authority.agentFor turnActor }
         { capabilities with
             AddRepo =
               fun repo ->
@@ -529,7 +529,7 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
             { Command = command
               Args = encodeArgs args
               Summary = summary
-              Provenance = ActProvenance.agentFor turnActor }
+              Authority = Authority.agentFor turnActor }
     { capabilities with
         StartWorkSandbox =
           fun name forward ->

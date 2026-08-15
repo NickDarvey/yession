@@ -155,7 +155,7 @@ let private approvalTests =
 let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order: float) (approved: PeerId option) =
     { QueueId = queue id
       Subject = ForTerminal terminal
-      Provenance = ActProvenance.ofAuthor author
+      Authority = Authority.ofAuthor author
       Order = order
       Payload = CommandLine
       ApprovedBy = approved
@@ -246,7 +246,7 @@ let private drainTests =
                     { TerminalId = terminalA
                       BlockId = block "1"
                       QueueId = Some (queue "a1")
-                      Provenance = ActProvenance.ofAuthor (PeerRef ada)
+                      Authority = Authority.ofAuthor (PeerRef ada)
                       Command = "ls"
                       FromSeq = 0
                       Background = false }
@@ -267,7 +267,7 @@ let private started (id: TerminalId) (b: string) (command: string) (fromSeq: int
         { TerminalId = id
           BlockId = block b
           QueueId = None
-          Provenance = ActProvenance.ofAuthor (PeerRef ada)
+          Authority = Authority.ofAuthor (PeerRef ada)
           Command = command
           FromSeq = fromSeq
           Background = false }
@@ -581,7 +581,7 @@ let private rejectionTests =
                     { TerminalId = terminalA
                       BlockId = block "1"
                       QueueId = Some (queue "a1")
-                      Provenance = ActProvenance.agentFor (PeerRef ada)
+                      Authority = Authority.agentFor (PeerRef ada)
                       Command = "make"
                       FromSeq = 0
                       Background = false }
@@ -606,9 +606,9 @@ let private rejectionTests =
             Expect.equal (view.Blocks |> List.map (fun b -> b.Command)) [ "make"; "rm -rf /" ] "beside what did run"
             let refusal = view.Blocks |> List.last
             Expect.equal refusal.Status (BlockRejected (PeerRef bob, Some "not on prod")) "named, with the reason"
-            Expect.equal (ActProvenance.author refusal.Provenance) ActorRef.Agent "and whose command it was"
+            Expect.equal (Authority.author refusal.Authority) ActorRef.Agent "and whose command it was"
             Expect.equal
-                (ActProvenance.approver refusal.Provenance)
+                (Authority.approver refusal.Authority)
                 None
                 "nobody approved it — someone did the opposite"
             Expect.equal (refusal.FromSeq, refusal.ToSeq) (0, Some 0) "an empty range, because it produced nothing"
@@ -978,7 +978,7 @@ let private leaseGateTests =
 let private blockOf (status: TerminalBlockStatus) : TerminalBlock =
     { BlockId = block "1"
       QueueId = Some (queue "a1")
-      Provenance = ActProvenance.agentFor (PeerRef ada)
+      Authority = Authority.agentFor (PeerRef ada)
       Command = "make"
       Background = false
       FromSeq = 0
@@ -1179,7 +1179,7 @@ let private digestTests =
                       { TerminalId = terminalA
                         BlockId = block "1"
                         QueueId = None
-                        Provenance = ActProvenance.agentFor (PeerRef ada) |> ActProvenance.approvedBy (Some bob)
+                        Authority = Authority.agentFor (PeerRef ada) |> Authority.approvedBy (Some bob)
                         Command = "rm -rf build"
                         FromSeq = 0
                         Background = false }
@@ -1451,7 +1451,7 @@ let private codecTests =
                       { TerminalId = terminalA
                         BlockId = block "1"
                         QueueId = Some (queue "a1")
-                        Provenance = ActProvenance.agentFor (PeerRef bob) |> ActProvenance.approvedBy (Some ada)
+                        Authority = Authority.agentFor (PeerRef bob) |> Authority.approvedBy (Some ada)
                         Command = "ls -la"
                         FromSeq = 3
                         Background = false }
@@ -1479,21 +1479,21 @@ let private codecTests =
         // A round-trip cannot see this: nesting the three parties under one key would
         // round-trip perfectly and make every block ever written unreadable. An event log is
         // read back for the life of its session, so where the keys SIT is the contract, and
-        // moving the value into `ActProvenance` (Plan 20) had to leave it exactly where it was.
+        // moving the value into `Authority` (Plan 20) had to leave it exactly where it was.
         testCase "a block's parties stay top-level keys on the wire" <| fun () ->
             let encoded =
                 SessionEvent.TerminalBlockStarted
                     { TerminalId = terminalA
                       BlockId = block "1"
                       QueueId = Some (queue "a1")
-                      Provenance = ActProvenance.agentFor (PeerRef bob) |> ActProvenance.approvedBy (Some ada)
+                      Authority = Authority.agentFor (PeerRef bob) |> Authority.approvedBy (Some ada)
                       Command = "ls -la"
                       FromSeq = 3
                       Background = false }
                 |> Codec.toString Codec.sessionEvent
             for key in [ "\"author\""; "\"approvedBy\""; "\"onBehalfOf\"" ] do
                 Expect.isTrue (encoded.Contains key) (sprintf "%s is still written: %s" key encoded)
-            Expect.isFalse (encoded.Contains "\"provenance\"") "and the F# shape did not reach the wire"
+            Expect.isFalse (encoded.Contains "\"authority\"") "and the F# shape did not reach the wire"
 
         testCase "a block written before Plan 20 still decodes" <| fun () ->
             // No `onBehalfOf` and no `background`: what every block in an existing log looks
@@ -1506,7 +1506,7 @@ let private codecTests =
             | Ok (SessionEvent.TerminalBlockStarted decoded) ->
                 Expect.isFalse decoded.Background "it ran in the foreground, which is what its absence means"
                 Expect.equal
-                    (ActProvenance.onBehalfOf decoded.Provenance)
+                    (Authority.onBehalfOf decoded.Authority)
                     None
                     "and it borrowed nobody's authority, which is what that absence means"
             | other -> failwithf "a pre-Plan-20 block must still read back, got %A" other
@@ -1860,11 +1860,11 @@ let private managerTests =
                 let startedEvent =
                     events |> List.pick (function SessionEvent.TerminalBlockStarted e -> Some e | _ -> None)
                 Expect.equal
-                    (ActProvenance.author startedEvent.Provenance)
+                    (Authority.author startedEvent.Authority)
                     ActorRef.Agent
                     "the agent wrote it"
                 Expect.equal
-                    (ActProvenance.approver startedEvent.Provenance)
+                    (Authority.approver startedEvent.Authority)
                     (Some (PeerRef bob))
                     "and bob approved it"
             }
@@ -1938,7 +1938,7 @@ let private schedulerTests =
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
                 // Queued exactly as the agent's capability queues one — same doc write.
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (ActProvenance.ofAuthor (PeerRef ada)) 1.0 "echo ok" false
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.ofAuthor (PeerRef ada)) 1.0 "echo ok" false
                 scheduler.Drain ()
                 do! Async.Sleep 20
 
@@ -1960,7 +1960,7 @@ let private schedulerTests =
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (ActProvenance.agentFor (PeerRef ada)) 1.0 "rm -rf /" false
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.agentFor (PeerRef ada)) 1.0 "rm -rf /" false
                 scheduler.Drain ()
                 do! Async.Sleep 20
                 Expect.isEmpty (List.ofSeq spawned) "nothing ran"
@@ -1994,7 +1994,7 @@ let private schedulerTests =
                 let doc = Y.Doc.Create ()
                 // The crash window: a block start reached the log, the doc removal did not.
                 let scheduler = TerminalScheduler.create doc terminals ignore (Set.singleton "q-a1")
-                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (ActProvenance.ofAuthor (PeerRef ada)) 1.0 "make" false
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.ofAuthor (PeerRef ada)) 1.0 "make" false
                 scheduler.Drain ()
                 do! Async.Sleep 20
                 Expect.isEmpty (List.ofSeq spawned) "it does not run a second time"
@@ -2009,13 +2009,13 @@ let private syncTests =
     testList "Terminal collaborative state" [
         testCase "a terminal queue entry survives a doc round-trip" <| fun () ->
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (ActProvenance.agentFor (PeerRef ada)) 3.0 "git status" false
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 3.0 "git status" false
             let synced = syncedOf doc
             let entry = synced.Pending |> Map.find (queue "a1")
             Expect.equal entry.Subject (ForTerminal terminalA) "the subject names its terminal"
             Expect.equal entry.Payload CommandLine "and its payload is an editable command line"
             Expect.equal
-                (ActProvenance.author entry.Provenance)
+                (Authority.author entry.Authority)
                 ActorRef.Agent
                 "the author, as an actor rather than a peer"
             Expect.equal entry.Order 3.0 "the order"
@@ -2025,7 +2025,7 @@ let private syncTests =
         testCase "an unreadable approval reads as NOT approved" <| fun () ->
             // Fail closed: a value we cannot read must never release an agent's command.
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (ActProvenance.agentFor (PeerRef ada)) 1.0 "x" false
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 1.0 "x" false
             setQueuedFieldInDoc doc (queue "a1") "approvedBy" "   "
             let synced = syncedOf doc
             Expect.equal (synced.Pending |> Map.find (queue "a1")).ApprovedBy None "blank is not an approval"
@@ -2063,7 +2063,7 @@ let private syncTests =
             let entry = synced.Pending |> Map.find (queue "a1")
             Expect.equal entry.Subject (ForTerminal terminalA) "the entry names the terminal it named before"
             Expect.equal entry.Payload CommandLine "as the only payload kind that existed then"
-            Expect.equal (ActProvenance.author entry.Provenance) ActorRef.Agent "with its author"
+            Expect.equal (Authority.author entry.Authority) ActorRef.Agent "with its author"
             Expect.equal entry.Order 3.0 "and its place in the queue"
             Expect.equal (SyncedSessionState.modeOf terminalA synced) ApproveAll "the stricter mode survives"
             // Exactly one live location afterwards, never two that can disagree.
@@ -2071,7 +2071,7 @@ let private syncTests =
 
         testCase "migrating a doc that was never legacy does nothing" <| fun () ->
             let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (ActProvenance.agentFor (PeerRef ada)) 1.0 "git status" false
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 1.0 "git status" false
             Expect.equal (SyncedStateSync.migrateGateRoots doc) (0, 0) "no legacy roots, no work"
             Expect.equal (Map.count (syncedOf doc).Pending) 1 "and the entry it did have is untouched"
     ]

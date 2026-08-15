@@ -937,7 +937,7 @@ module ClientModel =
     let awaitsApproval (entry: PendingAct) (model: ClientModel) : bool =
         ApprovalMode.requiresApproval
             (SyncedSessionState.gateOf entry.Subject model.Synced)
-            (ActProvenance.author entry.Provenance)
+            (Authority.author entry.Authority)
         && Option.isNone entry.ApprovedBy
 
     /// Whether a queued command is held because a peer is typing in its terminal (Plan 13,
@@ -1370,7 +1370,7 @@ module ClientModel =
                       // `ofAuthor`, so it runs as its own author: a terminal command is a
                       // shell line in a sandbox, not a call against somebody's credential —
                       // and a person's act cannot accidentally carry one.
-                      Provenance = ActProvenance.ofAuthor (PeerRef author)
+                      Authority = Authority.ofAuthor (PeerRef author)
                       ApprovedBy = None
                       RejectedBy = None
                       RejectedReason = None

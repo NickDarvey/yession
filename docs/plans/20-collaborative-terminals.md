@@ -371,7 +371,11 @@ bare into this document or a PR body). Stages 1, 4 and 5 are `+semver: patch` at
   rule-1 defaults only. Durable per-user pins are a deliberate non-goal until tabs stop
   being personal, which would be its own decision.
 
-## Provenance, as a value (stage 2b)
+## Authority, as a value (stage 2b)
+
+> Named `ActProvenance` when this was written, and renamed on landing. *Provenance* promises a
+> chain — a lineage of who delegated to whom — and this is a flat triple describing ONE act.
+> A type whose name over-claims is a type the next reader will look inside expecting history.
 
 Wiring the wake turned up a bug older than this plan: **agent terminal commands recorded no
 `OnBehalfOf` at all.** Gated commands set it (`SessionMain`, twice); the terminal enqueue path
@@ -395,31 +399,31 @@ holds only because a caller remembered to set a field is a convention with a goo
 
 ```fsharp
 /// Who is behind an act: the three parties an audit asks about, as ONE value.
-type ActProvenance =
+type Authority =
     private { Author : ActorRef; OnBehalfOf : ActorRef option; ApprovedBy : ActorRef option }
 
-module ActProvenance =
+module Authority =
     /// A party acting for themselves. There is no authority to borrow, so there is none to
     /// state — which is why a person's act cannot accidentally carry somebody else's.
-    let ofAuthor (actor: ActorRef) : ActProvenance
+    let ofAuthor (actor: ActorRef) : Authority
 
     /// The agent, acting on a turn human's authority (Plan 08). The rule that was missing
     /// from one call site, as the ONLY way to build an agent-authored act: you cannot
     /// construct one without naming whose authority it runs on.
-    let agentFor (turnActor: ActorRef) : ActProvenance
+    let agentFor (turnActor: ActorRef) : Authority
 
     /// Released by a peer, when the subject's mode demanded one.
-    let approvedBy (peer: PeerId) (provenance: ActProvenance) : ActProvenance
+    let approvedBy (peer: PeerId) (authority: Authority) : Authority
 
     /// Whose credentials this resolves to — the borrowed authority when there is one, the
     /// author otherwise. The question every dispatch actually asks, answered once.
-    let effective (provenance: ActProvenance) : ActorRef
+    let effective (authority: Authority) : ActorRef
 ```
 
 What this buys, in order of how much it matters:
 
 1. **The bug becomes unrepresentable.** `agentFor` takes the turn actor; there is no
-   agent-authored `ActProvenance` without one. The terminal enqueue path could not have
+   agent-authored `Authority` without one. The terminal enqueue path could not have
    forgotten, because forgetting would not compile.
 2. **`effective` replaces four hand-rolled `defaultArg`s.** The dispatch, the wake, the repo
    verbs and the sandbox verbs each answer "whose credential?" today; they would ask once.
@@ -436,7 +440,7 @@ width behind it would have been the rebase tax `contributing-changes` warns abou
 
 **Two things the sketch above did not anticipate, found by building it.**
 
-*The approval is not part of a PENDING act's provenance.* `PendingAct.ApprovedBy` is a CRDT
+*The approval is not part of a PENDING act's authority.* `PendingAct.ApprovedBy` is a CRDT
 register peers write and clear; folding it into an immutable value would have meant a setter
 and an un-setter on a type whose point is that it cannot be edited into a lie — and would have
 split the entry's two verdicts, approval and refusal, into two shapes. So a pending act carries
@@ -450,6 +454,6 @@ there is a fourth function, `rehydrate`, for the boundary. It is an escape hatch
 sense that a repository's reconstitutor is one: nothing AUTHORS through it, and the guarantee
 that matters — no code path can propose an agent act with nobody's authority on it — is intact.
 
-The field names inside the record are prefixed (`ProvAuthor`, ...) and private. Bare
+The field names inside the record are prefixed (`AuthAuthor`, ...) and private. Bare
 `Author`/`OnBehalfOf` fields in this namespace made every other record carrying those names
 ambiguous to F#'s inference.
