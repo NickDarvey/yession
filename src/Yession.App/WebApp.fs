@@ -172,6 +172,12 @@ self.addEventListener('fetch', (e) => {
         return await keep(new Request(SHELL), fresh)
       } catch (err) {
         const kept = await caches.match(new Request(SHELL))
+        // The one moment this worker makes a decision nobody can otherwise see: the session
+        // did not answer, and either there is a shell kept here or the page is about to be a
+        // browser error. Debugging it without this line means inferring it from a timeout,
+        // which cost three full runs of the gate once. Open devtools -> Application ->
+        // Service Workers to read it; Playwright cannot (no `ServiceWorkers` on a context).
+        console.debug('yession/sw: shell unreachable', { asked: request.url, reason: String(err), served: kept ? 'kept copy' : 'nothing kept' })
         if (kept) return kept
         throw err
       }

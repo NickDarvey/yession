@@ -931,11 +931,28 @@ let private rerunUnderKeyring (caps: string list) : int =
     finally
         File.Delete script
 
-// check [caps…]. Default = cheap tier; each cap adds its suites (Browser, Ports, Native, …).
+/// Split `--only <text>` out of the arguments. What is left is the capability list, which is
+/// what everything downstream expects — a capability the box cannot host still refuses the run,
+/// narrowed or not, because "which box is this" and "which cases do I want" are different
+/// questions and only the first one is a reason to stop.
+let private takeOnly (args: string list) : string list * string option =
+    let rec go acc only remaining =
+        match remaining with
+        | "--only" :: text :: rest -> go acc (Some text) rest
+        | [ "--only" ] -> failwith "check --only: give it something to match (e.g. --only \"session is gone\")"
+        | arg :: rest -> go (arg :: acc) only rest
+        | [] -> List.rev acc, only
+    go [] None args
+
+// check [caps…] [--only <text>]. Default = cheap tier; each cap adds its suites (Browser,
+// Ports, Native, …). `--only` narrows BOTH runtimes to the cases whose full name contains the
+// text — the build is unchanged, so this buys back the running, not the compiling.
 // The gate runs once and is deterministic — the native WebRTC suites used to abort intermittently,
 // but that was a real defect (the addon carried its own C++ runtime; see nix/node-datachannel.nix),
 // now fixed, not inherent flakiness. A failure here is a genuine break, so don't paper it over.
-let check (caps: string list) =
+let check (args: string list) =
+    let caps, only = takeOnly args
+    only |> Option.iter (fun text -> Environment.SetEnvironmentVariable ("YESSION_TEST_ONLY", text))
     if needsKeyringWrap caps then exit (rerunUnderKeyring caps)
     restore ()
     runCheckOnce caps
