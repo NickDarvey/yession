@@ -73,6 +73,13 @@ jobs:
       - uses: cachix/cachix-action@v17
         with:
           name: yession
+          # devenv's own cache, and the reason this is here rather than in `extra_nix_config`
+          # above: install-nix-action writes /etc/nix/nix.conf, cachix-action writes
+          # ~/.config/nix/nix.conf, and the user file REPLACES the substituter list rather than
+          # appending to it. Naming devenv there and yession here silently dropped devenv — the
+          # darwin dev-shell step went 0m51s back to 16m11s, recompiling all 872 derivations.
+          # So one file owns substituters, and everything we pull from is named in it.
+          extraPullNames: devenv
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
@@ -119,19 +126,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v30
         with:
-          # devenv's own binary cache, and it is this job's single largest cost. The Linux job
-          # reaches the dev shell through the `devenv` CLI, which adds this substituter to every
-          # nix invocation it makes — so devenv's Rust tree substitutes there and nobody had to
-          # ask. This job enters the shell with a bare `nix develop` (below), which is not the
-          # CLI and inherits none of its options, so the same tree had no cache to come from and
-          # was COMPILED: 872 derivations from source, 414 of them crate2nix `rust_*` crates
-          # (devenv-tasks, sqlx, reqwest, syn, ...), ~8.4 min of a ~12 min step. The nixpkgs
-          # flake.nix pins is the same nixos-unstable channel devenv builds against, so the
-          # paths match and the whole tree arrives prebuilt.
           extra_nix_config: |
             experimental-features = nix-command flakes
-            extra-substituters = https://devenv.cachix.org
-            extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
       # Same argument as the Linux job, and this is the job that needed a real cache rather than
       # the Actions cache. Backed by the latter, the darwin run was throttled — `error 418`,
       # "GitHub Actions Cache throttled Magic Nix Cache. Not trying to use it again on this run."
@@ -141,6 +137,13 @@ jobs:
       - uses: cachix/cachix-action@v17
         with:
           name: yession
+          # devenv's own cache, and the reason this is here rather than in `extra_nix_config`
+          # above: install-nix-action writes /etc/nix/nix.conf, cachix-action writes
+          # ~/.config/nix/nix.conf, and the user file REPLACES the substituter list rather than
+          # appending to it. Naming devenv there and yession here silently dropped devenv — the
+          # darwin dev-shell step went 0m51s back to 16m11s, recompiling all 872 derivations.
+          # So one file owns substituters, and everything we pull from is named in it.
+          extraPullNames: devenv
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       # Deliberately `nix build` and not devenv: this is the `nix profile install
       # github:NickDarvey/yession` path a user actually takes, and it must stay pure.
