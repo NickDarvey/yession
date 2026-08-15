@@ -438,10 +438,37 @@ let startFull
               // as the authority it borrows and what a WOKEN turn later resolves its own from.
               // The agent cannot name it: an acting party that could choose whose credential
               // it runs on is not gated by one.
-              ExecuteCommand =
-                fun target command background ->
-                    terminalCommands.Execute target command background (Authority.agentFor turnActor)
+              ExecuteCommand = fun request -> terminalCommands.Execute request (Authority.agentFor turnActor)
               CheckPending = checkPending
+              // The terminal verbs a person already has (Plan 20, stage 3), reaching the same
+              // manager the list's buttons do. One implementation, two surfaces.
+              OpenTerminal =
+                fun name sandbox ->
+                    terminals.OpenAgentTerminal (defaultArg sandbox SandboxName.defaultName) name
+              CloseTerminal =
+                fun id ->
+                    async {
+                        // A person typing in their own shell is not the agent's to end. The
+                        // list gives THEM the same verb over the agent's terminals, which is
+                        // the asymmetry worth having: a human can always stop the machine.
+                        if not (terminals.OpenedByAgent id) then
+                            return Error "that terminal is not yours — it belongs to someone in this session"
+                        else return! terminals.Close id "the agent finished with it"
+                    }
+              ListTerminals =
+                fun () ->
+                    async {
+                        let busy = terminals.Busy ()
+                        return
+                            Ok
+                                (TerminalProjection.openTerminals terminalProjection
+                                 |> List.map (fun view ->
+                                     { Terminal = view.TerminalId
+                                       Name = view.Title
+                                       Sandbox = view.Sandbox
+                                       Mine = terminals.OpenedByAgent view.TerminalId
+                                       Busy = Set.contains (TerminalId.value view.TerminalId) busy }))
+                    }
               // The agent's hand in a terminal that has no blocks (Plan 19). It takes the
               // lease like a peer, so a human watching sees who is typing and can take it
               // back — which is the whole reason this is a terminal verb rather than a
