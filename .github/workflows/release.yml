@@ -40,6 +40,14 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      # Master builds what pull requests consume. The derivations this repository defines have no
+      # public cache — libdatachannel and node-datachannel are C++ builds, and every pull request
+      # compiled them from scratch until they were published here. Nix keys by derivation hash, so
+      # a stale entry is never consulted: this can miss, it cannot serve a wrong answer.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: yession
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
       # The Docker integration suite talks to the daemon (dockerode over the local socket). This
@@ -86,6 +94,11 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      # Publishes the dev-shell closure this job builds — same argument as `verify`.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: yession
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
       # Quoted: the name contains a colon-space, which is a mapping separator in a bare scalar.
@@ -108,8 +121,8 @@ jobs:
           path: dist/*.tgz
 
   # The other parallel channel: the reproducible Nix package. Build it and boot-smoke the two
-  # wrapped bins, so `nix profile install github:NickDarvey/yession` stays green. (Add a
-  # `cachix/cachix-action` push here to serve binaries and spare consumers the source build.)
+  # wrapped bins, so `nix profile install github:NickDarvey/yession` stays green — and push
+  # the result to the binary cache, which is what spares consumers the source build.
   package-nix:
     name: "package:nix"
     needs: verify
@@ -121,6 +134,13 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      # Publishes the INSTALLABLE's closure: what a consumer gets from
+      # `nix profile install github:NickDarvey/yession`, who otherwise compiles libdatachannel on
+      # their own machine. That reach, not the CI minutes, is what makes this cache worth keeping.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: yession
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Build the Nix package
         run: nix build .#yession --print-build-logs
       # nix-only job (no devenv, no dotnet), so the readiness check is inline tool-glue rather
