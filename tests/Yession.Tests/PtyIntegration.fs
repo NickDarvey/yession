@@ -39,7 +39,8 @@ let private runOnPty (executable: string) (arguments: string list) : Async<Resul
               WritePaths = []
               AllowedDomains = None
               Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-              WorkingDirectory = None }
+              WorkingDirectory = None
+              Filesystem = Confined }
         match! Sandboxes.HostSandbox.create () policy with
         | Error e -> return Error e
         | Ok sandbox ->
@@ -82,7 +83,8 @@ let private withLiveTerminal
               WritePaths = []
               AllowedDomains = None
               Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-              WorkingDirectory = None }
+              WorkingDirectory = None
+              Filesystem = Confined }
         match! Sandboxes.HostSandbox.create () policy with
         | Error e -> failwith e
         | Ok sandbox ->
@@ -429,7 +431,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Map.empty
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->
@@ -477,7 +480,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->
@@ -506,7 +510,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->
@@ -545,7 +550,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->
@@ -609,7 +615,8 @@ let tests =
                       WritePaths = []
                       AllowedDomains = None
                       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-                      WorkingDirectory = None }
+                      WorkingDirectory = None
+                      Filesystem = Confined }
                 match! Sandboxes.HostSandbox.create () policy with
                 | Error e -> failwith e
                 | Ok sandbox ->

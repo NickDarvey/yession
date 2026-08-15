@@ -96,7 +96,8 @@ let policyFor
       WritePaths = (workspace |> Option.toList) @ (reposDir |> Option.toList)
       AllowedDomains = egressFor backend ambient
       Env = env
-      WorkingDirectory = workspace }
+      WorkingDirectory = workspace
+      Filesystem = Confined }
 
 /// A one-line description of the backend + spec for the start-requested event.
 let summaryFor (backend: SandboxBackend) (spec: EnvironmentSpec) : string =
@@ -641,8 +642,14 @@ type SrtConfig =
       /// the flag from the session config the first sandbox initialized the manager with
       /// and ignores the per-spawn one, which makes any per-sandbox answer a lie about
       /// which sandbox got it. What that costs is stated in docs/GAPS.md; the hooks deny
-      /// (the execution vector) is separate and stays.
-      AllowGitConfig : bool }
+      /// (the execution vector) is separate and stays. Undo when srt reads the flag from
+      /// the per-spawn config: then only the git sandbox asks for it.
+      AllowGitConfig : bool
+      /// srt's `filesystem.disabled`: no read or write rules, and none of the mandatory
+      /// denies either — the only way to write a checkout carrying a name srt refuses.
+      /// All-or-nothing by construction: srt scopes it per SPAWN, never per path.
+      /// Egress and credential env scrubbing are untouched. Undo when it can be a path.
+      FilesystemDisabled : bool }
 
 /// OS-level confinement via `@anthropic-ai/sandbox-runtime` (bubblewrap on Linux,
 /// Seatbelt on macOS): a wrapped spawn, no container, and egress that is ENFORCED —
@@ -685,7 +692,8 @@ module SrtSandbox =
           Socat = tools.Socat
           Ripgrep = tools.Ripgrep
           WeakNesting = (tools.Nesting = WeakNesting)
-          AllowGitConfig = true }
+          AllowGitConfig = true
+          FilesystemDisabled = (policy.Filesystem = Unconfined) }
 
     /// How this host confines, as configured. A blank tool path is an absent one: the dev
     /// shell and the installable set these per platform, and on macOS they are empty.
@@ -713,7 +721,7 @@ module SrtSandbox =
               Ripgrep = named "YESSION_RIPGREP_PATH"
               Nesting = nesting })
 
-    [<Emit("({ network: { allowedDomains: $0, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: $1, allowRead: $2, allowWrite: $3, denyWrite: [], allowGitConfig: $8 }, ...($4 ? { bwrapPath: $4 } : {}), ...($5 ? { socatPath: $5 } : {}), ...($6 ? { ripgrep: { command: $6 } } : {}), ...($7 ? { enableWeakerNestedSandbox: true } : {}) })")>]
+    [<Emit("({ network: { allowedDomains: $0, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: $1, allowRead: $2, allowWrite: $3, denyWrite: [], allowGitConfig: $8, disabled: $9 }, ...($4 ? { bwrapPath: $4 } : {}), ...($5 ? { socatPath: $5 } : {}), ...($6 ? { ripgrep: { command: $6 } } : {}), ...($7 ? { enableWeakerNestedSandbox: true } : {}) })")>]
     let private configObject
         (allowedDomains: string array)
         (denyRead: string array)
@@ -724,6 +732,7 @@ module SrtSandbox =
         (ripgrep: string)
         (weakNesting: bool)
         (allowGitConfig: bool)
+        (filesystemDisabled: bool)
         : obj = jsNative
 
     let private toJs (config: SrtConfig) : obj =
@@ -737,6 +746,7 @@ module SrtSandbox =
             (config.Ripgrep |> Option.defaultValue "")
             config.WeakNesting
             config.AllowGitConfig
+            config.FilesystemDisabled
 
     // The package is loaded on demand: it pulls a proxy stack and a TLS library, and a
     // session on the host backend must not pay for either. Dynamic `import` (not
@@ -800,7 +810,12 @@ module SrtSandbox =
                         let! srt = Interop.awaitPromise (importSrt ())
                         if not (supportedPlatform srt) then
                             return failwith "this platform has no srt sandbox"
-                        do! Interop.awaitPromise (initialize srt (toJs config))
+                        // Always CONFINED, whichever sandbox got here first: srt reads
+                        // the session config for anything a spawn does not name, so an
+                        // exempt one initializing the manager would hand its exemption
+                        // to the session. The exemption rides `customConfig` per spawn,
+                        // which wins outright over this.
+                        do! Interop.awaitPromise (initialize srt (toJs { config with FilesystemDisabled = false }))
                         let! check = Interop.awaitPromise (checkDependencies srt)
                         match dependencyErrors check with
                         | "" -> return srt
@@ -944,7 +959,8 @@ module AgentSandbox =
           WritePaths = [ home ]
           AllowedDomains = Some (domainsFrom ambient)
           Env = env
-          WorkingDirectory = None }
+          WorkingDirectory = None
+          Filesystem = Confined }
 
     let private childProcess : obj = importAll "node:child_process"
     let private nodeStream : obj = importAll "node:stream"

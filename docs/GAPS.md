@@ -386,14 +386,20 @@ Items are roughly ordered by how much they matter.
     per-invocation `GIT_CONFIG_*` hardening wins over any repo config); OUTSIDE it, a
     human running git in the checkout on their own host is not. `.git/hooks` — the other
     half of the same vector — stays denied.
-  - **On macOS a checkout cannot contain what srt refuses to write.** Seatbelt's mandatory
-    denies are patterns, not a scan, and no policy re-allows them: `**/.vscode/**`,
-    `**/.idea/**`, `**/.claude/commands|agents/**`, `**/.mcp.json`, `**/.gitmodules`, and
-    the shell rc names. A repo carrying any of them fails mid-checkout with git's
-    "Operation not permitted". Linux computes its denies by scanning what already exists,
-    so the same clone succeeds there and no suite here can see the difference —
-    `YESSION_AGENT_SANDBOX=host` is the only route for such a repo until srt can be told
-    to stand down per spawn.
+  - **The clone verb runs with no filesystem confinement.** srt refuses writes to
+    `.vscode`, `.idea`, `.claude/commands|agents`, `.mcp.json`, `.gitmodules`, `.git/hooks`
+    and the shell rc names WHEREVER they appear, and no allow-path outranks that refusal —
+    so a confined process cannot materialize a checkout containing any of them, and srt
+    scopes the exemption per SPAWN, never per path. So `add_repo`'s clone has its own
+    sandbox with srt's filesystem rules off: for that one command git can read and write
+    whatever the session's user can, including the credential files srt would otherwise
+    mask. Egress stays pinned to github.com, the env stays the hardened one, and every
+    other verb keeps the confined policy — none of them writes a path srt objects to.
+    macOS enforces the refusal as patterns and Linux as a scan of what already exists, so
+    a Linux clone would have been fine confined; it is exempt there too rather than ship a
+    production path no CI here exercises. Both of these go away the day srt can exempt a
+    subtree rather than a spawn, or reads `allowGitConfig` per spawn — the clone takes the
+    ordinary confined policy again and `FilesystemConfinement` loses its only caller.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **The session's imperative API is split, and only half of it is built**

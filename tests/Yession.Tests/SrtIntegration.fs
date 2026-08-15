@@ -51,7 +51,8 @@ let private policyIn (workspace: string) (domains: string list) : SandboxPolicy 
       WritePaths = [ workspace ]
       AllowedDomains = Some domains
       Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-      WorkingDirectory = Some workspace }
+      WorkingDirectory = Some workspace
+      Filesystem = Confined }
 
 /// How this box confines, as the run's environment configures it — the same parse the
 /// Session Process does at boot, so the suite exercises the deployed shape.

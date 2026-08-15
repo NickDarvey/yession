@@ -245,6 +245,16 @@ let private sandboxPolicyTests =
                     Support.emptyPolicy
             Expect.isTrue config.AllowGitConfig "srt's default denies the write every `git clone` makes"
 
+        testCase "an unconfined policy turns srt's filesystem rules off, and only that policy does" <| fun () ->
+            let tools : Sandboxes.SrtTools =
+                { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
+            let configFor filesystem =
+                Sandboxes.SrtSandbox.configFor tools None { Support.emptyPolicy with Filesystem = filesystem }
+            Expect.isFalse (configFor Confined).FilesystemDisabled "every ordinary sandbox is confined"
+            Expect.isTrue
+                (configFor Unconfined).FilesystemDisabled
+                "the clone's sandbox is not — a checkout carries names srt refuses to write"
+
         testCase "the confinement tools: named, blank is absent, and weakening is never a guess" <| fun () ->
             let tools =
                 Sandboxes.SrtSandbox.toolsFrom
