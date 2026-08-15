@@ -153,6 +153,7 @@ module TerminalQueueDrain =
           /// a second time.
           Removals : QueueId list }
 
+
     /// The gate for ONE terminal, shared by `plan` and `holdOf` so what runs and what the
     /// queue says about why it is not running cannot drift apart.
     ///
@@ -653,6 +654,18 @@ module SessionTerminals =
           /// `npm test` rather than `agent`, a better answer to "what is that terminal for"
           /// than a label would be.
           AgentTerminal : SandboxName -> string -> Async<Result<TerminalId, string>>
+          /// Open a NAMED terminal for the agent (Plan 20, stage 3) — the same verb a person
+          /// has, over the same terminals, so the agent can hold several things open and say
+          /// what each is for.
+          ///
+          /// Refuses when the sandbox already holds `agentTerminalLimit` of them, naming the
+          /// limit. A refusal rather than a hold, and that is the whole reason this verb
+          /// exists: only the agent knows which of its own terminals it has finished with, so
+          /// the answer has to reach it somewhere it can act.
+          OpenAgentTerminal : SandboxName -> string -> Async<Result<TerminalId, string>>
+          /// Whether the agent opened this terminal. What decides if it may close it, and what
+          /// the roster reports as `Mine`.
+          OpenedByAgent : TerminalId -> bool
           /// Close a terminal. Rejected when it is not open.
           Close : TerminalId -> string -> Async<Result<unit, string>>
           /// Run one drained queue entry to completion, recording the block and streaming
@@ -745,6 +758,8 @@ module SessionTerminals =
     let unavailable : SessionTerminals =
         { Open = fun _ _ _ -> async { return Error "this session has no environment" }
           AgentTerminal = fun _ _ -> async { return Error "this session has no environment" }
+          OpenAgentTerminal = fun _ _ -> async { return Error "this session has no environment" }
+          OpenedByAgent = fun _ -> false
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ _ -> async { return () }
           Reject = fun _ _ _ _ -> async { return () }
@@ -818,6 +833,10 @@ module SessionTerminals =
         /// because it is a fact about which terminals exist, and a caller cannot ask for a
         /// second one — `AgentTerminal` is the only way to name it.
         let agentTerminals = Collections.Generic.Dictionary<string, TerminalId> ()
+        /// The NAMED terminals the agent opened for itself. Kept apart from the general-purpose
+        /// one above because the cap counts these: an agent that has filled its allowance can
+        /// still run a plain command, which is the one shell it should never have to ask for.
+        let agentOpened = Collections.Generic.HashSet<string> ()
 
         /// The block a pty terminal is waiting on: what to call when its `D` mark lands, and
         /// the per-block output accounting the piped path keeps in locals. Keyed by terminal,
@@ -1638,6 +1657,44 @@ module SessionTerminals =
         /// prompt — a large change to autonomy smuggled in under a refactor. What the gate
         /// gains instead is teeth: setting `ApproveAgent` on a terminal a human opened now
         /// stops the agent, because there is no second door.
+        /// How many NAMED terminals the agent may hold open in one sandbox (Plan 20, stage 3).
+        /// Enough that independent work genuinely runs alongside itself; small enough that a
+        /// sandbox is not asked to hold an unbounded number of shells because a model asked.
+        /// The general-purpose one is not counted, so a plain command never has to ask.
+        let agentTerminalLimit = 4
+
+        let openAgentTerminal (sandbox: SandboxName) (name: string) : Async<Result<TerminalId, string>> =
+            async {
+                let held =
+                    agentOpened
+                    |> Seq.filter (fun key ->
+                        match live.TryGetValue key with
+                        | true, terminal -> terminal.Sandbox = Some sandbox
+                        | _ -> false)
+                    |> Seq.length
+                let name = name.Trim ()
+                if name = "" then return Error "a terminal needs a name — it is what everyone here reads"
+                elif held >= agentTerminalLimit then
+                    // Named, so the agent can act on it. "No" with a number is a decision it can
+                    // make; "no" on its own is a wall it can only retry.
+                    return
+                        Error (
+                            sprintf
+                                "you already have %d terminals open in %s, which is the limit — close one you have finished with"
+                                held
+                                (SandboxName.value sandbox))
+                else
+                    let title =
+                        if sandbox = SandboxName.defaultName then name
+                        else sprintf "[%s] %s" (SandboxName.value sandbox) name
+                    match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
+                    | Error reason -> return Error reason
+                    | Ok id ->
+                        agentOpened.Add (TerminalId.value id) |> ignore
+                        setAutoRun id
+                        return Ok id
+            }
+
         let agentTerminal (sandbox: SandboxName) (reason: string) : Async<Result<TerminalId, string>> =
             async {
                 let key = SandboxName.value sandbox
@@ -1649,7 +1706,7 @@ module SessionTerminals =
                     // terminals in a strip are navigable only if each says where it is.
                     let title =
                         if sandbox = SandboxName.defaultName then label
-                        else sprintf "[%s] %s" key label
+                        else sprintf "[%s] %s" (SandboxName.value sandbox) label
                     match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
                     | Error reason -> return Error reason
                     | Ok id ->
@@ -1658,8 +1715,11 @@ module SessionTerminals =
                         return Ok id
             }
 
+
         { Open = openTerminal
           AgentTerminal = agentTerminal
+          OpenAgentTerminal = openAgentTerminal
+          OpenedByAgent = fun id -> agentOpened.Contains (TerminalId.value id)
           Close = closeTerminal
           RunBlock = runBlock
           Reject = reject
@@ -1856,14 +1916,14 @@ module TerminalCommands =
         { /// Not `ExecuteCommand`: the agent-facing capability takes no authority argument,
           /// and this takes the one the per-turn binding supplies. Two shapes because they
           /// are two audiences — the tool surface must not be able to name a credential.
-          Execute : CommandTarget option -> string -> bool -> Authority -> Async<Result<TerminalCommandOutcome, string>>
+          Execute : CommandRequest -> Authority -> Async<Result<TerminalCommandOutcome, string>>
           /// Resume a terminal handle. The terminal HALF of `CheckPending` (Plan 15, stage
           /// 3b): the Host joins it to the command gate's half, because a handle names a
           /// request without saying which kind, which is exactly what makes one tool enough.
           Read : QueueId -> Async<Result<TerminalCommandOutcome, string>> }
 
     let unavailable : TerminalCommands =
-        { Execute = fun _ _ _ _ -> async { return Error "this session has no terminals" }
+        { Execute = fun _ _ -> async { return Error "this session has no terminals" }
           Read = fun _ -> async { return Error "this session has no terminals" } }
 
     /// Wake on the next change, or on a short tick. The tick is a floor, not the mechanism:
@@ -1993,9 +2053,7 @@ module TerminalCommands =
             }
 
         let execute
-            (requested: CommandTarget option)
-            (command: string)
-            (background: bool)
+            (request: CommandRequest)
             // Who is behind it (Plan 20). Supplied by the per-turn binding rather than by the
             // agent, for the reason the authority itself is: an acting party that could name
             // its own is not gated by one. A value rather than a loose owner, so the binding
@@ -2003,19 +2061,19 @@ module TerminalCommands =
             (authority: Authority)
             : Async<Result<TerminalCommandOutcome, string>> =
             async {
-                let command = command.Trim ()
+                let command = request.Command.Trim ()
                 if command = "" then return Error "a command cannot be empty"
                 else
                     let! terminal =
                         async {
-                            match requested with
+                            match request.Target with
                             | Some (InTerminal id) when terminals.IsOpen id -> return Ok id
                             | Some (InTerminal _) -> return Error "that terminal is not open"
                             // The agent's own terminal IN THAT SANDBOX, titled with what
                             // it is for. One per sandbox, so a command sent to `test` does
                             // not silently run in `default`.
-                            | Some (InSandbox sandbox) -> return! agentTerminal sandbox command
-                            | None -> return! agentTerminal SandboxName.defaultName command
+                            | Some (InSandbox sandbox) -> return! agentTerminal sandbox request.Command
+                            | None -> return! agentTerminal SandboxName.defaultName request.Command
                         }
                     match terminal, syncedOf () with
                     | Error reason, _ -> return Error reason
@@ -2032,8 +2090,8 @@ module TerminalCommands =
                             authority
                             (TerminalQueueOrder.nextFor terminal synced.Pending)
                             command
-                            background
-                        if not background then return! awaitOutcome terminal handle (now ()) None
+                            request.Background
+                        if not request.Background then return! awaitOutcome terminal handle (now ()) None
                         else
                             // Answer with what is true NOW rather than waiting: the caller
                             // said it is not waiting, and the outcome reaches it as a wake

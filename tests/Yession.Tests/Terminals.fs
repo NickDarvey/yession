@@ -173,6 +173,8 @@ let private queueOf entries =
     entries |> List.map (fun (e: PendingAct) -> e.QueueId, e) |> Map.ofList
 
 let private allOpen (_: TerminalId) = true
+/// No lane cap in play. These cases are about the drain's other holds; the cap has its own.
+let private noLaneCap (_: TerminalId) = false
 let private planWith consumed busy isOpen modeOf entries =
     TerminalQueueDrain.plan consumed busy Set.empty Set.empty isOpen modeOf (queueOf entries)
 
@@ -1686,6 +1688,10 @@ let private recordingTranscripts () =
             | _ -> None)
         |> List.ofSeq)
 
+/// Note the exhaustion behaviour: the LAST id repeats for ever rather than running out. That
+/// is deliberate for the cases that only ever open one or two terminals, and a trap for any
+/// that open more — two terminals with one id are not two terminals. Keep the lists longer
+/// than any case needs.
 let private mintFrom (ids: string list) =
     let remaining = ResizeArray<string> ids
     fun () ->
@@ -1694,7 +1700,7 @@ let private mintFrom (ids: string list) =
         next
 
 let private makeTerminalsGated attach setAutoRun (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
-    let mintTerminal = mintFrom [ "term-a"; "term-b" ]
+    let mintTerminal = mintFrom [ "term-a"; "term-b"; "term-c"; "term-d"; "term-e"; "term-f" ]
     let mintBlock = mintFrom [ "b-1"; "b-2"; "b-3" ]
     let records = ResizeArray<TerminalId * int * TranscriptRecord> ()
     let terminals =
@@ -2415,6 +2421,81 @@ let private agentTerminalTests =
             }
     ]
 
+// The agent's own terminal verbs (Plan 20, stage 3): the same ones a person has, over the
+// same terminals. The cap is a refusal rather than a hold, because only the agent knows which
+// of its terminals it has finished with.
+let private agentVerbTests =
+    let fixture () =
+        let log = newLog ()
+        let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+        let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+        let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+        terminals, log
+    let openFour (terminals: SessionTerminals.SessionTerminals) =
+        async {
+            let mutable last = Unchecked.defaultof<Result<TerminalId, string>>
+            for n in 1 .. 4 do
+                let! opened = terminals.OpenAgentTerminal SandboxName.defaultName (sprintf "job-%d" n)
+                last <- opened
+            return last
+        }
+    testList "The agent's terminal verbs" [
+
+        testCaseAsync "a terminal it opens is named for the job, and is its own" <|
+            async {
+                let terminals, log = fixture ()
+                let! opened = terminals.OpenAgentTerminal SandboxName.defaultName "tests"
+                let id = opened |> expect
+                Expect.isTrue (terminals.OpenedByAgent id) "the agent may close what it opened"
+                let! events = eventsOf log
+                let titles = events |> List.choose (function SessionEvent.TerminalOpened o -> Some o.Title | _ -> None)
+                Expect.equal titles [ "tests" ] "and everyone reads the name it gave"
+            }
+
+        testCaseAsync "at the limit it is refused, and told the number" <|
+            async {
+                // Named, so the agent can act on it: "no" with a number is a decision it can
+                // make, "no" on its own is a wall it can only retry.
+                let terminals, _ = fixture ()
+                let! _ = openFour terminals
+                let! fifth = terminals.OpenAgentTerminal SandboxName.defaultName "one more"
+                match fifth with
+                | Ok _ -> failwith "a fifth terminal must not open"
+                | Error reason ->
+                    Expect.isTrue (reason.Contains "4") "the limit is stated"
+                    Expect.isTrue (reason.Contains "close") "and so is what to do about it"
+            }
+
+        testCaseAsync "closing one makes room" <|
+            async {
+                let terminals, _ = fixture ()
+                let! fourth = openFour terminals
+                let! _ = terminals.Close (fourth |> expect) "done"
+                let! next = terminals.OpenAgentTerminal SandboxName.defaultName "one more"
+                Expect.isTrue (Result.isOk next) "the limit counts what is OPEN, not what ever was"
+            }
+
+        testCaseAsync "a plain command still gets a shell at the limit" <|
+            async {
+                // The general-purpose terminal is not counted. An agent that has filled its
+                // allowance can still run one command, which is the shell it should never have
+                // to ask for.
+                let terminals, _ = fixture ()
+                let! _ = openFour terminals
+                let! general = terminals.AgentTerminal SandboxName.defaultName "git status"
+                Expect.isTrue (Result.isOk general) "the one door is never closed by the cap"
+            }
+
+        testCaseAsync "a terminal a person opened is not the agent's" <|
+            async {
+                let terminals, _ = fixture ()
+                let! theirs = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "mine"
+                Expect.isFalse
+                    (terminals.OpenedByAgent (theirs |> expect))
+                    "a human typing in their own shell is not the agent's to end"
+            }
+    ]
+
 let tests =
     testList "Terminals (Plan 13)" [
         affordanceTests
@@ -2437,6 +2518,7 @@ let tests =
         ansiTests
         transcriptTests
         agentTerminalTests
+        agentVerbTests
         codecTests
         orderTests
         managerTests
