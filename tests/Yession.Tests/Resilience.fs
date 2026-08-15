@@ -783,6 +783,38 @@ let private surfaceTests =
             Expect.isTrue (healthy.Contains (Dom.attr Dom.Hooks.feed Dom.Text.feedLive)) "a live feed says so quietly"
             Expect.isFalse (healthy.Contains Dom.Hooks.degraded) "and takes no room on the page"
 
+        testCase "history this device does not hold is said when nothing is coming to fill it" <| fun () ->
+            // A conversation that starts in the middle, on a client that cannot reach its
+            // session: nothing here can repair it, so the timeline says what it is instead of
+            // letting a truncated history read as the whole of one.
+            let model = ClientModel.init (peer "ada" "Ada")
+            let html =
+                Support.render
+                    { model with
+                        Connection = Disconnected (Some "session unreachable")
+                        // As the replay leaves it: the walk that found the hole is the walk
+                        // that finished looking.
+                        HistoryRead = true
+                        EventConsumer =
+                            { model.EventConsumer with MissingBefore = Some (EventOffset.create 22L |> expect) } }
+            Expect.isTrue (html.Contains "data-history-gap") "the timeline says its earlier half is not here"
+
+        testCase "a gap the feed is already filling says nothing" <| fun () ->
+            // The regression that made this its own fact: a hole is found before a single
+            // read leaves the client, and the read that follows resumes exactly where the
+            // fill has to start. Reported as feed health it flashed a red "history paused"
+            // over the cold open of anyone whose store had one — for the one round trip it
+            // took to repair itself.
+            let model = ClientModel.init (peer "ada" "Ada")
+            let html =
+                Support.render
+                    { model with
+                        Connection = Connected
+                        EventConsumer =
+                            { model.EventConsumer with MissingBefore = Some (EventOffset.create 22L |> expect) } }
+            Expect.isFalse (html.Contains "data-history-gap") "a hole being filled is catch-up, not a fact worth a line"
+            Expect.isFalse (html.Contains Dom.Hooks.degraded) "and nothing about it is a degradation"
+
         testCase "the session leg outranks the feed: one strip, one problem" <| fun () ->
             // A Process that cannot be reached cannot serve its feed either, so reporting both
             // would be reporting one fault twice.

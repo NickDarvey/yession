@@ -52,7 +52,19 @@ type EventConsumerState =
       /// Whether reads are getting through at all. `IsCatchingUp` says there is more to
       /// read; this says whether reading is possible — the distinction the old design had
       /// no way to express, because a failed fetch was reported as an empty final page.
-      Feed                : FeedHealth }
+      Feed                : FeedHealth
+      /// Where this client's KEPT history resumes, when the boot replay could not walk to
+      /// it (Plan 20): everything between `LastProcessedOffset` and this offset is not on
+      /// this device. `None` is the ordinary state — nothing kept, or everything kept in
+      /// one unbroken run.
+      ///
+      /// A fact about the STORE, never about the feed: it is settled before a single read
+      /// leaves this client, so it can neither prove nor deny that history is arriving. The
+      /// feed repairs it — a read resumes at the cursor, which the replay parked at exactly
+      /// the offset the fill has to start from — which is why any page off the network
+      /// clears it. Reported as feed health, it flashed a red "history paused" over every
+      /// cold open with an out-of-order store, moments before the first page fixed it.
+      MissingBefore       : EventOffset option }
 
 type AgentViewState = { ActiveTurn : AgentTurnId option }
 
@@ -405,6 +417,14 @@ type ClientMsg =
     /// off the local store proves only that this client kept it, and an offline client
     /// reporting a live history feed would be lying about the one leg that is down.
     | LocalHistoryMsg of EventPage<SessionEvent>
+    /// The boot replay could not walk all the way through what this client kept (Plan 20):
+    /// the carried offset is where the kept history resumes, and everything between the read
+    /// cursor and it is not on this device.
+    ///
+    /// Its own message rather than a feed fault, because it is not one: no read has been
+    /// attempted when it is dispatched, and the next one repairs it. See
+    /// `EventConsumerState.MissingBefore`.
+    | LocalHistoryGapMsg of EventOffset
     /// The client has finished reading what it already had (Plan 20) — whether that was a
     /// full conversation, or nothing at all because it keeps nothing. Either way it has now
     /// LOOKED, which is what the timeline needs to know before it can claim a session is
@@ -572,7 +592,9 @@ module ClientModel =
               IsCatchingUp = false
               CatchUpIsSlow = false
               // Nothing has failed yet; the first read decides.
-              Feed = FeedLive }
+              Feed = FeedLive
+              // Nothing has been looked at yet; the replay decides.
+              MissingBefore = None }
           Agent = { ActiveTurn = None }
           Presence = Map.empty
           Peers = Map.empty
@@ -1222,7 +1244,18 @@ module ClientModel =
                       Feed =
                         match msg with
                         | EventsPageMsg _ -> FeedLive
-                        | _ -> model.EventConsumer.Feed } }
+                        | _ -> model.EventConsumer.Feed
+                      // A page off the NETWORK resumes at the cursor and runs unbroken from
+                      // it, so whatever the store was missing before it is being filled —
+                      // what is left to arrive is ordinary catch-up, which `IsCatchingUp`
+                      // already says. A page off the local store is what found the hole in
+                      // the first place and cannot have repaired it.
+                      MissingBefore =
+                        match msg with
+                        | EventsPageMsg _ -> None
+                        | _ -> model.EventConsumer.MissingBefore } }
+        | LocalHistoryGapMsg resumesAt ->
+            { model with EventConsumer = { model.EventConsumer with MissingBefore = Some resumesAt } }
         | HistoryReadMsg -> { model with HistoryRead = true }
         | EventFeedMsg health ->
             { model with EventConsumer = { model.EventConsumer with Feed = health } }
