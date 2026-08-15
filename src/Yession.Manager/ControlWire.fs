@@ -167,6 +167,27 @@ module ControlWire =
     /// Store a pasted static token/key verbatim.
     type ConnectionPutRequest = { Target : SecretId; Value : string }
 
+    /// Store a grant the SESSION obtained itself, as a grant — the device flow (RFC 8628)
+    /// is a whole authorization the session runs end to end, and there is no code for the
+    /// broker to exchange by the time it finishes. Put next to `ConnectionPutRequest`
+    /// rather than instead of it, because the difference is the point: a pasted token is
+    /// static and cannot rotate, and this one can.
+    ///
+    /// It carries what a later refresh needs and what the session is the only one to know:
+    /// the provider's token endpoint, the client id the grant was minted for, and the
+    /// dialect that endpoint speaks. The lifetimes arrive as the provider states them
+    /// (seconds from now), because that is what an OAuth token response says and the clock
+    /// that matters for storing an absolute expiry is the Manager's.
+    type ConnectionPutGrantRequest =
+        { Target : SecretId
+          AccessToken : string
+          RefreshToken : string option
+          ExpiresIn : int option
+          RefreshTokenExpiresIn : int option
+          TokenUrl : string
+          ClientId : string
+          TokenDialect : TokenRequestDialect }
+
     type ConnectionDisconnectRequest = { Target : SecretId }
     type ConnectionDisconnectResponse = { Disconnected : bool }
 
@@ -275,6 +296,37 @@ module ControlWire =
             Decode.object (fun get ->
                 { ConnectionPutRequest.Target = get.Required.Field "target" secretId.Decode
                   ConnectionPutRequest.Value = get.Required.Field "value" Decode.string }) }
+
+    let connectionPutGrantRequest : Codec<ConnectionPutGrantRequest> =
+        { Encode =
+            fun (r: ConnectionPutGrantRequest) ->
+                Encode.object
+                    [ "target", secretId.Encode r.Target
+                      "accessToken", Encode.string r.AccessToken
+                      "refreshToken", Encode.option Encode.string r.RefreshToken
+                      "expiresIn", Encode.option Encode.int r.ExpiresIn
+                      "refreshTokenExpiresIn", Encode.option Encode.int r.RefreshTokenExpiresIn
+                      "tokenUrl", Encode.string r.TokenUrl
+                      "clientId", Encode.string r.ClientId
+                      "tokenDialect", Encode.string (TokenRequestDialect.describe r.TokenDialect) ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionPutGrantRequest.Target = get.Required.Field "target" secretId.Decode
+                  ConnectionPutGrantRequest.AccessToken = get.Required.Field "accessToken" Decode.string
+                  // Every lifetime is optional because a provider states them only when it
+                  // means them: a GitHub App with user-token expiration turned off answers
+                  // an access token and nothing else, and that grant is simply one that
+                  // never comes due.
+                  ConnectionPutGrantRequest.RefreshToken = get.Optional.Field "refreshToken" Decode.string
+                  ConnectionPutGrantRequest.ExpiresIn = get.Optional.Field "expiresIn" Decode.int
+                  ConnectionPutGrantRequest.RefreshTokenExpiresIn =
+                    get.Optional.Field "refreshTokenExpiresIn" Decode.int
+                  ConnectionPutGrantRequest.TokenUrl = get.Required.Field "tokenUrl" Decode.string
+                  ConnectionPutGrantRequest.ClientId = get.Required.Field "clientId" Decode.string
+                  ConnectionPutGrantRequest.TokenDialect =
+                    get.Optional.Field "tokenDialect" Decode.string
+                    |> Option.map TokenRequestDialect.ofString
+                    |> Option.defaultValue FormEncoded }) }
 
     let connectionDisconnectRequest : Codec<ConnectionDisconnectRequest> =
         { Encode = fun (r: ConnectionDisconnectRequest) -> Encode.object [ "target", secretId.Encode r.Target ]

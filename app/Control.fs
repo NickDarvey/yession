@@ -30,6 +30,7 @@ module Yession.Host.Control
 //   POST /control/connections/begin      ConnectionBeginRequest -> { authorizeUrl, state }
 //   POST /control/connections/complete   { target, code }       -> "ok" (manual paste completion)
 //   POST /control/connections/put        { target, value }      -> "ok" (static token)
+//   POST /control/connections/put-grant  { target, accessToken, … } -> "ok" (refreshable)
 //   POST /control/connections/disconnect { target }             -> { disconnected }
 //   POST /control/connections/resolve    { target }             -> { kind, value }
 //        (the ONE value-returning route (Plan 08): an agent turn needs the token
@@ -86,6 +87,7 @@ type ConnectionsApi =
     { Begin : ControlCaller -> ControlWire.ConnectionBeginRequest -> Async<Result<ControlWire.ConnectionBeginResponse, SecretsError>>
       Complete : ControlCaller -> ControlWire.ConnectionCompleteRequest -> Async<Result<unit, SecretsError>>
       Put : ControlCaller -> ControlWire.ConnectionPutRequest -> Async<Result<unit, SecretsError>>
+      PutGrant : ControlCaller -> ControlWire.ConnectionPutGrantRequest -> Async<Result<unit, SecretsError>>
       Disconnect : ControlCaller -> ControlWire.ConnectionDisconnectRequest -> Async<Result<ControlWire.ConnectionDisconnectResponse, SecretsError>>
       Resolve : ControlCaller -> ControlWire.ConnectionResolveRequest -> Async<Result<ControlWire.ConnectionResolveResponse, SecretsError>>
       Status : ControlCaller -> Async<ConnectionStatusList> }
@@ -222,7 +224,7 @@ let tryHandle
                                         (fun deleted -> ControlWire.toString ControlWire.deleteSecretResponse { Deleted = deleted })
                                         outcome
                                 }))
-            | "POST", ("/control/connections/begin" | "/control/connections/complete" | "/control/connections/put" | "/control/connections/disconnect" | "/control/connections/resolve" as connectionsPath) ->
+            | "POST", ("/control/connections/begin" | "/control/connections/complete" | "/control/connections/put" | "/control/connections/put-grant" | "/control/connections/disconnect" | "/control/connections/resolve" as connectionsPath) ->
                 // Connections (Plan 08). Same thin-arm shape as secrets: decode, hand the
                 // verified caller to the pre-authorized handlers, map the outcome.
                 match connectionsApi with
@@ -253,6 +255,13 @@ let tryHandle
                             Async.StartImmediate (
                                 async {
                                     let! outcome = api.Put caller request
+                                    respondWith (fun () -> "\"ok\"") outcome
+                                }))
+                    | "/control/connections/put-grant" ->
+                        decodeAnd (ControlWire.fromString ControlWire.connectionPutGrantRequest) (fun request ->
+                            Async.StartImmediate (
+                                async {
+                                    let! outcome = api.PutGrant caller request
                                     respondWith (fun () -> "\"ok\"") outcome
                                 }))
                     | "/control/connections/disconnect" ->
