@@ -23,7 +23,7 @@ open Yession.Domain
 ///
 ///   Strokes — every border in the product is composed from the `Stroke` vocabulary
 ///   below (width, tone, and what interaction does to it) into a handful of phrases —
-///   `field`/`fieldMono`/`fieldBare`, `rowBase`/`rowLift`, `focusRing` — and those
+///   `field`/`fieldSelect`/`fieldBare`, `rowBase`/`rowLift`, `focusRing` — and those
 ///   phrases are what surfaces wear. No bare `border-*` utility is written outside
 ///   `Stroke`, and none at all in the views. The two remaining literals are variant-
 ///   PREFIXED (`md:[.nav-alt_&]:border-r-0`), undoing a column's divider while it is
@@ -229,6 +229,23 @@ module Style =
     /// 32px square, destructive: the composer's discard — the same height as the Send
     /// button it sits beside, so the pair shares top and bottom edges.
     let btnIconDangerLg = btnIconBase + " w-8 h-8" + btnIconDangerFace
+
+    /// 32px square and BORDERLESS: the verb at the trailing edge of a field.
+    ///
+    /// A Metro button IS its rectangle, so dropping the rectangle is not a quieter button, it
+    /// is a different kind of control — and it earns that by living inside the field it acts
+    /// on rather than beside it. `SEND →` was the word and the arrow saying one thing twice
+    /// in a 93px box on a strip of its own; the arrow alone, on the line you just wrote, says
+    /// it once. The name goes on `aria-label`, which is where an icon-only control keeps it.
+    let private btnInField =
+        cls [ "w-8 h-8 shrink-0 grid place-items-center bg-transparent border-0 cursor-pointer p-0"
+              "transition-colors"; focusRing ]
+    let btnSendInField = cls [ btnInField; "text-blue hover:text-blue-bright" ]
+    /// Waiting for something to send. The same control in the same place, at the weight of a
+    /// thing with nothing to do — never `disabled`, in either spelling: an empty composer is
+    /// not a blocked one.
+    let btnSendInFieldWaiting = cls [ btnInField; "text-ink-faint hover:text-ink" ]
+    let btnDiscardInField = cls [ btnInField; "text-ink-faint hover:text-err" ]
     /// Chrome, not an action: the small sidebar collapse/reveal chevrons. They lean the way
     /// they travel on hover and lead further on press — the only motion chrome earns, and the
     /// reason the two directions are separate values rather than one class plus a guess.
@@ -305,10 +322,6 @@ module Style =
     let fieldSelectWrap = "relative w-full"
     let fieldSelectWrapOf (width: string) = cls [ "relative"; width ]
     let fieldSelectMark = "pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ink-faint"
-
-    /// The same field in mono, sized by the flex row that holds it — a command line is a
-    /// field, not a terminal.
-    let fieldMono = cls [ fieldFace; "flex-1 min-w-0 font-terminal text-code text-ink placeholder:text-ink-faint"; touchType ]
 
     /// The chrome-LESS field: an input whose CONTAINER already carries the stroke (the
     /// composer's box, a listed row's leading edge), so the control itself must draw
@@ -711,52 +724,76 @@ module Style =
         "flex gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 transition-opacity"
 
     // --- Composer: the one gradient in the product lives on its focus edge --------------------
+    // A COMPOSER IS A BAND, not a box on a ground. It used to be a bordered box inside a padded
+    // section inside a bordered column — a box in a box in a box, of which only the innermost
+    // one could be typed in, and each nested rectangle bought nothing but another edge to
+    // notice. The band runs the full width of its column and is told apart from what is above
+    // it the way any two surfaces here are: a tone, and a rule.
 
-    let composer = "shrink-0 flex flex-col gap-3 px-8 pt-4 pb-6 max-md:px-4 max-md:pb-4"
-    /// The box lifts a tone while anything inside it has focus, so "this is where I am typing"
-    /// is legible at a glance and not only from the 2px edge below.
-    let draftBox = "group relative bg-surface focus-within:bg-surface-2 transition-colors"
+    /// The band a message is written in. Lifts a tone while anything inside it has focus, so
+    /// "this is where I am typing" is legible at a glance and not only from the 2px rule.
+    let composer =
+        "group relative shrink-0 flex flex-col bg-surface focus-within:bg-surface-2 transition-colors"
 
-    /// The composer's left edge, in two parts — because it was doing two jobs as one element
-    /// and could only ever do one of them.
+    /// The band's top rule, in two parts — because it is doing two jobs and one element could
+    /// only ever do one of them.
     ///
-    /// The edge used to be scaled to NOTHING until focus, so an untouched session was a black
-    /// column containing a black box: the composer's `#111` barely separates from the `#000`
-    /// canvas, and the edge — the one thing marking "this is where you type" — appeared only
-    /// once you had already found it and clicked. But simply leaving it up at rest would spend
-    /// the focus gesture, and "grows from the top" is a named part of this design language.
+    /// The gradient used to be scaled to NOTHING until focus, so an untouched session was a
+    /// black column containing a black box: `#111` barely separates from the `#000` canvas, and
+    /// the edge — the one thing marking "this is where you type" — appeared only once you had
+    /// already found it and clicked. Leaving it up at rest instead would spend the focus
+    /// gesture. So: a dim white hairline that is always there (the marker), and the gradient
+    /// growing over it on focus (the gesture).
     ///
-    /// So: a dim rail that is always there (the marker), and the gradient growing over it on
-    /// focus (the gesture). Same 2px column, same gradient, spent exactly once in the product.
-    let draftRail = "absolute left-0 inset-y-0 w-0.5 bg-grad opacity-25"
+    /// It is the same pair that used to run down the composer's LEFT edge, turned ninety
+    /// degrees to become the band's separator from the column above. Same 2px, same
+    /// blue→green — Zune's orange→pink signature, recast — still spent exactly once in the
+    /// product. Worn by the message composer and the terminal's command band alike, because
+    /// they are the same object on two surfaces.
+    let bandRail = "absolute inset-x-0 top-0 h-0.5 bg-ink/15"
+    let bandEdge =
+        "absolute inset-x-0 top-0 h-0.5 bg-grad scale-x-0 origin-left transition-transform "
+        + "duration-300 ease-out group-focus-within:scale-x-100 motion-reduce:transition-none"
 
-    /// The focus edge: grows top-to-bottom over the rail in the blue→green gradient —
-    /// Zune's orange→pink signature, recast.
-    let draftEdge =
-        "absolute left-0 inset-y-0 w-0.5 bg-grad scale-y-0 origin-top transition-transform "
-        + "duration-300 ease-out group-focus-within:scale-y-100 motion-reduce:transition-none"
+    /// A ROW, since the actions moved into it: the box was 56px of which 40 was a strip under
+    /// the text holding a 93px bordered rectangle that said Send and then drew an arrow saying
+    /// it again. The verb belongs at the trailing edge of the line you just wrote, which is
+    /// where it now is — the same shape the terminal's command line takes, so a person moving
+    /// between the two columns meets one object twice instead of two conventions.
+    ///
+    /// Carries no fill and no edge of its own any more: the band it sits in is the surface.
+    let draftBox = "relative flex items-end"
 
-    /// Chrome-less by construction (`fieldBare`): the box around it carries the stroke, and
-    /// the focus signal is the gradient edge plus the box's lift.
+    /// Chrome-less by construction (`fieldBare`): the band carries the tone and the rule, and
+    /// the focus signal is the gradient growing across it.
+    ///
+    /// ONE LINE at rest, growing upward on focus. A composer that is 96px of empty box for
+    /// most of a session is spending the conversation's height on the promise of a message
+    /// rather than on the messages; it takes the room when it is being used and gives it back
+    /// when it is not. `max-height` rather than `height` so the growth is animatable and so a
+    /// long draft still scrolls inside rather than pushing the timeline off the top.
     let draftInput =
-        cls [ "block w-full"; fieldBare
+        cls [ "block w-full max-h-10 overflow-hidden transition-[max-height] duration-200 ease-out"
+              "group-focus-within:max-h-64 group-focus-within:overflow-y-auto motion-reduce:transition-none"
+              fieldBare
               messageVoice false
-              "font-light text-body text-ink placeholder:text-ink-faint px-4 pt-3 pb-1"; touchType ]
+              "font-light text-body text-ink placeholder:text-ink-faint px-4 py-2"; touchType ]
 
-    let draftActions = "flex items-center gap-2 pl-4 pr-2 pb-2"
-
-    /// What the keys do, said where the keys are — and only while you are in the composer,
-    /// so it teaches once and then gets out of the way. Never the only route: every action
-    /// it names has a button on this same row.
-    let draftHint =
-        "hidden md:block min-w-0 truncate " + caps + " text-ink-faint opacity-0 transition-opacity "
-        + "group-focus-within:opacity-100 motion-reduce:transition-none"
+    /// The writing side of the box: whose message it is, then the message. A column only
+    /// because someone else's draft says so above the words; your own — the case that is
+    /// almost always on screen — is the input and nothing else.
+    let draftBody = "flex-1 min-w-0 flex flex-col"
 
     /// Send sits at the TRAILING edge — where the eye ends the line it just wrote, and where
-    /// every send button a person has ever used lives — with discard as its quiet neighbour.
-    /// Everything that describes the draft (who is in it, whose it is) stays on the left.
-    let draftCommit = "ml-auto flex items-center gap-2"
-    let draftAuthor = "pr-1 " + caps + " text-ink-faint truncate"
+    /// every send button a person has ever used lives — with discard as its quiet neighbour
+    /// and whoever is typing beside them.
+    ///
+    /// The keyboard hint that used to sit on this row is gone from the layout. It was true and
+    /// it taught something, but it spent a permanent strip saying what one press teaches; it
+    /// survives as `aria-keyshortcuts` on the control it describes, which is where a screen
+    /// reader looks for it and where it cannot go stale.
+    let draftCommit = "shrink-0 flex items-center gap-1 pr-2 pb-2"
+    let draftAuthor = "pl-4 pt-2 " + caps + " text-ink-faint truncate"
 
     // A draft nobody has open here: one line of it, so the composer reads as "what is being
     // written" rather than a stack of boxes. Clicking it opens it (and closes whatever was).
@@ -783,7 +820,7 @@ module Style =
 
     /// Starts your own draft, collapsing whoever's is open — the escape hatch from joining.
     let draftNew =
-        "self-end bg-transparent border-0 cursor-pointer " + caps
+        "self-end bg-transparent border-0 cursor-pointer px-4 py-2 " + caps
         + " text-ink-faint hover:text-blue transition-colors " + focusRing
 
     // --- Settings ------------------------------------------------------------------------------
@@ -838,23 +875,103 @@ module Style =
     /// chat is a back-swipe away rather than an overlay to dismiss, and desktop and phone
     /// stay the same mental model. The old 92vw left a sliver of chat showing beside it,
     /// which reads as a dialog: something you get rid of rather than somewhere you are.
+    /// On desktop the width is a CUSTOM PROPERTY the shell root carries, not the token — the
+    /// token is its default. 420px was picked as "the width the content actually has" and is
+    /// 20 columns short of the 80 a terminal prints; rather than guess a better number for
+    /// everybody, the split is draggable and remembered (`PaneShell.installPaneResize`). The
+    /// transition is suppressed while dragging, or the column chases the pointer a frame late.
     let terminalPanel =
-        "relative w-term shrink-0 bg-panel h-full overflow-hidden z-40 flex flex-col " + Stroke.dividerLeft + " "
-        + "md:transition-[width] md:duration-200 md:ease-out "
+        "relative w-term md:w-[var(--term-w,var(--spacing-term))] shrink-0 bg-panel h-full overflow-hidden z-40 flex flex-col "
+        + Stroke.dividerLeft + " "
+        + "md:transition-[width] md:duration-200 md:ease-out md:[.term-resizing_&]:transition-none "
         + "md:[.term-closed_&]:w-0 md:[.term-closed_&]:border-l-0 "
         + "max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:w-full max-md:border-l-0 "
         + "max-md:transition-transform max-md:duration-200 max-md:ease-out "
         + "max-md:[.term-closed_&]:translate-x-[101%] motion-reduce:transition-none"
 
     /// Held at the column's full width so nothing reflows while the column animates shut.
-    let terminalPane = "absolute inset-0 w-term max-md:w-full flex flex-col"
+    let terminalPane = "absolute inset-0 md:w-[var(--term-w,var(--spacing-term))] w-term max-md:w-full flex flex-col"
 
-    /// The column's head, on the same 88px band as the sidebar and the main header.
-    let terminalHead = "h-band shrink-0 flex items-end justify-between gap-2 px-5 pb-5 " + Stroke.dividerBottom
+    /// The split between the chat and this column, made draggable — a real `separator`, so it
+    /// answers to the arrow keys as well as the pointer. Desktop only: on a phone the pane IS
+    /// the column and there is nothing to divide.
+    ///
+    /// Inside the panel rather than straddling the divider, because the panel clips its
+    /// overflow — which also rules out an outline for focus, so focus is the same blue the
+    /// hover shows, at full strength.
+    let terminalResize =
+        cls [ "max-md:hidden absolute left-0 inset-y-0 w-1.5 z-50 cursor-col-resize"
+              "bg-transparent hover:bg-blue/50 focus-visible:bg-blue focus-visible:outline-none"
+              "transition-colors motion-reduce:transition-none" ]
+
+    /// The column's head: a PROPERTIES BAR, not a title.
+    ///
+    /// It used to be the 88px band the sidebar and the main header wear, carrying the word
+    /// "terminals" — the largest text on a phone screen, telling a reader looking at terminals
+    /// that these are terminals, for 10% of the height. What a reader cannot otherwise know is
+    /// which terminal this is and whether the agent has to ask before it runs, and neither had
+    /// anywhere to live: the second was a labelled form control directly above the command
+    /// line, in the highest-attention position on the surface, for a setting changed twice a
+    /// session.
+    ///
+    /// So: 40px, at BOTH breakpoints, holding what this terminal IS plus the acts that are
+    /// about the terminal rather than about the command you are typing. The band token is not
+    /// missed — a band is for a heading, and this is a readout.
+    let terminalHead = "h-10 shrink-0 flex items-center gap-2 px-3 " + Stroke.dividerBottom
+    /// Which terminal this is. The one thing in the bar that is neither a fact you can change
+    /// nor an act — so it is the only thing in ink.
+    let terminalHeadName = "flex-1 min-w-0 truncate font-ui text-small text-ink"
+
+    /// A property of the terminal, stated as a fact and changed by touching the fact.
+    ///
+    /// Not a labelled control: the label existed because the VALUES could not stand alone
+    /// ("the agent's commands" is an answer with its question missing). Values that say what
+    /// they are — `approval: agent` — leave a label nothing to add, and the control collapses
+    /// to the readout it always wanted to be.
+    ///
+    /// BARE, in the field vocabulary's second sense (`fieldBare`): it draws no box because the
+    /// bar it sits in carries the structure. Which is the honest reading — this is not a field
+    /// you type into that happens to look quiet, it is a stated fact you can touch, and a
+    /// control that invented its own border would be the third thing the chrome-consistency
+    /// suite exists to rule out.
+    let private terminalPropBase =
+        cls [ caps; "bg-transparent border-0 outline-none appearance-none cursor-pointer shrink-0"
+              "pl-1.5 pr-4 py-1 transition-colors"; focusRing ]
+    let terminalProp = cls [ terminalPropBase; "text-ink-faint hover:text-ink" ]
+    /// The same readout wearing the alarm, for the setting that lets commands run unasked. A
+    /// safety property whose most permissive value is the quietest thing on screen is
+    /// backwards; this is the one place in the pane where err is not an error.
+    let terminalPropAlert = cls [ terminalPropBase; "text-err" ]
+    /// The readout is a `<select>`, so it needs the caret `appearance-none` took away — drawn
+    /// beside it, deaf to the pointer so the whole readout still opens the menu.
+    let terminalPropWrap = "relative flex items-center shrink-0"
+    let terminalPropMark = "pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-ink-faint"
+
+    /// An act that is about THIS TERMINAL rather than about the command you are writing:
+    /// closing it, stepping back through its recording. In the bar's voice — quiet text — not
+    /// as another bordered rectangle in a strip already full of them.
+    let private terminalBarActBase =
+        cls [ caps; "bg-transparent cursor-pointer shrink-0 px-1.5 py-1 transition-colors"
+              Stroke.clear; focusRing ]
+    let terminalBarAct = cls [ terminalBarActBase; "text-ink-faint hover:text-ink" ]
+    /// The acts, grouped and set apart from the facts beside them. Same tone, same voice —
+    /// what separates them is the gap, because a bar of eight evenly spaced words reads as one
+    /// run-on and a reader has to parse it to find the verb.
+    let terminalBarActs = "flex items-center gap-1 ml-3"
+    /// Closing a terminal kills what is running in it. It reddens under the hand — the same
+    /// promise the danger button makes, kept without the rectangle.
+    let terminalBarDanger = cls [ terminalBarActBase; "text-ink-faint hover:text-err" ]
 
     /// The open-terminal strip: one chip per terminal, scrolling horizontally when there are
     /// more than fit rather than wrapping into a second band that shifts the whole column.
-    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 py-2 overflow-x-auto " + Stroke.dividerBottom
+    ///
+    /// The tabs run down to the strip's own divider so their marks land on it rather than
+    /// drawing a second line above it (see `tabBase`). `pb-px` is the one pixel their pulled-up
+    /// borders occupy: this strip scrolls, and anything painted outside a scroll container's
+    /// padding box is something to scroll TO — a 1px overhang made the row scrollable on the
+    /// vertical axis (`overflow-x` forces `overflow-y` to `auto`) and Chromium drew a scrollbar
+    /// down the side of the tabs for it.
+    let terminalTabs = "shrink-0 flex items-stretch gap-1 px-3 pt-2 pb-px overflow-x-auto " + Stroke.dividerBottom
     /// The tabs THEMSELVES, and nothing else. `role="tablist"` is a promise about what its
     /// children are, and the strip also holds two things that are not tabs — "+ new" and
     /// "close" — which a reader was told were tabs (four of them, in a list of two) and which
@@ -866,18 +983,40 @@ module Style =
     /// tablist at all. `shrink-0` keeps the strip the thing that scrolls when the tabs
     /// outgrow it, exactly as when they were its direct children.
     let terminalTabList = "flex items-stretch gap-1 shrink-0"
+    /// A tab is marked by an UNDERLINE, not by a box.
+    ///
+    /// The selected one used to be a full blue rectangle — which in this design is the button
+    /// vocabulary, and specifically the primary one: `btnPrimary` is a blue-bordered rectangle
+    /// wearing blue text. So the strip's answer to "which terminal am I looking at" shouted at
+    /// exactly the weight of the page's one real call to action, next to the thing you actually
+    /// press. Nothing in a tab strip is a CTA; a tab is a statement about where you are.
+    ///
+    /// The mark is `Stroke.underline`, the same hairline the session title wears — an
+    /// established, chrome-light affordance in this vocabulary rather than a new width. Every
+    /// tab carries the border box (`Stroke.clear` when it is not the one), so selecting moves
+    /// no text, and the selection is said twice quietly instead of once loudly: ink rather than
+    /// faint, over a blue rule.
+    ///
+    /// And it is the strip's OWN rule, not a second one. `-mb-px` pulls each tab's bottom
+    /// border down onto the divider the strip already draws, so there is one line under the
+    /// row and the selected tab paints its segment of it: an unselected tab's border is
+    /// transparent and the hairline shows straight through. Drawn at the tab's own height
+    /// instead, it was a second rule 23px above the first — two horizontal lines saying one
+    /// thing, which is the ornament this pass exists to remove.
     let private tabBase =
-        cls [ caps; "bg-transparent cursor-pointer px-2.5 py-1.5 max-w-40 truncate transition-colors"
-              Stroke.ring; focusRing ]
+        cls [ caps; "bg-transparent cursor-pointer px-2.5 pt-1.5 pb-2 -mb-px max-w-40 truncate transition-colors"
+              Stroke.underline; focusRing ]
     let terminalTab = cls [ tabBase; Stroke.clear; "text-ink-faint hover:text-ink" ]
-    let terminalTabActive = cls [ tabBase; Stroke.blue; "text-blue" ]
-    /// Adds a terminal. The one action in the strip that is not a selection.
-    let terminalTabNew = cls [ tabBase; Stroke.rim; "text-ink-dim"; Stroke.hoverInk; "hover:text-ink" ]
-    /// Closes the selected one — the same rectangle, in the danger face. It used to wear
-    /// `terminalTab`, which is the face of an UNSELECTED TAB: a thing that kills a running
-    /// terminal, dressed as a thing that navigates between them, in a strip full of the
-    /// latter. The border is what says which it is, exactly as everywhere else.
-    let terminalTabClose = cls [ tabBase; Stroke.rim; "text-ink-dim"; Stroke.hoverErr; "hover:text-err" ]
+    let terminalTabActive = cls [ tabBase; Stroke.blue; "text-ink" ]
+    /// Adds a terminal. The one action in the strip that is not a selection — so it wears the
+    /// strip's own quiet face and says `+`, rather than being the bordered rectangle that
+    /// out-shouted every tab beside it. What it does is named for anyone not reading pixels.
+    ///
+    /// The strip's other non-tab, `close`, is gone from here entirely: it kills a running
+    /// terminal, and dressing that as a sibling of "switch to this one" put the most
+    /// destructive control in the pane one pixel from the most routine. It is an act about
+    /// the terminal, and it lives with the terminal's other properties, in the bar.
+    let terminalTabNew = cls [ tabBase; Stroke.clear; "text-ink-faint hover:text-ink" ]
     /// A tab's presence marks: one dot per peer whose caret is in THAT terminal, so a
     /// collaborator typing a command in a terminal you are not looking at is visible from
     /// the strip rather than only from inside it.
@@ -928,14 +1067,14 @@ module Style =
     /// list of names, blue under the pointer because that is what interactive means here —
     /// the same reasoning `recordLink` carries, at the list's size.
     let terminalListName =
-        cls [ "bg-transparent cursor-pointer text-left w-full truncate p-0 font-sans text-body text-ink"
+        cls [ "bg-transparent cursor-pointer text-left w-full truncate p-0 font-ui text-body text-ink"
               "no-underline hover:text-blue transition-colors"; focusRing ]
 
     /// A closed row's name. The recording is still worth opening, and the row says which
     /// half of the list it is in by its tone rather than by repeating the word "closed" —
     /// the play mark beside it is what it IS.
     let terminalListNameClosed =
-        cls [ "bg-transparent cursor-pointer text-left w-full truncate p-0 font-sans text-body text-ink-dim"
+        cls [ "bg-transparent cursor-pointer text-left w-full truncate p-0 font-ui text-body text-ink-dim"
               "no-underline hover:text-blue transition-colors"; focusRing ]
 
     /// The row's verbs, kept on one baseline at its right edge.
@@ -947,13 +1086,17 @@ module Style =
 
     /// The block history's scroll box, and the stream inside it.
     ///
-    /// A terminal reads from the BOTTOM: the newest line sits above where you type, and a
-    /// short history hangs off that edge rather than starting at the top of a tall empty
-    /// column. `mt-auto` on the stream is what does it — in a scroll container it collapses
-    /// to nothing the moment the content is taller than the box, so unlike `justify-end` it
-    /// never puts the top of the history somewhere the scrollbar cannot reach.
-    let terminalScrollback = "flex-1 min-h-0 overflow-y-auto flex flex-col px-3 py-3"
-    let terminalStream = "mt-auto flex flex-col gap-2"
+    /// A terminal grows DOWNWARD from the top and the viewport rides the tail. Those are two
+    /// different statements and only the second one is about the bottom: with a long history
+    /// the newest line does sit at the bottom edge, because the scroller is pinned there
+    /// (`keepSurfacesPinned`), not because the content is.
+    ///
+    /// `mt-auto` on the stream said the first statement as if it were the second, and with a
+    /// short history it showed: two lines pinned to the floor under 500px of void, measured on
+    /// a phone. No terminal has ever looked like that. `relative` so the way back to the live
+    /// edge can float over this box rather than take a band from it.
+    let terminalScrollback = "relative flex-1 min-h-0 overflow-y-auto flex flex-col px-3 py-3"
+    let terminalStream = "flex flex-col gap-2"
 
     /// The player's own mount, and any other read-only region that shows a recording rather
     /// than a run of blocks: the same box, without the bottom anchoring (a player is one
@@ -1006,25 +1149,74 @@ module Style =
         cls [ "flex-1 min-h-0 overflow-auto px-3 py-2 font-terminal text-code-sm leading-4"
               "whitespace-pre text-ink bg-bg"; focusRing ]
 
-    /// The DVR's own row (Rewind, or how far behind live you are and the way back). It used
-    /// to borrow `terminalQueuedRow`, which is a row INSIDE a padded region and carries no
-    /// gutter of its own — so out here, as a direct child of the column, its button ran to
-    /// the pane's edge and the border on that side was clipped away by the column's
-    /// `overflow-hidden` (measured: 1px past, against 11px for every other control).
-    let terminalDvr = "shrink-0 flex items-center gap-2 px-3 py-2"
+    /// The DVR, which is TWO acts that were wearing one button in one band.
+    ///
+    /// Going back and coming back are opposites with opposite lifetimes, and once separated
+    /// each has an obvious home — neither of them a band of its own.
+    ///
+    /// Going back is a DESTINATION, and you reach a destination by scrolling to it. So the way
+    /// in sits at the top of the scrollback, in the content, scrolling with it, exactly where
+    /// the history you have runs out: earlier is up. It costs no permanent chrome at all, and
+    /// it is there only when something is actually recorded.
+    let terminalReplayFrom =
+        cls [ "self-start flex items-center gap-2 bg-transparent border-0 cursor-pointer px-0 py-1"
+              "font-terminal text-code-sm text-ink-faint hover:text-ink transition-colors"; focusRing ]
 
-    /// The composer area beneath the blocks.
-    let terminalComposer = "shrink-0 flex flex-col gap-2 px-3 py-3 " + Stroke.dividerTop
+    /// Coming back is TRANSIENT — it exists only while you are behind the live edge — and it
+    /// is about where you are in the scroll, so it floats over the scroller. The same slot
+    /// every chat client puts "jump to latest" in, for the same reason.
+    let terminalLiveFloat =
+        cls [ "absolute right-3 bottom-3 z-10 flex items-center gap-3 px-3 py-2 bg-surface"
+              Stroke.ring; Stroke.rim ]
+    /// The rewound read is a player, not a scroller, so it has no scroll box of its own to
+    /// float over — this is the positioned region the way back hangs in.
+    let terminalReplayRegion = "relative flex-1 min-h-0 flex flex-col"
 
-    /// A labelled control in the composer — the approval mode. A column, not a baseline row:
-    /// the row gave a native `<select>` whatever was left after its label and the button
-    /// beside it (measured 163px on a phone), and a select truncates its VALUE, so the one
-    /// thing the control exists to tell you — which commands run without asking — was cut
-    /// off mid-word.
-    let terminalField = "flex flex-col gap-1"
-    /// Its head: the label, and whatever act belongs to the same region — the lease control,
-    /// which needs a row of its own on a phone and has one here without spending a third one.
-    let terminalFieldHead = "flex items-center justify-between gap-3 min-h-8"
+    /// The command band beneath the blocks: the command line, whatever is queued against this
+    /// terminal, and nothing else. The approval control that used to head it is a property of
+    /// the terminal and now says so from the bar.
+    ///
+    /// The message composer's band exactly — same tone, same top rule, same gradient on focus
+    /// — because typing a command here and typing a message there are the same act, and the
+    /// pane was built out of the composer's parts for that reason. It carries no gutter of its
+    /// own: what is in it runs edge to edge, and the rows that are not the command line bring
+    /// their own padding (`terminalBandRow`).
+    let terminalComposer =
+        "group relative shrink-0 flex flex-col bg-surface focus-within:bg-surface-2 transition-colors"
+
+    /// A row in the band that is not the command line — the lease bar, the "not marking"
+    /// notice. They used to inherit the section's padding; the band has none.
+    let terminalBandRow = "flex items-center gap-2 px-3 py-2"
+
+    /// The command line: the row IS the field.
+    ///
+    /// It used to share its row with a `$` glyph and a Run button, and its column with two
+    /// more rows above — leaving the one thing you type into the smallest thing in the pane
+    /// (measured 273px of a 390px phone), narrow enough that a real command scrolled inside it
+    /// while being typed.
+    ///
+    /// The `$` is now the PLACEHOLDER. That is not a trick to save an element: it puts the
+    /// glyph exactly at the text origin, so it marks where the command will start and is
+    /// replaced by the first character rather than sitting beside a box the text then begins
+    /// to the right of. The old placeholder said "a command to run here", which a `$` says
+    /// shorter; the field keeps its `aria-label`, because a placeholder is not a name.
+    let terminalCommandWrap = "relative w-full"
+    /// `py-3` is not a guess: 12 + 16 + 12 is exactly the 40px the message composer's band
+    /// stands at (`py-2` around a 24px line), and the two sit side by side on a desktop where
+    /// four pixels of disagreement between them reads as one of the columns being wrong.
+    let terminalCommand =
+        cls [ "w-full"; fieldBare
+              "font-terminal text-code text-ink px-3 py-3 pr-10 placeholder:text-green"; touchType ]
+    /// What sits at the field's trailing edge, inside its border: whoever else has a caret in
+    /// this slot, and the verb.
+    let terminalCommandTrail = "absolute right-1 inset-y-0 flex items-center gap-1"
+
+    // Run itself is `btnSendInField` / `btnSendInFieldWaiting` — the message composer's Send,
+    // unchanged. Queueing a command and sending a message are the same act, which is why the
+    // terminal composer was built from the message composer's parts in the first place; they
+    // should not have two different verbs at two different weights. Which of the two faces it
+    // wears comes from the MODEL (a published slot, the same fact the send path acts on),
+    // never from a second measurement of the field.
     /// A queued command awaiting its turn (or its approval) — a listed row, so its leading
     /// edge carries its state: green ready, blue waiting on someone.
     let private terminalQueued = cls [ "flex-col gap-1 px-3 py-2"; rowBase ]

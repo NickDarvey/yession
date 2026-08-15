@@ -1,4 +1,4 @@
-# Plan 20 — Collaborative terminals: the list, pins, agent lanes, and wakes
+# Plan 20 — Collaborative terminals: the list, pins, agent terminals, and wakes
 
 > **Status: proposed.** Builds on [Plan 13](13-worksandbox-terminals.md) (terminals, blocks,
 > leases, the transcript), [Plan 14](14-terminal-replay-in-chat.md) (chips, the tab strip,
@@ -198,34 +198,48 @@ What humans see, by form:
   message has. An agent that acts unprompted always shows cause; that is the
   identity-and-attribution promise the UI test doctrine already pins, extended to turns.
 
-## Agent lanes: task terminals
+## The agent's terminals: the same verbs, two surfaces
 
-With ephemeral tabs costing nothing, parallel agent work stops being a furniture problem:
+> **Superseded the "lanes" design, unbuilt.** A lane was a terminal with a name and a
+> lifecycle policy — which meant implementing terminal lifecycle a second time for the agent
+> alone: a keyed map, a membership test, a concurrency count, a hold, an idle reaper. Two
+> mechanisms for one thing. The tell was what stage 3b had to be: an *agent indicator* and a
+> filtered list, both of which exist only to paper over the agent's terminals being a
+> different kind of object than a person's.
 
-- The agent may open **task terminals**: `execute_command` gains `lane : string option`. A
-  lane names an intent ("tests", "build docs"); the first command in a lane opens a
-  terminal titled by it — the same lazy open, title-is-the-reason move the per-sandbox
-  agent terminal already makes — and later commands naming the lane join its queue.
-- **Capped at 4 lanes per sandbox.** The cap is enforced inside the terminal manager,
-  beside the state it governs, and hitting it is a QUEUE HOLD with a name
-  (`AwaitingLane`), never an error and never a silent drop — the same doctrine as every
-  other hold: a stall with a name beats a stall.
-- A lane closes itself when it has been idle for a beat past its last block with nothing
-  queued — reason "task finished" — and becomes a list row like any closed terminal. The
-  close is appended by the Process, so the audit reads exactly what happened.
-- Lanes default to `background: true` — a lane exists to fan out, and fanning out then
-  blocking the turn on lane one would be the old serialization wearing a new name.
+The agent gets the verbs a person already has, over the same terminals:
 
-**The agent indicator** replaces N agent tabs with one strip-end element: the agent's
-presence dot plus a count of running lanes, wearing the failed-state colour the moment any
-lane's last block failed. It is a button into the list filtered to agent rows — not a tab.
-Pin a lane from its row to watch it; typing in it pins it (rule 3) and makes it yours to
-collaborate in, queue, approvals and all.
+- `open_terminal(name, sandbox?)` — a terminal of its own, named for the job. The name is the
+  title everyone reads, which is what makes a roster of agent work legible without a second
+  concept.
+- `close_terminal(terminal)` — its own only. A person typing in their shell is not the
+  agent's to end; the list gives THEM the same verb over the agent's, which is the asymmetry
+  worth having — a human can always stop the machine.
+- `list_terminals()` — everything open, whose it is, and what is running. So the agent knows
+  what it can use rather than inferring it from whichever blocks landed in its last digest.
+
+**The cap is a refusal, not a hold.** At most four NAMED agent terminals per sandbox; the
+general-purpose one is not counted, so a plain command never has to ask. Refused at the moment
+of asking, with the number and the remedy in the message — because only the agent knows which
+of its own terminals it has finished with, so the answer has to reach it somewhere it can act.
+
+That also settles a question the lane design could not: a cap expressed as a queue hold had
+nothing to hold. A pending act names a terminal, so at cap there was no terminal to queue
+against and the held command would have lived nowhere anyone could see.
+
+**One implementation, two surfaces.** These tools and the list's buttons reach the same
+`SessionTerminals`. Nothing about an agent terminal is special except who opened it — which is
+one boolean, used to decide what it may close and to mark its own rows.
+
+*Deferred:* the agent pinning a terminal to draw a person's attention. Pinning is client-local
+per person today, so an agent pin is a shared ATTENTION fact each client's pin policy would
+honour — a real design question, and not one this stage needs. A terminal the agent opens is
+visible in the list either way, which is what the stage owes.
 
 ## Task cards
 
 Chips from one agent burst — same turn, overlapping or consecutive blocks across the
-agent's lanes — coalesce into one **task card** in the timeline: a summary line
+agent's terminals — coalesce into one **task card** in the timeline: a summary line
 (`5 commands · 3 ✓ · 1 ✗ · 1 running`, each state in its established glyph and colour) over
 one line per command, statuses mutating in place exactly as chips do. Collapsed, failures
 sort first: red is what a person scans for. Tapping a line opens its block in the preview;
@@ -295,15 +309,15 @@ transcript reader — the drain knows a block finished, and what that is WORTH b
 whoever composed it with an agent. A terminal queue that knew about turns would be the wrong
 thing knowing it.
 
-### Stage 3 — task lanes
+### Stage 3 — the agent's terminal verbs
 
-`lane` on `execute_command`; lane open/join/cap/auto-close in the terminal manager
-(`AwaitingLane` beside the other holds, reported apart because it resolves differently);
-the agent indicator; list filtering.
+`open_terminal` / `close_terminal` / `list_terminals` over the same `SessionTerminals` the
+list's buttons drive; the per-sandbox cap as a refusal that names the number.
 
-*Tests:* cheap tier for the lane policy (first command opens, second joins, fifth holds
-with the named reason, idle lane closes with "task finished"); `Ports Native` for two
-lanes genuinely running concurrently — the property the stage exists for.
+*Tests:* cheap tier owns the rule — a named terminal is the agent's own, at the limit the open
+is refused and says the number, closing one makes room, a plain command still gets its shell at
+the limit, and a person's terminal is never the agent's. `Ports Native` for two agent terminals
+genuinely running commands at once.
 
 ### Stage 4 — task cards
 
@@ -349,9 +363,9 @@ bare into this document or a PR body). Stages 1, 4 and 5 are `+semver: patch` at
 - **Cancelling a wake.** A person can always interrupt a woken turn; a control that
   unsubscribes the agent from a completion it asked about needs a durable fact (the wake
   is derived, so cancellation cannot be client-local) and is not being built until wanted.
-- **A session-wide transcript budget** — unchanged from Plan 14, and lanes make the
+- **A session-wide transcript budget** — unchanged from Plan 14, and several agent terminals make the
   64 MB × terminals floor grow faster. The list at least makes the growth visible.
-- **Following a lane** (auto-selecting the loudest agent terminal) — cheap once the
+- **Following the agent** (auto-selecting the loudest agent terminal) — cheap once the
   indicator exists, cut from scope until someone misses it.
 - **Grouping human chips** — task cards group agent bursts only; twenty hand-run
   commands still render as twenty chips, deliberately.

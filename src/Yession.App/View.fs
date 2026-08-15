@@ -940,7 +940,7 @@ module View =
             let discard =
                 if target = myPeer && hasContent then
                     html $"""
-                        <button type="button" class="{Style.btnIconDangerLg}" aria-label="Discard draft"
+                        <button type="button" class="{Style.btnDiscardInField}" aria-label="Discard draft"
                                 data-discard-draft @click={Ev(fun _ -> actions.DiscardDraft myPeer)}>{Icon.close}</button>"""
                 else Lit.nothing
             // Send STAYS — same place in the layout, same place in focus order, so nothing
@@ -954,25 +954,22 @@ module View =
             // blocked, they just have not typed yet. The weight is the signal; the control
             // stays whole. `Resilience.fs` pins the same promise from the other direction.
             let sendClass =
-                if hasContent then Style.cls [ Style.btnPrimary; "gap-2" ]
-                else Style.cls [ Style.btnPrimary; "gap-2"; Style.btnWaiting ]
+                if hasContent then Style.btnSendInField else Style.btnSendInFieldWaiting
             let author =
                 if target = myPeer then Lit.nothing
                 else html $"""<span class="{Style.draftAuthor}">{ClientModel.nameOf target model}'s message</span>"""
             html $"""
                 <article class="{Style.draftBox}" data-draft-id="{PeerId.value target}" data-draft-author="{PeerId.value target}">
-                  <span class="{Style.draftRail}"></span>
-                  <span class="{Style.draftEdge}"></span>
-                  <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft target}" data-rich-readonly="false" data-draft-input="{PeerId.value target}"></div>
-                  <div class="{Style.draftActions}">
-                    <span class="{Style.draftEditors}">{editors target}</span>
+                  <div class="{Style.draftBody}">
                     {author}
-                    <span class="{Style.draftHint}">{Dom.Text.composerKeys}</span>
-                    <div class="{Style.draftCommit}">
-                      {discard}
-                      <button type="button" class="{sendClass}" aria-keyshortcuts="Enter"
-                              data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>Send{Icon.send}</button>
-                    </div>
+                    <div class="{Style.draftInput}" data-rich-body="{BodyKey.draft target}" data-rich-readonly="false" data-draft-input="{PeerId.value target}"></div>
+                  </div>
+                  <div class="{Style.draftCommit}">
+                    <span class="{Style.draftEditors}">{editors target}</span>
+                    {discard}
+                    <button type="button" class="{sendClass}" aria-label="Send" aria-keyshortcuts="Enter"
+                            title="{Dom.Text.composerKeys}"
+                            data-send-draft="{PeerId.value target}" @click={Ev(fun _ -> actions.SendDraft target)}>{Icon.send}</button>
                   </div>
                 </article>"""
         // "New message" only says something when you are in someone else's draft: it is the way
@@ -985,6 +982,8 @@ module View =
                             @click={Ev(fun _ -> dispatch StartDraftMsg)}>+ New message</button>"""
         html $"""
             <section class="{Style.composer}" data-draft-editor>
+              <span class="{Style.bandRail}"></span>
+              <span class="{Style.bandEdge}"></span>
               {ClientModel.collapsedDrafts model |> List.map summary}
               {open'}
               {startMine}
@@ -1252,6 +1251,17 @@ module View =
             match block.Status with
             | BlockFinished (CommandSucceeded _) -> Lit.nothing
             | status -> html $"""<span class="shrink-0">{terminalBlockStatus model status}</span>"""
+        // Whose command this was, on the same terms: a mark only when the answer is not the
+        // obvious one. Your own commands need no attribution in your own terminal — but a
+        // command the AGENT ran is the thing a person scanning a scrollback is looking for,
+        // and with the facts behind a disclosure there was nothing on the line to say so.
+        let author =
+            let who = Authority.author block.Authority
+            if who = ActorRef.PeerRef model.Peer.PeerId then Lit.nothing
+            else
+                html $"""
+                    <span class="{Style.cls [ Style.avatarSm; authorAvatar who ]}" title="{authorName model who}"
+                          data-terminal-block-author="{authorLabel who}"></span>"""
         // The facts that used to have nowhere to go, or nowhere better than a status beside
         // the command: who ran it, who let it through, and how it ended. Behind a
         // disclosure, because a scrollback is read for its OUTPUT and who was behind it is what
@@ -1277,6 +1287,7 @@ module View =
                      data-terminal-block-status="{terminalBlockStatusLabel block.Status}">
               <details>
                 <summary class="{Style.terminalBlockSummary}">
+                  {author}
                   <span class="{Style.terminalPrompt}">$</span>
                   <code class="{Style.terminalCommandText}">{block.Command}</code>
                   {notable}
@@ -1458,7 +1469,7 @@ module View =
                     <button type="button" class="{Style.btn}" data-terminal-take="{TerminalId.value terminal}"
                             @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take over</button>"""
         html $"""
-            <div class="{Style.terminalQueuedRow}" data-terminal-lease="{label}" aria-live="polite">
+            <div class="{Style.terminalBandRow}" data-terminal-lease="{label}" aria-live="polite">
               <span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>live</span>
               <span class="{Style.cls [ Style.avatarSm; authorAvatar holder ]}"></span>
               <span class="{Style.small}">{who}</span>
@@ -1504,7 +1515,6 @@ module View =
     /// The terminal composer: your command line, and everyone else's as they type them.
     let private terminalComposer (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminal: TerminalId) : TemplateResult =
         let mine = model.Peer.PeerId
-        let mode = SyncedSessionState.modeOf terminal model.Synced
         let lease =
             TerminalProjection.tryFind terminal model.Terminals |> Option.bind (fun view -> view.Lease)
         let integrationLost =
@@ -1528,16 +1538,17 @@ module View =
                   <input type="text" class="{Style.fieldMonoBare}" readonly aria-label="{ClientModel.nameOf author model}'s command"
                          data-terminal-input="{BodyKey.terminalDraft terminal author}">
                   <span class="{Style.terminalEditors}">{editors author}</span>
-                  <button type="button" class="{Style.btn}" data-terminal-send="{PeerId.value author}"
-                          @click={Ev(fun _ -> actions.SendTerminalDraft terminal author)}>Run</button>
+                  <button type="button" class="{Style.btnSendInField}" aria-label="Run"
+                          data-terminal-send="{PeerId.value author}"
+                          @click={Ev(fun _ -> actions.SendTerminalDraft terminal author)}>{Icon.send}</button>
                 </div>"""
-        let others = ClientModel.terminalDrafts terminal model |> List.filter (fun author -> author <> mine)
-        let takeControl =
-            if Option.isSome lease then Lit.nothing
-            else
-                html $"""
-                    <button type="button" class="{Style.cls [ Style.btn; "ml-auto" ]}" data-terminal-take="{TerminalId.value terminal}"
-                            @click={Ev(fun _ -> actions.TakeTerminal terminal)}>Take it</button>"""
+        let drafting = ClientModel.terminalDrafts terminal model
+        let others = drafting |> List.filter (fun author -> author <> mine)
+        // The same fact the message composer's Send reads, asked of the terminal's own slots: a
+        // slot is published exactly while its body has content. So Run knows whether it has
+        // anything to do without the view measuring the field, and the two cannot disagree.
+        let hasCommand = drafting |> List.contains mine
+        let runClass = if hasCommand then Style.btnSendInField else Style.btnSendInFieldWaiting
         // In live mode the command lines give way to the lease bar. Drafting into a box marked
         // "Run" that cannot run anything is the misleading half; the QUEUE above stays, because
         // queueing during a live session is meaningful — the entry runs the moment the terminal
@@ -1549,22 +1560,29 @@ module View =
                 html $"""
                     <div>
                       {others |> List.map peerDraft}
-                      <div class="{Style.terminalQueuedRow}">
-                        <span class="{Style.terminalPrompt}">$</span>
-                        <!-- A phone keyboard treats a text input as prose unless told
+                      <div class="{Style.terminalCommandWrap}">
+                        <!-- The placeholder is a `$`, and that is the prompt glyph rather than a
+                             hint that replaced one: a placeholder sits exactly at the text
+                             origin, so it marks where the command will start and the first
+                             character typed takes its place. `aria-label` carries the NAME —
+                             a placeholder has never been one.
+
+                             A phone keyboard treats a text input as prose unless told
                              otherwise: it capitalises the first word, autocorrects the rest,
                              and underlines what it does not know. A command line is none of
                              those things — `Git` is not `git`, and `ls -la` is not a typo. The
                              four attributes are written out at each command surface rather
                              than composed: lit interpolates VALUES, not attribute names. -->
-                        <input type="text" class="{Style.fieldMono}" aria-label="Command"
-                               placeholder="a command to run here"
+                        <input type="text" class="{Style.terminalCommand}" aria-label="Command"
+                               placeholder="$"
                                autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
                                data-terminal-input="{BodyKey.terminalDraft terminal mine}">
-                        <span class="{Style.terminalEditors}">{editors mine}</span>
-                        <button type="button" class="{Style.btnPrimary}" aria-keyshortcuts="Enter"
-                                data-terminal-send="{PeerId.value mine}"
-                                @click={Ev(fun _ -> actions.SendTerminalDraft terminal mine)}>Run</button>
+                        <div class="{Style.terminalCommandTrail}">
+                          <span class="{Style.terminalEditors}">{editors mine}</span>
+                          <button type="button" class="{runClass}" aria-label="Run" aria-keyshortcuts="Enter"
+                                  data-terminal-send="{PeerId.value mine}"
+                                  @click={Ev(fun _ -> actions.SendTerminalDraft terminal mine)}>{Icon.send}</button>
+                        </div>
                       </div>
                     </div>"""
         // Named, not shown as a stall. The queue is held because a command written here could
@@ -1574,7 +1592,7 @@ module View =
             if not integrationLost then Lit.nothing
             else
                 html $"""
-                    <div class="{Style.terminalQueuedRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
+                    <div class="{Style.terminalBandRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
                       <span class="{Style.statusErr}">not marking</span>
                       <span class="{Style.small}">queued commands held</span>
                       <div class="ml-auto flex items-center gap-2">
@@ -1582,24 +1600,14 @@ module View =
                                 @click={Ev(fun _ -> actions.RearmTerminal terminal)}>Re-arm</button>
                       </div>
                     </div>"""
+        // What is left here is what this region is FOR: what is waiting to run, and the line
+        // you say the next thing on. The approval control that used to head it is a property
+        // of the terminal, and states itself from the bar.
         html $"""
             <section class="{Style.terminalComposer}">
+              <span class="{Style.bandRail}"></span>
+              <span class="{Style.bandEdge}"></span>
               {lostBanner}
-              <div class="{Style.terminalField}">
-                <div class="{Style.terminalFieldHead}">
-                  <label class="{Style.label}" for="terminal-mode">approval</label>
-                  {takeControl}
-                </div>
-                <div class="{Style.fieldSelectWrap}">
-                  <select id="terminal-mode" class="{Style.fieldSelect}" data-terminal-mode="{ApprovalMode.describe mode}"
-                          @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (ForTerminal terminal, m)) | None -> ())}>
-                    <option value="approve-agent" ?selected={mode = ApproveAgent}>the agent's commands</option>
-                    <option value="approve-all" ?selected={mode = ApproveAll}>every command</option>
-                    <option value="auto" ?selected={mode = AutoRun}>nothing — run them</option>
-                  </select>
-                  <span class="{Style.fieldSelectMark}">{Icon.down}</span>
-                </div>
-              </div>
               {terminalQueue actions dispatch model terminal}
               {commandLines}
             </section>"""
@@ -1629,7 +1637,8 @@ module View =
             // a fact that is wrong.
             html $"""
                 <section class="{Style.terminalComposer}" data-terminal-replay-gone="{TerminalId.value view.TerminalId}">
-                  <div class="{Style.terminalQueuedRow}">
+                  <span class="{Style.bandRail}"></span>
+                  <div class="{Style.terminalBandRow}">
                     <span class="{Style.statusFaint}">{closedFor}</span>
                     <span class="{Style.statusErr}">recording not kept</span>
                   </div>
@@ -1640,7 +1649,8 @@ module View =
             // closed.
             html $"""
                 <section class="{Style.terminalComposer}">
-                  <div class="{Style.terminalQueuedRow}">
+                  <span class="{Style.bandRail}"></span>
+                  <div class="{Style.terminalBandRow}">
                     <span class="{Style.statusFaint}">{closedFor}</span>
                   </div>
                   <div class="{Style.terminalBlocks}" role="region" aria-label="Terminal recording"
@@ -1878,7 +1888,7 @@ module View =
         | [] ->
             html $"""
                 <div class="{Style.terminalListEmpty}" data-terminal-list>
-                  <span class="font-mono text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
+                  <span class="font-terminal text-[28px] leading-8 text-ink-faint select-none" aria-hidden="true">$</span>
                   <button type="button" class="{Style.btnPrimary}" data-terminal-new
                           @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>New terminal</button>
                 </div>"""
@@ -1931,17 +1941,24 @@ module View =
                     <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-closed-tab="{id}"
                             aria-selected="{selectedAttr}" tabindex="{tabIndex}"
                             @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+        // What a tab is CALLED — read by the tab itself and by the properties bar, which names
+        // the selected one. One function, so the strip and the bar can never disagree about
+        // what you are looking at.
+        let tabLabel (tab: PaneTab) =
+            match tab with
+            | TerminalTab id ->
+                TerminalProjection.tryFind id model.Terminals
+                |> Option.map (fun v -> v.Title)
+                |> Option.defaultValue (TerminalId.value id)
+            | BlockTab (terminalId, blockId) ->
+                TerminalProjection.tryFind terminalId model.Terminals
+                |> Option.bind (fun v -> v.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+                |> Option.map (fun b -> b.Command)
+                |> Option.defaultValue (BlockId.value blockId)
+            | StretchTab stretch -> sprintf "%s · %s" (authorName model stretch.Holder) stretch.Title
         let readonlyTabButton (tab: PaneTab) =
             let on = isOn tab
-            let label =
-                match tab with
-                | TerminalTab id -> TerminalId.value id
-                | BlockTab (terminalId, blockId) ->
-                    TerminalProjection.tryFind terminalId model.Terminals
-                    |> Option.bind (fun v -> v.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
-                    |> Option.map (fun b -> b.Command)
-                    |> Option.defaultValue (BlockId.value blockId)
-                | StretchTab stretch -> sprintf "%s · %s" (authorName model stretch.Holder) stretch.Title
+            let label = tabLabel tab
             html $"""
                 <button type="button" role="tab" class="{if on then Style.terminalTabActive else Style.terminalTab}"
                         data-pane-tab="{PaneTab.key tab}"
@@ -1992,19 +2009,38 @@ module View =
             let blocks =
                 // An idle prompt IS the empty state a terminal-shaped surface already has a
                 // symbol for; "nothing has run here yet" was the same fact as a sentence.
-                if List.isEmpty view.Blocks then
-                    [ html $"""<div class="{Style.terminalOutputEmpty}"><span class="{Style.terminalPrompt}">$</span></div>""" ]
-                else view.Blocks |> List.map (terminalBlockView model feed)
-            // The DVR (Plan 14, stage 7): step back through what this terminal has recorded
-            // so far while it keeps running, and catch back up. Offered on any LIVE terminal
-            // — the mechanism does not care which mode it is in, and both are one growing
-            // byte stream — but only once something IS recorded: a DVR with nothing behind
-            // it is a control with nothing to do. Each press hands focus to the control
-            // that replaces the pressed one, which leaves the document.
+                //
+                // On an OPEN terminal the command line now carries that prompt itself — the `$`
+                // is its placeholder — so drawing a second one above it is one idle prompt too
+                // many. On a closed one there is no command line, and the symbol is the only
+                // thing left to say the surface is a terminal that ran nothing.
+                if not (List.isEmpty view.Blocks) then view.Blocks |> List.map (terminalBlockView model feed)
+                elif view.IsOpen then []
+                else [ html $"""<div class="{Style.terminalOutputEmpty}"><span class="{Style.terminalPrompt}">$</span></div>""" ]
+            // The DVR (Plan 14, stage 7): step back through what this terminal has recorded so
+            // far while it keeps running, and catch back up. Offered on any LIVE terminal — the
+            // mechanism does not care which mode it is in, and both are one growing byte stream
+            // — but only once something IS recorded: a DVR with nothing behind it is a control
+            // with nothing to do. Each press hands focus to the control that replaces the
+            // pressed one, which leaves the document.
+            //
+            // The two halves are not one control and no longer share a band. Going back is a
+            // DESTINATION, so in block mode it sits at the top of the scrollback, where the
+            // history runs out — earlier is up, and you get there by scrolling. (In live mode
+            // there is no scrollback to scroll up through, so the bar carries it instead.)
+            // Coming back is TRANSIENT and is about where you are in the scroll, so it floats
+            // over the scroller, in the slot every reader already knows.
             let rewound = ClientModel.isRewound view.TerminalId model
-            let dvr =
-                if not view.IsOpen then Lit.nothing
-                elif rewound then
+            let replayFrom =
+                if view.IsOpen && Option.isNone view.Lease && not rewound && feed.KnownLength > 0 then
+                    html $"""
+                        <button type="button" class="{Style.terminalReplayFrom}"
+                                data-terminal-rewind="{TerminalId.value view.TerminalId}"
+                                @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>↑ replay from the start</button>"""
+                else Lit.nothing
+            let backToLive =
+                if not (view.IsOpen && rewound) then Lit.nothing
+                else
                     // Say HOW FAR behind, in the recording's clock, as it grows — a reader
                     // parked behind live deserves to know the edge is moving away.
                     let behind =
@@ -2013,20 +2049,12 @@ module View =
                             sprintf "behind live — %s" (durationText (System.TimeSpan.FromSeconds seconds))
                         | _ -> "behind live"
                     html $"""
-                        <div class="{Style.terminalDvr}">
+                        <div class="{Style.terminalLiveFloat}">
                           <span class="{Style.statusFaint}" data-terminal-behind="{TerminalId.value view.TerminalId}">{behind}</span>
-                          <button type="button" class="{Style.cls [ Style.btnPrimary; "ml-auto" ]}"
+                          <button type="button" class="{Style.btnPrimary}"
                                   data-terminal-live="{TerminalId.value view.TerminalId}"
                                   @click={Ev(fun _ -> dispatch (JumpToLiveMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Jump to live</button>
                         </div>"""
-                elif feed.KnownLength > 0 then
-                    html $"""
-                        <div class="{Style.terminalDvr}">
-                          <button type="button" class="{Style.cls [ Style.btn; "ml-auto" ]}"
-                                  data-terminal-rewind="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Rewind</button>
-                        </div>"""
-                else Lit.nothing
             // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
             // program is running here and what it displays is not a list of commands and
             // their output — the blocks are block mode's view of a terminal, and they come
@@ -2037,9 +2065,11 @@ module View =
                     // same cast a finished terminal's replay uses, which is exactly what
                     // "rewound like live TV, through the same mechanism" has to mean.
                     html $"""
-                        {dvr}
-                        <div class="{Style.paneReadonly}" role="region" aria-label="Terminal recording, behind live"
-                             data-pane-replay="{PaneTab.key (TerminalTab view.TerminalId)}"></div>"""
+                        <div class="{Style.terminalReplayRegion}">
+                          <div class="{Style.paneReadonly}" role="region" aria-label="Terminal recording, behind live"
+                               data-pane-replay="{PaneTab.key (TerminalTab view.TerminalId)}"></div>
+                          {backToLive}
+                        </div>"""
                 else
                     match view.Lease with
                     | Some holder ->
@@ -2051,18 +2081,17 @@ module View =
                         // third. The notice is a line and now renders as one.
                         html $"""
                             {truncated}
-                            {dvr}
                             {terminalScreenView actions model view.TerminalId holder}"""
                     | None ->
                         html $"""
                             <div class="{Style.terminalScrollback}" data-terminal-scrollback
                                  data-terminal-id="{TerminalId.value view.TerminalId}">
                               <div class="{Style.terminalStream}">
+                                {replayFrom}
                                 {truncated}
                                 {blocks}
                               </div>
-                            </div>
-                            {dvr}"""
+                            </div>"""
             html $"""
                 {above}
                 {if not view.IsOpen then terminalReplay model view
@@ -2102,6 +2131,70 @@ module View =
                          data-pane-panel="{PaneTab.key tab}">
                       {inner}
                     </div>"""
+        // What this terminal IS, and the acts that are about the terminal rather than about
+        // the command you are writing. The approval readout is the reason the bar exists: it
+        // is a property of the terminal — read constantly, changed twice a session — and it
+        // was a labelled form control directly above the command line, which is the most
+        // valuable position on the surface.
+        let properties =
+            match selected with
+            | Some (TerminalTab id) ->
+                match TerminalProjection.tryFind id model.Terminals with
+                | None -> Lit.nothing
+                | Some view ->
+                    let mode = SyncedSessionState.modeOf view.TerminalId model.Synced
+                    // Only the setting that lets commands run unasked wears the alarm. It is
+                    // the one place in this pane where err is not an error: a safety property
+                    // whose most permissive value is the quietest thing on screen is backwards.
+                    let propClass = if mode = AutoRun then Style.terminalPropAlert else Style.terminalProp
+                    // The values say what they are, so nothing is left for a label to add —
+                    // which is what killed the label. "the agent's commands" was an answer with
+                    // its question missing, and it needed a word stencilled above it to mean
+                    // anything at all.
+                    let approval =
+                        if not view.IsOpen then Lit.nothing
+                        else
+                            html $"""
+                                <div class="{Style.terminalPropWrap}">
+                                  <select class="{propClass}" aria-label="Approval" data-terminal-mode="{ApprovalMode.describe mode}"
+                                          @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (ForTerminal view.TerminalId, m)) | None -> ())}>
+                                    <option value="approve-agent" ?selected={mode = ApproveAgent}>approval: agent</option>
+                                    <option value="approve-all" ?selected={mode = ApproveAll}>approval: all</option>
+                                    <option value="auto" ?selected={mode = AutoRun}>approval: off</option>
+                                  </select>
+                                  <span class="{Style.terminalPropMark}">{Icon.down}</span>
+                                </div>"""
+                    // Taking the keyboard changes what this terminal IS, not what the next
+                    // command says, so it belongs here rather than over the command line. The
+                    // STEAL — taking it from whoever holds it — stays on the lease bar, where
+                    // the name of the person you would be taking it from is.
+                    let take =
+                        if not view.IsOpen || Option.isSome view.Lease then Lit.nothing
+                        else
+                            html $"""
+                                <button type="button" class="{Style.terminalBarAct}" data-terminal-take="{TerminalId.value view.TerminalId}"
+                                        @click={Ev(fun _ -> actions.TakeTerminal view.TerminalId)}>take</button>"""
+                    // In LIVE mode the way into the recording has no spatial home: the content
+                    // is a screen, not a scrollback, so there is no top of the history to scroll
+                    // up to. It is an act about this terminal, so it says so from the bar. In
+                    // block mode the stream carries it instead, where the history runs out.
+                    let feed = ClientModel.terminalFeed view.TerminalId model
+                    let rewind =
+                        if view.IsOpen && Option.isSome view.Lease
+                           && not (ClientModel.isRewound view.TerminalId model) && feed.KnownLength > 0 then
+                            html $"""
+                                <button type="button" class="{Style.terminalBarAct}" data-terminal-rewind="{TerminalId.value view.TerminalId}"
+                                        @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>rewind</button>"""
+                        else Lit.nothing
+                    html $"""{approval}<span class="{Style.terminalBarActs}">{take}{rewind}</span>"""
+            | _ -> Lit.nothing
+        // The bar names the SELECTED tab, which is the thing a reader cannot work out for
+        // themselves. It used to say "terminals" — the largest text on a phone screen, telling
+        // someone looking at terminals that these are terminals.
+        let paneName =
+            match selected with
+            | Some tab -> tabLabel tab
+            | None -> "terminals"
         // The strip's kill and its attach-again are GONE (Plan 20, stage 1): both are verbs
         // about a terminal rather than about which tab you are reading, and both now live on
         // that terminal's row in the list, offered from the one fold that decides what a
@@ -2151,9 +2244,16 @@ module View =
                         @click={Ev(fun _ -> dispatch ToggleTerminalListMsg)}>{Icon.list}</button>"""
         html $"""
             <aside class="{Style.terminalPanel}" data-terminal-panel>
+              <!-- The split, as a real separator: `aria-valuenow` and the arrow keys are what
+                   make a splitter reachable without a pointer, and the shell keeps the value
+                   in step (`PaneShell.installPaneResize`). -->
+              <div class="{Style.terminalResize}" data-term-resize role="separator" tabindex="0"
+                   aria-orientation="vertical" aria-label="Resize the terminals column"
+                   aria-valuemin="320" aria-valuenow="420" aria-valuemax="1080"></div>
               <div class="{Style.terminalPane}">
                 <div class="{Style.terminalHead}">
-                  <span class="{Style.settingsTitle}">terminals</span>
+                  <span class="{Style.terminalHeadName}">{paneName}</span>
+                  {properties}
                   {listToggle}
                   <button type="button" class="{Style.navChevronForward}" aria-label="Back to the chat"
                           data-terminal-toggle="hide"

@@ -257,7 +257,7 @@ let private diagnosticAgent : RunAgent =
             // peer can see it, drains it and waits for the exit code. That the whole path
             // collapses to this is the point of the merge, and driving the real one across
             // process boundaries is what makes this a smoke test rather than a mock.
-            match! capabilities.ExecuteCommand None "node -e \"console.log('diagnostic-ok')\"" false with
+            match! capabilities.ExecuteCommand (CommandRequest.ofCommand "node -e \"console.log('diagnostic-ok')\"") with
             | Error reason -> return AgentFailed (sprintf "diagnostic command failed: %s" reason)
             | Ok outcome ->
                 match outcome.Status with

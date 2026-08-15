@@ -909,6 +909,117 @@ let editorTests =
                 pw.Dispose ()
                 server.Stop ()
             }
+        // The split between the two columns is the reader's to set. What is pinned is the
+        // PROMISE, not the geometry: that the divider can be moved without a pointer at all.
+        // A splitter that only answers a drag is a control a keyboard user cannot reach, and
+        // nothing else in this suite would notice — the column would still render, still
+        // scroll, and still be exactly the width somebody else chose for them.
+        //
+        // Deliberately not asserted: the default width, the step size, the bounds. Those are
+        // the design, and the design changing is not a regression.
+        testCaseAsync "the column divider moves from the keyboard, not only from a drag" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 8)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! ctx =
+                    await (br.NewContextAsync (
+                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 1440, Height = 900))))
+                let! page = await (ctx.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 8)))
+                // Waited for on the CONTROL, never on the panel: a shut pane is `w-0`, which
+                // Playwright reports as hidden, so waiting for the panel to be visible before
+                // opening it waits for something that only happens afterwards.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-toggle='show']")
+                // This page carries two other fixtures ABOVE the shell — the editor host and
+                // the player — so the shell starts a viewport and a half down. Every control
+                // in it is reachable by scroll, which is fine for a person and a trap for a
+                // test: the assertions here are about a WIDTH, and a click that has to scroll
+                // first is one more thing that can be the reason a width did not change.
+                let! _ =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 for (const id of ['host', 'replay']) {
+                                   const el = document.getElementById(id)
+                                   if (el) el.style.display = 'none'
+                                 }
+                                 document.querySelector('#shell [data-terminal-toggle="show"]').click()
+                                 return true
+                               }""")
+                // Read on `aria-valuenow`, not on the rendered width.
+                //
+                // Not a convenience: the column animates, so its rendered width spends 200ms
+                // being neither the old value nor the new one, and every way of asking "has it
+                // settled" from the outside is a heuristic. Sampling twice and comparing was
+                // the one tried here, and it accepted a 1px panel — a shut pane is its own left
+                // border — as "open and settled" because two polls happened to agree before the
+                // transition started. It passed twice and failed the third time, which is worse
+                // than not having been written.
+                //
+                // The separator's value is the state the shell actually owns: the keydown
+                // handler sets it synchronously, so there is nothing to wait for and nothing to
+                // race. It is also the thing this test is ABOUT — what a keyboard user is told
+                // the split is. That the pixels follow it is asserted once at the end, where
+                // the target is known and the wait is therefore deterministic.
+                let value () =
+                    page.EvaluateAsync<float>
+                        "() => Number(document.querySelector('#shell [data-term-resize]').getAttribute('aria-valuenow'))"
+
+                // Focusable, and it says what it is: a separator with a value is the one
+                // shape assistive technology can report and move.
+                let! _ =
+                    await (page.EvaluateAsync<bool>
+                            "() => { document.querySelector('#shell [data-term-resize]').focus(); return true }")
+                let! isSeparator =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const h = document.activeElement
+                                 return h?.getAttribute('role') === 'separator'
+                                     && h.hasAttribute('aria-valuenow')
+                               }""")
+                Expect.isTrue isSeparator "the focused divider is a separator carrying its value"
+                let! before = await (value ())
+
+                // The two arrows move it, and they are opposites. Which one GROWS the column
+                // is deliberately not asserted: this one is on the right, so left-grows reads
+                // as "drag its edge", but a design that put the pane elsewhere or read the
+                // keys the other way round would be a different choice rather than a broken
+                // one — and a test that failed for it would be reporting taste as a
+                // regression. What has to hold is that a keyboard can move the split at all,
+                // and that the second press undoes the first.
+                do! awaitU (page.Keyboard.PressAsync "ArrowLeft")
+                let! moved = await (value ())
+                Expect.isTrue
+                    (abs (moved - before) > 1.0)
+                    (sprintf "an arrow key must move the split (was %f, still %f)" before moved)
+                do! awaitU (page.Keyboard.PressAsync "ArrowRight")
+                let! back = await (value ())
+                Expect.isTrue
+                    (abs (back - before) < abs (moved - before))
+                    (sprintf "the opposite arrow must move it back (started %f, went %f, now %f)"
+                        before moved back)
+
+                // And the column is really that wide, once it has finished travelling there.
+                // Deterministic because the destination is declared: what is waited for is the
+                // pixels catching up to the value, not a guess about when a transition ended.
+                // Without this the test would be happy with a separator that narrates a resize
+                // nothing performed.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                            """() => {
+                                 const h = document.querySelector('#shell [data-term-resize]')
+                                 const pane = document.querySelector('#shell [data-terminal-panel]')
+                                 const said = Number(h.getAttribute('aria-valuenow'))
+                                 return Math.abs(pane.getBoundingClientRect().width - said) <= 1
+                               }""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
         // The live viewport (Plan 14, stage 6). What only a browser can answer here is the
         // KEYSTROKE TRANSLATION: a `KeyboardEvent` is not a byte stream, and turning one
         // into what a pty expects — printable characters as themselves, Ctrl-<key> as the
