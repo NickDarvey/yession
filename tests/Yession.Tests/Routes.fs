@@ -39,11 +39,15 @@ let private every =
       EventsAfter (Some (offset 4711L))
       Events (0L, 99L)
       Events (100L, 136L)
-      // A terminal's transcript chunks (Plan 13) and the keyframes beside them (Plan 14):
-      // deeper paths than anything else here, and the pair the router has to keep apart —
-      // `terminals/<id>/<n>` and `terminals/<id>/keyframes/<n>` differ only by depth.
-      TerminalTranscript ("term-a", 0)
-      TerminalTranscript ("term-a", 3)
+      // A terminal's transcript cursor and ranges (Plan 22), and the keyframes beside them
+      // (Plan 14): deeper paths than anything else here, and the set the router has to keep
+      // apart — `terminals/<id>`, `terminals/<id>/after/<n>`, `terminals/<id>/<a>-<b>` and
+      // `terminals/<id>/keyframes/<n>` differ only by depth and by shape.
+      TerminalTranscriptAfter ("term-a", None)
+      TerminalTranscriptAfter ("term-a", Some 0)
+      TerminalTranscriptAfter ("term-a", Some 4711)
+      TerminalTranscriptRange ("term-a", 0, 499)
+      TerminalTranscriptRange ("term-a", 500, 612)
       TerminalKeyframe ("term-a", 0)
       TerminalKeyframe ("term-a", 41)
       ClaudeStatus

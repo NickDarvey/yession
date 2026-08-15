@@ -94,11 +94,16 @@ type SessionRoute =
     /// redirect and keeps what came back under it, so it never has to know that a range
     /// has a size, a boundary, or an alignment.
     | Events of first: int64 * last: int64
-    /// Immutable chunk `index` of a terminal's transcript (Plan 13) — the history leg of
-    /// the terminal feed, cacheable on exactly the same argument as `Events`. The terminal
-    /// is carried as a raw string because a route is a PATH, and validating it into a
-    /// `TerminalId` is the server's job at dispatch, not the router's at parse.
-    | TerminalTranscript of terminal: string * index: int
+    /// A terminal transcript's cursor (Plan 22): "what has this terminal printed after line
+    /// `after`?", `None` meaning from the beginning. The event log's `EventsAfter` for the
+    /// history leg of the terminal feed, and the only transcript address a client builds.
+    /// The terminal is carried as a raw string because a route is a PATH, and validating it
+    /// into a `TerminalId` is the server's job at dispatch, not the router's at parse.
+    | TerminalTranscriptAfter of terminal: string * after: int option
+    /// A terminal's transcript lines `[first, last]` — the same answer for ever, because a
+    /// transcript is append-only and line index IS sequence number. Named for the range it
+    /// carries, and reached only through the cursor's redirect.
+    | TerminalTranscriptRange of terminal: string * first: int * last: int
     /// The keyframe for transcript line `seq` of a terminal (Plan 14, stage 3) — the screen
     /// a ranged replay starts from. Immutable on the same argument the chunks are: a
     /// keyframe is written once, at a position that never moves.
@@ -170,7 +175,9 @@ module SessionRoute =
         | EventsAfter None -> "events"
         | EventsAfter (Some after) -> sprintf "events/after/%d" (EventOffset.value after)
         | Events (first, last) -> sprintf "events/%d-%d" first last
-        | TerminalTranscript (terminal, index) -> sprintf "terminals/%s/%d" terminal index
+        | TerminalTranscriptAfter (terminal, None) -> sprintf "terminals/%s" terminal
+        | TerminalTranscriptAfter (terminal, Some after) -> sprintf "terminals/%s/after/%d" terminal after
+        | TerminalTranscriptRange (terminal, first, last) -> sprintf "terminals/%s/%d-%d" terminal first last
         | TerminalKeyframe (terminal, seq) -> sprintf "terminals/%s/keyframes/%d" terminal seq
         | ClaudeStatus -> "claude"
         | Claude action -> "claude/" + claudeSegment action
@@ -231,9 +238,22 @@ module SessionRoute =
             match System.Int32.TryParse seq with
             | true, parsed when parsed >= 0 && terminal <> "" -> Some (TerminalKeyframe (terminal, parsed))
             | _ -> None
-        | "GET", [ "terminals"; terminal; index ] ->
-            match System.Int32.TryParse index with
-            | true, parsed when parsed >= 0 && terminal <> "" -> Some (TerminalTranscript (terminal, parsed))
+        | "GET", [ "terminals"; terminal ] when terminal <> "" -> Some (TerminalTranscriptAfter (terminal, None))
+        | "GET", [ "terminals"; terminal; "after"; seq ] ->
+            match System.Int32.TryParse seq with
+            | true, parsed when parsed >= 0 && terminal <> "" ->
+                Some (TerminalTranscriptAfter (terminal, Some parsed))
+            | _ -> None
+        | "GET", [ "terminals"; terminal; range ] ->
+            // `{first}-{last}`, validated here on exactly the argument the event ranges are:
+            // an inverted or over-long range is not an address this server has, and must 404
+            // rather than be answered with something shorter than the address promised.
+            match range.Split '-' with
+            | [| first; last |] ->
+                match System.Int32.TryParse first, System.Int32.TryParse last with
+                | (true, f), (true, l) when terminal <> "" && f >= 0 && l >= f && l - f < TranscriptChunk.size ->
+                    Some (TerminalTranscriptRange (terminal, f, l))
+                | _ -> None
             | _ -> None
         | "GET", [ "claude" ] -> Some ClaudeStatus
         | "POST", [ "claude"; "begin" ] -> Some (Claude ClaudeAction.Begin)
@@ -286,17 +306,26 @@ module AssetBuild =
 /// was rendered against — which is exactly the bug that produced these values (a 24-hour
 /// window on stable URLs made every release invisible for a day).
 ///
-/// The event log is deliberately NOT here. Its answers are kept by the client itself, in a
-/// store it can enumerate and ask to persist, so every response on that surface is
-/// `no-store` — a header inviting a second copy into the HTTP cache would be the redundant
-/// spare, not a belt (docs/plans/20).
+/// The event log and the transcripts are deliberately NOT here. Their answers are kept by
+/// the client itself, in a store it can enumerate and ask to persist, so every response on
+/// those surfaces is `no-store` — a header inviting a second copy into the HTTP cache would
+/// be the redundant spare, not a belt (docs/plans/20, docs/plans/22).
 module CachePolicy =
 
     /// A fingerprinted asset: the address changes whenever the bytes do, so a cache entry can
-    /// never be stale — only unused. `public`, unlike the event chunks' `private`: these are
+    /// never be stale — only unused. `public`, unlike the session's own surfaces: these are
     /// ungated static bytes, identical for every user.
     let asset = "public, max-age=31536000, immutable"
 
     /// The shell. `no-cache` is "revalidate before every use", NOT "do not store" — the
     /// browser keeps the copy and asks; an `ETag` turns the usual answer into a 304.
     let shell = "no-cache"
+
+    /// A transcript keyframe: written once, at a line that never moves, so its bytes can
+    /// never change. `private`, because it sits behind the session's per-user authorization
+    /// and no shared cache may hold a screen from someone's terminal.
+    ///
+    /// The one session surface still served out of the HTTP cache, and it stays there for
+    /// the reason the ranges left: a keyframe is fetched only by a replay a person opened,
+    /// so there is nothing to read back offline that they did not just ask for.
+    let keyframe = "private, max-age=259200, immutable"

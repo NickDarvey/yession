@@ -130,19 +130,25 @@ agent progress notifications (hints only)
 HTTP is allowed only for: serving the web app, initial local bootstrap, and temporary
 signalling. **HTTP is not the session API.**
 
-One read path is the exception the rule permits, and it is read-only: the event log is also
-served over HTTP, by CURSOR (docs/plans/20). A client sends the offset it has folded through
-(`GET /events/after/{n}`, or `/events` from the beginning) and the server answers with a
-redirect to the range it chose (`GET /events/{first}-{last}`), or `204` when that client is
+One read path is the exception the rule permits, and it is read-only: the durable HISTORY is
+also served over HTTP, by CURSOR — the event log (docs/plans/20) and each terminal's
+transcript (docs/plans/22), on identical terms. A client sends the position it has folded
+through (`GET /events/after/{n}`, `GET /terminals/{t}/after/{n}`, or the bare path from the
+beginning) and the server answers with a redirect to the range it chose (`GET
+/events/{first}-{last}`, `GET /terminals/{t}/{first}-{last}`), or `204` when that client is
 already current. A range's bounds do not move, so its bytes are the same for ever — the
 growing tail included, which a fixed chunk index could never manage — and that is what makes
 an answer worth keeping. The client keeps them, in a store it can enumerate and ask to
-persist (the Cache API, named for the session); every response on the surface is `no-store`,
-because the copy that matters is the client's and a second one in the HTTP cache would be a
-spare nobody reads.
+persist (the Cache API, one named for the session's events and one per terminal); every
+response on the surface is `no-store`, because the copy that matters is the client's and a
+second one in the HTTP cache would be a spare nobody reads.
 
-The client computes none of it: it holds an offset and stores what it is given under the
-address it was given, so there is no arithmetic in it that could address the wrong events.
+The client computes no address: it holds a position and stores what it is given under the
+address it was given. The one number it does compute is where an answer starts, and that
+comes from what it ASKED rather than from where the answer lives — the answer to `after n`
+begins at `n + 1`. Events carry their own offsets and do not need even that; transcript lines
+cannot, because the file is an asciicast and a private index field in it would stop it being
+one, which is why the cursor's start is a server contract with a test of its own.
 
 That makes the durable history feed a second, independently failing leg, and it is treated
 as one:

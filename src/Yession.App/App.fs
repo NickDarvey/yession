@@ -179,76 +179,91 @@ module App =
     type EventFeed = EventOffset option -> Async<Result<EventPage<SessionEvent>, FeedFault>>
 
     /// Reading a terminal's transcript over HTTP — the history leg of the terminal feed
-    /// (Plan 13), and a deliberate copy of `EventFetch`'s shape because it is the same
-    /// problem: immutable fixed-size chunks, so the browser's own cache is the store and
-    /// only the growing tail reaches the network.
+    /// (Plan 13), read by cursor since Plan 22 and a deliberate copy of `EventFetch`'s shape
+    /// because it is the same problem: a position in, an answer whose bounds never move back,
+    /// and a store the client keeps it in.
     ///
     /// One difference from the event feed, and it is the reason this is a separate module
     /// rather than a reuse: a transcript's first line is its asciicast header, not a
-    /// record. Chunk 0 therefore yields one fewer record than it has lines, and every
-    /// record's sequence number is its LINE index — which is what keeps a fetched chunk and
-    /// a live frame talking about the same thing.
+    /// record. The first answer therefore yields one fewer record than it has lines, and
+    /// every record's sequence number is its LINE index — which is what keeps a fetched
+    /// answer and a live frame talking about the same thing.
     module TranscriptFetch =
 
         /// One fetched page: the records it carried with their sequence numbers, and
-        /// whether the transcript continues past this chunk.
+        /// whether the transcript continues past it.
         type TranscriptPage =
             { Records : (int * TranscriptRecord) list
-              /// The transcript's own header, when this page carried it (line 0, so chunk 0
-              /// alone). Kept rather than discarded because the replay view (Plan 13, stage
-              /// 3e) rebuilds a `.cast` from these records, and a `.cast` without its header
-              /// is not one — the recorded width and height are what make a replay come out
-              /// the shape the terminal actually was.
+              /// The transcript's own header, when this page carried it (line 0, so the
+              /// answer from a client with nothing yet, and no other). Kept rather than
+              /// discarded because the replay view (Plan 13, stage 3e) rebuilds a `.cast`
+              /// from these records, and a `.cast` without its header is not one — the
+              /// recorded width and height are what make a replay come out the shape the
+              /// terminal actually was.
               Header : TranscriptHeader option
-              /// One past the last line this chunk covered.
+              /// One past the last line this page covered.
               NextSeq : int
-              /// A full chunk means more may exist; a partial chunk IS the current tail.
+              /// A capped answer means the server had more to give; anything shorter — a
+              /// `204`, which arrives here as no lines at all — is the transcript's tail.
               IsEnd : bool }
 
         type TranscriptFeed = TerminalId -> int -> Async<Result<TranscriptPage, FeedFault>>
 
         /// Build a feed over the platform's HTTP GET, resolving routes with `urlOf` (the
         /// browser passes `SessionRoute.relative` and lets `<base href>` do the rest).
+        /// The lines of one answer, numbered from `first` — the seq of its first line.
+        ///
+        /// ONE decoder, used by the network read and by the replay of what was kept, for the
+        /// reason `EventFetch.decodeLines` is one: what is kept IS what the network returned,
+        /// verbatim, and a store holding anything else would be a second wire format.
+        ///
+        /// A line that will not decode fails the whole answer: a partially decoded transcript
+        /// is not history, it is a guess.
+        let decodeLines (first: int) (body: string) : Result<TranscriptPage, FeedFault> =
+            let lines = body.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
+            let rec decode i acc header =
+                if i >= lines.Length then Ok (List.rev acc, header)
+                else
+                    match Codec.fromString Codec.transcriptLine lines.[i] with
+                    | Ok (TranscriptRecordLine record) -> decode (i + 1) ((first + i, record) :: acc) header
+                    // The header is line 0 and carries no output, so it is no record — but
+                    // it is KEPT, because a replay needs it.
+                    | Ok (TranscriptHeaderLine h) -> decode (i + 1) acc (Some h)
+                    | Error e -> Error (FeedCorrupt e)
+            match decode 0 [] None with
+            | Error fault -> Error fault
+            | Ok (records, header) ->
+                Ok
+                    { Records = records
+                      Header = header
+                      NextSeq = first + lines.Length
+                      IsEnd = lines.Length < TranscriptChunk.size }
+
+        /// Build a feed over the platform's HTTP GET, resolving routes with `urlOf` (the
+        /// browser passes `SessionRoute.relative` and lets `<base href>` do the rest).
+        ///
+        /// The cursor, and nothing else: the line this client has folded through, sent as-is.
+        /// The server picks the bounds of the answer and redirects to them, so no arithmetic
+        /// here can address the wrong lines — there is none to get wrong.
+        ///
+        /// The ONE number this computes is where the answer starts, and it comes from what it
+        /// ASKED rather than from where the answer lives: the answer to `after n` begins at
+        /// line `n + 1`. A transcript line cannot carry its own index — the file is an
+        /// asciicast and a private index field in it would stop it being one — so the cursor
+        /// contract is what numbering rests on, and it has a test of its own (docs/plans/22).
         let overHttp (get: HttpGet) (urlOf: SessionRoute -> string) (token: string option) : TranscriptFeed =
             fun terminal fromSeq ->
                 async {
-                    let index = TranscriptChunk.indexOf (max 0 fromSeq)
+                    let after = if fromSeq <= 0 then None else Some (fromSeq - 1)
                     let tokenSuffix =
                         token
                         |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
                         |> Option.defaultValue ""
-                    let url = urlOf (TerminalTranscript (TerminalId.value terminal, index)) + tokenSuffix
+                    let url = urlOf (TerminalTranscriptAfter (TerminalId.value terminal, after)) + tokenSuffix
                     match! get url with
                     | Error (HttpUnreachable detail) -> return Error (FeedUnreachable detail)
                     | Error (HttpStatus status) -> return Error (FeedRefused status)
-                    | Ok answer ->
-                        // A transcript chunk is addressed by index and its answer comes back
-                        // from the address that asked, so `answer.Url` says nothing new here.
-                        let lines = answer.Body.Split '\n' |> Array.filter (fun l -> l.Trim().Length > 0)
-                        let first = TranscriptChunk.firstSeq index
-                        // Decode line by line, keeping each one's LINE index as its seq.
-                        // A line that will not decode fails the page: a partially decoded
-                        // transcript is not history, it is a guess — the same rule the
-                        // event feed applies to a corrupt chunk.
-                        let rec decode i acc header =
-                            if i >= lines.Length then Ok (List.rev acc, header)
-                            else
-                                match Codec.fromString Codec.transcriptLine lines.[i] with
-                                | Ok (TranscriptRecordLine record) ->
-                                    decode (i + 1) ((first + i, record) :: acc) header
-                                // The header is line 0 and carries no output, so it is no
-                                // record — but it is KEPT, because a replay needs it.
-                                | Ok (TranscriptHeaderLine h) -> decode (i + 1) acc (Some h)
-                                | Error e -> Error (FeedCorrupt e)
-                        match decode 0 [] None with
-                        | Error fault -> return Error fault
-                        | Ok (records, header) ->
-                            return
-                                Ok
-                                    { Records = records |> List.filter (fun (seq, _) -> seq >= fromSeq)
-                                      Header = header
-                                      NextSeq = first + lines.Length
-                                      IsEnd = lines.Length < TranscriptChunk.size }
+                    | Ok answer -> return decodeLines (max 0 fromSeq) answer.Body
                 }
 
     /// How a connection consumes the event log (Step 07).
