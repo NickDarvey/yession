@@ -280,6 +280,21 @@ events at boot re-arm the same wake), humans-outrank-wakes at the drain. `Ports 
 for one end-to-end: a real backgrounded command completes, a turn runs unprompted, its
 digest carries the outcome.
 
+**The arm, as built.** `Wake` is called from exactly three places, and the third was not in
+this plan: at boot, when a terminal block completes, and **at the end of every turn**. The
+third exists because the first two can both miss. A background command that finishes while the
+agent is mid-turn fires the wake against a taken slot, and nothing looks again — the debt sits
+in the log for ever. Re-reading when the slot frees costs one page and terminates on its own,
+because `AgentWake.pending` resets at every `AgentTurnStarted`.
+
+It is a re-read rather than a queued flag deliberately: a flag is a second place the answer
+lives, and the whole shape of the wake is that the log already knows.
+
+`TerminalScheduler` takes an `onBlockFinished` seam for the same reason the manager takes a
+transcript reader — the drain knows a block finished, and what that is WORTH belongs to
+whoever composed it with an agent. A terminal queue that knew about turns would be the wrong
+thing knowing it.
+
 ### Stage 3 — task lanes
 
 `lane` on `execute_command`; lane open/join/cap/auto-close in the terminal manager

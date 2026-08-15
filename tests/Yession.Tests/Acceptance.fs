@@ -80,14 +80,17 @@ let private representativeModel : ClientModel =
                 Body = "ship it"
                 Status = Complete
                 Kind = ConversationItemKind.Message
-                Offset = EventOffset.create 1L |> expect }
+                Offset = EventOffset.create 1L |> expect
+                Woke = None }
               { MessageId = MessageId.create "msg-agent" |> expect
                 Author = ActorRef.Agent
                 Body = "Sounds go"
                 Status = Streaming
                 Kind = ConversationItemKind.Message
-                Offset = EventOffset.create 4L |> expect } ]
-          ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ] }
+                Offset = EventOffset.create 4L |> expect
+                Woke = None } ]
+          ActiveAgentMessages = Map.ofList [ turnId, MessageId.create "msg-agent" |> expect ]
+          WokenTurn = None }
       // The terminal half of the chat (Plan 14): the fixture's one block, anchored between
       // the two messages — so the checklist renders a chip in the middle of the conversation
       // rather than only at the end, which is the ordering the merge exists for.
@@ -606,7 +609,8 @@ let private uiChecklistTests =
                   Body = "# Heading one\n\nText with **bold** and `code`.\n\n- item one\n- item two"
                   Status = Complete
                   Kind = ConversationItemKind.Message
-                  Offset = EventOffset.create 1L |> expect }
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ richItem ] } }
@@ -636,7 +640,8 @@ let private uiChecklistTests =
                   Body = "added repo octo/hello (branch main)"
                   Status = Complete
                   Kind = ConversationItemKind.ActNote
-                  Offset = EventOffset.create 1L |> expect }
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = None }
             let model =
                 { representativeModel with
                     Conversation = { representativeModel.Conversation with Items = [ note ] } }
@@ -646,6 +651,40 @@ let private uiChecklistTests =
             let noteStart = html.IndexOf "data-act-note"
             let article = html.Substring (html.LastIndexOf ("<article", noteStart), 300)
             Expect.isFalse (article.Contains "data-message-body") "no message body — it is not something someone said"
+
+        // A turn nobody asked for (Plan 20, stage 2). The agent may now speak with nobody
+        // having spoken to it, and on a shared surface that reads as the agent deciding
+        // things on its own unless the item itself says otherwise. What is pinned is that
+        // the mark is ON the woken item and on nothing else — not what it looks like.
+        testCase "what a woken turn said is attributed as a turn nobody asked for" <| fun () ->
+            let asked = MessageId.create "msg-asked" |> expect
+            let woken = MessageId.create "msg-woken" |> expect
+            let agentItem (messageId: MessageId) (woke: WakeReason option) : ConversationItem =
+                { MessageId = messageId
+                  Author = ActorRef.Agent
+                  Body = "the build finished"
+                  Status = Complete
+                  Kind = ConversationItemKind.Message
+                  Offset = EventOffset.create 1L |> expect
+                  Woke = woke }
+            let model =
+                { representativeModel with
+                    Conversation =
+                        { representativeModel.Conversation with
+                            Items = [ agentItem asked None; agentItem woken (Some CommandFinished) ] } }
+            let html = Support.render model
+            // Scoped to each article, because a whole-page render contains both and a bare
+            // `Contains` would pass with the mark on the wrong one.
+            let article (messageId: MessageId) =
+                let start = html.IndexOf (sprintf "data-message-id=\"%s\"" (MessageId.value messageId))
+                Expect.isTrue (start > 0) "the message renders"
+                html.Substring (start, html.IndexOf ("</article>", start) - start)
+            Expect.isTrue
+                ((article woken).Contains Dom.Text.wokeCommandFinished)
+                "the woken turn's message says why it exists"
+            Expect.isFalse
+                ((article asked).Contains "data-message-woke")
+                "and a turn somebody asked for says nothing — there is nothing to explain"
 
         // The generated read surface (Plan 15). One renderer draws every query, so this
         // pins the RENDERER — a section per declared query, each shape drawn the way its
@@ -1122,8 +1161,9 @@ let private semanticsTests =
                             Body = "on it"
                             Status = Complete
                             Kind = ConversationItemKind.Message
-                            Offset = EventOffset.create 1L |> expect } ]
-                      ActiveAgentMessages = Map.empty }
+                            Offset = EventOffset.create 1L |> expect
+                            Woke = None } ]
+                      ActiveAgentMessages = Map.empty; WokenTurn = None }
                 Timeline = TimelineProjection.empty }
 
         // A peer id is a token, not a person. The roster, the draft summaries and the lease

@@ -142,8 +142,9 @@ let private shellModel : ClientModel =
                     Body = "ship it"
                     Status = Complete
                     Kind = ConversationItemKind.Message
-                    Offset = offset 1L } ]
-              ActiveAgentMessages = Map.empty }
+                    Offset = offset 1L
+                    Woke = None } ]
+              ActiveAgentMessages = Map.empty; WokenTurn = None }
         Timeline = { TimelineProjection.empty with TerminalItems = [ TimelineBlock (offset 2L, terminalId, blockId) ] }
         Terminals =
             { Terminals =

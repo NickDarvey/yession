@@ -349,6 +349,17 @@ module Dom =
         /// when a person finishes a task, this one when somebody repairs the terminal.
         let queuedAwaitingIntegration = "awaiting-integration"
         let system = "system"
+        /// Why a turn nobody asked for exists (Plan 20, stage 2). The token a test reads off
+        /// `data-message-woke`; the word beside it on screen is `turnWoke`.
+        let wokeCommandFinished = "command-finished"
+        /// What a woken turn wears in the chat, in the slot its siblings — *streaming*,
+        /// *interrupted* — already occupy. A word rather than a new glyph: this design says
+        /// a message's state in one lowercase word, and a mark nobody can decode without a
+        /// tooltip would be a worse semantic than the vocabulary the surface already has.
+        let turnWoke = "woke"
+        /// The same fact, at length, for the reader who wants it. Never the visible label:
+        /// the chat's meta line is three short words wide.
+        let turnWokeCommandFinished = "The agent picked this up on its own: a command it left running in the background finished."
         // Conversation item status.
         let complete = "complete"
         let streaming = "streaming"

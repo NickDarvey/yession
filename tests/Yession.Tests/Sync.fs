@@ -68,8 +68,9 @@ let private codecTests =
                         Body = "secret history"
                         Status = Complete
                         Kind = ConversationItemKind.Message
-                        Offset = EventOffset.zero } ]
-                  ActiveAgentMessages = Map.empty }
+                        Offset = EventOffset.zero
+                        Woke = None } ]
+                  ActiveAgentMessages = Map.empty; WokenTurn = None }
             let initial = { ClientModel.init (peer "ada" "Ada") with Conversation = conversation }
             let p = Harness.run (App.makeProgram doc initial)
             Body.author registry p ada "draft body"
@@ -275,7 +276,8 @@ let private queueUnitTests =
                     Body = "ship it"
                     Status = Complete
                     Kind = ConversationItemKind.Message
-                    Offset = envelope.Offset } ]
+                    Offset = envelope.Offset
+                    Woke = None } ]
                 "the sent message is a complete conversation item"
 
         testCase "duplicate event pages do not duplicate conversation items" <| fun () ->

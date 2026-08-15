@@ -31,11 +31,13 @@ module Scheduler =
           /// stage 2) — a background command finished while the agent was not running.
           ///
           /// Called where the answer can change and nowhere else: when a terminal block
-          /// completes, and once at boot (a completion the previous process never got to act
-          /// on is still owed). Deliberately not on every doc update, which is what a drain
-          /// is: the answer lives in the log, a doc update cannot move it, and reading the
-          /// whole log on every keystroke somebody types into a draft would be a poll with a
-          /// nicer name.
+          /// completes, once at boot (a completion the previous process never got to act on
+          /// is still owed), and at the end of every turn — a completion that lands while the
+          /// agent is busy fires this against a taken slot, and would otherwise be a debt
+          /// nothing ever collects. Deliberately not on every doc update, which is what a
+          /// drain is: the answer lives in the log, a doc update cannot move it, and reading
+          /// the whole log on every keystroke somebody types into a draft would be a poll
+          /// with a nicer name.
           Wake : unit -> unit }
 
     /// Create the scheduler for one session. `initialConsumed` seeds the log-anchored
@@ -153,6 +155,14 @@ module Scheduler =
                                 | Some current when current.Generation = turn.Generation ->
                                     running <- None
                                     drain ()
+                                    // A background block may have finished WHILE this turn
+                                    // ran, and the wake it fired found the slot taken. The
+                                    // debt is in the log, so re-reading it here is what keeps
+                                    // a completion from being lost to bad timing — and it
+                                    // costs nothing when none is owed. After `drain`, because
+                                    // a person who spoke meanwhile outranks it (and, having
+                                    // taken the slot, silences this).
+                                    wake ()
                                 | _ -> ()
                             | _ ->
                                 drainBusy <- false
@@ -212,6 +222,12 @@ module Scheduler =
                                 // A person may have said something while the woken turn ran,
                                 // and their turn is the one that outranks everything.
                                 drain ()
+                                // A second background command may have finished while this
+                                // woken turn ran. Same re-read as the message path's, and it
+                                // terminates: `AgentWake.pending` resets at every
+                                // `AgentTurnStarted`, so a wake that consumed the debt leaves
+                                // nothing for the next one to find.
+                                wake ()
                             | _ -> ()
                     })
 

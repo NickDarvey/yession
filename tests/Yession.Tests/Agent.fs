@@ -66,7 +66,8 @@ let private triggerItem : ConversationItem =
       Body = "hi agent"
       Status = Complete
       Kind = ConversationItemKind.Message
-      Offset = EventOffset.zero }
+      Offset = EventOffset.zero
+      Woke = None }
 
 let private envelope (offset: int64) (event: SessionEvent) : EventEnvelope<SessionEvent> =
     { EventId = EventId.fresh ()
@@ -501,10 +502,168 @@ let private wakeTests =
                 "and the turn it starts is told about both"
     ]
 
+// --- The arm (Plan 20, stage 2): the wake, wired to the scheduler that runs it -------------
+
+/// A scheduler over an in-memory log, with an agent that answers immediately. `duringTurn`
+/// runs inside the agent's turn, which is how a completion that lands WHILE the agent is busy
+/// is arranged without a clock.
+let private appendNow (log: EventLog<SessionEvent>) (event: SessionEvent) =
+    // The in-memory log never yields, so this completes before it returns — which is what
+    // lets these cases arrange a log and then observe a synchronous scheduler decision.
+    Async.StartImmediate (log.Append ActorRef.Agent event |> Async.Ignore)
+
+let private armedScheduler (seed: SessionEvent list) (duringTurn: EventLog<SessionEvent> -> unit) =
+    let sessionId = SessionId.create "wake-session" |> expect
+    let log = newLog ()
+    for event in seed do
+        appendNow log event
+    let runner : RunAgent =
+        fun _ _ _ onChunk ->
+            async {
+                onChunk { Text = "ok" }
+                duringTurn log
+                return AgentCompleted ("done", None)
+            }
+    let mintTurnId =
+        let mutable n = 0
+        fun () ->
+            n <- n + 1
+            AgentTurnId.create (sprintf "turn-%d" n) |> expect
+    let mintMessageId =
+        let mutable n = 0
+        fun () ->
+            n <- n + 1
+            MessageId.create (sprintf "message-%d" n) |> expect
+    let scheduler =
+        Scheduler.create sessionId (Y.Doc.Create ()) log (fun () -> Some runner)
+            (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId PeerRef
+            (fun _ _ _ -> []) Set.empty
+    scheduler, log
+
+let private startedTurns (log: EventLog<SessionEvent>) =
+    async {
+        let! events = eventsOf log
+        return
+            events
+            |> List.choose (function AgentTurnStarted started -> Some started | _ -> None)
+    }
+
+// A turn's chat item has to carry WHY the turn exists, because an agent that pipes up with
+// nobody having spoken is, on the surface people read, indistinguishable from an agent
+// deciding things on its own.
+let private attributionTests =
+    testList "A woken turn, in the chat (Plan 20, stage 2)" [
+
+        let started (woke: WakeReason option) =
+            envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = None; Woke = woke })
+        let saidSomething =
+            envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+
+        testCase "what a woken turn says is marked with why the turn exists" <| fun () ->
+            let projection, _ =
+                ConversationProjection.applyEvents None [ started (Some CommandFinished); saidSomething ] ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.Woke))
+                [ Some CommandFinished ]
+                "the item says why it is here"
+
+        testCase "what an ordinary turn says is marked with nothing" <| fun () ->
+            let projection, _ =
+                ConversationProjection.applyEvents None [ started None; saidSomething ] ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.Woke))
+                [ None ]
+                "somebody asked for this one, so there is nothing to explain"
+
+        testCase "a turn that failed before speaking still says why it was running" <| fun () ->
+            // The one item a turn can produce without ever starting a message. Unattributed,
+            // it reads as the agent failing at something nobody asked it to do — which is
+            // exactly the sentence that needs its second half.
+            let projection, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ started (Some CommandFinished)
+                      envelope 1L (AgentTurnFailed { AgentTurnId = turnId; Reason = "no credential" }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.Woke))
+                [ Some CommandFinished ]
+                "the failure says why it was running"
+
+        testCase "a message from a turn the wake did not start is not marked by the one that is" <| fun () ->
+            // A late `AgentMessageStarted` from the previous turn must not inherit the current
+            // turn's reason: the mark says why THIS was said, and a mark that can attach to
+            // the wrong item is worse than none.
+            let earlier = AgentTurnId.create "turn-earlier" |> expect
+            let projection, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ started (Some CommandFinished)
+                      envelope 1L (AgentMessageStarted { AgentTurnId = earlier; MessageId = agentMessageId }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.Woke))
+                [ None ]
+                "the mark belongs to the turn that carried it"
+    ]
+
+let private armTests =
+    testList "The wake, armed (Plan 20, stage 2)" [
+
+        testCaseAsync "a background command that finished starts a turn nobody asked for" <|
+            async {
+                let scheduler, log =
+                    armedScheduler
+                        [ blockStarted "b1" true (Some (PeerRef ada)); blockCompleted "b1" ]
+                        ignore
+                scheduler.Wake ()
+                match! startedTurns log with
+                | [ started ] ->
+                    Expect.equal started.Woke (Some CommandFinished) "and it can say why it exists"
+                    Expect.isNone started.TriggeredByMessageId "nobody spoke"
+                | other -> failwithf "expected exactly one turn, got %d" (List.length other)
+            }
+
+        testCaseAsync "a wake with nothing owed starts nothing" <|
+            async {
+                // The boot call site fires on every session, most of which owe nothing. It has
+                // to be free of consequence, not merely cheap.
+                let scheduler, log =
+                    armedScheduler [ blockStarted "b1" false (Some (PeerRef ada)); blockCompleted "b1" ] ignore
+                scheduler.Wake ()
+                let! started = startedTurns log
+                Expect.isEmpty started "a foreground command answered its own caller"
+            }
+
+        testCaseAsync "a completion that lands while the agent is busy still gets its turn" <|
+            async {
+                // The terminal drain wakes the moment a block completes, and finds the slot
+                // taken. Without a re-read when the turn ends, that debt is collected by
+                // nothing: the log keeps it and no call site ever looks again.
+                let mutable armed = false
+                let scheduler, log =
+                    armedScheduler
+                        [ blockStarted "b1" true (Some (PeerRef ada)); blockCompleted "b1" ]
+                        (fun log ->
+                            // Once: a second background command finishing under the running turn.
+                            if not armed then
+                                armed <- true
+                                appendNow log (blockStarted "b2" true (Some (PeerRef ada)))
+                                appendNow log (blockCompleted "b2"))
+                scheduler.Wake ()
+                let! started = startedTurns log
+                match started |> List.map (fun t -> t.Woke) with
+                | [ Some CommandFinished; Some CommandFinished ] -> ()
+                | other -> failwithf "expected the second completion to get its own turn, got %A" other
+            }
+    ]
+
 let tests =
     testList "Agent" [
         turnTests
         wakeTests
+        attributionTests
+        armTests
         Tag.needs "Agent E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
         Tag.needs "Agent live SDK" [ Tag.LiveAgent; Tag.Native ] (fun () -> liveTests)
     ]

@@ -538,19 +538,11 @@ let startFull
         let drain () = scheduler.Drain ()
         let requestInterrupt = scheduler.RequestInterrupt
 
-        let terminalScheduler = TerminalScheduler.create doc terminals initialTerminalConsumed
+        // A terminal block finishing is the one thing outside the agent's own turn that can
+        // make the log owe it a turn nobody asked for (Plan 20, stage 2). The terminal
+        // scheduler is what knows one finished; the wake is what that is worth here.
+        let terminalScheduler = TerminalScheduler.create doc terminals scheduler.Wake initialTerminalConsumed
         let drainTerminals () = terminalScheduler.Drain ()
-        // A terminal block finishing is the ONE thing that can make the log owe the agent a
-        // turn nobody asked for (Plan 20, stage 2), and this callback — which the terminal
-        // manager already fires when one does — is where `scheduler.Wake ()` belongs.
-        //
-        // It is NOT called yet, deliberately. An agent that starts a turn nobody asked for
-        // has to be able to say why on the surface people read, and the chat does not render
-        // `AgentTurnStarted.Woke` yet. Everything below the call site is finished and tested;
-        // what is missing is the half that makes it explicable, and shipping the two apart
-        // would put an unexplained turn in a shared session — which is the one thing an
-        // agent acting unprompted must never look like. The arm and its attribution land
-        // together.
         reDrainTerminals <- drainTerminals
         // The bound on the starvation a live holder can cause (Plan 13, stage 3c). Reclaims
         // only a lease that has gone idle WITH something queued behind it, so a peer nobody is
@@ -665,11 +657,9 @@ let startFull
         // reads the projection — and before the terminal drain, which must not try to run a
         // command in a terminal that is gone.
         do! terminals.ReconcileAtBoot ()
-        // The boot half of the same arm, dormant for the same reason: a completion the
-        // previous process never acted on is still owed, and the wake re-derives it from the
-        // log rather than losing it — once there is a surface that explains the turn it
-        // starts.
-        ignore scheduler.Wake
+        // The boot half of the same arm: a completion the previous process never acted on is
+        // still owed, and the wake re-derives it from the log rather than losing it.
+        scheduler.Wake ()
 
         // The boot drain (Step 19): a replayed doc may hold entries that were pending
         // at the crash (consume them now) or already consumed but not yet removed (the
