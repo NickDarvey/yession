@@ -307,9 +307,19 @@ let private toggleSettings () : unit = jsNative
 // outside F#'s reach, so a path embedded here could not be checked against
 // `SessionRoute`. Every fetch below takes its URL from `SessionRoute.relative`, and the
 // browser resolves it against the shell's `<base href>`.
+//
+// A REFUSAL is 401/403 and nothing else. Every other error status — a 502 from the
+// operator's proxy standing in front of a session that is gone, a 503 from one still
+// starting — is the session not being there, which is the other axis entirely. Reading them
+// as "log in" sent a client whose session had stopped off to a login bounce that could only
+// fail, and (once the shell was served from a worker) replaced a perfectly good offline
+// session with a browser error page. The thrown case was already right; this is the same
+// distinction for the answers that arrive.
 [<Emit("""fetch($0, { cache: 'no-store' }).then(
   r => r.ok ? r.json().then(me => ({ reachable: true, authorized: true, token: me.peerToken, detail: '' }))
-            : { reachable: true, authorized: false, token: '', detail: 'HTTP ' + r.status },
+      : (r.status === 401 || r.status === 403)
+        ? { reachable: true, authorized: false, token: '', detail: 'HTTP ' + r.status }
+        : { reachable: false, authorized: false, token: '', detail: 'HTTP ' + r.status },
   e => ({ reachable: false, authorized: false, token: '', detail: String(e) }))""")>]
 let private fetchMe (url: string) : JS.Promise<{| reachable: bool; authorized: bool; token: string; detail: string |}> = jsNative
 
@@ -502,6 +512,19 @@ let private cacheRead (cache: obj) (url: string) : JS.Promise<string option> = j
 [<Emit("$0.put($1, new Response($2, { headers: { 'content-type': 'application/x-ndjson; charset=utf-8' } })).catch(() => undefined)")>]
 let private cacheWrite (cache: obj) (url: string) (body: string) : JS.Promise<unit> = jsNative
 
+/// Register the worker that makes a cold open possible with no network (Plan 20).
+///
+/// Best-effort and deliberately unawaited-for-correctness: a client whose registration fails
+/// (an insecure context, a browser that refuses) is exactly today's client — it just cannot
+/// open cold. Nothing above this waits on it, and nothing breaks if it never resolves.
+/// Returns `unit`, and that is load-bearing rather than stylistic. As a promise-returning
+/// emit whose result was discarded (`|> ignore`), the whole call was dead code to the
+/// compiler and never reached the bundle at all — the registration silently did not ship,
+/// which looks exactly like a worker that will not take control. A unit-returning emit is a
+/// statement, and statements survive.
+[<Emit("""void (navigator.serviceWorker && navigator.serviceWorker.register($0).catch(() => undefined))""")>]
+let private registerWorker (url: string) : unit = jsNative
+
 /// Ask for the store to be kept. A request, not a guarantee — granted for an engaged site on
 /// Chrome, essentially only for an installed app on Safari — and best-effort by design: the
 /// answer changes nothing this client does, it only changes how long what it kept survives.
@@ -521,6 +544,79 @@ let private openHistoryCache () : Async<App.HistoryCache> =
                 { Stored = fun () -> async { let! keys = cacheKeys cache |> Async.AwaitPromise in return List.ofArray keys }
                   Read = fun url -> cacheRead cache url |> Async.AwaitPromise
                   Write = fun url body -> cacheWrite cache url body |> Async.AwaitPromise }
+    }
+
+// --- One store per terminal (Plan 22) -----------------------------------------------------
+// Same Cache API, one cache per terminal, so a replay can walk one terminal's answers in
+// insertion order without asking whose each entry is. The terminal's id is in the cache's NAME,
+// which is what makes that question already answered when the walk starts — and what keeps a
+// hole in one terminal's history from stopping another's.
+
+let private transcriptCachePrefix () = persistenceKey () + "/terminals/"
+
+let private transcriptCacheName (terminal: TerminalId) = transcriptCachePrefix () + TerminalId.value terminal
+
+[<Emit("window.caches.keys()")>]
+let private cacheNames () : JS.Promise<string array> = jsNative
+
+// The line an answer starts on, kept BESIDE the bytes rather than parsed back out of the
+// address: a transcript line cannot carry its own index, and the address is the one thing this
+// client is never allowed to read meaning out of. It rides a header on the stored `Response`,
+// which the Cache API round-trips for nothing.
+[<Emit("""$0.put($1, new Response($3, { headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'x-yession-first-seq': String($2) } })).catch(() => undefined)""")>]
+let private transcriptWrite (cache: obj) (url: string) (firstSeq: int) (body: string) : JS.Promise<unit> = jsNative
+
+// `null` for an entry that is gone, and for one written without the header — which no build
+// that shipped this ever wrote, but a store outlives the build that filled it.
+[<Emit("""$0.match($1).then(async r => {
+  if (!r) return null
+  const first = r.headers.get('x-yession-first-seq')
+  if (first === null) return null
+  return [parseInt(first, 10), await r.text()]
+})""")>]
+let private transcriptRead (cache: obj) (url: string) : JS.Promise<(int * string) option> = jsNative
+
+/// Every terminal's store for this session, or the one that keeps nothing.
+let private openTranscriptCaches () : Async<App.TranscriptCaches> =
+    async {
+        if not (canKeepHistory ()) then return App.TranscriptCaches.none
+        else
+            return
+                { For =
+                    fun terminal ->
+                        async {
+                            // Opening is idempotent and cheap, and doing it per call is what
+                            // keeps this a lookup rather than a registry something has to
+                            // remember to populate before a terminal is first written to.
+                            let! cache = openCache (transcriptCacheName terminal) |> Async.AwaitPromise
+                            return
+                                { Stored =
+                                    fun () ->
+                                        async {
+                                            let! keys = cacheKeys cache |> Async.AwaitPromise
+                                            return List.ofArray keys
+                                        }
+                                  Read = fun url -> transcriptRead cache url |> Async.AwaitPromise
+                                  Write =
+                                    fun url first body -> transcriptWrite cache url first body |> Async.AwaitPromise }
+                        }
+                  Kept =
+                    fun () ->
+                        async {
+                            let! names = cacheNames () |> Async.AwaitPromise
+                            let prefix = transcriptCachePrefix ()
+                            return
+                                names
+                                |> Array.filter (fun name -> name.StartsWith prefix)
+                                |> Array.map (fun name -> name.Substring prefix.Length)
+                                // An id the store held but this build cannot parse is a
+                                // terminal this client cannot fold records for anyway.
+                                |> Array.choose (fun id ->
+                                    match TerminalId.create id with
+                                    | Ok terminal -> Some terminal
+                                    | Error _ -> None)
+                                |> List.ofArray
+                        } }
     }
 
 // --- Waiting to try again (Plan 20, step 3) ----------------------------------------------
@@ -1290,8 +1386,17 @@ let private start () =
         // this client may CONNECT; it has never had any business deciding whether a client may
         // read what it was already given. That it did is why an offline open rendered an empty
         // conversation rather than the one it had been reading.
+        // The worker first, because it is what makes the NEXT cold open work; this one is
+        // already served. Fire and forget: nothing here depends on it, and a client that
+        // cannot have one loses only the offline open.
+        registerWorker (SessionRoute.relative ServiceWorker)
+
         let! historyCache = openHistoryCache ()
+        let! transcriptCaches = openTranscriptCaches ()
         do! App.EventFetch.replay historyCache (fun msg -> dispatchRef msg)
+        // After the events, never beside them: a terminal exists because an event said so, and
+        // records folded before that event has been folded have nowhere to land.
+        do! App.TranscriptFetch.replay transcriptCaches (fun msg -> dispatchRef msg)
 
         // Authorization by renavigation: probe `/me` for a peer token. 401 -> bounce
         // through `/login` (code + PKCE via the Manager) and land back on this shell,
@@ -1330,12 +1435,13 @@ let private start () =
                     (App.EventFetch.policy Resilience.Policy.sleep jsRandom (fun attempt ->
                         App.EventFetch.retrying attempt
                         |> Option.iter (fun health -> dispatchRef (EventFeedMsg health))))
-            // Terminal history rides the same HTTP leg, in immutable chunks, for the same
-            // payoff: a reload replays a terminal out of the browser cache and only the live
-            // tail crosses the data channel. No resilience policy on it — unlike the event
+            // Terminal history rides the same HTTP leg, by the same cursor, for the same
+            // payoff: a reload replays a terminal out of this client's own store and only what
+            // happened since crosses the network. No resilience policy on it — unlike the event
             // feed, a failed read here is re-armed by the next record or availability hint
             // that arrives, so there is nothing for a retry schedule to add.
-            let transcripts = App.TranscriptFetch.overHttp httpGet SessionRoute.relative None
+            let transcripts =
+                App.TranscriptFetch.overHttp transcriptCaches httpGet SessionRoute.relative None
             let options =
                 { App.ConnectOptions.defaults with
                     FetchEvents = Some feed
@@ -1347,7 +1453,15 @@ let private start () =
                     // The model is the read position (see `ConnectOptions.ReadPosition`):
                     // `latestModel` is kept current by `setState`, so a fold rolled back by
                     // a racing doc update is visibly behind and gets re-read.
-                    ReadPosition = Some (fun () -> latestModel.EventConsumer.LastProcessedOffset) }
+                    ReadPosition = Some (fun () -> latestModel.EventConsumer.LastProcessedOffset)
+                    // Same rule one feed over: a client that just replayed a terminal out of
+                    // its own store must resume where that got to, not at line 0.
+                    TranscriptReadPosition =
+                        Some (fun terminal ->
+                            latestModel.TerminalFeeds
+                            |> Map.tryFind terminal
+                            |> Option.map (fun feed -> feed.ReadThrough)
+                            |> Option.defaultValue 0) }
             let openChannel =
                 Resilience.Policy.guard
                     (App.SessionChannel.policy Resilience.Policy.sleep jsRandom)

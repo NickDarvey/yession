@@ -75,6 +75,7 @@ let all =
         Tag.needs "Pty integration" [ Tag.Pty ] (fun () -> PtyIntegration.tests)
         Tag.needs "Phase3" [] (fun () -> Phase3.tests)
         Tag.needs "EventsHttp" [] (fun () -> EventsHttp.tests)
+        Tag.needs "TranscriptHttp" [] (fun () -> TranscriptHttp.tests)
         Tag.needs "Transport resilience" [] (fun () -> Resilience.tests)
         Tag.needs "Oidc" [] (fun () -> Oidc.tests)
         Tag.needs "Phase4" [] (fun () -> Phase4.tests)
@@ -97,4 +98,4 @@ let all =
     ]
 
 [<EntryPoint>]
-let main argv = !! Pyxpecto.runTests [||] all
+let main argv = !! Pyxpecto.runTests [||] (Tag.narrowed all)

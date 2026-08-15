@@ -754,7 +754,7 @@ let private retentionTests =
                 (TerminalProjection.tryFind terminalA proj |> Option.map (fun t -> t.IsOpen))
                 (Some false)
                 "the terminal is closed"
-            Expect.isSome (store.ReadChunk terminalA 0) "and its recording is still served"
+            Expect.isSome (store.BoundsAfter terminalA None) "and its recording is still served"
             Expect.equal
                 (store.ReadRange terminalA 0 None |> List.map (fun r -> r.Data))
                 [ "still here" ]
@@ -1298,15 +1298,55 @@ let private ansiTests =
 
 // --- The transcript ---------------------------------------------------------------------
 
+/// An in-memory transcript of `records` output lines, plus the header at line 0 — the setup
+/// the cursor cases share. Hoisted rather than repeated, because it is the ARRANGEMENT that
+/// is common to them; what each one asserts is its own.
+let private recorded (records: int) : Yession.Host.TranscriptStore.TranscriptStore =
+    let store = Yession.Host.TranscriptStore.inMemory ()
+    let transcript = store.Open terminalA { Width = 80; Height = 24; Timestamp = 0L }
+    for i in 1 .. records do
+        transcript.Append { At = 0.0; Kind = TranscriptOutput; Data = string i } |> ignore
+    store
+
 let private transcriptTests =
     testList "Transcript" [
-        testCase "chunk bounds are fixed, so a full chunk is immutable" <| fun () ->
-            Expect.equal (TranscriptChunk.indexOf 0) 0 "line 0 is in chunk 0"
-            Expect.equal (TranscriptChunk.indexOf (TranscriptChunk.size - 1)) 0 "and so is the last of chunk 0"
-            Expect.equal (TranscriptChunk.indexOf TranscriptChunk.size) 1 "the next line starts chunk 1"
-            Expect.equal (TranscriptChunk.firstSeq 2) (TranscriptChunk.size * 2) "chunk starts are exact multiples"
-            Expect.isTrue ((TranscriptChunk.cacheControl true).Contains "immutable") "a full chunk caches hard"
-            Expect.equal (TranscriptChunk.cacheControl false) "no-store" "the growing tail never does"
+        // Plan 22. A client numbers an answer from what it ASKED, because a transcript line
+        // cannot carry its own index — the file is an asciicast, and a private index field in
+        // it would stop it being one. So the four cases below are the whole contract that
+        // numbering rests on, and each is pinned alone.
+        testCase "the answer to a cursor begins one line past it" <| fun () ->
+            let store = recorded 10
+            Expect.equal
+                (store.BoundsAfter terminalA (Some 4) |> Option.map fst)
+                (Some 5)
+                "a client sitting at line 4 is answered from line 5"
+
+        testCase "a cursor with no position is answered from the very start" <| fun () ->
+            // Which is what puts the asciicast header — line 0, and nowhere else — in the
+            // first answer, and so in the store of a client that has never read this before.
+            let store = recorded 10
+            Expect.equal
+                (store.BoundsAfter terminalA None |> Option.map fst)
+                (Some 0)
+                "and line 0 is the header"
+
+        testCase "a cursor at the tail asks for nothing rather than for an empty range" <| fun () ->
+            // An empty range would be an address a client keeps for ever, and "nothing yet"
+            // is exactly the thing that stops being true. `None` here is the `204`.
+            let store = recorded 10
+            Expect.equal
+                (store.BoundsAfter terminalA (Some 10)) // the header plus ten records
+                None
+                "a client that has read every line is told to keep its cursor"
+
+        testCase "a range the transcript has not reached is no answer at all" <| fun () ->
+            // Answering short would put a partial answer at an address that named the whole
+            // range — and the client keeps what it is given, for ever.
+            let store = recorded 10
+            Expect.equal
+                (store.ReadLines terminalA 0 99)
+                None
+                "the address promised a hundred lines and the transcript has eleven"
 
         testCase "keyframes live in a SIDECAR, and survive the process that wrote them" <| fun () ->
             // Plan 14, stage 3. Never in the `.cast`: Plan 13 bought a standard, replayable
@@ -1358,7 +1398,7 @@ let private transcriptTests =
         // This drives the real route end to end — write through the store, read the chunks a
         // client reads, decode them as a client decodes them, rebuild — and compares against
         // the recording on disk byte for byte.
-        testCase "a replay rebuilt from fetched chunks IS the recording on disk" <| fun () ->
+        testCase "a replay rebuilt from fetched answers IS the recording on disk" <| fun () ->
             let dir = sprintf "tests/Yession.Tests/out/.data/replay-%s" (string (System.Guid.NewGuid ()))
             let store = Yession.Host.TranscriptStore.openStore dir
             let header = { Width = 120; Height = 40; Timestamp = 1754092800L }
@@ -1370,10 +1410,14 @@ let private transcriptTests =
                   { At = 0.3; Kind = TranscriptResize; Data = "100x30" } ] do
                 transcript.Append record |> ignore
             // What a client holds after fetching: decoded lines, keyed by sequence number.
-            let lines, _ = store.ReadChunk terminalA 0 |> Option.defaultWith (fun () -> failwith "no chunk 0")
+            let first, last =
+                store.BoundsAfter terminalA None |> Option.defaultWith (fun () -> failwith "no lines")
+            let lines =
+                store.ReadLines terminalA first last
+                |> Option.defaultWith (fun () -> failwith "the bounds named lines the store would not read")
             let decoded =
                 lines
-                |> List.mapi (fun i line -> i, Codec.fromString Codec.transcriptLine line)
+                |> List.mapi (fun i line -> first + i, Codec.fromString Codec.transcriptLine line)
                 |> List.choose (fun (seq, line) ->
                     match line with
                     | Ok (TranscriptRecordLine record) -> Some (seq, record)

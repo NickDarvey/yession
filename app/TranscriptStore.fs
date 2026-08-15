@@ -46,11 +46,21 @@ let private mkdirSync (path: string) : unit = mkdirRecursive (box fs) path
 type TranscriptStore =
     { /// Open (or reopen) one terminal's transcript.
       Open : OpenTranscript
-      /// Lines `[n*size, (n+1)*size)` of a terminal's transcript, plus whether the chunk
-      /// is full (and therefore immutable and cacheable for ever). `None` for a terminal
-      /// with no transcript — which is a 404, not an empty chunk: those mean different
-      /// things to a client catching up.
-      ReadChunk : TerminalId -> int -> (string list * bool) option
+      /// The bounds of what a caller sitting at line `after` has not seen (Plan 22), capped
+      /// at `TranscriptChunk.size` lines — `None` when it is current, or when the terminal
+      /// has no transcript at all. The two are the same answer on purpose: a cursor says
+      /// where the lines are, and there being none is not an error.
+      BoundsAfter : TerminalId -> int option -> (int * int) option
+      /// The raw lines `[first, last]` of a terminal's transcript — the bytes the range
+      /// address promised, or `None` when the transcript does not reach `last` yet.
+      /// Answering short would put a partial answer at an address that named the whole
+      /// range, and a client keeps that for ever.
+      ///
+      /// Raw, not decoded: this serves an HTTP range, and what a client stores has to be
+      /// what the file says. `ReadRange` below is the decoded read, and they are separate
+      /// because a context pack and a cacheable slice want opposite things from a line
+      /// that will not parse.
+      ReadLines : TerminalId -> int -> int -> string list option
       /// Decoded records over a half-open line range, for a caller that wants what a
       /// block PRINTED rather than a cacheable slice of file (Plan 13, stage 3a).
       /// A line that will not decode is skipped rather than failing the read: this
@@ -66,6 +76,20 @@ type TranscriptStore =
       /// made before keyframes existed, which is a degradation the ranged replay states
       /// rather than a failure.
       ReadKeyframe : TerminalId -> int -> TranscriptKeyframe option }
+
+/// The bounds of what a caller at `after` has not seen, over a transcript of `total` lines.
+/// One place, so the in-memory store and the file-backed one cannot disagree about what a
+/// cursor means — and so the contract the client numbers by (an answer to `after n` begins
+/// at `n + 1`) is stated once, here, rather than implied twice.
+let private boundsIn (total: int) (after: int option) : (int * int) option =
+    let first = match after with Some a -> a + 1 | None -> 0
+    if first >= total then None
+    else Some (first, min (total - 1) (first + TranscriptChunk.size - 1))
+
+/// The raw lines `[first, last]`, or `None` when the transcript does not reach `last`.
+let private linesIn (first: int) (last: int) (lines: string list) : string list option =
+    if first < 0 || last < first || last >= List.length lines then None
+    else lines |> List.skip first |> List.truncate (last - first + 1) |> Some
 
 /// Decode the records in `[fromSeq, toSeq)` of a transcript's lines. `None` as the end
 /// means "whatever it has now", which is what a still-running block has. The header sits
@@ -118,16 +142,16 @@ let inMemory () : TranscriptStore =
                     seq
               NextSeq = fun () -> lines.Count
               Keyframe = appendKeyframe id }
-      ReadChunk =
-        fun id index ->
+      BoundsAfter =
+        fun id after ->
             match files.TryGetValue (TerminalId.value id) with
             | false, _ -> None
-            | true, lines ->
-                let first = TranscriptChunk.firstSeq index
-                let chunk =
-                    if first >= lines.Count then []
-                    else lines.GetRange (first, min TranscriptChunk.size (lines.Count - first)) |> List.ofSeq
-                Some (chunk, List.length chunk = TranscriptChunk.size)
+            | true, lines -> boundsIn lines.Count after
+      ReadLines =
+        fun id first last ->
+            match files.TryGetValue (TerminalId.value id) with
+            | false, _ -> None
+            | true, lines -> lines |> List.ofSeq |> linesIn first last
       ReadRange =
         fun id fromSeq toSeq ->
             match files.TryGetValue (TerminalId.value id) with
@@ -218,15 +242,16 @@ let openStore (directory: string) : TranscriptStore =
               Keyframe = appendKeyframe id }
 
     { Open = openTranscript
-      ReadChunk =
-        fun id index ->
+      BoundsAfter =
+        fun id after ->
             let path = pathOf id
             if not (existsSync path) then None
-            else
-                let lines, _ = readLines path
-                let first = TranscriptChunk.firstSeq index
-                let chunk = lines |> List.skip (min first (List.length lines)) |> List.truncate TranscriptChunk.size
-                Some (chunk, List.length chunk = TranscriptChunk.size)
+            else boundsIn (List.length (fst (readLines path))) after
+      ReadLines =
+        fun id first last ->
+            let path = pathOf id
+            if not (existsSync path) then None
+            else readLines path |> fst |> linesIn first last
       ReadRange =
         fun id fromSeq toSeq ->
             let path = pathOf id
@@ -246,3 +271,28 @@ let openStore (directory: string) : TranscriptStore =
                     match Codec.fromString Codec.transcriptKeyframe line with
                     | Ok k when k.Seq = seq -> Some k
                     | _ -> None) }
+
+/// The store as the session's HTTP read surface: a cursor, the ranges it resolves to, and the
+/// keyframes beside them (docs/plans/22).
+///
+/// Here rather than at the composition root, because every rule in it is a rule about THIS
+/// state — what a terminal id has to be, what a cursor means, what a range that runs off the
+/// end answers. A composition root that computed those would put them where only a whole
+/// running session could test them; here, a store and a fake token check are enough.
+let endpoint (validateToken: string -> bool) (store: TranscriptStore) : Signalling.TranscriptEndpoint =
+    // An unparseable id is a terminal that does not exist, which is exactly what an unknown
+    // one is — same answer, one code path.
+    let forTerminal (terminal: string) (read: TerminalId -> 'a option) : Async<'a option> =
+        async {
+            match TerminalId.create terminal with
+            | Ok id -> return read id
+            | Error _ -> return None
+        }
+
+    { ValidateToken = validateToken
+      BoundsAfter = fun terminal after -> forTerminal terminal (fun id -> store.BoundsAfter id after)
+      ReadRange = fun terminal first last -> forTerminal terminal (fun id -> store.ReadLines id first last)
+      ReadKeyframe =
+        fun terminal seq ->
+            forTerminal terminal (fun id ->
+                store.ReadKeyframe id seq |> Option.map (Codec.toString Codec.transcriptKeyframe)) }

@@ -1,6 +1,9 @@
 # Plan 20 — The conversation survives the network
 
-> **Status: proposed.** Open a session you have read before, with no network, and the app is
+> **Status: shipped**, all five steps, one PR each — and the terminals followed in
+> [plan 22](22-offline-terminal-history.md), which is this same scheme one feed over.
+>
+> Open a session you have read before, with no network, and the app was
 > empty. Not degraded, not stale — empty, with the idle caret that means *nothing was ever said
 > here* ([`View.fs:1173`](../../src/Yession.App/View.fs)). Every durable fact of that session is
 > already immutable, already chunked, already addressed by a cache key. None of it reaches the

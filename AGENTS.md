@@ -253,6 +253,9 @@ check Jumpstarter            # + our MCP client driven against the Python exampl
 verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix Srt
                              #    Pty Serial Jumpstarter. Release gate; what CI runs on master.
 lint                         # actionlint over .github/workflows. Runs first in the PR gate.
+check --only "<text>"        # narrow BOTH runtimes to cases whose full name contains <text>.
+                             #   Buys back the RUNNING, not the compiling: 66s -> 44s on the
+                             #   cheap tier, and far more on a tier that spawns browsers.
 ```
 
 `lint` is separate from `check` because it guards a different thing: GitHub only validates a
@@ -358,6 +361,31 @@ Then, so that red means what it says:
   test keeps proving it. Verify-once throwaways stay out.
 - Tag suites with the MINIMUM capabilities they truly need, so they run in the cheapest tier
   that can host them and skip (never error) everywhere else.
+
+**A failure that cannot say why is a failure you will pay for repeatedly.** Most tiers here
+fail legibly — an assertion prints what it expected. The browser tier does not: a case can only
+fail by a wait never settling, so its red says which wait, never which fault. Three unrelated
+defects in one feature (a call eliminated as dead code, an opaque redirect, a precache that
+could not have happened) all printed the same thirty-second timeout, and each cost a full run
+of the gate to tell apart — while the page had been saying which was which the whole time.
+
+So instrument the boundary rather than guessing across it, and instrument it to STAY:
+
+- **Fixtures keep what the thing under test said** — console, page errors, failed requests —
+  and print it when a case fails (`Browser.fs`: `watching` / `reporting`). Free on green, and
+  it is the only way to read a red run in CI, where nothing can be attached afterwards.
+- **Anything that decides silently is made to say so.** A service worker choosing between the
+  network and a kept copy leaves no trace anywhere; one `console.debug` at that branch is the
+  difference between reading the answer and inferring it.
+- **Throwaway instrumentation is a smell.** If you add a probe to answer a question, and the
+  question could be asked again, the probe belongs in the fixture — not in a scratch file you
+  delete. The rule is the same one the tests follow: what was verified once by hand is written
+  down so it keeps being verified.
+
+The tell that you are about to pay for this: you are about to run the gate again to test a
+hypothesis. When looking is expensive, guessing and verifying cost the same, so guessing wins
+each time and loses overall. Make looking cheap first — `check --only "<part of a test name>"`
+narrows both runtimes to the cases that match.
 
 **A UI test pins an invariant, never a design.** A rendered surface is the most-revised thing
 in the product. A test that asserts what it currently LOOKS like will be deleted by the next
