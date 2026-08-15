@@ -129,7 +129,22 @@ type TerminalAffordances =
       /// Ask the provider for the stream again (Plan 19, step 4). Closed, and its source
       /// said asking again is safe; a shell terminal is never renewable, because a second
       /// shell is a second terminal and opening one already exists.
-      CanReattach : bool }
+      CanReattach : bool
+      /// Whether the recording is the ONLY read this terminal has, so its panel opens
+      /// playing rather than offering a way to.
+      ///
+      /// A closed terminal that ran commands has two reads of one history — the blocks, and
+      /// the recording — and showing both at once made the second redundant wherever the
+      /// first said everything: a command and its result, printed, with a player of the same
+      /// two lines under it. So the blocks are the read and the recording is a destination.
+      ///
+      /// A terminal with no blocks has no such first read. A source that could not be
+      /// instrumented (`SourceCapabilities.CanInstrument`) never mints one, and neither does
+      /// a shell that only ever held a lease — in both the whole history is in the recording,
+      /// and an empty block list is not a read, it is a `$`. Asked of the BLOCKS rather than
+      /// of the source, because blocks are what the other read is made of: a source flag
+      /// would answer "could this have had blocks" about a terminal that has none.
+      ReplayIsTheRead : bool }
 
 module TerminalAffordances =
 
@@ -145,7 +160,8 @@ module TerminalAffordances =
           // the store: a terminal whose recording the cap ate can still have a live device on
           // the other end, and refusing the way back because the RECORD is gone would answer
           // a question nobody asked.
-          CanReattach = not view.IsOpen && view.Renewable }
+          CanReattach = not view.IsOpen && view.Renewable
+          ReplayIsTheRead = not view.IsOpen && recorded && List.isEmpty view.Blocks }
 
 /// Every terminal this session has had, in the order they were opened.
 type TerminalProjection = { Terminals : TerminalView list }

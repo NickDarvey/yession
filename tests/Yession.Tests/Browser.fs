@@ -816,10 +816,13 @@ let editorTests =
                         """document.activeElement?.getAttribute('data-pane-tab')?.startsWith('terminal:') === true""")
                 let! _ = await (page.WaitForFunctionAsync showingBlock)
 
-                // The block's recording is PLAYED, not printed: the real player, over the
-                // ranged cast the model built, inside the tab the chip opened. A stream
-                // renderer would show a cursor-moving program as garbage, which is the whole
-                // reason the transcript was written as asciicast.
+                // The block reads as TEXT, and its recording is one press away — the two reads
+                // of one history, with the cheap one first. Pressing play mounts the real
+                // player over the ranged cast the model built, inside the tab the chip
+                // opened: a stream renderer would show a cursor-moving program as garbage,
+                // which is the whole reason the transcript was written as asciicast.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-block] [data-terminal-output]")
+                do! awaitU (page.ClickAsync "#shell [data-pane-play]")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay] .ap-overlay-start")
                 do! awaitU (page.ClickAsync "#shell [data-pane-replay] .ap-overlay-start")
                 let! _ =
