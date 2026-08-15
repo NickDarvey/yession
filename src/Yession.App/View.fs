@@ -1071,6 +1071,15 @@ module View =
         let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
             let whoClass = if isAgent then Style.whoAgent else Style.who
+            // Why this turn exists, when nobody asked for it (Plan 20, stage 2). Beside the
+            // author rather than in the body: it is attribution, and attribution belongs on
+            // the line that says who — the body is what the agent said, and a sentence the
+            // agent did not say does not go in it.
+            let wokeInner =
+                match item.Woke with
+                | None -> Lit.nothing
+                | Some CommandFinished ->
+                    html $"""<span class="{Style.statusFaint}" data-message-woke="{Dom.Text.wokeCommandFinished}" title="{Dom.Text.turnWokeCommandFinished}">{Dom.Text.turnWoke}</span>"""
             let statusInner =
                 match item.Status with
                 | Complete -> Lit.nothing
@@ -1085,7 +1094,7 @@ module View =
             html $"""
                 <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
                   <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
-                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorName model item.Author}</span>{statusInner}</div>
+                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorName model item.Author}</span>{wokeInner}{statusInner}</div>
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
         let message (item: ConversationItem) =

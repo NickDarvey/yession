@@ -1671,9 +1671,16 @@ module TerminalScheduler =
 
     /// `initialConsumed` seeds the log-anchored exactly-once set from the durable log at
     /// boot — every `QueueId` a `TerminalBlockStarted` already names.
+    ///
+    /// `onBlockFinished` is told after each block's completion is durable. Taken as a seam
+    /// rather than reached for, because what the drain KNOWS is that a block finished; what
+    /// that is worth — the agent may be owed a turn it never asked for (Plan 20, stage 2) —
+    /// belongs to whoever composes this with an agent, and a terminal queue that knew about
+    /// turns would be the wrong thing knowing it.
     let create
         (doc: Yjs.Y.Doc)
         (terminals: SessionTerminals.SessionTerminals)
+        (onBlockFinished: unit -> unit)
         (initialConsumed: Set<string>)
         : TerminalScheduler =
 
@@ -1741,6 +1748,11 @@ module TerminalScheduler =
                             // The terminal is free again: whatever queued behind this
                             // command starts now.
                             drain ()
+                            // ...and the completion is in the log, which is the only place
+                            // the wake reads. Second, so a person's queued command has
+                            // already claimed the terminal before the agent is told anything
+                            // — the queue outranks a turn nobody asked for.
+                            onBlockFinished ()
                         })
 
         let reclaimIdleLeases () =

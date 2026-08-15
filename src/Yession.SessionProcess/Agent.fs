@@ -111,7 +111,10 @@ module AgentTurn =
                               // offset of its own. Nothing here sorts — the agent's context is
                               // built in the projection's order, and this stands in for an item
                               // that projection has not caught up to yet.
-                              Offset = EventOffset.zero })
+                              Offset = EventOffset.zero
+                              // A turn with a triggering message is by definition a turn
+                              // somebody asked for, so there is nothing here to explain.
+                              Woke = None })
                 let context =
                     { SessionId = sessionId
                       Conversation = conversation

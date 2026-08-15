@@ -41,20 +41,44 @@ type ConversationItem =
       /// Carried so the view can interleave this with terminal work in one timeline. Both are
       /// folds of the SAME ordered log, which makes merging them a sort rather than a clock
       /// reconciliation — and this field is the only thing that was missing.
-      Offset    : EventOffset }
+      Offset    : EventOffset
+      /// Why the turn that produced this item exists, when nobody asked for it (Plan 20,
+      /// stage 2). `None` on everything a person said and on every turn a person triggered.
+      ///
+      /// On the ITEM rather than looked up from the turn, because the timeline renders items
+      /// and an item does not know its turn. It rides here for the same reason `Offset` does:
+      /// the fold knows something the view needs and cannot re-derive.
+      Woke      : WakeReason option }
 
 type ConversationProjection =
     { Items : ConversationItem list
       /// Agent messages currently streaming, by turn — so a turn failure (which carries
       /// only the turn id) can mark its item `Failed`. Projection-internal bookkeeping.
-      ActiveAgentMessages : Map<AgentTurnId, MessageId> }
+      ActiveAgentMessages : Map<AgentTurnId, MessageId>
+      /// The turn nobody asked for, while it is the current one (Plan 20, stage 2) — so the
+      /// items it goes on to produce can say why they exist. Projection-internal bookkeeping.
+      ///
+      /// One turn rather than a map, because turns are serial: the scheduler runs one at a
+      /// time, and `AgentWake.pending` folds on that same fact — it resets at every
+      /// `AgentTurnStarted`. So does this, which is also what keeps it from growing: an
+      /// ordinary turn clears it, and there is no turn-completed event that could.
+      WokenTurn : (AgentTurnId * WakeReason) option }
 
 module ConversationProjection =
 
-    let empty : ConversationProjection = { Items = []; ActiveAgentMessages = Map.empty }
+    let empty : ConversationProjection =
+        { Items = []; ActiveAgentMessages = Map.empty; WokenTurn = None }
 
     let private updateItem (messageId: MessageId) (f: ConversationItem -> ConversationItem) (items: ConversationItem list) =
         items |> List.map (fun item -> if item.MessageId = messageId then f item else item)
+
+    /// Why the given turn exists, if nobody asked for it. Matched on the turn id rather than
+    /// taken on trust: a late event from a turn the wake did not start must not inherit the
+    /// current one's reason.
+    let private wokeBy (turnId: AgentTurnId) (proj: ConversationProjection) : WakeReason option =
+        match proj.WokenTurn with
+        | Some (woken, reason) when woken = turnId -> Some reason
+        | _ -> None
 
     /// Fold one event into the projection. The match is total over `SessionEvent`, so
     /// adding a case forces this projection to account for it.
@@ -72,8 +96,13 @@ module ConversationProjection =
                           Body = m.Body
                           Status = Complete
                           Kind = ConversationItemKind.Message
-                          Offset = envelope.Offset } ] }
-        | AgentTurnStarted _ -> proj   // lifecycle; the item appears at AgentMessageStarted
+                          Offset = envelope.Offset
+                          Woke = None } ] }
+        // Lifecycle; the item appears at `AgentMessageStarted`. What is remembered here is
+        // only the turn's REASON for existing, which that item cannot re-derive: by the time
+        // it arrives, the event that carried the reason is pages behind it.
+        | AgentTurnStarted a ->
+            { proj with WokenTurn = a.Woke |> Option.map (fun reason -> a.AgentTurnId, reason) }
         | AgentContextBuilt _ -> proj  // lifecycle
         // Environment lifecycle (Step 12) is session state, not conversation content.
         | EnvironmentNeedIdentified _
@@ -126,7 +155,8 @@ module ConversationProjection =
                           Body = sprintf "added repo %s (branch %s)" (RepoRef.value r.Repo) r.Branch
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
-                          Offset = envelope.Offset } ] }
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         | SessionEvent.RepoRemoved r ->
             { proj with
                 Items =
@@ -136,7 +166,8 @@ module ConversationProjection =
                           Body = sprintf "removed repo %s" (RepoRef.value r.Repo)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
-                          Offset = envelope.Offset } ] }
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         | SessionEvent.RepoBranchSwitched r ->
             { proj with
                 Items =
@@ -148,7 +179,8 @@ module ConversationProjection =
                             else sprintf "switched %s to branch %s" (RepoRef.value r.Repo) r.Branch
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
-                          Offset = envelope.Offset } ] }
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         // Named WorkSandboxes (Plan 15, stage 2) fold in for the repo notes' reason and
         // one more: forwarding a credential into a sandbox is the most consequential thing
         // a command here does, and the timeline is where the person whose credential it is
@@ -169,7 +201,8 @@ module ConversationProjection =
                           Body = sprintf "started sandbox %s (%s)%s" (SandboxName.value s.Sandbox) s.Backend forwarded
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
-                          Offset = envelope.Offset } ] }
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         | SessionEvent.WorkSandboxStopped s ->
             { proj with
                 Items =
@@ -179,7 +212,8 @@ module ConversationProjection =
                           Body = sprintf "stopped sandbox %s" (SandboxName.value s.Sandbox)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
-                          Offset = envelope.Offset } ] }
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         // A refusal reads in the timeline beside the acts that happened, attributed to the
         // person who said no rather than to the agent that asked (Plan 15, stage 3). Same
         // reason `BlockRejected` renders in the terminal: an act that simply vanishes is
@@ -196,7 +230,8 @@ module ConversationProjection =
                             | None -> sprintf "refused %s" c.Summary
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
-                          Offset = envelope.Offset } ] }
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         // The MCP set changing (Plan 17). `ActorRef.System`, because nobody in the session
         // did it, and the DELTA only — the Process compares what it was last told, from
         // its own events, against the newly resolved set, so a boot, a reconnect and a
@@ -210,7 +245,8 @@ module ConversationProjection =
                           Body = sprintf "you can now use the %s tools" (McpServerName.value m.Name)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
-                          Offset = envelope.Offset } ] }
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         | SessionEvent.McpServerUnavailable m ->
             { proj with
                 Items =
@@ -220,17 +256,20 @@ module ConversationProjection =
                           Body = sprintf "the %s tools are no longer available" (McpServerName.value m.Name)
                           Status = Complete
                           Kind = ConversationItemKind.ActNote
-                          Offset = envelope.Offset } ] }
+                          Offset = envelope.Offset
+                          Woke = None } ] }
         | AgentMessageStarted a ->
-            { Items =
-                proj.Items
-                @ [ { MessageId = a.MessageId
-                      Author = ActorRef.Agent
-                      Body = ""
-                      Status = Streaming
-                      Kind = ConversationItemKind.Message
-                      Offset = envelope.Offset } ]
-              ActiveAgentMessages = Map.add a.AgentTurnId a.MessageId proj.ActiveAgentMessages }
+            { proj with
+                Items =
+                    proj.Items
+                    @ [ { MessageId = a.MessageId
+                          Author = ActorRef.Agent
+                          Body = ""
+                          Status = Streaming
+                          Kind = ConversationItemKind.Message
+                          Offset = envelope.Offset
+                          Woke = wokeBy a.AgentTurnId proj } ]
+                ActiveAgentMessages = Map.add a.AgentTurnId a.MessageId proj.ActiveAgentMessages }
         | AgentMessageDelta a ->
             { proj with
                 Items =
@@ -238,17 +277,19 @@ module ConversationProjection =
                     |> updateItem a.MessageId (fun item ->
                         if item.Status = Streaming then { item with Body = item.Body + a.Delta } else item) }
         | AgentMessageCompleted a ->
-            { Items =
-                proj.Items
-                |> updateItem a.MessageId (fun item -> { item with Body = a.Body; Status = Complete })
-              ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
+            { proj with
+                Items =
+                    proj.Items
+                    |> updateItem a.MessageId (fun item -> { item with Body = a.Body; Status = Complete })
+                ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
         | AgentTurnInterrupted a ->
             match Map.tryFind a.AgentTurnId proj.ActiveAgentMessages with
             | Some messageId ->
                 // The streaming item keeps its partial body; the status records the
                 // explicit interrupt. Late deltas for it no longer apply (not Streaming).
-                { Items = proj.Items |> updateItem messageId (fun item -> { item with Status = Interrupted })
-                  ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
+                { proj with
+                    Items = proj.Items |> updateItem messageId (fun item -> { item with Status = Interrupted })
+                    ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
             | None ->
                 // Interrupted before any message started: nothing to show — the turn
                 // simply never produced an item.
@@ -257,8 +298,9 @@ module ConversationProjection =
             match Map.tryFind a.AgentTurnId proj.ActiveAgentMessages with
             | Some messageId ->
                 // The streaming item keeps whatever partial body it accumulated.
-                { Items = proj.Items |> updateItem messageId (fun item -> { item with Status = Failed })
-                  ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
+                { proj with
+                    Items = proj.Items |> updateItem messageId (fun item -> { item with Status = Failed })
+                    ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
             | None ->
                 // The turn failed before its message started: the failure still shows in
                 // the conversation, under an id derived deterministically from the turn.
@@ -274,7 +316,8 @@ module ConversationProjection =
                               Body = a.Reason
                               Status = Failed
                               Kind = ConversationItemKind.Message
-                              Offset = envelope.Offset } ] }
+                              Offset = envelope.Offset
+                              Woke = wokeBy a.AgentTurnId proj } ] }
 
     /// Fold ordered event envelopes into a conversation projection.
     ///

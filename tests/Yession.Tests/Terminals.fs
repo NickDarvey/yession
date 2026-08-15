@@ -1904,7 +1904,7 @@ let private schedulerTests =
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
-                let scheduler = TerminalScheduler.create doc terminals Set.empty
+                let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
                 // Queued exactly as the agent's capability queues one — same doc write.
                 SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (PeerRef ada) 1.0 "echo ok" false None
                 scheduler.Drain ()
@@ -1927,7 +1927,7 @@ let private schedulerTests =
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
-                let scheduler = TerminalScheduler.create doc terminals Set.empty
+                let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
                 SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id ActorRef.Agent 1.0 "rm -rf /" false None
                 scheduler.Drain ()
                 do! Async.Sleep 20
@@ -1961,7 +1961,7 @@ let private schedulerTests =
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 // The crash window: a block start reached the log, the doc removal did not.
-                let scheduler = TerminalScheduler.create doc terminals (Set.singleton "q-a1")
+                let scheduler = TerminalScheduler.create doc terminals ignore (Set.singleton "q-a1")
                 SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (PeerRef ada) 1.0 "make" false None
                 scheduler.Drain ()
                 do! Async.Sleep 20
