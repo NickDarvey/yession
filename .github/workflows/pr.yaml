@@ -115,6 +115,15 @@ jobs:
       # A successful link is not a successful load. `-undefined dynamic_lookup` defers every
       # napi_* symbol to load time, so the link above would still pass if the addon were
       # unloadable. Require it to load and construct a peer connection for real.
+      #
+      # `--inputs-from .` resolves `nixpkgs` through THIS flake's lock — the one the build above
+      # already fetched and realised. Without it, the bare `nixpkgs#` reference goes to the
+      # registry's nixpkgs-unstable CHANNEL, which is a different nixpkgs from the locked one:
+      # the runner downloaded and unpacked a second, entire nixpkgs into the git cache (124s in
+      # the run this was measured on) to get a `node` the locked one already had. It is also the
+      # node the package itself runs on — nix/packages.nix wraps `${pkgs.nodejs_24}/bin/node` —
+      # so the smoke test now loads the addon under the same interpreter that ships it, which is
+      # the interpreter the claim is about.
       - name: The native WebRTC addon loads
         run: |
           cat > "$RUNNER_TEMP/addon-smoke.cjs" <<'EOF'
@@ -124,4 +133,4 @@ jobs:
           pc.close();
           process.exit(0);
           EOF
-          nix shell nixpkgs#nodejs_24 --command node "$RUNNER_TEMP/addon-smoke.cjs"
+          nix shell --inputs-from . nixpkgs#nodejs_24 --command node "$RUNNER_TEMP/addon-smoke.cjs"
