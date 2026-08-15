@@ -10,6 +10,8 @@ module Yession.Host.Broker
 // refresher means providers that rotate refresh tokens on use never see two racing
 // refreshes for one stored credential.
 
+open System.Collections.Generic
+
 open Fable.Core
 open Yession.Domain
 open Yession.Manager
@@ -58,6 +60,10 @@ type BrokerService =
       Complete : SecretId -> string -> Async<Result<unit, string>>
       /// Store a pasted static token verbatim.
       Put : SecretId -> string -> Async<Result<unit, string>>
+      /// Store a grant the SESSION obtained itself (the device flow, RFC 8628) as a
+      /// refreshable grant. `Put`'s sibling, and the difference is the whole point: a
+      /// pasted token cannot rotate and this one can, so the two must not share a path.
+      PutGrant : ControlWire.ConnectionPutGrantRequest -> Async<Result<unit, string>>
       Disconnect : SecretId -> Async<Result<bool, string>>
       /// Metadata for whichever of `targets` exist — never values.
       StatusOf : SecretId list -> Async<ConnectionStatusList>
@@ -108,6 +114,88 @@ let create
                 match BrokeredCredentialCodec.fromString raw with
                 | Error e -> return Error (sprintf "stored credential malformed: %s" e)
                 | Ok credential -> return Ok (Some credential)
+        }
+
+    // One refresh per target at a time, and everyone waits on it.
+    //
+    // A provider that rotates hands back a NEW refresh token and spends the old one, so
+    // two concurrent resolves of the same due grant are not merely wasteful: the second
+    // presents a token the first already spent, and whichever writes last stores a grant
+    // built from a dead one. Sessions resolve per turn and per network verb, so two at
+    // once is ordinary rather than exotic.
+    //
+    // The in-flight map holds a PROMISE, because that is the only thing here that can be
+    // awaited twice — an `Async` re-runs on each await, which is exactly the duplicate
+    // this exists to prevent. Cleared in both directions, so a failed refresh does not
+    // wedge the target forever.
+    let inFlight = Dictionary<SecretId, JS.Promise<Result<ConnectionKind * string, string>>> ()
+
+    let refreshGrant (target: SecretId) (grant: OAuthGrant) (refreshToken: string) =
+        async {
+            match! grantAt grant.TokenUrl (BrokerFlow.refreshRequest grant refreshToken) with
+            | Error e ->
+                // Keep the old entry: the user can reconnect, and the
+                // stale token may still be honored briefly.
+                observe (RefreshFailed (target, e))
+                return Error (sprintf "token refresh failed: %s" e)
+            | Ok json ->
+                match BrokerFlow.decodeTokenResponse (now ()) grant.TokenUrl grant.ClientId grant.Dialect json with
+                | Error e ->
+                    observe (RefreshFailed (target, e))
+                    return Error (sprintf "token refresh response malformed: %s" e)
+                | Ok fresh ->
+                    let merged = BrokerFlow.merged grant fresh
+                    match! store.Set target (BrokeredCredentialCodec.toString (BrokeredOAuth merged)) with
+                    | Error e -> return Error e
+                    | Ok _ ->
+                        observe (Resolved (target, OAuthConnection, true))
+                        return Ok (OAuthConnection, merged.AccessToken)
+        }
+
+    let refreshOnce (target: SecretId) (grant: OAuthGrant) (refreshToken: string) =
+        async {
+            let pending =
+                match inFlight.TryGetValue target with
+                | true, running -> running
+                | _ ->
+                    let running =
+                        refreshGrant target grant refreshToken
+                        |> Async.StartAsPromise
+                    inFlight.[target] <- running
+                    running.``then`` (fun outcome -> inFlight.Remove target |> ignore; outcome)
+                    |> ignore
+                    running
+            return! Interop.awaitPromise pending
+        }
+
+    let resolve (target: SecretId) : Async<Result<ConnectionKind * string, string>> =
+        async {
+            match! loadCredential target with
+            | Error e -> return Error e
+            | Ok None -> return Error "no credential connected"
+            | Ok (Some credential) ->
+                if not (BrokerFlow.needsRefresh (now ()) credential) then
+                    observe (Resolved (target, BrokerFlow.kindOf credential, false))
+                    return Ok (BrokerFlow.kindOf credential, BrokerFlow.valueOf credential)
+                elif BrokerFlow.refreshExpired (now ()) credential then
+                    // Nothing to retry: the refresh token is past its own life, so the
+                    // grant is finished rather than stale. Say which, because "try again"
+                    // and "sign in again" are different instructions.
+                    let reason = "the refresh token has expired — sign in again"
+                    observe (RefreshFailed (target, reason))
+                    return Error reason
+                else
+                    match credential with
+                    | BrokeredStatic _ ->
+                        // Unreachable (needsRefresh is false for static) but total.
+                        observe (Resolved (target, StaticConnection, false))
+                        return Ok (StaticConnection, BrokerFlow.valueOf credential)
+                    | BrokeredOAuth grant ->
+                        match grant.RefreshToken with
+                        | None ->
+                            observe (Resolved (target, OAuthConnection, false))
+                            return Ok (OAuthConnection, grant.AccessToken)
+                        | Some refreshToken -> return! refreshOnce target grant refreshToken
         }
 
     { Begin =
@@ -165,6 +253,27 @@ let create
                 if System.String.IsNullOrWhiteSpace value then return Error "token cannot be empty"
                 else return! storeCredential target (BrokeredStatic (value.Trim ()))
             }
+      PutGrant =
+        fun request ->
+            async {
+                if System.String.IsNullOrWhiteSpace request.AccessToken then
+                    return Error "token cannot be empty"
+                else
+                    // The lifetimes arrive as the provider stated them — seconds from now
+                    // — and become absolute against the MANAGER's clock, which is the one
+                    // every later refresh decision is made on.
+                    let issued = now ()
+                    let grant : OAuthGrant =
+                        { AccessToken = request.AccessToken.Trim ()
+                          RefreshToken = request.RefreshToken
+                          ExpiresAt = request.ExpiresIn |> Option.map (fun s -> issued.AddSeconds (float s))
+                          RefreshExpiresAt =
+                            request.RefreshTokenExpiresIn |> Option.map (fun s -> issued.AddSeconds (float s))
+                          TokenUrl = request.TokenUrl
+                          ClientId = request.ClientId
+                          Dialect = request.TokenDialect }
+                    return! storeCredential request.Target (BrokeredOAuth grant)
+            }
       Disconnect =
         fun target ->
             async {
@@ -194,44 +303,4 @@ let create
                     | Ok None | Error _ -> ()
                 return { Connections = statuses }
             }
-      Resolve =
-        fun target ->
-            async {
-                match! loadCredential target with
-                | Error e -> return Error e
-                | Ok None -> return Error "no credential connected"
-                | Ok (Some credential) ->
-                    if not (BrokerFlow.needsRefresh (now ()) credential) then
-                        observe (Resolved (target, BrokerFlow.kindOf credential, false))
-                        return Ok (BrokerFlow.kindOf credential, BrokerFlow.valueOf credential)
-                    else
-                        match credential with
-                        | BrokeredStatic _ ->
-                            // Unreachable (needsRefresh is false for static) but total.
-                            observe (Resolved (target, StaticConnection, false))
-                            return Ok (StaticConnection, BrokerFlow.valueOf credential)
-                        | BrokeredOAuth grant ->
-                            match grant.RefreshToken with
-                            | None ->
-                                observe (Resolved (target, OAuthConnection, false))
-                                return Ok (OAuthConnection, grant.AccessToken)
-                            | Some refreshToken ->
-                                match! grantAt grant.TokenUrl (BrokerFlow.refreshRequest grant refreshToken) with
-                                | Error e ->
-                                    // Keep the old entry: the user can reconnect, and the
-                                    // stale token may still be honored briefly.
-                                    observe (RefreshFailed (target, e))
-                                    return Error (sprintf "token refresh failed: %s" e)
-                                | Ok json ->
-                                    match BrokerFlow.decodeTokenResponse (now ()) grant.TokenUrl grant.ClientId grant.Dialect json with
-                                    | Error e ->
-                                        observe (RefreshFailed (target, e))
-                                        return Error (sprintf "token refresh response malformed: %s" e)
-                                    | Ok fresh ->
-                                        let merged = BrokerFlow.merged grant fresh
-                                        match! store.Set target (BrokeredCredentialCodec.toString (BrokeredOAuth merged)) with
-                                        | Error e -> return Error e
-                                        | Ok _ ->
-                                            observe (Resolved (target, OAuthConnection, true))
-                                            return Ok (OAuthConnection, merged.AccessToken)
-            } }
+      Resolve = fun target -> resolve target } 

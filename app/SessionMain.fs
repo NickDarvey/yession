@@ -332,12 +332,25 @@ let private resolveGitHubToken (credentialActor: ActorRef) : Async<string option
         let targets =
             GitHubConnection.turnTargets sessionId credentialActor
             |> List.filter (fun target -> Map.containsKey target connectionStatus)
+        let ambient () =
+            match Interop.envOr "GITHUB_TOKEN" "" with
+            | "" -> None
+            | token -> Some token
         match connectionsClient, targets with
         | Some client, target :: _ ->
             match! client.Resolve target with
             | Ok (_, value) -> return Some value
-            | Error _ -> return (match Interop.envOr "GITHUB_TOKEN" "" with "" -> None | t -> Some t)
-        | _ -> return (match Interop.envOr "GITHUB_TOKEN" "" with "" -> None | t -> Some t)
+            // A connected credential that will not resolve is a FAULT, not an absence:
+            // since the grant can now refresh, this is exactly what a refresh failure
+            // looks like. Falling back to the ambient token here made that present as
+            // "git is anonymous", which sends whoever debugs it at the wrong thing —
+            // and could silently use a different identity than the one they connected.
+            // The ambient token stays what it always was: the answer when nothing is
+            // connected at all.
+            | Error reason ->
+                eprintfn "[session %s] the connected github credential did not resolve: %s" (SessionId.value sessionId) reason
+                return None
+        | _ -> return ambient ()
     }
 
 /// The turn's repo capabilities: the service bound to the agent as acting party and

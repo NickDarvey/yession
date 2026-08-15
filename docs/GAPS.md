@@ -358,9 +358,11 @@ Items are roughly ordered by how much they matter.
   - **A pasted PAT bypasses the App-installation scope rule.** The device-flow token
     is a GitHub App user-to-server token, so it can only reach repos where the App is
     installed; a pasted `github_pat_`/`ghp_` answers to no such bound.
-  - **The stored token does not rotate.** Device flow + static storage (the broker is
-    a PKCE public client; GitHub's code exchange wants the App secret) means the App
-    must have user-token expiration disabled and revocation happens at GitHub.
+  - **A GitHub token rotates only if the App expires it**
+    ([Plan 21](plans/21-expiring-tokens.md)): a device-flow grant is stored as a grant now
+    and the Manager refreshes it on use, but an App registered with user-token expiration
+    disabled still yields a permanent token, and revocation is at GitHub either way.
+    Nothing tells an operator which of the two they have registered.
   - **`git push` in a WorkSandbox terminal has no forwarded credential yet** — v1
     terminals do local git only; forwarding becomes `.yession.yml` configuration in a
     later plan. Commit/push attribution machinery (author = requesting user,
@@ -388,7 +390,12 @@ Items are roughly ordered by how much they matter.
     (Plan 15 stage 2), readable by everyone in the session and by everything running in
     it — the same shared trust boundary Plan 14 states. Revoking at the provider does
     not claw back what was injected; `stop_work_sandbox` is what removes it. Only
-    `github` is forwardable so far.
+    `github` is forwardable so far. Now that such a token can EXPIRE
+    ([Plan 21](plans/21-expiring-tokens.md)), the same freeze cuts the other way: a
+    refreshed token never reaches a sandbox already running, so terminal git in one older
+    than the token's life starts failing auth and a new sandbox is the fix. Withholding
+    refreshable credentials instead would break terminal git for everyone today to fix it
+    for the long-lived case.
   - **A third-party MCP server's read-only tools do not reach the registry.** The
     identification convention is the spec's own annotation, deliberately, so nothing
     yession-specific is in the way; the client machinery and a JSON-Schema-subset

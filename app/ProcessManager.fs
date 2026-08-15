@@ -379,6 +379,16 @@ let connectionsApiFor
                 | Error e -> return Error e
                 | Ok () -> return! run (broker.Put request.Target request.Value)
             }
+      // The same action as `Put`, deliberately: the caller is connecting a credential to a
+      // scope it owns, and whether that credential can later refresh itself is a fact about
+      // the credential rather than a second thing to be permitted.
+      PutGrant =
+        fun caller request ->
+            async {
+                match authorize caller ConnectCredential request.Target with
+                | Error e -> return Error e
+                | Ok () -> return! run (broker.PutGrant request)
+            }
       Disconnect =
         fun caller request ->
             async {

@@ -19,6 +19,7 @@ module Yession.Host.GitHubConnection
 open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
+open Yession.Manager
 open Yession.SessionProcess
 open Yession.App
 open Yession.Host.Interop
@@ -103,11 +104,23 @@ let deviceCodeDecoder : Decoder<DeviceCodeGrant> =
 /// One poll of the token endpoint, folded to what the panel needs to know. The
 /// device-flow spec (RFC 8628) answers 200 for BOTH outcomes and the in-between, so
 /// everything decodes from the body, never the status code.
+/// What the token endpoint handed back when the flow succeeded, kept whole.
+///
+/// It used to be the access token alone, which threw away the two facts that decide
+/// whether the credential can ever rotate — and made the App's "user-token expiration"
+/// setting something an operator had to turn OFF for this to work at all. A grant that
+/// states no lifetimes is still a grant; it simply never comes due.
+type PollGrant =
+    { AccessToken : string
+      RefreshToken : string option
+      ExpiresIn : int option
+      RefreshTokenExpiresIn : int option }
+
 type PollOutcome =
     /// The human has not approved yet — keep polling at `interval` seconds.
     | PollPending of interval: int
-    /// The grant landed: here is the access token.
-    | PollGranted of token: string
+    /// The grant landed, with whatever lifetimes the provider stated.
+    | PollGranted of PollGrant
     /// The flow is dead (expired, denied) — start again. The reason is shown as-is.
     | PollFailed of reason: string
 
@@ -115,8 +128,16 @@ type PollOutcome =
 /// flow already had; `slow_down` widens it by the spec's fixed 5 seconds.
 let pollOutcome (currentInterval: int) (body: string) : PollOutcome =
     let field name = Decode.fromString (Decode.field name Decode.string) body |> Result.toOption
+    // The lifetimes are numbers on the wire, and GitHub omits them entirely when the App
+    // has token expiration disabled — so a missing one means "not stated", never zero.
+    let seconds name = Decode.fromString (Decode.field name Decode.int) body |> Result.toOption
     match field "access_token" with
-    | Some token -> PollGranted token
+    | Some token ->
+        PollGranted
+            { AccessToken = token
+              RefreshToken = field "refresh_token"
+              ExpiresIn = seconds "expires_in"
+              RefreshTokenExpiresIn = seconds "refresh_token_expires_in" }
     | None ->
         match field "error" with
         | Some "authorization_pending" -> PollPending currentInterval
@@ -128,6 +149,25 @@ let pollOutcome (currentInterval: int) (body: string) : PollOutcome =
             |> Option.defaultValue other
             |> PollFailed
         | None -> PollFailed "unrecognised reply from the token endpoint"
+
+/// What the Manager needs to refresh this grant later, said once here because the SESSION
+/// is the only party that knows it: the endpoint the token came from, the client id it was
+/// minted for, and the dialect that endpoint speaks.
+///
+/// `FormEncoded` because GitHub's token endpoint takes a form body (the JSON answer is a
+/// matter of the `accept` header, which the broker already sends). And the refresh needs no
+/// client secret precisely BECAUSE this was the device flow — GitHub requires one for every
+/// other way of getting a user token, which is what made the broker's public-client shape
+/// fit this provider at all.
+let grantRequest (target: SecretId) (granted: PollGrant) : ControlWire.ConnectionPutGrantRequest =
+    { Target = target
+      AccessToken = granted.AccessToken
+      RefreshToken = granted.RefreshToken
+      ExpiresIn = granted.ExpiresIn
+      RefreshTokenExpiresIn = granted.RefreshTokenExpiresIn
+      TokenUrl = envOr "YESSION_GITHUB_TOKEN_URL" tokenUrl
+      ClientId = configuredClientId () |> Option.defaultValue ""
+      TokenDialect = FormEncoded }
 
 // --- the browser-facing /github* routes -------------------------------------------------
 // Thin proxies, gated by the same cookie identity as /me — the ClaudeConnection shape,
@@ -253,9 +293,13 @@ let routes
                                                 if interval <> grant.Interval then
                                                     pending <- Map.add target { grant with Interval = interval } pending
                                                 respondJson res 200 (sprintf """{"status":"pending","interval":%d}""" interval)
-                                            | PollGranted token ->
+                                            | PollGranted granted ->
                                                 pending <- Map.remove target pending
-                                                match! connections.Put target token with
+                                                // Over the grant leg, not the paste leg: this
+                                                // is an authorization this session ran, and the
+                                                // Manager is the only place a refresh token may
+                                                // live (Plan 08).
+                                                match! connections.PutGrant (grantRequest target granted) with
                                                 | Ok () -> respondJson res 200 """{"status":"connected"}"""
                                                 | Error e -> respondText res 502 e
                                             | PollFailed reason ->
