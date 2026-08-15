@@ -935,7 +935,9 @@ module ClientModel =
     /// the Session Process will actually do. Keyed by SUBJECT, so it answers for a command
     /// act exactly as it does for a terminal's (Plan 15, stage 3).
     let awaitsApproval (entry: PendingAct) (model: ClientModel) : bool =
-        ApprovalMode.requiresApproval (SyncedSessionState.gateOf entry.Subject model.Synced) entry.Author
+        ApprovalMode.requiresApproval
+            (SyncedSessionState.gateOf entry.Subject model.Synced)
+            (ActProvenance.author entry.Provenance)
         && Option.isNone entry.ApprovedBy
 
     /// Whether a queued command is held because a peer is typing in its terminal (Plan 13,
@@ -1359,15 +1361,16 @@ module ClientModel =
                 let entry =
                     { QueueId = draft.QueueId
                       Subject = ForTerminal terminal
+                      Order = TerminalQueueOrder.nextFor terminal model.Synced.Pending
+                      Payload = CommandLine
                       // The author is the PEER who wrote it. Attribution to a verified user
                       // happens at the durable append, where the Session Process knows the
                       // binding — the doc only ever knows connections.
-                      Author = PeerRef author
-                      Order = TerminalQueueOrder.nextFor terminal model.Synced.Pending
-                      Payload = CommandLine
-                      // A terminal command runs as its own author: it is a shell line in a
-                      // sandbox, not a call against somebody's credential.
-                      OnBehalfOf = None
+                      //
+                      // `ofAuthor`, so it runs as its own author: a terminal command is a
+                      // shell line in a sandbox, not a call against somebody's credential —
+                      // and a person's act cannot accidentally carry one.
+                      Provenance = ActProvenance.ofAuthor (PeerRef author)
                       ApprovedBy = None
                       RejectedBy = None
                       RejectedReason = None

@@ -430,8 +430,26 @@ Deliberately NOT included: the peer/user attribution step (`actorFor`, at the du
 boundary). That converts a connection into a party and is a different question from which
 parties are behind an act — folding it in here would make this type know about transports.
 
-**Delivery.** It lands with the wake arm (stage 2b), because that is the change that needs
-`effective` and the change whose absence exposed the gap. It is a mechanical refactor with one
-behavioural consequence, and that consequence is the fix: agent terminal commands start
-recording whose authority they ran on, so an audit of a session can answer "who was this for?"
-about every act rather than about some of them.
+**Delivery.** Shipped after the wake arm rather than with it: `effective` is what the arm
+needed, and the arm was already merged by the time this landed — banking a refactor of this
+width behind it would have been the rebase tax `contributing-changes` warns about.
+
+**Two things the sketch above did not anticipate, found by building it.**
+
+*The approval is not part of a PENDING act's provenance.* `PendingAct.ApprovedBy` is a CRDT
+register peers write and clear; folding it into an immutable value would have meant a setter
+and an un-setter on a type whose point is that it cannot be edited into a lie — and would have
+split the entry's two verdicts, approval and refusal, into two shapes. So a pending act carries
+Author + OnBehalfOf, and `approvedBy` is applied at the transition: the drain stamps the
+approver on as it mints the block. Which is what `approvedBy` was always for.
+
+*Decoding is not authoring.* A doc entry or a stored event whose owner does not read back is a
+state the constructors deliberately cannot express — and a decoder that could not represent it
+would drop the act instead of recovering it, turning a corrupt field into a missing command. So
+there is a fourth function, `rehydrate`, for the boundary. It is an escape hatch only in the
+sense that a repository's reconstitutor is one: nothing AUTHORS through it, and the guarantee
+that matters — no code path can propose an agent act with nobody's authority on it — is intact.
+
+The field names inside the record are prefixed (`ProvAuthor`, ...) and private. Bare
+`Author`/`OnBehalfOf` fields in this namespace made every other record carrying those names
+ambiguous to F#'s inference.

@@ -388,12 +388,16 @@ let private andPublish (name: QueryName) (outcome: Async<Result<'a, string>>) : 
 /// and "run something adjacent to what was approved" is the one outcome an approval gate
 /// must never produce.
 let private commandDispatch () : CommandDispatch =
-    let repoCaller (invocation: GatedInvocation) (fallback: ActorRef) =
-        Repos.agentCaller (invocation.OnBehalfOf |> Option.defaultValue fallback) invocation.ApprovedBy
-    let sandboxCaller (invocation: GatedInvocation) (fallback: ActorRef) : WorkSandboxes.SandboxCaller =
-        { Actor = ActorRef.Agent
-          Credential = invocation.OnBehalfOf |> Option.defaultValue fallback
-          ApprovedBy = invocation.ApprovedBy }
+    // Whose credential, asked once: the borrowed authority when there is one, the author
+    // otherwise. It used to be a `defaultArg` per call site with `ActorRef.Agent` written in
+    // as the fallback — which was right only because the agent is what authored every one of
+    // these, a coincidence each site had to keep re-establishing.
+    let repoCaller (invocation: GatedInvocation) =
+        Repos.agentCaller (ActProvenance.effective invocation.Provenance) (ActProvenance.approver invocation.Provenance)
+    let sandboxCaller (invocation: GatedInvocation) : WorkSandboxes.SandboxCaller =
+        { Actor = ActProvenance.author invocation.Provenance
+          Credential = ActProvenance.effective invocation.Provenance
+          ApprovedBy = ActProvenance.approver invocation.Provenance }
     Map.ofList
         [ GatedCommands.addRepo.Tool,
           fun (invocation: GatedInvocation) ->
@@ -407,7 +411,7 @@ let private commandDispatch () : CommandDispatch =
                         return!
                             andPublish Repos.queryName (
                                 async {
-                                    match! service.AddRepo (repoCaller invocation ActorRef.Agent) repo with
+                                    match! service.AddRepo (repoCaller invocation) repo with
                                     | Error e -> return Error e
                                     | Ok listing ->
                                         return
@@ -431,7 +435,7 @@ let private commandDispatch () : CommandDispatch =
                         return!
                             andPublish Repos.queryName (
                                 async {
-                                    match! service.SwitchBranch (repoCaller invocation ActorRef.Agent) repo branch (create = "true") with
+                                    match! service.SwitchBranch (repoCaller invocation) repo branch (create = "true") with
                                     | Error e -> return Error e
                                     | Ok listing -> return Ok (sprintf "now on %s" (RepoListing.describe listing))
                                 })
@@ -447,7 +451,7 @@ let private commandDispatch () : CommandDispatch =
                     match SandboxName.create name with
                     | Error e -> return Error (sprintf "not a sandbox name: %s" e)
                     | Ok name ->
-                        match! workSandboxes.Ensure (sandboxCaller invocation ActorRef.Agent) name forward with
+                        match! workSandboxes.Ensure (sandboxCaller invocation) name forward with
                         | Error e -> return Error e
                         | Ok entry ->
                             queryRegistry.Invalidate WorkSandboxes.queryName
@@ -473,7 +477,7 @@ let private commandDispatch () : CommandDispatch =
                     match SandboxName.create name with
                     | Error e -> return Error (sprintf "not a sandbox name: %s" e)
                     | Ok name ->
-                        match! workSandboxes.Stop (sandboxCaller invocation ActorRef.Agent) name with
+                        match! workSandboxes.Stop (sandboxCaller invocation) name with
                         | Error e -> return Error e
                         | Ok () ->
                             queryRegistry.Invalidate WorkSandboxes.queryName
@@ -497,8 +501,10 @@ let private repoCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabi
                 { Command = command
                   Args = encodeArgs args
                   Summary = summary
-                  Author = ActorRef.Agent
-                  OnBehalfOf = Some turnActor }
+                  // The agent acts; the credential is the turn human's (Plan 08). `agentFor`
+                  // TAKES that actor, so an agent-authored call with nobody's authority on it
+                  // is not something this could be written to omit.
+                  Provenance = ActProvenance.agentFor turnActor }
         { capabilities with
             AddRepo =
               fun repo ->
@@ -523,8 +529,7 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
             { Command = command
               Args = encodeArgs args
               Summary = summary
-              Author = ActorRef.Agent
-              OnBehalfOf = Some turnActor }
+              Provenance = ActProvenance.agentFor turnActor }
     { capabilities with
         StartWorkSandbox =
           fun name forward ->

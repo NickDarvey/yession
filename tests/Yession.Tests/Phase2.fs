@@ -646,12 +646,10 @@ let private acceptanceTests =
                         { TerminalId = TerminalId.create "t1" |> expect
                           BlockId = BlockId.create "b1" |> expect
                           QueueId = None
-                          Author = ActorRef.Agent
-                          ApprovedBy = None
+                          Provenance = ActProvenance.agentFor (PeerRef ada)
                           Command = "true"
                           FromSeq = 0
-                          Background = false
-                          OnBehalfOf = None }
+                          Background = false }
                       SessionEvent.TerminalBlockCompleted
                         { TerminalId = TerminalId.create "t1" |> expect
                           BlockId = BlockId.create "b1" |> expect

@@ -167,21 +167,20 @@ type GatedCall =
       /// shows and what a refusal records, rendered once here rather than three times
       /// downstream.
       Summary : string
-      /// Who is asking. Always the agent today; `yession.yaml` will ask too.
-      Author : ActorRef
-      /// Whose credential it runs on, when that is not the author's own (Plan 08: the agent
-      /// acts, the turn human's credential is used). Recorded on the act, because a restart
-      /// has no turn to ask.
-      OnBehalfOf : ActorRef option }
+      /// Who is asking, and on whose authority (Plan 08: the agent acts, the turn human's
+      /// credential is used). One value, so a call cannot be built with an author and no
+      /// authority — and recorded on the act, because a restart has no turn to ask.
+      Provenance : ActProvenance }
 
 /// A command being carried out, as its dispatch entry sees it. Everything comes off the
 /// pending act rather than out of a closure, which is what makes an approval survive the
 /// process that proposed it.
 type GatedInvocation =
     { Args : string
-      OnBehalfOf : ActorRef option
-      /// Who released it, when a gate held it. Goes onto the command's own event.
-      ApprovedBy : ActorRef option }
+      /// The three parties, including whoever released it when a gate held it — the approval
+      /// joins the provenance at the moment of acting, which is here. `ActProvenance.effective`
+      /// is what a dispatch entry asks for whose credential to run on.
+      Provenance : ActProvenance }
 
 /// How a command is actually carried out, by tool name. Built where the capabilities are
 /// composed; read by the gate, including at boot for acts it never proposed.
@@ -471,7 +470,7 @@ module AgentWake =
                 // turn's digest reported it.
                 | AgentTurnStarted _ -> Map.empty, None
                 | SessionEvent.TerminalBlockStarted b when b.Background ->
-                    match b.OnBehalfOf with
+                    match ActProvenance.onBehalfOf b.Provenance with
                     | Some owner -> Map.add (BlockId.value b.BlockId) owner background, woken
                     | None -> background, woken
                 | SessionEvent.TerminalBlockCompleted b ->

@@ -51,10 +51,10 @@ type TerminalBlock =
       /// a block does not exist until the command runs, so resuming a command that is still
       /// waiting has to be keyed on the request, and this is what joins the two afterwards.
       QueueId : QueueId option
-      /// Who wrote the command.
-      Author : ActorRef
-      /// Who approved it, when the mode required one.
-      ApprovedBy : ActorRef option
+      /// The parties behind the command (Plan 20): who wrote it, whose credential it ran on,
+      /// who released it. Carried whole rather than split back into fields, because a
+      /// projection that re-spells the value is another place the three can drift apart.
+      Provenance : ActProvenance
       Command : string
       /// Whether the agent asked for this one in the background (Plan 20, stage 2) — it did
       /// not hold a turn open, and its completion is something the agent is waiting to be
@@ -210,8 +210,7 @@ module TerminalProjection =
                             t.Blocks
                             @ [ { BlockId = e.BlockId
                                   QueueId = e.QueueId
-                                  Author = e.Author
-                                  ApprovedBy = e.ApprovedBy
+                                  Provenance = e.Provenance
                                   Command = e.Command
                                   Background = e.Background
                                   FromSeq = e.FromSeq
@@ -233,10 +232,9 @@ module TerminalProjection =
                                   QueueId = Some e.QueueId
                                   // A command that never ran was never anybody's wait.
                                   Background = false
-                                  Author = e.Author
                                   // Nobody approved it; someone did the opposite, and that
                                   // is on the status rather than smuggled in here.
-                                  ApprovedBy = None
+                                  Provenance = ActProvenance.ofAuthor e.Author
                                   Command = e.Command
                                   // An EMPTY range, not a missing one: a command that never
                                   // ran produced no output, so every reader that slices
@@ -380,8 +378,8 @@ module TerminalDigest =
                     { TerminalId = terminal.TerminalId
                       Title = terminal.Title
                       BlockId = block.BlockId
-                      Author = block.Author
-                      ApprovedBy = block.ApprovedBy
+                      Author = ActProvenance.author block.Provenance
+                      ApprovedBy = ActProvenance.approver block.Provenance
                       Command = block.Command
                       Status = block.Status
                       OutputTail = (if elided > 0 then output.Substring elided else output)
