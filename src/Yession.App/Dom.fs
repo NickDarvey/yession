@@ -194,11 +194,15 @@ module Dom =
         /// tablist and a test asserting keyboard order should not have to know which is which.
         /// Its value is `PaneTab.key`.
         let paneTab = "data-pane-tab"
-        /// The pin on a tab (Plan 20, stage 1), carrying `PaneTab.key` and its state in
-        /// `aria-pressed`. It replaced a close control, and the difference is the point: this
-        /// one releases a tab and never ends anything, so the strip cannot destroy. Killing a
-        /// terminal is `terminalClose`, on its row in the list.
-        let paneTabPin = "data-pane-tab-pin"
+        /// Whether a tab is KEPT — `"true"` or `"false"`, and absent on a tab that cannot be
+        /// pinned at all (a closed terminal's preview). State rather than a control: the pin
+        /// stopped being a second button beside every tab and became a mark on the one that
+        /// has it, toggled by activating the tab you are already on.
+        ///
+        /// Releasing a tab never ends anything, which is the point the pin inherited from the
+        /// close control it replaced: the strip cannot destroy. Killing a terminal is
+        /// `terminalClose`, on its row in the list.
+        let paneTabPinned = "data-pane-tab-pinned"
         /// The pane's body, carrying the key of whatever it is showing.
         let panePanel = "data-pane-panel"
         /// A block's read-only view: its command line and everything it printed.
@@ -336,6 +340,12 @@ module Dom =
         let stretchGone = "holder-gone"
         let stretchIdle = "idle"
         /// A queued command whose terminal's mode demands an approval it has not got.
+        /// What the pin mark is called, for anything that cannot see a blue glyph.
+        let pinned = "pinned"
+        /// What a second activation of the tab you are on will do. A gesture has no control
+        /// of its own to be labelled, so it says so from the tab it acts on.
+        let pinHint = "Select again to keep this tab"
+        let unpinHint = "Select again to release this tab"
         let queuedAwaitingApproval = "awaiting-approval"
         /// A queued command that will run as soon as the terminal is free.
         let queuedReady = "ready"

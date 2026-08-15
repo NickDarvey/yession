@@ -95,6 +95,10 @@ module Icon =
     /// Keep this tab, or stop keeping it. Never an `✕`: on a tab strip that glyph means
     /// "gone", and this control's whole point is that what it releases keeps running.
     let pin = stroked "w-3.5 h-3.5" pinPath
+    /// The pin at the size a tab wears it: 14px of glyph beside 11px caps sat four pixels
+    /// proud of the line it was marking. Same shape, sized and aligned to the text it
+    /// follows, exactly as `checkSm` is.
+    let pinSm = stroked "w-3 h-3 inline-block align-[-1px]" pinPath
 
     /// Inline with a status word: smaller, and nudged onto the caps baseline.
     let checkSm = stroked "w-3 h-3 inline-block align-[-1px]" checkPath

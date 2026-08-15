@@ -1065,18 +1065,25 @@ let editorTests =
                 page.SetDefaultTimeout 15000.0f
                 let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 9)))
 
-                // A chip's tab arrives previewed — kept by nothing.
+                // A chip's tab arrives previewed — kept by nothing — and selected, since
+                // tapping the chip is what put it there.
                 do! awaitU (page.ClickAsync "#shell [data-chat-block]")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-tab^='block:']")
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        """document.querySelector("#shell [data-pane-tab-pin^='block:']")?.getAttribute('aria-pressed') === 'false'""")
+                        """document.querySelector("#shell [data-pane-tab^='block:']")?.getAttribute('data-pane-tab-pinned') === 'false'""")
 
-                // Pinning says so where anything that cannot see colour can read it.
-                do! awaitU (page.ClickAsync "#shell [data-pane-tab-pin^='block:']")
+                // Activating the tab you are already on is the pin. There is no second
+                // control to hit — which is the point on a touch screen, where the second
+                // control was a 24px target beside a 30px one.
+                do! awaitU (page.ClickAsync "#shell [data-pane-tab^='block:']")
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        """document.querySelector("#shell [data-pane-tab-pin^='block:']")?.getAttribute('aria-pressed') === 'true'""")
+                        """document.querySelector("#shell [data-pane-tab^='block:']")?.getAttribute('data-pane-tab-pinned') === 'true'""")
+                // And it says so where anything that cannot see a blue glyph can read it.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector("#shell [data-pane-tab^='block:'] [role='img']")?.getAttribute('aria-label') === 'pinned'""")
 
                 // Move on to something else. The pinned tab stays, which is what a pin is
                 // for — a preview would have been replaced here.
