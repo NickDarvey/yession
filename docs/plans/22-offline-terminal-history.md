@@ -1,6 +1,6 @@
 # Plan 22 — The terminal survives the network too
 
-> **Status: proposed.** Plan 20 gave the conversation a cursor, an address that names its own
+> **Status: shipped**, both steps, one PR each. Plan 20 gave the conversation a cursor, an address that names its own
 > bounds, and a store the client reads before it asks anyone anything. The terminals were left
 > on the scheme plan 20 replaced: a client computes a chunk index, asks for it by number, and
 > keeps nothing of its own. Open a session offline and the conversation is there; the terminal

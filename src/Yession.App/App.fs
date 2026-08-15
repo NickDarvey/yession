@@ -146,6 +146,50 @@ module App =
               Read = fun _ -> async.Return None
               Write = fun _ _ -> async.Return () }
 
+    /// One terminal's kept answers (Plan 22). `HistoryCache` with one field more, and that
+    /// field is the whole difference between the two feeds: an event envelope carries its own
+    /// offset, so the event store never has to be told where an answer starts. A transcript
+    /// line cannot — the file is an asciicast and a private index field in it would stop it
+    /// being one — so the seq is kept BESIDE the bytes, taken from what the client asked for
+    /// rather than parsed back out of the address it was given.
+    type TranscriptCache =
+        { /// Every address kept, oldest first (insertion order IS fetch order, which is
+          /// ascending — so a replay never parses an address to sort them).
+          Stored : unit -> Async<string list>
+          /// One kept answer: the line its first line is, and the bytes.
+          Read   : string -> Async<(int * string) option>
+          /// Keep this answer under the address it came back from, at the line it starts on.
+          Write  : string -> int -> string -> Async<unit> }
+
+    /// Every terminal's store, one per terminal.
+    ///
+    /// Not one store with everything in it, and the reason is the replay. `Stored` answers in
+    /// insertion order, which is what lets a walk be "read them in order" with no sorting and
+    /// no address parsing. Two terminals' answers in one store interleave by whichever fetched
+    /// first, and a walk over that would have to ask, of every entry, whose it is — which
+    /// means parsing an address. The store's own name answers it instead, before the walk
+    /// starts.
+    type TranscriptCaches =
+        { /// The store for one terminal.
+          For  : TerminalId -> Async<TranscriptCache>
+          /// Every terminal this client has kept anything for, read from the stores' own
+          /// names — never from the model, which this same startup path has only just filled.
+          Kept : unit -> Async<TerminalId list> }
+
+    module TranscriptCache =
+
+        let none : TranscriptCache =
+            { Stored = fun () -> async.Return []
+              Read = fun _ -> async.Return None
+              Write = fun _ _ _ -> async.Return () }
+
+    module TranscriptCaches =
+
+        /// The client that keeps nothing: every replay is empty and every write is dropped.
+        let none : TranscriptCaches =
+            { For = fun _ -> async.Return TranscriptCache.none
+              Kept = fun () -> async.Return [] }
+
     /// Why an event-feed read failed. The cases exist to be classified: a refused
     /// connection may well come back, an unauthorized read needs a fresh login, and a chunk
     /// that does not decode is corruption. Retrying helps exactly one of those.
@@ -251,10 +295,25 @@ module App =
         /// line `n + 1`. A transcript line cannot carry its own index — the file is an
         /// asciicast and a private index field in it would stop it being one — so the cursor
         /// contract is what numbering rests on, and it has a test of its own (docs/plans/22).
-        let overHttp (get: HttpGet) (urlOf: SessionRoute -> string) (token: string option) : TranscriptFeed =
+        /// `caches` is where a settled answer is kept — `TranscriptCaches.none` for a client
+        /// with no store, which is then exactly today's client, asking the network from its
+        /// cursor.
+        ///
+        /// Keeping happens HERE rather than in a wrapper around the GET, as the event feed's
+        /// does, because the two things that have to be written down together are known in
+        /// two different places: the address comes back with the answer, and the line it
+        /// starts on is what this call asked for. A wrapper around the GET can see only one
+        /// of them.
+        let overHttp
+            (caches: TranscriptCaches)
+            (get: HttpGet)
+            (urlOf: SessionRoute -> string)
+            (token: string option)
+            : TranscriptFeed =
             fun terminal fromSeq ->
                 async {
-                    let after = if fromSeq <= 0 then None else Some (fromSeq - 1)
+                    let first = max 0 fromSeq
+                    let after = if first = 0 then None else Some (first - 1)
                     let tokenSuffix =
                         token
                         |> Option.map (fun t -> sprintf "?token=%s" (System.Uri.EscapeDataString t))
@@ -263,8 +322,67 @@ module App =
                     match! get url with
                     | Error (HttpUnreachable detail) -> return Error (FeedUnreachable detail)
                     | Error (HttpStatus status) -> return Error (FeedRefused status)
-                    | Ok answer -> return decodeLines (max 0 fromSeq) answer.Body
+                    | Ok answer ->
+                        match decodeLines first answer.Body with
+                        | Error fault -> return Error fault
+                        | Ok page ->
+                            // An answer with no lines is the `204` — the caller is current.
+                            // There is nothing to keep, and keeping it would put an empty
+                            // entry in the store under the CURSOR's address (no redirect
+                            // happened, so that is where this came back from), which the
+                            // replay would then read as a hole in the recording.
+                            if answer.Body.Trim().Length > 0 then
+                                let! cache = caches.For terminal
+                                do! cache.Write answer.Url first answer.Body
+                            return Ok page
                 }
+
+        /// Fold what this client has already been given for every terminal it kept anything
+        /// for, oldest first, before anything asks the network.
+        ///
+        /// Runs AFTER the event replay, never beside it: a terminal exists because an event
+        /// said so, and records folded before that event has been folded have nowhere to
+        /// land.
+        ///
+        /// **A gap stops that terminal's walk, and is noticed in the SEQUENCE rather than in
+        /// the addresses.** An entry evicted from the middle leaves the rest in the store, so
+        /// the walk reaches an answer whose first line is not one past the last folded. The
+        /// walk stops there because `ReadThrough` is both "shown through" and "resume from",
+        /// and advancing it over unread lines would skip them for ever — but only for THAT
+        /// terminal, which is the other thing one store per terminal buys.
+        let replay (caches: TranscriptCaches) (dispatch: ClientMsg -> unit) : Async<unit> =
+            async {
+                let! terminals = caches.Kept ()
+                for terminal in terminals do
+                    let! cache = caches.For terminal
+                    let! stored = cache.Stored ()
+                    // One past the last line folded. `0` before anything, because line 0 is
+                    // the header and a first answer always carries it.
+                    let mutable expected = 0
+                    let mutable stop = false
+                    for url in stored do
+                        if not stop then
+                            match! cache.Read url with
+                            // An address the store listed and then could not answer is a gap
+                            // like any other: the next entry's first line will say so.
+                            | None -> ()
+                            | Some (first, body) ->
+                                if first > expected then stop <- true
+                                else
+                                    match decodeLines first body with
+                                    // A recording that will not decode is not history, it is
+                                    // a guess — and unlike the event log there is no feed
+                                    // health to report it on, because a terminal's history
+                                    // failing costs that terminal and nothing else.
+                                    | Error _ -> stop <- true
+                                    | Ok page ->
+                                        page.Header
+                                        |> Option.iter (fun h -> dispatch (TerminalHeaderMsg (terminal, h)))
+                                        for (seq, record) in page.Records do
+                                            dispatch (TerminalRecordMsg (terminal, seq, record))
+                                        dispatch (TerminalReadThroughMsg (terminal, page.NextSeq))
+                                        expected <- max expected page.NextSeq
+            }
 
     /// How a connection consumes the event log (Step 07).
     type ConnectOptions =
@@ -300,7 +418,12 @@ module App =
           /// Asking the model instead makes that unrepresentable: a model that lost a
           /// fold is visibly behind, so the next hint re-reads it. The fold is
           /// offset-gated, so a re-read costs a round trip and changes nothing else.
-          ReadPosition : (unit -> EventOffset option) option }
+          ReadPosition : (unit -> EventOffset option) option
+          /// How far the MODEL has read one terminal's transcript, for the same reason and on
+          /// the same terms as `ReadPosition` above. Without it, a client that replayed a
+          /// terminal out of its own store would start its first read at line 0 and fetch
+          /// every line it already has.
+          TranscriptReadPosition : (TerminalId -> int) option }
 
     module ConnectOptions =
         let defaults : ConnectOptions =
@@ -309,7 +432,8 @@ module App =
               FetchEvents = None
               FetchTranscripts = None
               OnTerminalSnapshot = fun _ _ _ -> ()
-              ReadPosition = None }
+              ReadPosition = None
+              TranscriptReadPosition = None }
 
     /// The HTTP event feed for `ConnectOptions.FetchEvents`: sends "events after offset X"
     /// as exactly that — a cursor (`/events/after/{n}`) — and decodes the JSONL envelopes
@@ -639,10 +763,16 @@ module App =
         // client ends up with a hole it will never fetch.
         let transcriptRead = System.Collections.Generic.Dictionary<string, int> ()
 
+        // Where this terminal's transcript has actually been read to. The model's answer when
+        // the composition gave one; the loop's own bookkeeping otherwise (a peer with no model
+        // behind it) — the same two sources, for the same reason, as the event cursor above.
         let readPositionOf (terminal: TerminalId) =
-            match transcriptRead.TryGetValue (TerminalId.value terminal) with
-            | true, seq -> seq
-            | _ -> 0
+            match options.TranscriptReadPosition with
+            | Some position -> position terminal
+            | None ->
+                match transcriptRead.TryGetValue (TerminalId.value terminal) with
+                | true, seq -> seq
+                | _ -> 0
 
         let fetchTranscript (terminal: TerminalId) =
             match options.FetchTranscripts with
