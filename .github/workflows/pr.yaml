@@ -58,6 +58,15 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+      # A binary cache for the derivations no public one can serve: OUR derivations. The
+      # expensive ones do not depend on the app source at all — libdatachannel and
+      # node-datachannel are C++ builds keyed on nix/node-datachannel.nix, node_modules on
+      # package-lock.json — so they are byte-identical from one pull request to the next and
+      # were nonetheless compiled from scratch on every run (~1.2 min of the step below is
+      # `Building CXX object`). This backs a cache with the Actions cache, so the second run
+      # onward substitutes them. Nix keys by derivation hash, so a source change still
+      # rebuilds: this can go stale, it cannot go wrong.
+      - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Install devenv
         run: nix profile install nixpkgs#devenv
       # First, and cheap: actionlint over .github/workflows. release.yml only runs on master, so
@@ -116,6 +125,11 @@ jobs:
             experimental-features = nix-command flakes
             extra-substituters = https://devenv.cachix.org
             extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+      # Same argument as the Linux job, and this is where it pays most: `nix build .#yession`
+      # is now the largest step here, and almost all of it is the source-stable derivations
+      # (libdatachannel, node-datachannel, node-pty, the npm and NuGet fixed-output deps) that
+      # no public cache can hold because they are ours.
+      - uses: DeterminateSystems/magic-nix-cache-action@main
       # Deliberately `nix build` and not devenv: this is the `nix profile install
       # github:NickDarvey/yession` path a user actually takes, and it must stay pure.
       - name: Build the installable package
