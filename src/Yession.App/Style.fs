@@ -121,9 +121,11 @@ module Style =
     /// button, and author line. Colour composes at the use site.
     let private caps = "font-semibold text-label tracking-caps uppercase"
 
-    /// The voice a body is written in: Monaspace Xenon for a person, Krypton for the agent
-    /// (`--font-human`/`--font-agent`, both vendored in `app/tailwind.css`). Attribution the
-    /// eye reads before the words — the author line and the avatar say the same thing, but
+    /// The voice a body is written in: Noto Serif for a person, and the system's own Noto Sans
+    /// for the agent, which is part of the system (`--font-human`/`--font-agent`). Siblings, so
+    /// a conversation reads as one voice in two registers rather than two typefaces arguing —
+    /// and the difference is one of CLASS rather than of letterform detail, which is what makes
+    /// it survive 15px. Attribution the eye reads before the words — the author line and the avatar say the same thing, but
     /// they say it once at the top, and a long turn scrolls past them.
     ///
     /// A face, not a colour: the caps author line already spends the palette on this
@@ -269,10 +271,16 @@ module Style =
               "inline-flex items-center"
               Stroke.ring; Stroke.hair; Stroke.hoverRim; Stroke.focus ]
 
-    /// What a field holds, as opposed to what it looks like: the body scale (never the
-    /// title's) in the human voice, because a field is somebody typing.
+    /// What a field holds, as opposed to what it looks like: the body scale, never the title's.
+    ///
+    /// The UI voice, not the human one — the distinction is SPEECH, not keystrokes. A composer,
+    /// a queued message and a peer's draft wear `messageVoice` because what is typed there
+    /// becomes a message and keeps the face it was written in. A session's display name, an API
+    /// token, a mode select are chrome a person operates: nothing is being said, so there is no
+    /// attribution to make, and a serif form control on a sans page reads as a mistake rather
+    /// than a signal.
     let private fieldType =
-        cls [ messageVoice false; "font-light text-small leading-5 text-ink placeholder:text-ink-faint" ]
+        cls [ "font-ui font-light text-small leading-5 text-ink placeholder:text-ink-faint" ]
 
     /// A settings field (input/select), filling the column it sits in.
     let field = cls [ fieldFace; fieldType; "w-full"; touchType ]

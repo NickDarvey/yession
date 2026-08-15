@@ -13,13 +13,21 @@
    rule as everything else the shell serves, no CDN. Both are SIL OFL 1.1; the two licences sit
    beside the faces.
 
-   Four voices. The chrome is Noto Sans, which is where the Segoe UI this design was drawn
-   around went: Segoe cannot be redistributed, and Noto descends from the same designer's
-   humanist line, so a box without Segoe stops guessing and every box reads the same. The
-   other three are GitHub's Monaspace, because they are all showing you machine text — and
-   the two a reader must tell apart mid-paragraph are the two furthest apart in that
-   superfamily: Xenon is a serif, Krypton a mechanical sans. Neon and Krypton, which shipped
-   first, differ only in their zero at 15px, which is not attribution.
+   Four voices, three families, one rule: SANS IS THE MACHINE — the chrome, and the agent,
+   which is part of it — and SERIF IS THE PERSON. The terminal keeps Monaspace Neon, because
+   a terminal is columns.
+
+   The chrome is Noto Sans, which is where the Segoe UI this design was drawn around went:
+   Segoe cannot be redistributed, and Noto descends from the same designer's humanist line, so
+   a box without Segoe stops guessing and every box reads the same. A person's words are Noto
+   Serif, its sibling — same superfamily, so the two share proportion and vertical metrics and
+   a conversation reads as one voice in two registers rather than two typefaces arguing.
+
+   That similarity is the point, and it is also the trap. The first attempt at these two put
+   the conversation in Monaspace Xenon and Krypton, whose difference lives in letterform
+   DETAIL: at 15px they differ in their zero and nothing else, which is not attribution. What
+   survives body size is a difference of CLASS, on a shared skeleton — which is exactly what a
+   sans and its own serif are.
 
    Each face is declared in `AssetFile` and copied beside this sheet by the build; the
    `url()`s below are passed through verbatim — Tailwind does not rewrite them — and resolve
@@ -59,6 +67,27 @@
   src: url('fonts/noto-sans-latin-600-normal.woff2') format('woff2');
 }
 @font-face {
+  font-family: 'Noto Serif';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('fonts/noto-serif-latin-300-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Serif';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/noto-serif-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Noto Serif';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/noto-serif-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
   font-family: 'Monaspace Neon';
   font-style: normal;
   font-weight: 400;
@@ -71,48 +100,6 @@
   font-weight: 600;
   font-display: swap;
   src: url('fonts/monaspace-neon-latin-600-normal.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Monaspace Xenon';
-  font-style: normal;
-  font-weight: 300;
-  font-display: swap;
-  src: url('fonts/monaspace-xenon-latin-300-normal.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Monaspace Xenon';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('fonts/monaspace-xenon-latin-400-normal.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Monaspace Xenon';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url('fonts/monaspace-xenon-latin-600-normal.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Monaspace Krypton';
-  font-style: normal;
-  font-weight: 300;
-  font-display: swap;
-  src: url('fonts/monaspace-krypton-latin-300-normal.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Monaspace Krypton';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('fonts/monaspace-krypton-latin-400-normal.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Monaspace Krypton';
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url('fonts/monaspace-krypton-latin-600-normal.woff2') format('woff2');
 }
 
 /* Theme — mirrors what the old tailwind.config.js `theme.extend` registered. Namespaced
@@ -167,10 +154,11 @@
   --color-term-cyan-bright: #8cebf5;
   --color-term-white-bright: #fff;
 
-  /* WHO IS TALKING, said by the typeface. Four voices, four families, and every one of them
-     a face this build ships — so the product reads the same on every machine. `--font-sans`
-     and `--font-mono` are gone because they named a CATEGORY and resolved to whatever
-     Microsoft fonts a box happened to have; these name a ROLE and resolve to bytes we ship.
+  /* WHO IS TALKING, said by the typeface. Four voices over three families — the agent wears
+     the system's — and every face is one this build ships, so the product reads the same on
+     every machine. `--font-sans` and `--font-mono` are gone because they named a CATEGORY and
+     resolved to whatever Microsoft fonts a box happened to have; these name a ROLE and resolve
+     to bytes we ship.
 
      Every surface wears exactly one of them, and each is written here once. */
   /* What a browser falls back to for the moment before a face arrives, or forever if it
@@ -179,12 +167,16 @@
      names Segoe first — on the machines this design was drawn around, the fallback should be
      the face it was drawn with. */
   --fallback-sans: 'Segoe UI', system-ui, sans-serif;
+  --fallback-serif: Georgia, 'Times New Roman', serif;
   --fallback-mono: ui-monospace, monospace;
 
   --font-ui: 'Noto Sans', var(--fallback-sans);
   --font-terminal: 'Monaspace Neon', var(--fallback-mono);
-  --font-human: 'Monaspace Xenon', var(--fallback-mono);
-  --font-agent: 'Monaspace Krypton', var(--fallback-mono);
+  --font-human: 'Noto Serif', var(--fallback-serif);
+  /* The agent speaks in the system's face, so this is not a second declaration of it — it is
+     the same voice, named for the thing that wears it. If the agent ever needs its own face,
+     one line here changes and nothing else does. */
+  --font-agent: var(--font-ui);
 
   /* Retired, so a leftover `font-sans`/`font-mono` cannot silently pick up Tailwind's own
      defaults instead of a voice above. */
