@@ -190,7 +190,7 @@ module TerminalQueueDrain =
             // know when it started or finished. Holding is the honest answer — draining into
             // an unmarked shell would produce blocks that never close.
             elif Set.contains (TerminalId.value terminal) lost then Choice2Of2 AwaitingIntegration
-            elif ApprovalMode.requiresApproval modeOf (ActProvenance.author entry.Provenance)
+            elif ApprovalMode.requiresApproval modeOf (Authority.author entry.Authority)
                  && Option.isNone entry.ApprovedBy then
                 Choice2Of2 AwaitingApproval
             else Choice1Of2 (terminal, entry)
@@ -1259,7 +1259,7 @@ module SessionTerminals =
                     busy <- Set.add key busy
                     // The flip policy's input: if this command takes the alternate screen, its
                     // author is the person who now needs the keyboard.
-                    runningAuthor.[key] <- ActProvenance.author entry.Provenance
+                    runningAuthor.[key] <- Authority.author entry.Authority
                     let blockId = mintBlockId ()
                     // Taken BEFORE the command is written, which is forced by the anchor
                     // ordering below and is the honest reading anyway: on a pty the shell
@@ -1274,7 +1274,7 @@ module SessionTerminals =
                     // command that silently runs twice.
                     do!
                         appendAs
-                            (ActProvenance.author entry.Provenance)
+                            (Authority.author entry.Authority)
                             (SessionEvent.TerminalBlockStarted
                                 { TerminalId = terminalId
                                   BlockId = blockId
@@ -1283,10 +1283,10 @@ module SessionTerminals =
                                   // what lets the wake decide from the LOG alone: the entry
                                   // is removed the moment this lands. The approval joins it
                                   // HERE — a verdict register on the entry while people can
-                                  // still change it, part of the provenance once it is what
+                                  // still change it, part of the authority once it is what
                                   // let the command run.
-                                  Provenance =
-                                    entry.Provenance |> ActProvenance.approvedBy entry.ApprovedBy
+                                  Authority =
+                                    entry.Authority |> Authority.approvedBy entry.ApprovedBy
                                   Command = command
                                   FromSeq = fromSeq
                                   Background = entry.Background })
@@ -1587,7 +1587,7 @@ module SessionTerminals =
                                 { TerminalId = terminalId
                                   QueueId = entry.QueueId
                                   BlockId = mintBlockId ()
-                                  Author = ActProvenance.author entry.Provenance
+                                  Author = Authority.author entry.Authority
                                   RejectedBy = PeerRef by
                                   Command = command
                                   Reason = entry.RejectedReason })
@@ -1804,7 +1804,7 @@ module TerminalCommands =
         { /// Not `ExecuteCommand`: the agent-facing capability takes no authority argument,
           /// and this takes the one the per-turn binding supplies. Two shapes because they
           /// are two audiences — the tool surface must not be able to name a credential.
-          Execute : CommandTarget option -> string -> bool -> ActProvenance -> Async<Result<TerminalCommandOutcome, string>>
+          Execute : CommandTarget option -> string -> bool -> Authority -> Async<Result<TerminalCommandOutcome, string>>
           /// Resume a terminal handle. The terminal HALF of `CheckPending` (Plan 15, stage
           /// 3b): the Host joins it to the command gate's half, because a handle names a
           /// request without saying which kind, which is exactly what makes one tool enough.
@@ -1948,7 +1948,7 @@ module TerminalCommands =
             // agent, for the reason the authority itself is: an acting party that could name
             // its own is not gated by one. A value rather than a loose owner, so the binding
             // cannot hand over an agent command with nobody's authority on it.
-            (provenance: ActProvenance)
+            (authority: Authority)
             : Async<Result<TerminalCommandOutcome, string>> =
             async {
                 let command = command.Trim ()
@@ -1977,7 +1977,7 @@ module TerminalCommands =
                             doc
                             handle
                             terminal
-                            provenance
+                            authority
                             (TerminalQueueOrder.nextFor terminal synced.Pending)
                             command
                             background

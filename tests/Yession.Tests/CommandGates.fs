@@ -72,7 +72,7 @@ let private call (command: GatedCommand) (args: string list) (summary: string) :
     { Command = command
       Args = Codec.toString Codec.gatedArgs args
       Summary = summary
-      Provenance = ActProvenance.agentFor ada' }
+      Authority = Authority.agentFor ada' }
 
 /// A dispatch table of one command, recording what it was invoked with.
 let private recordingDispatch (command: GatedCommand) =
@@ -106,9 +106,9 @@ let private gateTests =
                 let! outcome = gate.Run (call GatedCommands.addRepo [ "octo/hello" ] "add_repo octo/hello")
                 let outcome = expect outcome
                 Expect.equal (Seq.length seen) 1 "it ran"
-                Expect.equal (ActProvenance.approver (Seq.head seen).Provenance) None "nobody had to approve it"
+                Expect.equal (Authority.approver (Seq.head seen).Authority) None "nobody had to approve it"
                 Expect.equal
-                    (ActProvenance.effective (Seq.head seen).Provenance)
+                    (Authority.effective (Seq.head seen).Authority)
                     ada'
                     "on the turn actor's credential"
                 Expect.equal outcome.Status (CommandRan "done") "and answered with what it said"
@@ -139,8 +139,8 @@ let private gateTests =
                         act.Payload
                         (CommandCall ("add_repo", Codec.toString Codec.gatedArgs [ "octo/hello" ], "add_repo octo/hello"))
                         "carrying both what a machine runs and what a human reads"
-                    Expect.equal (ActProvenance.author act.Provenance) ActorRef.Agent "attributed to whoever asked"
-                    Expect.equal (ActProvenance.effective act.Provenance) ada' "with whose credential it runs on"
+                    Expect.equal (Authority.author act.Authority) ActorRef.Agent "attributed to whoever asked"
+                    Expect.equal (Authority.effective act.Authority) ada' "with whose credential it runs on"
                     Expect.equal act.ApprovedBy None "never pre-approved — that would be the agent approving itself"
                 | other -> failwithf "expected one pending act, got %A" other
             }
@@ -163,7 +163,7 @@ let private gateTests =
                 do! Async.Sleep 150
                 Expect.equal (Seq.length seen) 1 "it ran once the verdict was in"
                 Expect.equal
-                    (ActProvenance.approver (Seq.head seen).Provenance)
+                    (Authority.approver (Seq.head seen).Authority)
                     (Some (PeerRef ada))
                     "and the event can name who released it"
                 let synced = SyncedStateSync.ofDoc doc |> expect
@@ -256,11 +256,11 @@ let private gateTests =
                     (Ok [ "octo/hello" ])
                     "with the arguments off the act, not out of a closure"
                 Expect.equal
-                    (ActProvenance.effective invocation.Provenance)
+                    (Authority.effective invocation.Authority)
                     ada'
                     "and the credential owner off the act too"
                 Expect.equal
-                    (ActProvenance.approver invocation.Provenance)
+                    (Authority.approver invocation.Authority)
                     (Some (PeerRef ada))
                     "and who released it"
                 let synced = SyncedStateSync.ofDoc doc |> expect
@@ -299,7 +299,7 @@ let private gateTests =
                 let log = newLog ()
                 let terminal = TerminalId.create "term-a" |> expect
                 SyncedStateSync.enqueueTerminalCommand
-                    doc (QueueId.create "q-t1" |> expect) terminal (ActProvenance.agentFor ada') 1.0 "git status" false
+                    doc (QueueId.create "q-t1" |> expect) terminal (Authority.agentFor ada') 1.0 "git status" false
                 let gate, _ = gateOver doc log (movingClock ())
                 gate.Drain ()
                 do! Async.Sleep 150

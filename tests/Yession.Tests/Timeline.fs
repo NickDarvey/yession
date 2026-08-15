@@ -55,7 +55,7 @@ let private started (id: TerminalId) (n: string) (author: ActorRef) (command: st
         { TerminalId = id
           BlockId = block n
           QueueId = None
-          Provenance = ActProvenance.ofAuthor author
+          Authority = Authority.ofAuthor author
           Command = command
           FromSeq = fromSeq
           Background = false }

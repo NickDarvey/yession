@@ -148,7 +148,7 @@ let private withLiveTerminal
 let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : PendingAct =
     { QueueId = QueueId.create n |> expect
       Subject = ForTerminal terminal
-      Provenance = ActProvenance.ofAuthor author
+      Authority = Authority.ofAuthor author
       Order = 1.0
       Payload = CommandLine
       ApprovedBy = None

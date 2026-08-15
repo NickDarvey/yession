@@ -170,7 +170,7 @@ type GatedCall =
       /// Who is asking, and on whose authority (Plan 08: the agent acts, the turn human's
       /// credential is used). One value, so a call cannot be built with an author and no
       /// authority — and recorded on the act, because a restart has no turn to ask.
-      Provenance : ActProvenance }
+      Authority : Authority }
 
 /// A command being carried out, as its dispatch entry sees it. Everything comes off the
 /// pending act rather than out of a closure, which is what makes an approval survive the
@@ -178,9 +178,9 @@ type GatedCall =
 type GatedInvocation =
     { Args : string
       /// The three parties, including whoever released it when a gate held it — the approval
-      /// joins the provenance at the moment of acting, which is here. `ActProvenance.effective`
+      /// joins the authority at the moment of acting, which is here. `Authority.effective`
       /// is what a dispatch entry asks for whose credential to run on.
-      Provenance : ActProvenance }
+      Authority : Authority }
 
 /// How a command is actually carried out, by tool name. Built where the capabilities are
 /// composed; read by the gate, including at boot for acts it never proposed.
@@ -470,7 +470,7 @@ module AgentWake =
                 // turn's digest reported it.
                 | AgentTurnStarted _ -> Map.empty, None
                 | SessionEvent.TerminalBlockStarted b when b.Background ->
-                    match ActProvenance.onBehalfOf b.Provenance with
+                    match Authority.onBehalfOf b.Authority with
                     | Some owner -> Map.add (BlockId.value b.BlockId) owner background, woken
                     | None -> background, woken
                 | SessionEvent.TerminalBlockCompleted b ->

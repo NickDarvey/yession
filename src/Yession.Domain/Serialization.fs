@@ -102,16 +102,16 @@ module Codec =
     /// the life of its session — so what changed is where the value lives in F#, and nothing
     /// about what is written. One pair of helpers rather than a spelling per event, which is
     /// how the three came to disagree in the first place.
-    let private provenanceFields (provenance: ActProvenance) =
-        [ "author", actor.Encode (ActProvenance.author provenance)
-          "approvedBy", Encode.option actor.Encode (ActProvenance.approver provenance)
-          "onBehalfOf", Encode.option actor.Encode (ActProvenance.onBehalfOf provenance) ]
+    let private authorityFields (authority: Authority) =
+        [ "author", actor.Encode (Authority.author authority)
+          "approvedBy", Encode.option actor.Encode (Authority.approver authority)
+          "onBehalfOf", Encode.option actor.Encode (Authority.onBehalfOf authority) ]
 
     /// Recovered, never authored — `rehydrate`'s reason. `onBehalfOf` is optional on the way
     /// in because events written before Plan 20 have no such key, and a `Required` field would
     /// make those pages undecodable, which is a session that will not open.
-    let private provenanceOf (get: Decode.IGetters) : ActProvenance =
-        ActProvenance.rehydrate
+    let private authorityOf (get: Decode.IGetters) : Authority =
+        Authority.rehydrate
             (get.Required.Field "author" actor.Decode)
             (get.Optional.Field "onBehalfOf" (Decode.option actor.Decode) |> Option.flatten)
             (get.Required.Field "approvedBy" (Decode.option actor.Decode))
@@ -741,13 +741,13 @@ module Codec =
                       "command", Encode.string p.Command
                       "fromSeq", Encode.int p.FromSeq
                       "background", Encode.bool p.Background ]
-                    @ provenanceFields p.Provenance)
+                    @ authorityFields p.Authority)
           Decode =
             Decode.object (fun get ->
                 { TerminalBlockStarted.TerminalId = get.Required.Field "terminalId" terminalId.Decode
                   TerminalBlockStarted.BlockId = get.Required.Field "blockId" blockId.Decode
                   TerminalBlockStarted.QueueId = get.Required.Field "queueId" (Decode.option queueId.Decode)
-                  TerminalBlockStarted.Provenance = provenanceOf get
+                  TerminalBlockStarted.Authority = authorityOf get
                   TerminalBlockStarted.Command = get.Required.Field "command" Decode.string
                   TerminalBlockStarted.FromSeq = get.Required.Field "fromSeq" Decode.int
                   // Optional on the way IN and required on the way out: every block written

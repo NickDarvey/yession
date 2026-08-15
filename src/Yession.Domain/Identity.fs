@@ -248,7 +248,8 @@ module ActorRef =
                     | "peer" -> (match PeerId.create rest with Ok p -> Some (PeerRef p) | Error _ -> None)
                     | _ -> None
 
-/// Who is behind an act: the three parties an audit asks about, as ONE value (Plan 20).
+/// On whose authority an act happens, and who is behind it: the three parties an audit asks
+/// about, as ONE value (Plan 20).
 ///
 /// They were three loose fields that every site re-spelled — `PendingAct` spelled them,
 /// `TerminalBlockStarted` spelled them, the refusal events spelled their share — and one site
@@ -257,40 +258,43 @@ module ActorRef =
 /// places and was silently absent in a third. An invariant that holds only because a caller
 /// remembered to set a field is a convention with a good reputation.
 ///
+/// It is a triple, not a chain: three parties for ONE act, with no lineage and no history of
+/// delegation. What a later act inherits, it inherits by being constructed with it.
+///
 /// Private, so the smart constructors below are the only way to author one. `agentFor` takes
-/// the turn actor, which is what makes the omission unrepresentable: there is no
-/// agent-authored provenance without somebody's authority named on it, so forgetting would
-/// not compile.
+/// the turn actor, which is what makes the omission unrepresentable: an agent-authored act
+/// with nobody named on it cannot be built, so forgetting would not compile.
+///
 /// The field names are prefixed and deliberately unlovely. They are private — every reader
 /// goes through the module below — and a record carrying bare `Author`/`OnBehalfOf` fields in
 /// this namespace made every OTHER record with those names ambiguous to inference.
-type ActProvenance =
+type Authority =
     private
-        { ProvAuthor : ActorRef
-          ProvOnBehalfOf : ActorRef option
-          ProvApprovedBy : ActorRef option }
+        { AuthAuthor : ActorRef
+          AuthOnBehalfOf : ActorRef option
+          AuthApprovedBy : ActorRef option }
 
-module ActProvenance =
+module Authority =
 
     /// A party acting for themselves. There is no authority to borrow, so there is none to
     /// state — which is why a person's act cannot accidentally carry somebody else's.
-    let ofAuthor (actor: ActorRef) : ActProvenance =
-        { ProvAuthor = actor; ProvOnBehalfOf = None; ProvApprovedBy = None }
+    let ofAuthor (actor: ActorRef) : Authority =
+        { AuthAuthor = actor; AuthOnBehalfOf = None; AuthApprovedBy = None }
 
     /// The agent, acting on a turn human's authority (Plan 08). The rule that was missing from
     /// one call site, as the ONLY way to build an agent-authored act.
-    let agentFor (turnActor: ActorRef) : ActProvenance =
-        { ProvAuthor = ActorRef.Agent; ProvOnBehalfOf = Some turnActor; ProvApprovedBy = None }
+    let agentFor (turnActor: ActorRef) : Authority =
+        { AuthAuthor = ActorRef.Agent; AuthOnBehalfOf = Some turnActor; AuthApprovedBy = None }
 
     /// Released by a peer, when the subject's mode demanded one. Takes the option every call
     /// site actually holds — the approval is a register on a queue entry, and `None` there
     /// means nobody had to, which is identity here rather than a decision to re-spell.
-    let approvedBy (peer: PeerId option) (provenance: ActProvenance) : ActProvenance =
+    let approvedBy (peer: PeerId option) (authority: Authority) : Authority =
         match peer with
-        | Some p -> { provenance with ProvApprovedBy = Some (PeerRef p) }
-        | None -> provenance
+        | Some p -> { authority with AuthApprovedBy = Some (PeerRef p) }
+        | None -> authority
 
-    /// Recover a provenance somebody else already wrote — a doc entry, a stored event. NOT an
+    /// Recover what somebody else already wrote — a doc entry, a stored event. NOT an
     /// authoring path: it can express states the constructors above refuse, because it is
     /// recovering facts rather than deciding them, and a decoder that could not represent what
     /// is written would drop the entry instead.
@@ -299,20 +303,20 @@ module ActProvenance =
     /// `effective` answers safely — the act runs on NOTHING rather than on somebody else's
     /// credential — and refusing to represent it here would turn a corrupt field into a
     /// missing act.
-    let rehydrate (author: ActorRef) (onBehalfOf: ActorRef option) (approvedBy: ActorRef option) : ActProvenance =
-        { ProvAuthor = author; ProvOnBehalfOf = onBehalfOf; ProvApprovedBy = approvedBy }
+    let rehydrate (author: ActorRef) (onBehalfOf: ActorRef option) (approvedBy: ActorRef option) : Authority =
+        { AuthAuthor = author; AuthOnBehalfOf = onBehalfOf; AuthApprovedBy = approvedBy }
 
-    let author (provenance: ActProvenance) : ActorRef = provenance.ProvAuthor
+    let author (authority: Authority) : ActorRef = authority.AuthAuthor
     /// Whose authority this runs on, when that is not the author's own. `None` on a person's
     /// act means there is nothing borrowed; `None` on the agent's means the owner was lost.
-    let onBehalfOf (provenance: ActProvenance) : ActorRef option = provenance.ProvOnBehalfOf
-    let approver (provenance: ActProvenance) : ActorRef option = provenance.ProvApprovedBy
+    let onBehalfOf (authority: Authority) : ActorRef option = authority.AuthOnBehalfOf
+    let approver (authority: Authority) : ActorRef option = authority.AuthApprovedBy
 
     /// Whose credentials this resolves to — the borrowed authority when there is one, the
     /// author otherwise. The question every dispatch actually asks, answered once instead of
     /// by a `defaultArg` at each site that asks it.
-    let effective (provenance: ActProvenance) : ActorRef =
-        provenance.ProvOnBehalfOf |> Option.defaultValue provenance.ProvAuthor
+    let effective (authority: Authority) : ActorRef =
+        authority.AuthOnBehalfOf |> Option.defaultValue authority.AuthAuthor
 
 /// A GitHub repository, named `owner/repo` (Plan 14). Validated at the boundary so the
 /// clone URL is CONSTRUCTED from it — there is no free-form remote anywhere downstream,

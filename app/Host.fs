@@ -474,7 +474,7 @@ let startFull
               // it runs on is not gated by one.
               ExecuteCommand =
                 fun target command background ->
-                    terminalCommands.Execute target command background (ActProvenance.agentFor turnActor)
+                    terminalCommands.Execute target command background (Authority.agentFor turnActor)
               CheckPending = checkPending
               // The agent's hand in a terminal that has no blocks (Plan 19). It takes the
               // lease like a peer, so a human watching sees who is typing and can take it

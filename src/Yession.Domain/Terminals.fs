@@ -54,7 +54,7 @@ type TerminalBlock =
       /// The parties behind the command (Plan 20): who wrote it, whose credential it ran on,
       /// who released it. Carried whole rather than split back into fields, because a
       /// projection that re-spells the value is another place the three can drift apart.
-      Provenance : ActProvenance
+      Authority : Authority
       Command : string
       /// Whether the agent asked for this one in the background (Plan 20, stage 2) — it did
       /// not hold a turn open, and its completion is something the agent is waiting to be
@@ -210,7 +210,7 @@ module TerminalProjection =
                             t.Blocks
                             @ [ { BlockId = e.BlockId
                                   QueueId = e.QueueId
-                                  Provenance = e.Provenance
+                                  Authority = e.Authority
                                   Command = e.Command
                                   Background = e.Background
                                   FromSeq = e.FromSeq
@@ -234,7 +234,7 @@ module TerminalProjection =
                                   Background = false
                                   // Nobody approved it; someone did the opposite, and that
                                   // is on the status rather than smuggled in here.
-                                  Provenance = ActProvenance.ofAuthor e.Author
+                                  Authority = Authority.ofAuthor e.Author
                                   Command = e.Command
                                   // An EMPTY range, not a missing one: a command that never
                                   // ran produced no output, so every reader that slices
@@ -378,8 +378,8 @@ module TerminalDigest =
                     { TerminalId = terminal.TerminalId
                       Title = terminal.Title
                       BlockId = block.BlockId
-                      Author = ActProvenance.author block.Provenance
-                      ApprovedBy = ActProvenance.approver block.Provenance
+                      Author = Authority.author block.Authority
+                      ApprovedBy = Authority.approver block.Authority
                       Command = block.Command
                       Status = block.Status
                       OutputTail = (if elided > 0 then output.Substring elided else output)

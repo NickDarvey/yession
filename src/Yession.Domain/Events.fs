@@ -321,7 +321,7 @@ and TerminalBlockStarted =
       /// resolve its authority from, and the log is the only thing it can read. Absent means
       /// no turn can be woken by this block — an unresolvable owner runs on NOTHING rather
       /// than on somebody else's credential.
-      Provenance : ActProvenance
+      Authority : Authority
       /// The command line, snapshotted from the collaborative draft at drain time and
       /// immutable thereafter — exactly as `MessageSent` snapshots a message body.
       Command : string

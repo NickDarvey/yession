@@ -1119,7 +1119,7 @@ module View =
                             data-chat-block-status="{terminalBlockStatusLabel block.Status}"
                             data-terminal-id="{TerminalId.value terminalId}"
                             @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
-                      <span class="{Style.chatChipWho}">{authorName model (ActProvenance.author block.Provenance)}</span>
+                      <span class="{Style.chatChipWho}">{authorName model (Authority.author block.Authority)}</span>
                       <span class="{Style.terminalPrompt}">$</span>
                       <code class="{Style.chatChipCommand}">{block.Command}</code>
                       <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
@@ -1254,7 +1254,7 @@ module View =
             | status -> html $"""<span class="shrink-0">{terminalBlockStatus model status}</span>"""
         // The facts that used to have nowhere to go, or nowhere better than a status beside
         // the command: who ran it, who let it through, and how it ended. Behind a
-        // disclosure, because a scrollback is read for its OUTPUT and the provenance is what
+        // disclosure, because a scrollback is read for its OUTPUT and who was behind it is what
         // you go looking for afterwards — and it is a real `<details>`, so going looking is
         // a keypress and an announcement rather than a click handler.
         let fact (text: string) = html $"""<span class="{Style.terminalBlockFact}">{text}</span>"""
@@ -1267,8 +1267,8 @@ module View =
             | BlockRejected (by, _) -> [ fact (sprintf "refused by %s" (authorName model by)) ]
             | BlockRunning -> []
         let facts =
-            [ fact (sprintf "ran by %s" (authorName model (ActProvenance.author block.Provenance)))
-              match ActProvenance.approver block.Provenance with
+            [ fact (sprintf "ran by %s" (authorName model (Authority.author block.Authority)))
+              match Authority.approver block.Authority with
               | Some by -> fact (sprintf "approved by %s" (authorName model by))
               | None -> ()
               yield! exitFact ]
@@ -1403,7 +1403,7 @@ module View =
               <div class="{Style.terminalQueuedRow}">
                 {statusLine}
                 {subject}
-                <span class="{Style.small}">{authorName model (ActProvenance.author entry.Provenance)}</span>
+                <span class="{Style.small}">{authorName model (Authority.author entry.Authority)}</span>
                 <div class="ml-auto flex items-center gap-2">
                   {reject}
                   {approval}

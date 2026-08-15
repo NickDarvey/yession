@@ -89,9 +89,9 @@ type PendingAct =
       /// one value so that an agent-proposed act without an owner cannot be written.
       ///
       /// No approver on it yet: the verdict registers below are what peers WRITE, and the
-      /// approval becomes part of the provenance at the moment of acting, where the drain
+      /// approval becomes part of the authority at the moment of acting, where the drain
       /// stamps it onto the block it mints.
-      Provenance : ActProvenance
+      Authority : Authority
       /// A fractional index within its subject's queue — one register write to reorder.
       /// Meaningful where something drains serially (a terminal has one stdin); harmless
       /// where nothing does.
