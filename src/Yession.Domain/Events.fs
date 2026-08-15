@@ -146,7 +146,27 @@ and MessageSent =
 
 and AgentTurnStarted =
     { AgentTurnId : AgentTurnId
-      TriggeredByMessageId : MessageId }
+      /// What was said to start this turn. `None` for a turn nobody asked for (Plan 20,
+      /// stage 2) — an option rather than a minted stand-in, because an id that names no
+      /// message is a fact invented to fill a field.
+      TriggeredByMessageId : MessageId option
+      /// Why this turn exists when nobody spoke (Plan 20, stage 2). `None` is the ordinary
+      /// turn, whose trigger is the message above.
+      ///
+      /// Durable because an agent that acts unprompted must be able to SAY why on every
+      /// surface that shows what it did — an unexplained turn in a shared session reads as
+      /// the agent deciding on its own, which is the one thing it must never look like.
+      Woke : WakeReason option }
+
+/// Why a turn exists when nobody spoke (Plan 20, stage 2).
+///
+/// Attribution, never payload: the substance of what happened arrives through the same door
+/// every turn's does — `TerminalBlockDigest` for terminal work, the tool roster for a roster
+/// change — so a wake carries the REASON and nothing else. A reason that carried results
+/// would be a second channel into the agent's context, free to disagree with the first.
+and WakeReason =
+    /// A command the agent asked to run in the background finished while it was not running.
+    | CommandFinished
 
 and AgentContextBuilt =
     { AgentTurnId : AgentTurnId
@@ -302,7 +322,24 @@ and TerminalBlockStarted =
       /// immutable thereafter — exactly as `MessageSent` snapshots a message body.
       Command : string
       /// The transcript line index at which this block's output begins.
-      FromSeq : int }
+      FromSeq : int
+      /// Whose credential the command ran on, when that is not the author's own (Plan 20,
+      /// stage 2) — the queue entry's `OnBehalfOf`, carried onto the block.
+      ///
+      /// Here because a WOKEN turn has no triggering message to resolve its authority from,
+      /// and the log is the only thing it can read. Absent means no turn can be woken by
+      /// this block: an unresolvable owner runs on NOTHING rather than on somebody else's
+      /// credential, which is the direction every other reader of this field already takes.
+      OnBehalfOf : ActorRef option
+      /// Whether the agent asked for this one to run in the BACKGROUND (Plan 20, stage 2):
+      /// it did not hold the turn open, and its completion is something the agent wants to
+      /// be told about.
+      ///
+      /// On the block rather than only in the queue entry it came from, because that is what
+      /// makes "is a wake due" a pure fold over the log: the doc's entry is gone the moment
+      /// the block starts, and a scheduling decision that depended on it would be a decision
+      /// a restart could not re-derive.
+      Background : bool }
 
 /// A queued command a peer refused (Plan 13, stage 2a). The other half of the approval
 /// gate: a log that records every yes and no no is the weaker thing wearing the stronger

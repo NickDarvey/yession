@@ -40,6 +40,7 @@ let private turnId = AgentTurnId.create "turn-1" |> expect
 let private humanMessageId = MessageId.create "msg-human" |> expect
 let private agentMessageId = MessageId.create "msg-agent" |> expect
 let private ada = PeerId.create "ada" |> expect
+let private bob = PeerId.create "bob" |> expect
 
 let private mintTurnId () = turnId
 let private mintMessageId () = agentMessageId
@@ -87,17 +88,17 @@ let private turnTests =
                 let scripted : RunAgent =
                     fun context _capabilities _signal onChunk ->
                         async {
-                            Expect.equal context.CurrentMessage triggerItem "the context's current message is the trigger"
+                            Expect.equal context.CurrentMessage (Some triggerItem) "the context's current message is the trigger"
                             Expect.equal context.SessionId sessionId "the context carries the session"
                             onChunk { Text = "Hel" }
                             onChunk { Text = "lo!" }
                             return AgentCompleted ("Hello!", None)
                         }
-                do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] [] trigger
+                do! AgentTurn.run log scripted AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] [] (AgentTurn.FromMessage trigger)
                 let! events = eventsOf log
                 Expect.equal
                     events
-                    [ AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = humanMessageId }
+                    [ AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (humanMessageId); Woke = None }
                       AgentContextBuilt { AgentTurnId = turnId; MessageCount = 1 }
                       AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId }
                       AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Hel" }
@@ -110,7 +111,7 @@ let private turnTests =
             async {
                 let log = newLog ()
                 let failing : RunAgent = fun _ _ _ _ -> async { return AgentFailed "boom" }
-                do! AgentTurn.run log failing AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] [] trigger
+                do! AgentTurn.run log failing AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] [] (AgentTurn.FromMessage trigger)
                 let! events = eventsOf log
                 Expect.equal
                     (List.last events)
@@ -122,7 +123,7 @@ let private turnTests =
             async {
                 let log = newLog ()
                 let throwing : RunAgent = fun _ _ _ _ -> failwith "runner exploded"
-                do! AgentTurn.run log throwing AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] [] trigger
+                do! AgentTurn.run log throwing AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintTurnId mintMessageId sessionId [ triggerItem ] [] (AgentTurn.FromMessage trigger)
                 let! events = eventsOf log
                 match List.last events with
                 | AgentTurnFailed f -> Expect.equal f.Reason "runner exploded" "the thrown reason is captured"
@@ -131,7 +132,7 @@ let private turnTests =
 
         testCase "the streamed response projects deterministically (deltas -> completed)" <| fun () ->
             let events =
-                [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = humanMessageId })
+                [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (humanMessageId); Woke = None })
                   envelope 1L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
                   envelope 2L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "Hel" })
                   envelope 3L (AgentMessageDelta { AgentTurnId = turnId; MessageId = agentMessageId; Delta = "lo!" }) ]
@@ -200,7 +201,7 @@ let private turnTests =
             let projection, _ =
                 ConversationProjection.applyEvents
                     None
-                    [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = humanMessageId })
+                    [ envelope 0L (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (humanMessageId); Woke = None })
                       envelope 1L (AgentTurnFailed { AgentTurnId = turnId; Reason = "context build failed" }) ]
                     ConversationProjection.empty
             Expect.equal
@@ -228,8 +229,8 @@ let private e2eTests =
                     fun context _capabilities _signal onChunk ->
                         async {
                             onChunk { Text = "You said: " }
-                            onChunk { Text = context.CurrentMessage.Body }
-                            return AgentCompleted (sprintf "You said: %s" context.CurrentMessage.Body, None)
+                            onChunk { Text = (context.CurrentMessage |> Option.map (fun m -> m.Body) |> Option.defaultValue "") }
+                            return AgentCompleted (sprintf "You said: %s" (context.CurrentMessage |> Option.map (fun m -> m.Body) |> Option.defaultValue ""), None)
                         }
                 let! h = Host.startWith (Some scripted) e2eSessionId port
                 host <- Some h
@@ -299,7 +300,7 @@ let private liveTests =
                 let log = newLog ()
                 let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
                 let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] [] trigger
+                do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] [] (AgentTurn.FromMessage trigger)
                 let! events = eventsOf log
                 match List.last events with
                 | AgentMessageCompleted completed ->
@@ -320,7 +321,7 @@ let private liveTests =
                 let log = newLog ()
                 let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
                 let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                do! AgentTurn.run log (Agent.runWith (Some credential)) AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] [] trigger
+                do! AgentTurn.run log (Agent.runWith (Some credential)) AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ triggerItem ] [] (AgentTurn.FromMessage trigger)
                 let! events = eventsOf log
                 match List.last events with
                 | AgentMessageCompleted completed ->
@@ -397,7 +398,7 @@ let private liveTests =
                 let log = newLog ()
                 let mintLiveTurn () = AgentTurnId.create (string (Guid.NewGuid ())) |> expect
                 let mintLiveMessage () = MessageId.create (string (Guid.NewGuid ())) |> expect
-                do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ probeItem ] [] probe
+                do! AgentTurn.run log Agent.run AgentAbortSignal.none (fun _ _ -> AgentCapabilities.none) (fun _ _ -> ()) mintLiveTurn mintLiveMessage sessionId [ probeItem ] [] (AgentTurn.FromMessage probe)
                 let! events = eventsOf log
                 match List.last events with
                 | AgentMessageCompleted completed ->
@@ -408,9 +409,102 @@ let private liveTests =
             }
     ]
 
+
+// --- The wake (Plan 20, stage 2) ---------------------------------------------------------
+
+let private blockStarted (n: string) (background: bool) (owner: ActorRef option) =
+    SessionEvent.TerminalBlockStarted
+        { TerminalId = TerminalId.create "term-a" |> expect
+          BlockId = BlockId.create n |> expect
+          QueueId = None
+          Author = ActorRef.Agent
+          ApprovedBy = None
+          Command = "make"
+          FromSeq = 0
+          Background = background
+          OnBehalfOf = owner }
+
+let private blockCompleted (n: string) =
+    SessionEvent.TerminalBlockCompleted
+        { TerminalId = TerminalId.create "term-a" |> expect
+          BlockId = BlockId.create n |> expect
+          Result = CommandSucceeded 0
+          ToSeq = 4 }
+
+let private turnStarted (n: string) =
+    AgentTurnStarted
+        { AgentTurnId = AgentTurnId.create n |> expect
+          TriggeredByMessageId = Some (MessageId.create ("m-" + n) |> expect)
+          Woke = None }
+
+let private wakeTests =
+    testList "The wake (Plan 20, stage 2)" [
+
+        testCase "a background command that finished owes the agent a turn" <| fun () ->
+            Expect.isTrue
+                (AgentWake.due [ turnStarted "1"; blockStarted "b1" true (Some (PeerRef ada)); blockCompleted "b1" ])
+                "nobody was waiting on it, so somebody has to be told"
+
+        testCase "a foreground command that finished owes nothing" <| fun () ->
+            // Somebody WAS waiting: the tool call that queued it is what carries the outcome
+            // back, and waking a turn to re-report it would be the second channel this
+            // design does not have.
+            Expect.isFalse
+                (AgentWake.due [ turnStarted "1"; blockStarted "b1" false (Some (PeerRef ada)); blockCompleted "b1" ])
+                "its own call answered it"
+
+        testCase "a background command still running owes nothing yet" <| fun () ->
+            Expect.isFalse
+                (AgentWake.due [ turnStarted "1"; blockStarted "b1" true (Some (PeerRef ada)) ])
+                "there is no outcome to be told about"
+
+        testCase "the turn a wake started takes that wake with it" <| fun () ->
+            // What makes the wake fire once without storing a cursor: an `AgentTurnStarted`
+            // resets the window, exactly as it does for the digest that turn reads.
+            Expect.isFalse
+                (AgentWake.due [ blockStarted "b1" true (Some (PeerRef ada)); blockCompleted "b1"; turnStarted "woken" ])
+                "the turn that was owed has run"
+
+        testCase "a wake names whose turn it is, and it is whoever the work was queued for" <| fun () ->
+            // A woken turn has no message to read its authority off, and every turn resolves
+            // its repo credential, its sandbox credential and its Claude account from whoever
+            // it is FOR. So the block records it and the wake reads it back — continuing the
+            // authority the queuing turn had, rather than inventing one.
+            Expect.equal
+                (AgentWake.pending
+                    [ turnStarted "1"; blockStarted "b1" true (Some (PeerRef bob)); blockCompleted "b1" ])
+                (Some (PeerRef bob))
+                "the party whose turn queued the work"
+
+        testCase "work queued for nobody wakes nobody" <| fun () ->
+            // The safe direction, and the one every other reader of `OnBehalfOf` already
+            // takes: run on NOTHING rather than on somebody else's credential. Picking the
+            // most recent speaker instead would run one person's work as another.
+            Expect.isNone
+                (AgentWake.pending [ turnStarted "1"; blockStarted "b1" true None; blockCompleted "b1" ])
+                "no owner, no turn"
+
+        testCase "several finishing at once are ONE wake, and one turn sees them all" <| fun () ->
+            // Coalescing is not a mechanism here, it is a consequence: the wake is a bool
+            // over the same window the digest reads, so everything that landed before the
+            // turn starts is in that turn's digest.
+            let page =
+                [ turnStarted "1"
+                  blockStarted "b1" true (Some (PeerRef ada))
+                  blockStarted "b2" true (Some (PeerRef ada))
+                  blockCompleted "b1"
+                  blockCompleted "b2" ]
+            Expect.isTrue (AgentWake.due page) "one wake"
+            Expect.equal
+                (TerminalDigest.window page |> Set.count)
+                2
+                "and the turn it starts is told about both"
+    ]
+
 let tests =
     testList "Agent" [
         turnTests
+        wakeTests
         Tag.needs "Agent E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
         Tag.needs "Agent live SDK" [ Tag.LiveAgent; Tag.Native ] (fun () -> liveTests)
     ]

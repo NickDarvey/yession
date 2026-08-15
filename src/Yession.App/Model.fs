@@ -1370,7 +1370,10 @@ module ClientModel =
                       OnBehalfOf = None
                       ApprovedBy = None
                       RejectedBy = None
-                      RejectedReason = None }
+                      RejectedReason = None
+                      // A person's composer never waits on a command, so there is nothing
+                      // for a background flag to spare them (Plan 20, stage 2).
+                      Background = false }
                 model
                 |> withSynced
                     { model.Synced with

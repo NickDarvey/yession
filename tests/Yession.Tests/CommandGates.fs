@@ -287,7 +287,7 @@ let private gateTests =
                 let doc = Y.Doc.Create ()
                 let log = newLog ()
                 let terminal = TerminalId.create "term-a" |> expect
-                SyncedStateSync.enqueueTerminalCommand doc (QueueId.create "q-t1" |> expect) terminal ActorRef.Agent 1.0 "git status"
+                SyncedStateSync.enqueueTerminalCommand doc (QueueId.create "q-t1" |> expect) terminal ActorRef.Agent 1.0 "git status" false None
                 let gate, _ = gateOver doc log (movingClock ())
                 gate.Drain ()
                 do! Async.Sleep 150

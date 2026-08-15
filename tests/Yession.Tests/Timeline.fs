@@ -58,7 +58,9 @@ let private started (id: TerminalId) (n: string) (author: ActorRef) (command: st
           Author = author
           ApprovedBy = None
           Command = command
-          FromSeq = fromSeq }
+          FromSeq = fromSeq
+          Background = false
+          OnBehalfOf = None }
 
 let private completed (id: TerminalId) (n: string) (result: CommandResult) (toSeq: int) =
     SessionEvent.TerminalBlockCompleted { TerminalId = id; BlockId = block n; Result = result; ToSeq = toSeq }
@@ -312,7 +314,7 @@ let private unchangedTests =
             let turnId = AgentTurnId.create "turn-1" |> expect
             let messageId = message "agent"
             let events =
-                [ at 1L 0.0 (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = message "1" })
+                [ at 1L 0.0 (AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (message "1"); Woke = None })
                   at 2L 1.0 (AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId })
                   at 3L 2.0 (AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "hel" })
                   at 4L 3.0 (AgentMessageCompleted { AgentTurnId = turnId; MessageId = messageId; Body = "hello" }) ]
