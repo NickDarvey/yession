@@ -1993,7 +1993,7 @@ module View =
             // toggle, so `aria-pressed` here would be two roles arguing.
             let pinMark =
                 if not pinned then Lit.nothing
-                else html $"""<span class="{Style.paneTabPinMark}" role="img" aria-label="{Dom.Text.pinned}">{Icon.pin}</span>"""
+                else html $"""<span class="{Style.paneTabPinMark}" role="img" aria-label="{Dom.Text.pinned}">{Icon.pinSm}</span>"""
             // Said where a pointer can find it, since a gesture with no target has nowhere
             // else to announce itself. Only on the tab it would act on — the selected one.
             let hint =

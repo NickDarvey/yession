@@ -1033,7 +1033,7 @@ module Style =
     /// So this says one thing — that the tab is kept — and only when it is true. Blue,
     /// exactly as the selected tab's rule is blue, because both mean "this is mine and it
     /// stays". Nothing here destroys anything, so nothing here wears the danger tone.
-    let paneTabPinMark = "inline-flex items-center ml-1.5 align-[1px] text-blue"
+    let paneTabPinMark = "ml-1.5 text-blue"
 
     /// The pane's body — whatever the selected tab shows. It takes the column's remaining
     /// height so the thing inside it scrolls rather than the column.
