@@ -200,9 +200,165 @@ let private endpointTests =
             }
     ]
 
-// Binds a port and speaks HTTP, so it needs `Ports`; `Signalling` loads the WebRTC addon at
-// import, so it needs `Native` too — even though nothing here signals.
+// --- What a client keeps, and what it does with it (Plan 22, step 2) ----------------------
+// The store is a port, so these need no browser: a list standing in for the Cache API answers
+// the same questions, and what is under test is the client's reasoning about what it holds —
+// replay each terminal in order, notice a hole in one without losing the others.
+
+/// A `TranscriptCaches` over per-terminal lists, ordered the way the Cache API orders `keys()`:
+/// insertion first, which is fetch order, which is ascending.
+let private storeOf (entries: (TerminalId * (string * int * string) list) list) =
+    let kept = System.Collections.Generic.Dictionary<string, ResizeArray<string * int * string>> ()
+    for (terminal, answers) in entries do
+        kept.[TerminalId.value terminal] <- ResizeArray answers
+    let forTerminal (terminal: TerminalId) =
+        match kept.TryGetValue (TerminalId.value terminal) with
+        | true, answers -> answers
+        | _ ->
+            let answers = ResizeArray ()
+            kept.[TerminalId.value terminal] <- answers
+            answers
+    { App.For =
+        fun terminal ->
+            let answers = forTerminal terminal
+            // Annotated, because `Stored`/`Read`/`Write` are field names both history stores
+            // share and inference would otherwise pick whichever was declared last.
+            async.Return
+                ({ Stored = fun () -> async.Return (answers |> Seq.map (fun (u, _, _) -> u) |> List.ofSeq)
+                   Read =
+                     fun url ->
+                         async.Return (
+                             answers
+                             |> Seq.tryPick (fun (u, first, body) -> if u = url then Some (first, body) else None))
+                   Write = fun url first body -> async { answers.Add (url, first, body) } } : App.TranscriptCache)
+      App.Kept = fun () -> async.Return (entries |> List.map fst) } : App.TranscriptCaches
+
+/// One kept answer: the JSONL the server served for lines [first, first + count - 1], and the
+/// address it came back from. The header goes at line 0, exactly as the recording has it.
+let private answerOf (first: int) (count: int) =
+    let line (seq: int) =
+        if seq = 0 then
+            Codec.toString Codec.transcriptLine (TranscriptHeaderLine { Width = 80; Height = 24; Timestamp = 0L })
+        else
+            Codec.toString
+                Codec.transcriptLine
+                (TranscriptRecordLine { At = 0.0; Kind = TranscriptOutput; Data = sprintf "line %d" seq })
+    let last = first + count - 1
+    sprintf "terminals/%s/%d-%d" (TerminalId.value terminal) first last,
+    first,
+    [ first .. last ] |> List.map line |> String.concat "\n"
+
+let private recordsIn (seen: ResizeArray<ClientMsg>) (of': TerminalId) =
+    seen
+    |> Seq.choose (fun msg ->
+        match msg with
+        | TerminalRecordMsg (t, seq, _) when t = of' -> Some seq
+        | _ -> None)
+    |> List.ofSeq
+
+let private storeTests =
+    testList "What a client keeps" [
+        testCaseAsync "a replay folds what was kept for a terminal, in order, with no network" <|
+            async {
+                let store = storeOf [ terminal, [ answerOf 0 3; answerOf 3 2 ] ]
+                let seen = ResizeArray ()
+                do! App.TranscriptFetch.replay store seen.Add
+                // Line 0 is the header and is no record, so the records are lines 1..4.
+                Expect.equal (recordsIn seen terminal) [ 1; 2; 3; 4 ] "every kept line, once, in recording order"
+            }
+
+        testCaseAsync "a replay carries the header, without which a rebuilt cast is not one" <|
+            async {
+                // The recorded width and height are what make a replay come out the shape the
+                // terminal actually was, and they live on line 0 alone.
+                let store = storeOf [ terminal, [ answerOf 0 3 ] ]
+                let seen = ResizeArray ()
+                do! App.TranscriptFetch.replay store seen.Add
+                let header =
+                    seen |> Seq.tryPick (fun msg ->
+                        match msg with
+                        | TerminalHeaderMsg (_, h) -> Some h
+                        | _ -> None)
+                Expect.equal (header |> Option.map (fun h -> h.Width)) (Some 80) "the recording's own width"
+            }
+
+        testCaseAsync "a replay says how far it read, so the next fetch resumes rather than refetches" <|
+            async {
+                let store = storeOf [ terminal, [ answerOf 0 3; answerOf 3 2 ] ]
+                let seen = ResizeArray ()
+                do! App.TranscriptFetch.replay store seen.Add
+                let readThrough =
+                    seen |> Seq.fold (fun acc msg ->
+                        match msg with
+                        | TerminalReadThroughMsg (_, seq) -> max acc seq
+                        | _ -> acc) 0
+                Expect.equal readThrough 5 "one past the last line kept"
+            }
+
+        testCaseAsync "a hole stops that terminal's walk at its edge" <|
+            async {
+                // An entry evicted from the middle leaves the rest kept. Folding over the gap
+                // would advance the read position past lines nothing will ever offer again.
+                let store = storeOf [ terminal, [ answerOf 0 3; answerOf 8 2 ] ]
+                let seen = ResizeArray ()
+                do! App.TranscriptFetch.replay store seen.Add
+                Expect.equal (recordsIn seen terminal) [ 1; 2 ] "everything up to the hole, and nothing past it"
+            }
+
+        testCaseAsync "a hole in one terminal costs that terminal alone" <|
+            async {
+                // What one store per terminal buys, and the reason they are not one store: a
+                // walk that had to sort a shared store by address would stop them all.
+                let other = TerminalId.create "term-other" |> expect
+                let store =
+                    storeOf
+                        [ terminal, [ answerOf 0 3; answerOf 8 2 ]
+                          other, [ answerOf 0 3 ] ]
+                let seen = ResizeArray ()
+                do! App.TranscriptFetch.replay store seen.Add
+                Expect.equal (recordsIn seen terminal) [ 1; 2 ] "the holed terminal stops at its hole"
+                Expect.equal (recordsIn seen other) [ 1; 2 ] "and the other one is folded in full"
+            }
+
+        testCaseAsync "an answer is kept under the address it came back FROM, at the line asked for" <|
+            async {
+                // The cursor moves; the range it resolves to does not. And the line it starts
+                // on is kept beside the bytes, because a transcript line cannot carry its own
+                // index and the address must never be parsed for one.
+                let store = storeOf []
+                let answering : App.HttpGet =
+                    fun _ ->
+                        async {
+                            let url, _, body = answerOf 5 2
+                            return Ok { Url = url; Body = body }
+                        }
+                let feed = App.TranscriptFetch.overHttp store answering (fun r -> SessionRoute.relative r) None
+                let! _ = feed terminal 5
+                let! cache = store.For terminal
+                let! kept = cache.Stored ()
+                Expect.equal kept [ sprintf "terminals/%s/5-6" (TerminalId.value terminal) ] "the resolved range is the key"
+                let! entry = cache.Read (List.head kept)
+                Expect.equal (entry |> Option.map fst) (Some 5) "with the line it starts on beside it"
+            }
+
+        testCaseAsync "a client told it is current keeps nothing" <|
+            async {
+                // The `204` arrives as an answer with no lines, from the CURSOR's address —
+                // no redirect happened. Keeping it would put an empty entry in the store that
+                // the replay would then read as a hole in the recording.
+                let store = storeOf []
+                let answering : App.HttpGet =
+                    fun url -> async { return Ok { Url = url; Body = "" } }
+                let feed = App.TranscriptFetch.overHttp store answering (fun r -> SessionRoute.relative r) None
+                let! _ = feed terminal 7
+                let! cache = store.For terminal
+                let! kept = cache.Stored ()
+                Expect.equal kept [] "nothing to keep, so nothing kept"
+            }
+    ]
+
 let tests =
     testList "TranscriptHttp" [
-        Tag.needs "transcripts over HTTP" [ Tag.Ports; Tag.Native ] (fun () -> endpointTests)
+        endpointTests
+        storeTests
     ]
