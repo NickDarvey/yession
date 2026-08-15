@@ -1106,23 +1106,32 @@ module View =
         let blockOf (terminalId: TerminalId) (blockId: BlockId) =
             TerminalProjection.tryFind terminalId model.Terminals
             |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
-        let blockChip (terminalId: TerminalId) (blockId: BlockId) =
+        // `who` is false only inside a task card, where the summary above already names the
+        // agent and every line is the agent's BY CONSTRUCTION — grouping is what makes it so.
+        // The same rule the terminal's own scrollback follows: a mark only when the answer is
+        // not the obvious one.
+        let blockChipBy (who: bool) (terminalId: TerminalId) (blockId: BlockId) =
             match blockOf terminalId blockId with
             // Both folds read the same page, so a chip without its block is a page boundary,
             // not a bug: the next page brings it. Rendering nothing beats rendering a stub.
             | None -> Lit.nothing
             | Some block ->
+                let author =
+                    if who then
+                        html $"""<span class="{Style.chatChipWho}">{authorName model (Authority.author block.Authority)}</span>"""
+                    else Lit.nothing
                 html $"""
                     <button type="button" class="{Style.chatChip}"
                             data-chat-block="{BlockId.value blockId}"
                             data-chat-block-status="{terminalBlockStatusLabel block.Status}"
                             data-terminal-id="{TerminalId.value terminalId}"
                             @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
-                      <span class="{Style.chatChipWho}">{authorName model (Authority.author block.Authority)}</span>
+                      {author}
                       <span class="{Style.terminalPrompt}">$</span>
                       <code class="{Style.chatChipCommand}">{block.Command}</code>
                       <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
                     </button>"""
+        let blockChip = blockChipBy true
         let stretchItem (stretch: TerminalStretch) =
             let length = durationText (TerminalStretch.duration stretch)
             html $"""
@@ -1205,7 +1214,7 @@ module View =
                     <span class="{Style.chatChipText}">ran {commands}</span>
                     {counts}
                   </summary>
-                  {lines |> List.map (fun ((terminalId, block), _) -> blockChip terminalId block.BlockId)}
+                  {lines |> List.map (fun ((terminalId, block), _) -> blockChipBy false terminalId block.BlockId)}
                 </details>"""
         let rows = TimelineProjection.rows model.Conversation model.Timeline
         let items =
