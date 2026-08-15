@@ -48,6 +48,26 @@ module SandboxBackend =
             | DockerBackend -> Error "docker is a work-sandbox backend only — the agent sandbox is host or srt"
             | backend -> Ok backend)
 
+/// Whether a sandbox confines the FILESYSTEM at all. Egress, env and process
+/// confinement are unaffected either way — this is only about paths.
+///
+/// `Unconfined` exists for one caller: the repo clone. srt refuses writes to
+/// `.git/hooks`, `.git/config`, `.vscode`, `.idea`, `.claude/commands|agents`,
+/// `.mcp.json`, `.gitmodules` and the shell rc names WHEREVER they appear, and no
+/// allow-path outranks that refusal — so a checkout containing any of them cannot be
+/// written by a confined process. The refusal is a set of patterns on macOS and a scan
+/// of what already exists on Linux, which is why the same clone succeeds there; we take
+/// the weaker state on BOTH rather than run a path in production that no CI here
+/// exercises.
+///
+/// UNDO when srt can exempt a SUBTREE from those refusals (or macOS adopts the Linux
+/// scan, which exempts a not-yet-existing checkout by construction): then the clone takes
+/// the ordinary confined policy and this case has no callers left — delete it, rather
+/// than leave an unused way to turn the filesystem off.
+type FilesystemConfinement =
+    | Confined
+    | Unconfined
+
 /// Everything a sandbox needs to know at creation. `Env` is the sandbox's WHOLE base
 /// environment — backends pass it verbatim and must never merge the parent process's
 /// env over or under it (that merge is exactly the credential leak this seam removes).
@@ -60,7 +80,10 @@ type SandboxPolicy =
       AllowedDomains : string list option
       Env : Map<string, string>
       /// Default working directory for spawns that do not name one.
-      WorkingDirectory : string option }
+      WorkingDirectory : string option
+      /// Whether the paths above are enforced at all. `Confined` everywhere except the
+      /// clone sandbox — see `FilesystemConfinement`.
+      Filesystem : FilesystemConfinement }
 
 /// One process to run inside a sandbox. `Env` is merged over the sandbox's policy env
 /// (the request wins); there is no timeout here — callers race `Exited` and `Kill`.

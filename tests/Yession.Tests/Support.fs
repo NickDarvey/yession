@@ -40,7 +40,8 @@ let emptyPolicy : SandboxPolicy =
       WritePaths = []
       AllowedDomains = None
       Env = Map.empty
-      WorkingDirectory = None }
+      WorkingDirectory = None
+      Filesystem = Confined }
 
 let preparedEmptyPolicy : unit -> Async<Result<SandboxPolicy, string>> =
     fun () -> async { return Ok emptyPolicy }

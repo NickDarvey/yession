@@ -375,6 +375,31 @@ Items are roughly ordered by how much they matter.
     operator's explicitly lax choice, as everywhere `host` is chosen. The per-invocation
     hardening (hooks/fsmonitor/ext off, no global config, protocol pinned) still
     applies; the filesystem and egress boundaries do not.
+  - **Every srt sandbox may write a checkout's `.git/config`.** srt denies that write by
+    default; a `git clone` makes it, so the flag is on. It cannot be scoped to the git
+    sandbox: srt reads it from the session config that whichever sandbox came up first
+    initialized the process-wide manager with, and ignores the per-spawn one. So the
+    WorkSandbox and the
+    agent can write a `.git/config` too — planting a `core.fsmonitor`, an alias, or a
+    pager that runs when git next runs in that checkout. Inside the session that is the
+    shared-trust boundary already stated above, and the verbs themselves are immune (the
+    per-invocation `GIT_CONFIG_*` hardening wins over any repo config); OUTSIDE it, a
+    human running git in the checkout on their own host is not. `.git/hooks` — the other
+    half of the same vector — stays denied.
+  - **The clone verb runs with no filesystem confinement.** srt refuses writes to
+    `.vscode`, `.idea`, `.claude/commands|agents`, `.mcp.json`, `.gitmodules`, `.git/hooks`
+    and the shell rc names WHEREVER they appear, and no allow-path outranks that refusal —
+    so a confined process cannot materialize a checkout containing any of them, and srt
+    scopes the exemption per SPAWN, never per path. So `add_repo`'s clone has its own
+    sandbox with srt's filesystem rules off: for that one command git can read and write
+    whatever the session's user can, including the credential files srt would otherwise
+    mask. Egress stays pinned to github.com, the env stays the hardened one, and every
+    other verb keeps the confined policy — none of them writes a path srt objects to.
+    macOS enforces the refusal as patterns and Linux as a scan of what already exists, so
+    a Linux clone would have been fine confined; it is exempt there too rather than ship a
+    production path no CI here exercises. Both of these go away the day srt can exempt a
+    subtree rather than a spawn, or reads `allowGitConfig` per spawn — the clone takes the
+    ordinary confined policy again and `FilesystemConfinement` loses its only caller.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **The session's imperative API is split, and only half of it is built**
