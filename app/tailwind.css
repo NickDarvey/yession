@@ -235,9 +235,15 @@
 }
 
 /* v4 has no `background-image` theme namespace, so the one custom gradient utility (the
-   composer's focus edge, `Style.fs`) is defined explicitly. */
+   composer's focus edge, `Style.fs`) is defined explicitly.
+
+   `90deg`, because the edge it paints is a 2px-TALL bar across the top of a composer band. It
+   used to be a 2px-WIDE rail down the band's left side and ran `180deg` to sweep along it;
+   turned ninety degrees and left at 180, the sweep ran across two pixels of height instead of
+   the band's width, and blue→green blended into a single flat teal — the gradient still there
+   in the stylesheet and gone from the screen. A gradient runs along the thing it is on. */
 @utility bg-grad {
-  background-image: linear-gradient(180deg, var(--color-blue), var(--color-green));
+  background-image: linear-gradient(90deg, var(--color-blue), var(--color-green));
 }
 
 /* The document ground. Both shells mount their own black surface (`Style.app`), but the
@@ -304,3 +310,13 @@ summary::-webkit-details-marker { display: none; }
 @source inline("bg-[conic-gradient(from_0deg,#17c3b2_25%,#0a5c54_0_50%,#17c3b2_0_75%,#0a5c54_0)]");
 @source inline("bg-[conic-gradient(from_0deg,#4ab8f0_25%,#1a6a96_0_50%,#4ab8f0_0_75%,#1a6a96_0)]");
 @source inline("bg-[conic-gradient(from_0deg,#7fb800_25%,#3d5a05_0_50%,#7fb800_0_75%,#3d5a05_0)]");
+
+/* While the chat/terminal split is being dragged (`PaneShell.installPaneResize` sets this on
+   the root): the pointer is captured by a 6px handle but the gesture is a page-wide one, so
+   the cursor has to hold across whatever it passes over, and a drag must not select the text
+   it sweeps. Two declarations that only a root-level state class can make — a utility on the
+   handle cannot reach the document the pointer is actually moving across. */
+:root.term-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
