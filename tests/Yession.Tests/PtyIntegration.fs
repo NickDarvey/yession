@@ -136,6 +136,8 @@ let private withLiveTerminal
                     (fun _ _ _ -> ())
                     (fun () -> reDrains <- reDrains + 1)
                     AttachTerminal.unavailable
+                    // No doc in this fixture, and no gate to write into one.
+                    ignore
                     []
             match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxName.defaultName) name with
             | Error e -> failwith e

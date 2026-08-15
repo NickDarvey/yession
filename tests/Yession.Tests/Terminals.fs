@@ -1693,7 +1693,7 @@ let private mintFrom (ids: string list) =
         if remaining.Count > 1 then remaining.RemoveAt 0
         next
 
-let private makeTerminalsWith attach (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
+let private makeTerminalsGated attach setAutoRun (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
     let mintTerminal = mintFrom [ "term-a"; "term-b" ]
     let mintBlock = mintFrom [ "b-1"; "b-2"; "b-3" ]
     let records = ResizeArray<TerminalId * int * TranscriptRecord> ()
@@ -1722,8 +1722,14 @@ let private makeTerminalsWith attach (log: EventLog<SessionEvent>) environment o
             // while making every manager assertion depend on it.
             ignore
             attach
+            setAutoRun
             openAtBoot
     terminals, records
+
+/// No doc in these fixtures, so nowhere to write a gate. A case that cares about WHICH
+/// terminals the manager asks to run unapproved passes a recorder instead.
+let private makeTerminalsWith attach log environment openTranscript readTranscript openAtBoot =
+    makeTerminalsGated attach ignore log environment openTranscript readTranscript openAtBoot
 
 let private makeTerminals log environment openTranscript readTranscript openAtBoot =
     makeTerminalsWith AttachTerminal.unavailable log environment openTranscript readTranscript openAtBoot
@@ -2339,6 +2345,76 @@ let private affordanceTests =
                 "the way back is about the stream, not about what was kept of it"
     ]
 
+// The agent's own terminal (Plan 15, stage 2), as a rule the manager owns rather than one the
+// composition root remembered. It used to be a `Map` in `Host.fs`; nothing below could be
+// asserted without building a whole session.
+let private agentTerminalTests =
+    testList "The agent's terminal" [
+
+        testCaseAsync "asking twice in one sandbox gets the same terminal" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! again = terminals.AgentTerminal SandboxName.defaultName "npm run build"
+                Expect.equal again first "the second command lands in the shell the first one used"
+            }
+
+        testCaseAsync "each sandbox gets its own" <|
+            async {
+                // The reason it is keyed at all: `execute_command` is the only door into a
+                // sandbox, and one shared cell would run a command meant for `test` in
+                // whichever sandbox happened to be first.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let other = SandboxName.create "test" |> expect
+                let! default' = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! test = terminals.AgentTerminal other "npm test"
+                Expect.notEqual test default' "a command for `test` cannot land in `default`"
+            }
+
+        testCaseAsync "a closed one is replaced rather than handed back" <|
+            async {
+                // A terminal is a process; a closed one has none. Handing back the dead id
+                // would make the next command fail in a way that reads as the command's fault.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let id = first |> expect
+                let! _ = terminals.Close id "closed by a peer"
+                let! next = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                Expect.notEqual next first "a fresh terminal, because the old one has no process"
+            }
+
+        testCaseAsync "it runs its queue unapproved, and a terminal a person opened does not" <|
+            async {
+                // Plan 15's autonomy line. If the agent's terminal inherited the
+                // `ApproveAgent` default, the agent's one execution path would silently become
+                // an approval prompt for every command.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let unapproved = ResizeArray<TerminalId> ()
+                let terminals, _ =
+                    makeTerminalsGated
+                        AttachTerminal.unavailable unapproved.Add log environment openTranscript readTranscript []
+                let! peers = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let peerTerminal = peers |> expect
+                let! agents = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let agentTerminal = agents |> expect
+                Expect.equal (List.ofSeq unapproved) [ agentTerminal ] "only the agent's own runs unapproved"
+                Expect.isFalse
+                    (unapproved.Contains peerTerminal)
+                    "a terminal a person opened keeps the approval default, which is what gives the gate teeth"
+            }
+    ]
+
 let tests =
     testList "Terminals (Plan 13)" [
         affordanceTests
@@ -2360,6 +2436,7 @@ let tests =
         digestTests
         ansiTests
         transcriptTests
+        agentTerminalTests
         codecTests
         orderTests
         managerTests

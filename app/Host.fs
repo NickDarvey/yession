@@ -315,49 +315,15 @@ let startFull
                 // a configurable one: the wire is part of the seam's contract, so a second
                 // way to attach would be a second contract nobody wrote down.
                 AttachWs.attach
+                // The gate register lives in the doc, which is this root's; WHICH terminals
+                // run unapproved is the manager's rule, and it decides that for itself.
+                (fun id -> SyncedStateSync.setGate doc (ForTerminal id) AutoRun)
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 
         // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
         // people can see it and then WAITS — bounded twice over, once for a person and once
         // for a process — so the agent gets its answer back without a turn ever hanging on
         // somebody pressing Approve.
-        // One agent terminal PER SANDBOX (Plan 15, stage 2). Keyed rather than single,
-        // because `execute_command` is the only door into a sandbox and a session now has
-        // several: one shared cell would have quietly run a command meant for `test` in
-        // whichever sandbox happened to be first.
-        let agentTerminalIds : Map<string, TerminalId> ref = ref Map.empty
-
-        /// The session's agent terminal in one sandbox, opened on first use.
-        ///
-        /// Its title is the command that needed it, which is what the retired
-        /// `ensure_environment`'s `reason` argument becomes — the strip says "npm test" rather
-        /// than "agent", a better answer to "what is that terminal for" than the tool gave.
-        ///
-        /// It opens in `AutoRun`, NOT the `ApproveAgent` default every other terminal has. If
-        /// it inherited that, replacing the old tool would silently turn every agent command
-        /// into an approval prompt — a large change to autonomy smuggled in under a refactor.
-        /// What changes is that the gate becomes REAL: setting `ApproveAgent` on a terminal a
-        /// human opened now stops the agent, because there is no second door.
-        let openAgentTerminal (sandbox: SandboxName) (reason: string) : Async<Result<TerminalId, string>> =
-            async {
-                let key = SandboxName.value sandbox
-                match Map.tryFind key agentTerminalIds.Value with
-                | Some id when terminals.IsOpen id -> return Ok id
-                | _ ->
-                    let label = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
-                    // The sandbox is in the title when it is not the default one: four
-                    // terminals in a strip are navigable only if each says where it is.
-                    let title =
-                        if sandbox = SandboxName.defaultName then label
-                        else sprintf "[%s] %s" key label
-                    match! terminals.Open ActorRef.Agent (SandboxShell sandbox) title with
-                    | Error reason -> return Error reason
-                    | Ok id ->
-                        agentTerminalIds.Value <- Map.add key id agentTerminalIds.Value
-                        SyncedStateSync.setGate doc (ForTerminal id) AutoRun
-                        return Ok id
-            }
-
         let terminalCommands =
             TerminalCommands.create
                 doc
@@ -365,7 +331,7 @@ let startFull
                 (fun () -> terminalProjection)
                 (fun () -> SyncedStateSync.ofDoc doc)
                 (fun id fromSeq toSeq -> transcripts.ReadRange id fromSeq toSeq |> Transcript.printed)
-                openAgentTerminal
+                terminals.AgentTerminal
                 (fun () ->
                     match QueueId.create (string (Guid.NewGuid ())) with
                     | Ok id -> id
