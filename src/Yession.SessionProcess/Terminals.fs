@@ -134,6 +134,10 @@ module TerminalQueueDrain =
         /// reported apart because they resolve differently: one ends when a person finishes,
         /// this one when somebody re-arms the instrumentation.
         | AwaitingIntegration
+        /// Its sandbox already has its limit of agent lanes running a block (Plan 20, stage
+        /// 3). Reported apart from `AwaitingBlock` because it resolves differently: that one
+        /// ends when THIS terminal's command finishes, this one when some OTHER lane's does.
+        | AwaitingLane
         /// The terminal is closed, or has nothing queued.
         | NotWaiting
 
@@ -153,6 +157,11 @@ module TerminalQueueDrain =
           /// a second time.
           Removals : QueueId list }
 
+    /// How many of a sandbox's agent lanes may run a block at once (Plan 20, stage 3). Four:
+    /// enough that independent work genuinely fans out, small enough that a sandbox is not
+    /// asked to run an unbounded number of builds because a model asked it to.
+    let laneLimit = 4
+
     /// The gate for ONE terminal, shared by `plan` and `holdOf` so what runs and what the
     /// queue says about why it is not running cannot drift apart.
     ///
@@ -166,6 +175,10 @@ module TerminalQueueDrain =
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
+        // Whether this terminal is an agent lane whose sandbox already has its limit of lanes
+        // running (Plan 20, stage 3). A predicate rather than a set, because the answer depends
+        // on which sandbox the terminal is in and only the manager knows that.
+        (laneAtCap: TerminalId -> bool)
         (modeOf: ApprovalMode)
         (queue: Map<QueueId, PendingAct>)
         (terminal: TerminalId)
@@ -181,6 +194,17 @@ module TerminalQueueDrain =
         | Some entry ->
             if not (isOpen terminal) then Choice2Of2 NotWaiting
             elif Set.contains (TerminalId.value terminal) busy then Choice2Of2 AwaitingBlock
+            // The lane cap (Plan 20, stage 3), read from the manager rather than counted here:
+            // at most `laneLimit` of a sandbox's agent lanes run a block at once. A HOLD, not
+            // an error and not a silent drop — the entry stays queued, visible and refusable,
+            // exactly as it does when a person is typing in its terminal.
+            //
+            // The cap is on lanes RUNNING, not on lanes existing. A cap on existence could not
+            // be a hold at all: the entry names a terminal, so at cap there would be nothing to
+            // queue against and a held command would live nowhere anyone could see it — which
+            // is the one thing the one-door design cannot afford. What is worth bounding is
+            // concurrent work anyway; the idle close is what bounds how many lanes there are.
+            elif laneAtCap terminal then Choice2Of2 AwaitingLane
             // Narrower than "the terminal is in live mode", and the narrowing is the point. A
             // block that BECAME live — the drain ran `vim`, alt-screen flipped the terminal —
             // is already held by `busy`. The gap this closes is a terminal live with NO block
@@ -203,6 +227,7 @@ module TerminalQueueDrain =
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
+        (laneAtCap: TerminalId -> bool)
         (modeOf: TerminalId -> ApprovalMode)
         (queue: Map<QueueId, PendingAct>)
         (terminal: TerminalId)
@@ -215,7 +240,7 @@ module TerminalQueueDrain =
             |> List.filter (fun entry -> Option.isSome entry.RejectedBy && not (alreadyConsumed entry))
             |> List.map (fun entry -> QueueId.value entry.QueueId)
             |> Set.ofList
-        match gate alreadyConsumed rejected busy leased lost isOpen (modeOf terminal) queue terminal with
+        match gate alreadyConsumed rejected busy leased lost isOpen laneAtCap (modeOf terminal) queue terminal with
         | Choice1Of2 _ -> None
         | Choice2Of2 hold -> Some hold
 
@@ -229,6 +254,7 @@ module TerminalQueueDrain =
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
+        (laneAtCap: TerminalId -> bool)
         (modeOf: TerminalId -> ApprovalMode)
         (queue: Map<QueueId, PendingAct>)
         : TerminalDrainPlan =
@@ -263,7 +289,7 @@ module TerminalQueueDrain =
         let ready =
             terminals
             |> List.choose (fun terminal ->
-                match gate alreadyConsumed rejected busy leased lost isOpen (modeOf terminal) queue terminal with
+                match gate alreadyConsumed rejected busy leased lost isOpen laneAtCap (modeOf terminal) queue terminal with
                 | Choice1Of2 resolved -> Some resolved
                 | Choice2Of2 _ -> None)
 
@@ -366,6 +392,12 @@ module TerminalCommandWait =
             // chains. Reported as `AwaitingTerminal` because from the caller's side both holds
             // say the same thing: the terminal is not free.
             | Some TerminalQueueDrain.AwaitingBlock ->
+                if deadlineElapsed then Return TerminalCommandAwaitingTerminal else KeepWaiting
+            // Its sandbox is running its limit of lanes (Plan 20, stage 3). Another lane's
+            // block has to finish, which is a wait on a PROCESS like the one above and gets
+            // the same deadline — and the same word back, because from the caller's side "not
+            // free yet" is the whole of what it needs to know.
+            | Some TerminalQueueDrain.AwaitingLane ->
                 if deadlineElapsed then Return TerminalCommandAwaitingTerminal else KeepWaiting
             // Marks are gone here and only a person re-arming brings them back — an unbounded
             // wait, like an approval, so it returns at once rather than burning a deadline.
@@ -652,7 +684,14 @@ module SessionTerminals =
           /// `reason` is the command that needed it, and becomes the title: the strip says
           /// `npm test` rather than `agent`, a better answer to "what is that terminal for"
           /// than a label would be.
-          AgentTerminal : SandboxName -> string -> Async<Result<TerminalId, string>>
+          AgentTerminal : SandboxName -> string option -> string -> Async<Result<TerminalId, string>>
+          /// Which of a sandbox's agent LANES are running a block right now (Plan 20, stage
+          /// 3). What the drain's lane cap is computed from — here rather than derived by the
+          /// scheduler, because lane membership is this manager's fact and a second place that
+          /// worked it out would be a second place it could be wrong.
+          BusyLanes : SandboxName -> int
+          /// Whether this terminal is one of `sandbox`'s agent lanes.
+          LaneOf : TerminalId -> SandboxName option
           /// Close a terminal. Rejected when it is not open.
           Close : TerminalId -> string -> Async<Result<unit, string>>
           /// Run one drained queue entry to completion, recording the block and streaming
@@ -744,7 +783,9 @@ module SessionTerminals =
     /// A session with no terminals: every operation refuses, nothing is ever open.
     let unavailable : SessionTerminals =
         { Open = fun _ _ _ -> async { return Error "this session has no environment" }
-          AgentTerminal = fun _ _ -> async { return Error "this session has no environment" }
+          AgentTerminal = fun _ _ _ -> async { return Error "this session has no environment" }
+          BusyLanes = fun _ -> 0
+          LaneOf = fun _ -> None
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ _ -> async { return () }
           Reject = fun _ _ _ _ -> async { return () }
@@ -817,7 +858,10 @@ module SessionTerminals =
         /// The agent's terminal in each sandbox, by sandbox name. Held here beside `live`
         /// because it is a fact about which terminals exist, and a caller cannot ask for a
         /// second one — `AgentTerminal` is the only way to name it.
-        let agentTerminals = Collections.Generic.Dictionary<string, TerminalId> ()
+        /// Keyed by sandbox AND lane (Plan 20, stage 3): a lane names an intent, and every
+        /// command naming it lands in one terminal. `None` is the sandbox's general-purpose
+        /// agent terminal — what every agent command used before lanes existed.
+        let agentTerminals = Collections.Generic.Dictionary<string * string, TerminalId> ()
 
         /// The block a pty terminal is waiting on: what to call when its `D` mark lands, and
         /// the per-block output accounting the piped path keeps in locals. Keyed by terminal,
@@ -1638,18 +1682,25 @@ module SessionTerminals =
         /// prompt — a large change to autonomy smuggled in under a refactor. What the gate
         /// gains instead is teeth: setting `ApproveAgent` on a terminal a human opened now
         /// stops the agent, because there is no second door.
-        let agentTerminal (sandbox: SandboxName) (reason: string) : Async<Result<TerminalId, string>> =
+        let agentTerminal (sandbox: SandboxName) (lane: string option) (reason: string) : Async<Result<TerminalId, string>> =
             async {
-                let key = SandboxName.value sandbox
+                let key = SandboxName.value sandbox, defaultArg lane ""
                 match agentTerminals.TryGetValue key with
                 | true, id when isOpen id -> return Ok id
                 | _ ->
-                    let label = if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
+                    // A lane's title is the LANE, not the command that opened it: the whole
+                    // point of naming a task is that the list says "tests" rather than
+                    // whichever command happened to be first. Without one, the command is the
+                    // best answer there is to "what is that terminal for".
+                    let label =
+                        match lane with
+                        | Some lane -> lane
+                        | None -> if reason.Length > 60 then reason.Substring (0, 57) + "..." else reason
                     // The sandbox is in the title when it is not the default one: several
                     // terminals in a strip are navigable only if each says where it is.
                     let title =
                         if sandbox = SandboxName.defaultName then label
-                        else sprintf "[%s] %s" key label
+                        else sprintf "[%s] %s" (SandboxName.value sandbox) label
                     match! openTerminal ActorRef.Agent (SandboxShell sandbox) title with
                     | Error reason -> return Error reason
                     | Ok id ->
@@ -1658,8 +1709,28 @@ module SessionTerminals =
                         return Ok id
             }
 
+        /// Which sandbox's agent lanes a terminal is one of. A LANE, not merely the agent's:
+        /// the general-purpose terminal is not capped, because capping it would mean the
+        /// agent's ordinary commands queue behind its tasks.
+        let laneOf (id: TerminalId) : SandboxName option =
+            agentTerminals
+            |> Seq.tryPick (fun entry ->
+                let sandbox, lane = entry.Key
+                if entry.Value = id && lane <> "" then SandboxName.create sandbox |> Result.toOption else None)
+
+        let busyLanes (sandbox: SandboxName) : int =
+            agentTerminals
+            |> Seq.filter (fun entry ->
+                let s, lane = entry.Key
+                s = SandboxName.value sandbox
+                && lane <> ""
+                && Set.contains (TerminalId.value entry.Value) busy)
+            |> Seq.length
+
         { Open = openTerminal
           AgentTerminal = agentTerminal
+          BusyLanes = busyLanes
+          LaneOf = laneOf
           Close = closeTerminal
           RunBlock = runBlock
           Reject = reject
@@ -1712,6 +1783,16 @@ module SessionTerminals =
 /// one another: a build running in a terminal must not stop the agent from answering, and
 /// a long agent turn must not stop a person from running `git status`. Two independent
 /// consumers over two independent queues, triggered by the same doc updates.
+/// Whether a terminal is an agent lane whose sandbox is already running its limit of them
+/// (Plan 20, stage 3). One definition, used by the drain and by the tool's own read of why a
+/// command is not running, so the two cannot answer differently.
+module private LaneCap =
+
+    let atCap (terminals: SessionTerminals.SessionTerminals) (id: TerminalId) : bool =
+        match terminals.LaneOf id with
+        | None -> false
+        | Some sandbox -> terminals.BusyLanes sandbox >= TerminalQueueDrain.laneLimit
+
 module TerminalScheduler =
 
     type TerminalScheduler =
@@ -1763,6 +1844,7 @@ module TerminalScheduler =
                         (terminals.Leased ())
                         (terminals.Lost ())
                         terminals.IsOpen
+                        (LaneCap.atCap terminals)
                         (fun terminal -> SyncedSessionState.modeOf terminal synced)
                         synced.Pending
                 // Leftovers first: a crash between the start append and the doc removal
@@ -1821,6 +1903,7 @@ module TerminalScheduler =
                         (terminals.Leased ())
                         (terminals.Lost ())
                         terminals.IsOpen
+                        (LaneCap.atCap terminals)
                         (fun t -> SyncedSessionState.modeOf t synced)
                         synced.Pending
                         terminal
@@ -1856,14 +1939,14 @@ module TerminalCommands =
         { /// Not `ExecuteCommand`: the agent-facing capability takes no authority argument,
           /// and this takes the one the per-turn binding supplies. Two shapes because they
           /// are two audiences — the tool surface must not be able to name a credential.
-          Execute : CommandTarget option -> string -> bool -> Authority -> Async<Result<TerminalCommandOutcome, string>>
+          Execute : CommandRequest -> Authority -> Async<Result<TerminalCommandOutcome, string>>
           /// Resume a terminal handle. The terminal HALF of `CheckPending` (Plan 15, stage
           /// 3b): the Host joins it to the command gate's half, because a handle names a
           /// request without saying which kind, which is exactly what makes one tool enough.
           Read : QueueId -> Async<Result<TerminalCommandOutcome, string>> }
 
     let unavailable : TerminalCommands =
-        { Execute = fun _ _ _ _ -> async { return Error "this session has no terminals" }
+        { Execute = fun _ _ -> async { return Error "this session has no terminals" }
           Read = fun _ -> async { return Error "this session has no terminals" } }
 
     /// Wake on the next change, or on a short tick. The tick is a floor, not the mechanism:
@@ -1902,7 +1985,7 @@ module TerminalCommands =
         /// The session's agent terminal, opened on first use with `reason` as its TITLE — so
         /// the strip says "running the test suite" rather than "agent", which is what the
         /// retired `ensure_environment`'s one genuinely useful argument becomes.
-        (agentTerminal: SandboxName -> string -> Async<Result<TerminalId, string>>)
+        (agentTerminal: SandboxName -> string option -> string -> Async<Result<TerminalId, string>>)
         (mintQueueId: unit -> QueueId)
         (now: unit -> DateTimeOffset)
         (onChanged: OnChanged)
@@ -1949,6 +2032,7 @@ module TerminalCommands =
                         (terminals.Leased ())
                         (terminals.Lost ())
                         terminals.IsOpen
+                        (LaneCap.atCap terminals)
                         (fun t -> SyncedSessionState.modeOf t synced)
                         synced.Pending
                         terminal }
@@ -1993,9 +2077,7 @@ module TerminalCommands =
             }
 
         let execute
-            (requested: CommandTarget option)
-            (command: string)
-            (background: bool)
+            (request: CommandRequest)
             // Who is behind it (Plan 20). Supplied by the per-turn binding rather than by the
             // agent, for the reason the authority itself is: an acting party that could name
             // its own is not gated by one. A value rather than a loose owner, so the binding
@@ -2003,19 +2085,19 @@ module TerminalCommands =
             (authority: Authority)
             : Async<Result<TerminalCommandOutcome, string>> =
             async {
-                let command = command.Trim ()
+                let command = request.Command.Trim ()
                 if command = "" then return Error "a command cannot be empty"
                 else
                     let! terminal =
                         async {
-                            match requested with
+                            match request.Target with
                             | Some (InTerminal id) when terminals.IsOpen id -> return Ok id
                             | Some (InTerminal _) -> return Error "that terminal is not open"
                             // The agent's own terminal IN THAT SANDBOX, titled with what
                             // it is for. One per sandbox, so a command sent to `test` does
                             // not silently run in `default`.
-                            | Some (InSandbox sandbox) -> return! agentTerminal sandbox command
-                            | None -> return! agentTerminal SandboxName.defaultName command
+                            | Some (InSandbox sandbox) -> return! agentTerminal sandbox request.Lane request.Command
+                            | None -> return! agentTerminal SandboxName.defaultName request.Lane request.Command
                         }
                     match terminal, syncedOf () with
                     | Error reason, _ -> return Error reason
@@ -2032,8 +2114,8 @@ module TerminalCommands =
                             authority
                             (TerminalQueueOrder.nextFor terminal synced.Pending)
                             command
-                            background
-                        if not background then return! awaitOutcome terminal handle (now ()) None
+                            request.Background
+                        if not request.Background then return! awaitOutcome terminal handle (now ()) None
                         else
                             // Answer with what is true NOW rather than waiting: the caller
                             // said it is not waiting, and the outcome reaches it as a wake

@@ -169,10 +169,10 @@ let private sessionTests =
             async {
                 let mutable seen = ""
                 let registry =
-                    AgentTools.registry (capabilities (fun _ command _ ->
+                    AgentTools.registry (capabilities (fun (request: CommandRequest) ->
                         async {
-                            seen <- command
-                            return Ok (ran command)
+                            seen <- request.Command
+                            return Ok (ran request.Command)
                         }))
                 let! answer = registry.Invoke (call "yession" "execute_command" """{"command":"echo hi"}""")
                 Expect.equal seen "echo hi" "the argument was decoded and passed through"
@@ -183,7 +183,7 @@ let private sessionTests =
         // mean the call never happened, and that is not the same as a command that failed.
         testCaseAsync "arguments that cannot be read are a refusal, not a failed command" <|
             async {
-                let registry = AgentTools.registry (capabilities (fun _ _ _ -> async { return Ok (ran "") }))
+                let registry = AgentTools.registry (capabilities (fun _ -> async { return Ok (ran "") }))
                 let! answer = registry.Invoke (call "yession" "execute_command" "{}")
                 Expect.isError answer "no command argument, so no call"
             }
@@ -191,7 +191,7 @@ let private sessionTests =
         testCaseAsync "a capability that says no answers as text the model can act on" <|
             async {
                 let registry =
-                    AgentTools.registry (capabilities (fun _ _ _ -> async { return Error "no terminal capability" }))
+                    AgentTools.registry (capabilities (fun _ -> async { return Error "no terminal capability" }))
                 let! answer = registry.Invoke (call "yession" "execute_command" """{"command":"ls"}""")
                 Expect.equal
                     answer
@@ -323,7 +323,7 @@ let private auditTests =
                 let block = BlockId.create "blk-1" |> expect
                 let registry =
                     AgentTools.registry
-                        (capabilities (fun _ command _ -> async { return Ok { ran command with Block = Some block } }))
+                        (capabilities (fun (request: CommandRequest) -> async { return Ok { ran request.Command with Block = Some block } }))
                     |> ToolUseLog.wrap log
                 let! _ = registry.Invoke (call "yession" "execute_command" """{"command":"ls"}""")
                 Expect.equal (Seq.head finished) { Outcome = ToolCallOk; Block = Some block } "the block travelled to the record"

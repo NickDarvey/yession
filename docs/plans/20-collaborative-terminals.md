@@ -206,7 +206,12 @@ With ephemeral tabs costing nothing, parallel agent work stops being a furniture
   lane names an intent ("tests", "build docs"); the first command in a lane opens a
   terminal titled by it — the same lazy open, title-is-the-reason move the per-sandbox
   agent terminal already makes — and later commands naming the lane join its queue.
-- **Capped at 4 lanes per sandbox.** The cap is enforced inside the terminal manager,
+- **Capped at 4 lanes RUNNING per sandbox** (built: the plan originally capped lanes
+  *existing*, which could not be a hold at all — a pending act names a terminal, so at cap
+  there would be nothing to queue against and a held command would live nowhere anyone could
+  see it, which is the one thing the one-door design cannot afford. What is worth bounding is
+  concurrent work anyway; the idle close bounds how many lanes there are). The cap is enforced
+  inside the terminal manager,
   beside the state it governs, and hitting it is a QUEUE HOLD with a name
   (`AwaitingLane`), never an error and never a silent drop — the same doctrine as every
   other hold: a stall with a name beats a stall.

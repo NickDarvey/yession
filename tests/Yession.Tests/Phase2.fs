@@ -392,8 +392,8 @@ let private lazyLifecycleTests =
                 let taskAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! first = capabilities.ExecuteCommand None "true" false
-                            let! second = capabilities.ExecuteCommand None "true" false
+                            let! first = capabilities.ExecuteCommand (CommandRequest.ofCommand "true")
+                            let! second = capabilities.ExecuteCommand (CommandRequest.ofCommand "true")
                             match first, second with
                             | Ok _, Ok _ ->
                                 onChunk { Text = "environment is up" }
@@ -558,7 +558,7 @@ let private commandTests =
                 let devAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            match! capabilities.ExecuteCommand None "echo hello from the env" false with
+                            match! capabilities.ExecuteCommand (CommandRequest.ofCommand "echo hello from the env") with
                             | Ok outcome when outcome.Status = TerminalCommandRan (CommandSucceeded 0) ->
                                 onChunk { Text = "ran it" }
                                 return AgentCompleted ("ran it", None)
@@ -671,7 +671,7 @@ let private acceptanceE2eTests =
                 let devAgent : RunAgent =
                     fun _ capabilities _signal onChunk ->
                         async {
-                            let! _ = capabilities.ExecuteCommand None "echo made progress" false
+                            let! _ = capabilities.ExecuteCommand (CommandRequest.ofCommand "echo made progress")
                             onChunk { Text = "done" }
                             return AgentCompleted ("done", None)
                         }

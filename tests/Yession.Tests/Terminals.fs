@@ -173,16 +173,18 @@ let private queueOf entries =
     entries |> List.map (fun (e: PendingAct) -> e.QueueId, e) |> Map.ofList
 
 let private allOpen (_: TerminalId) = true
+/// No lane cap in play. These cases are about the drain's other holds; the cap has its own.
+let private noLaneCap (_: TerminalId) = false
 let private planWith consumed busy isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed busy Set.empty Set.empty isOpen modeOf (queueOf entries)
+    TerminalQueueDrain.plan consumed busy Set.empty Set.empty isOpen noLaneCap modeOf (queueOf entries)
 
 /// The same plan with a lease in play (Plan 13, stage 2e).
 let private planLeased consumed busy leased isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed busy leased Set.empty isOpen modeOf (queueOf entries)
+    TerminalQueueDrain.plan consumed busy leased Set.empty isOpen noLaneCap modeOf (queueOf entries)
 
 /// ...and with the shell's marks gone (Plan 13, stage 2f).
 let private planLost consumed lost isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed Set.empty Set.empty lost isOpen modeOf (queueOf entries)
+    TerminalQueueDrain.plan consumed Set.empty Set.empty lost isOpen noLaneCap modeOf (queueOf entries)
 
 let private drainTests =
     testList "Terminal drain plan" [
@@ -787,7 +789,7 @@ let private integrationTests =
             let lost = Set.singleton (TerminalId.value terminalA)
             Expect.isEmpty (planLost Set.empty lost allOpen (fun _ -> AutoRun) entries).Ready "nothing runs"
             Expect.equal
-                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty lost allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty lost allOpen noLaneCap (fun _ -> AutoRun) (queueOf entries) terminalA)
                 (Some TerminalQueueDrain.AwaitingIntegration)
                 "and the hold names the repair, not a person"
 
@@ -937,7 +939,7 @@ let private leaseGateTests =
             let plan = planLeased Set.empty Set.empty leased allOpen (fun _ -> AutoRun) entries
             Expect.isEmpty plan.Ready "the queue waits for the terminal"
             Expect.equal
-                (TerminalQueueDrain.holdOf Set.empty Set.empty leased Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (TerminalQueueDrain.holdOf Set.empty Set.empty leased Set.empty allOpen noLaneCap (fun _ -> AutoRun) (queueOf entries) terminalA)
                 (Some TerminalQueueDrain.AwaitingTerminal)
                 "and the hold names the terminal, not an approval"
 
@@ -946,14 +948,14 @@ let private leaseGateTests =
             let plan = planLeased Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) entries
             Expect.equal (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId)) [ "q-a1" ] "it runs on release"
             Expect.equal
-                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty Set.empty allOpen noLaneCap (fun _ -> AutoRun) (queueOf entries) terminalA)
                 None
                 "nothing is holding it"
 
         testCase "the three holds are told apart" <| fun () ->
             let entries = [ entry "a1" terminalA ActorRef.Agent 1.0 None ]
             let hold busy leased mode =
-                TerminalQueueDrain.holdOf Set.empty busy leased Set.empty allOpen (fun _ -> mode) (queueOf entries) terminalA
+                TerminalQueueDrain.holdOf Set.empty busy leased Set.empty allOpen noLaneCap (fun _ -> mode) (queueOf entries) terminalA
             let busyA = Set.singleton (TerminalId.value terminalA)
             Expect.equal (hold busyA Set.empty AutoRun) (Some TerminalQueueDrain.AwaitingBlock) "a block is running"
             Expect.equal (hold Set.empty busyA AutoRun) (Some TerminalQueueDrain.AwaitingTerminal) "a peer is typing"
@@ -1686,6 +1688,10 @@ let private recordingTranscripts () =
             | _ -> None)
         |> List.ofSeq)
 
+/// Note the exhaustion behaviour: the LAST id repeats for ever rather than running out. That
+/// is deliberate for the cases that only ever open one or two terminals, and a trap for any
+/// that open more — two terminals with one id are not two terminals. Keep the lists longer
+/// than any case needs.
 let private mintFrom (ids: string list) =
     let remaining = ResizeArray<string> ids
     fun () ->
@@ -1694,7 +1700,7 @@ let private mintFrom (ids: string list) =
         next
 
 let private makeTerminalsGated attach setAutoRun (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
-    let mintTerminal = mintFrom [ "term-a"; "term-b" ]
+    let mintTerminal = mintFrom [ "term-a"; "term-b"; "term-c"; "term-d"; "term-e"; "term-f" ]
     let mintBlock = mintFrom [ "b-1"; "b-2"; "b-3" ]
     let records = ResizeArray<TerminalId * int * TranscriptRecord> ()
     let terminals =
@@ -2357,8 +2363,8 @@ let private agentTerminalTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript readTranscript []
-                let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
-                let! again = terminals.AgentTerminal SandboxName.defaultName "npm run build"
+                let! first = terminals.AgentTerminal SandboxName.defaultName None "npm test"
+                let! again = terminals.AgentTerminal SandboxName.defaultName None "npm run build"
                 Expect.equal again first "the second command lands in the shell the first one used"
             }
 
@@ -2372,8 +2378,8 @@ let private agentTerminalTests =
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript readTranscript []
                 let other = SandboxName.create "test" |> expect
-                let! default' = terminals.AgentTerminal SandboxName.defaultName "npm test"
-                let! test = terminals.AgentTerminal other "npm test"
+                let! default' = terminals.AgentTerminal SandboxName.defaultName None "npm test"
+                let! test = terminals.AgentTerminal other None "npm test"
                 Expect.notEqual test default' "a command for `test` cannot land in `default`"
             }
 
@@ -2385,10 +2391,10 @@ let private agentTerminalTests =
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
                 let terminals, _ = makeTerminals log environment openTranscript readTranscript []
-                let! first = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! first = terminals.AgentTerminal SandboxName.defaultName None "npm test"
                 let id = first |> expect
                 let! _ = terminals.Close id "closed by a peer"
-                let! next = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! next = terminals.AgentTerminal SandboxName.defaultName None "npm test"
                 Expect.notEqual next first "a fresh terminal, because the old one has no process"
             }
 
@@ -2406,13 +2412,122 @@ let private agentTerminalTests =
                         AttachTerminal.unavailable unapproved.Add log environment openTranscript readTranscript []
                 let! peers = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let peerTerminal = peers |> expect
-                let! agents = terminals.AgentTerminal SandboxName.defaultName "npm test"
+                let! agents = terminals.AgentTerminal SandboxName.defaultName None "npm test"
                 let agentTerminal = agents |> expect
                 Expect.equal (List.ofSeq unapproved) [ agentTerminal ] "only the agent's own runs unapproved"
                 Expect.isFalse
                     (unapproved.Contains peerTerminal)
                     "a terminal a person opened keeps the approval default, which is what gives the gate teeth"
             }
+    ]
+
+// Task lanes (Plan 20, stage 3). A lane names an intent; commands sharing one land in a
+// single terminal, and different lanes run alongside each other up to a cap.
+let private laneTests =
+    let laneEntry id terminal = entry id terminal ActorRef.Agent 1.0 None
+    testList "Task lanes" [
+
+        testCaseAsync "commands naming one lane share a terminal, and different lanes do not" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! tests1 = terminals.AgentTerminal SandboxName.defaultName (Some "tests") "npm test"
+                let! tests2 = terminals.AgentTerminal SandboxName.defaultName (Some "tests") "npm test -- --watch"
+                let! docs = terminals.AgentTerminal SandboxName.defaultName (Some "docs") "npm run docs"
+                Expect.equal tests2 tests1 "one task, one terminal"
+                Expect.notEqual docs tests1 "two tasks, two terminals — which is the fanning out"
+            }
+
+        testCaseAsync "a lane is not the sandbox's general-purpose terminal" <|
+            async {
+                // Otherwise the agent's ordinary commands would queue behind its tasks, which
+                // is the serialization lanes exist to end.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! general = terminals.AgentTerminal SandboxName.defaultName None "git status"
+                let! lane = terminals.AgentTerminal SandboxName.defaultName (Some "tests") "npm test"
+                Expect.notEqual lane general "a task does not take over the general-purpose shell"
+            }
+
+        testCaseAsync "a lane is titled for the task, not for whichever command opened it" <|
+            async {
+                // The whole point of naming a task is that the list says "tests" rather than
+                // the first command that happened to run in it.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! _ = terminals.AgentTerminal SandboxName.defaultName (Some "tests") "npm test -- --runInBand"
+                let! events = eventsOf log
+                let titles =
+                    events
+                    |> List.choose (function SessionEvent.TerminalOpened o -> Some o.Title | _ -> None)
+                Expect.equal titles [ "tests" ] "the task's name is what a person reads"
+            }
+
+        testCaseAsync "the general-purpose terminal is not a lane, so the cap never holds it" <|
+            async {
+                // What `LaneOf` decides, and the whole reason the cap can be applied per
+                // terminal: capping the agent's ordinary shell would make its plain commands
+                // wait on its tasks.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminals log environment openTranscript readTranscript []
+                let! general = terminals.AgentTerminal SandboxName.defaultName None "git status"
+                let! lane = terminals.AgentTerminal SandboxName.defaultName (Some "tests") "npm test"
+                let! peer = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "mine"
+                Expect.equal (terminals.LaneOf (general |> expect)) None "the general shell is not a task"
+                Expect.equal
+                    (terminals.LaneOf (lane |> expect))
+                    (Some SandboxName.defaultName)
+                    "a lane names the sandbox whose limit it counts against"
+                Expect.equal (terminals.LaneOf (peer |> expect)) None "and a person's terminal is nobody's lane"
+            }
+
+        testCase "a lane whose sandbox is at the cap holds, and says which hold it is" <| fun () ->
+            // Never an error and never a silent drop: the entry stays queued, visible and
+            // refusable, exactly as it does when a person is typing in its terminal.
+            let atCap (_: TerminalId) = true
+            let plan =
+                TerminalQueueDrain.plan
+                    Set.empty Set.empty Set.empty Set.empty allOpen atCap (fun _ -> AutoRun)
+                    (queueOf [ laneEntry "a1" terminalA ])
+            Expect.isEmpty plan.Ready "nothing runs while the sandbox is at its limit"
+            Expect.equal
+                (TerminalQueueDrain.holdOf
+                    Set.empty Set.empty Set.empty Set.empty allOpen atCap (fun _ -> AutoRun)
+                    (queueOf [ laneEntry "a1" terminalA ]) terminalA)
+                (Some TerminalQueueDrain.AwaitingLane)
+                "and the queue says which wait it is in"
+
+        testCase "a lane under the cap runs" <| fun () ->
+            let plan =
+                TerminalQueueDrain.plan
+                    Set.empty Set.empty Set.empty Set.empty allOpen noLaneCap (fun _ -> AutoRun)
+                    (queueOf [ laneEntry "a1" terminalA ])
+            Expect.equal
+                (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId))
+                [ "q-a1" ]
+                "the cap is a bound on how many run at once, not a queue that never moves"
+
+        testCase "a refusal still outranks the cap" <| fun () ->
+            // The drain's existing order, which the cap must not disturb: a person who said no
+            // is answered whether or not the sandbox is busy, because a refusal touches no pty.
+            let atCap (_: TerminalId) = true
+            let refused = rejected (laneEntry "a1" terminalA) bob (Some "not that one")
+            let plan =
+                TerminalQueueDrain.plan
+                    Set.empty Set.empty Set.empty Set.empty allOpen atCap (fun _ -> AutoRun)
+                    (queueOf [ refused ])
+            Expect.equal
+                (plan.Rejections |> List.map (fun (_, e) -> QueueId.value e.QueueId))
+                [ "q-a1" ]
+                "somebody can still clear a queue that is waiting on a lane"
     ]
 
 let tests =
@@ -2437,6 +2552,7 @@ let tests =
         ansiTests
         transcriptTests
         agentTerminalTests
+        laneTests
         codecTests
         orderTests
         managerTests

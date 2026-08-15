@@ -33,17 +33,17 @@ module private ToolArgs =
     let string (key: string) (json: string) : Result<string, string> =
         read (Decode.object (fun get -> get.Required.Field key Decode.string)) json
 
-    /// `execute_command`'s pair: the line to run, and which named sandbox to run it in.
-    /// An absent or empty `sandbox` is the default one, which is what the optional
-    /// parameter degrades to.
-    /// `execute_command`'s three: the line, where to run it, and whether the caller intends
-    /// to wait for it (Plan 20, stage 2).
-    let commandSandbox (json: string) : Result<string * string * bool, string> =
+    /// `execute_command`'s four: the line, which named sandbox to run it in, whether the
+    /// caller intends to wait for it (Plan 20, stage 2), and which task it belongs to (stage
+    /// 3). An absent or empty `sandbox`/`lane` is what the optional parameters degrade to —
+    /// the default sandbox, and no particular task.
+    let commandSandbox (json: string) : Result<string * string * bool * string, string> =
         read
             (Decode.object (fun get ->
                 get.Required.Field "command" Decode.string,
                 get.Optional.Field "sandbox" Decode.string |> Option.defaultValue "",
-                get.Optional.Field "background" Decode.bool |> Option.defaultValue false))
+                get.Optional.Field "background" Decode.bool |> Option.defaultValue false,
+                get.Optional.Field "lane" Decode.string |> Option.defaultValue ""))
             json
 
     /// `start_work_sandbox`'s pair: the sandbox name, and the credentials to forward.
@@ -152,7 +152,13 @@ module AgentTools =
 
     // The two verbs that produce a BLOCK say so, because the tool-use record needs to know
     // — a call that became a block draws no chip of its own, and only the call can tell.
-    let private executeCommand (capabilities: AgentCapabilities) (command: string) (sandbox: string) (background: bool) : Async<ToolAnswer> =
+    let private executeCommand
+        (capabilities: AgentCapabilities)
+        (command: string)
+        (sandbox: string)
+        (background: bool)
+        (lane: string)
+        : Async<ToolAnswer> =
         async {
             let target =
                 if sandbox = "" then Ok None
@@ -160,7 +166,12 @@ module AgentTools =
             match target with
             | Error e -> return ToolAnswer.text (sprintf "not a sandbox name: %s" e)
             | Ok target ->
-                match! capabilities.ExecuteCommand target command background with
+                let lane = if lane.Trim () = "" then None else Some (lane.Trim ())
+                // A lane exists to fan out, and fanning out then blocking the turn on lane one
+                // would be the old serialization wearing a new name. Named but not asked for
+                // in the foreground, it still runs in the background.
+                let background = background || Option.isSome lane
+                match! capabilities.ExecuteCommand { Command = command; Target = target; Background = background; Lane = lane } with
                 | Ok outcome -> return { Text = renderOutcome outcome; Block = outcome.Block; Stream = None }
                 | Error reason -> return ToolAnswer.text (sprintf "could not run the command: %s" reason)
         }
@@ -348,13 +359,17 @@ module AgentTools =
               ToolField.optional
                   "background"
                   "boolean"
-                  "true to start it and carry on without waiting — use it for long work, and for work that can run alongside other work. You will be told when it finishes." ]
+                  "true to start it and carry on without waiting — use it for long work, and for work that can run alongside other work. You will be told when it finishes."
+              ToolField.optional
+                  "lane"
+                  "string"
+                  "the task this command is part of, e.g. \"tests\" — commands sharing a lane run in one terminal, one after another, and different lanes run alongside each other. Use it to do several independent things at once. A lane runs in the background whether or not you ask." ]
             (fun args ->
                 async {
                     match ToolArgs.commandSandbox args with
                     | Error e -> return Error e
-                    | Ok (command, sandbox, background) ->
-                        return! answered (executeCommand capabilities command sandbox background)
+                    | Ok (command, sandbox, background, lane) ->
+                        return! answered (executeCommand capabilities command sandbox background lane)
                 })
 
           tool

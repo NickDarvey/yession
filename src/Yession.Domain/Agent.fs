@@ -122,12 +122,36 @@ type CommandTarget =
     /// makes a started sandbox usable rather than merely listed.
     | InSandbox of SandboxName
 
-/// `background` (Plan 20, stage 2) asks for the command to be queued and left running: the
-/// call answers as soon as there is something to say rather than waiting out the process, and
-/// the completion becomes a wake instead of a returned outcome. It changes who WAITS and
-/// nothing else — a background command is queued, editable and refusable exactly as every
-/// other one is, and it runs through the same one door.
-type ExecuteCommand = CommandTarget option -> string -> bool -> Async<Result<TerminalCommandOutcome, string>>
+/// One request to run a command (Plan 20, stage 3). A record rather than four positional
+/// arguments, because this is the one door and every capability the agent gains arrives here:
+/// `background` came in at stage 2 and `Lane` at stage 3, and a fifth would have made the call
+/// site unreadable in exactly the way a bare `false, None` already threatened to.
+type CommandRequest =
+    { /// The shell command line.
+      Command : string
+      /// Where to run it. `None` is the agent's own terminal in the default sandbox.
+      Target : CommandTarget option
+      /// Queue it and leave it running (Plan 20, stage 2): the call answers as soon as there
+      /// is something to say rather than waiting out the process, and the completion becomes a
+      /// wake instead of a returned outcome. It changes who WAITS and nothing else — a
+      /// background command is queued, editable and refusable exactly as every other one is,
+      /// and it runs through the same one door.
+      Background : bool
+      /// The TASK this command belongs to (Plan 20, stage 3). A lane names an intent —
+      /// "tests", "build docs" — and every command naming it lands in one terminal, so a
+      /// person reading the list sees a task rather than a scatter of commands.
+      ///
+      /// `None` is the sandbox's general-purpose agent terminal, which is what every agent
+      /// command used before lanes existed and what one that names no task still gets.
+      Lane : string option }
+
+module CommandRequest =
+
+    /// The plain case: a command, waited for, in the default sandbox's agent terminal.
+    let ofCommand (command: string) : CommandRequest =
+        { Command = command; Target = None; Background = false; Lane = None }
+
+type ExecuteCommand = CommandRequest -> Async<Result<TerminalCommandOutcome, string>>
 
 /// Where a COMMAND the agent asked for has got to (Plan 15, stage 3b). The same three shapes
 /// `TerminalCommandStatus` has, minus the two that are about a process: a command has no pty
@@ -366,7 +390,7 @@ module AgentCapabilities =
 
     /// A turn with no environment authority at all (Phase 1 behaviour).
     let none : AgentCapabilities =
-        { ExecuteCommand = fun _ _ _ -> async { return Error "no terminal capability" }
+        { ExecuteCommand = fun _ -> async { return Error "no terminal capability" }
           CheckPending = fun _ -> async { return Error "no terminal capability" }
           WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
           ReadTerminal = fun _ -> async { return Error "no terminal capability" }

@@ -438,9 +438,7 @@ let startFull
               // as the authority it borrows and what a WOKEN turn later resolves its own from.
               // The agent cannot name it: an acting party that could choose whose credential
               // it runs on is not gated by one.
-              ExecuteCommand =
-                fun target command background ->
-                    terminalCommands.Execute target command background (Authority.agentFor turnActor)
+              ExecuteCommand = fun request -> terminalCommands.Execute request (Authority.agentFor turnActor)
               CheckPending = checkPending
               // The agent's hand in a terminal that has no blocks (Plan 19). It takes the
               // lease like a peer, so a human watching sees who is typing and can take it
