@@ -1968,7 +1968,7 @@ module View =
             match selected with
             | Some chosen -> PaneTab.key chosen = PaneTab.key tab
             | None -> false
-        let terminalTabButton (view: TerminalView) =
+        let terminalTabButton (activate: unit -> unit) (pinMark: TemplateResult) (pinnedAttr: string) (hint: string) (view: TerminalView) =
             let on = isOn (TerminalTab view.TerminalId)
             let key = PaneTab.key (TerminalTab view.TerminalId)
             let id = TerminalId.value view.TerminalId
@@ -1990,13 +1990,14 @@ module View =
             if view.IsOpen then
                 html $"""
                     <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-tab="{id}"
-                            aria-selected="{selectedAttr}" tabindex="{tabIndex}"
-                            @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+                            aria-selected="{selectedAttr}" tabindex="{tabIndex}" title="{hint}"
+                            data-pane-tab-pinned="{pinnedAttr}"
+                            @click={Ev(fun _ -> activate ())}>{view.Title}{pinMark}<span class="{Style.terminalTabPeers}">{peers}</span></button>"""
             else
                 html $"""
                     <button type="button" role="tab" class="{klass}" data-pane-tab="{key}" data-terminal-closed-tab="{id}"
                             aria-selected="{selectedAttr}" tabindex="{tabIndex}"
-                            @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId))}>{view.Title}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
+                            @click={Ev(fun _ -> activate ())}>{view.Title}<span class="{Style.small}"> · closed</span><span class="{Style.terminalTabPeers}">{peers}</span></button>"""
         // What a tab is CALLED — read by the tab itself and by the properties bar, which names
         // the selected one. One function, so the strip and the bar can never disagree about
         // what you are looking at.
@@ -2012,50 +2013,56 @@ module View =
                 |> Option.map (fun b -> b.Command)
                 |> Option.defaultValue (BlockId.value blockId)
             | StretchTab stretch -> sprintf "%s · %s" (authorName model stretch.Holder) stretch.Title
-        let readonlyTabButton (tab: PaneTab) =
+        let readonlyTabButton (activate: unit -> unit) (pinMark: TemplateResult) (pinnedAttr: string) (hint: string) (tab: PaneTab) =
             let on = isOn tab
             let label = tabLabel tab
             html $"""
                 <button type="button" role="tab" class="{if on then Style.terminalTabActive else Style.terminalTab}"
-                        data-pane-tab="{PaneTab.key tab}"
+                        data-pane-tab="{PaneTab.key tab}" title="{hint}"
+                        data-pane-tab-pinned="{pinnedAttr}"
                         aria-selected="{if on then "true" else "false"}" tabindex="{if on then "0" else "-1"}"
-                        @click={Ev(fun _ -> dispatch (SelectPaneTabMsg tab))}>{label}</button>"""
-        /// The pin, on every tab that can be kept (Plan 20, stage 1).
+                        @click={Ev(fun _ -> activate ())}>{label}{pinMark}</button>"""
+        /// Activating the tab you are ALREADY on is how a tab gets kept, or released.
+        ///
+        /// The pin used to be a second button beside every keepable tab. On a touch screen
+        /// that is a 24px target beside a 30px one, in a strip that scrolls sideways — and it
+        /// was there on every tab whether or not it had anything to say. The gesture needs no
+        /// target of its own: a tab already takes a tap, a click and an Enter, and the second
+        /// one on the same tab is unambiguous because the first has nothing left to do.
         ///
         /// Offered where a pin would MEAN something: a live terminal, or a recording somebody
-        /// opened from the chat. A closed terminal appears here only as the preview — its
-        /// home is the list — so pinning one would be kept by nothing, and a control whose
-        /// effect is undone by the next event is worse than no control.
-        let pinToggle (tab: PaneTab) (label: string) =
-            if not (PaneTab.isLive model.Terminals tab) then Lit.nothing
-            else
-                let pinned = ClientModel.isPinned tab model
-                // The name states the CONSEQUENCE, because the vocabulary this control
-                // replaced — a tab's `✕` — means "gone", and someone who reads it that way
-                // would think they were killing a terminal.
-                let name = if pinned then sprintf "Unpin %s — keeps running" label else sprintf "Pin %s" label
-                html $"""
-                    <button type="button" class="{if pinned then Style.paneTabPinned else Style.paneTabPin}"
-                            data-pane-tab-pin="{PaneTab.key tab}"
-                            aria-pressed="{if pinned then "true" else "false"}" aria-label="{name}"
-                            @click={Ev(fun _ -> dispatch (TogglePinMsg tab))}>{Icon.pin}</button>"""
+        /// opened from the chat. A closed terminal appears here only as the preview — its home
+        /// is the list — so pinning one would be kept by nothing, and an act whose effect the
+        /// next event undoes is worse than no act.
         let tabButton (tab: PaneTab) =
-            let inner =
+            let pinnable = PaneTab.isLive model.Terminals tab
+            let pinned = pinnable && ClientModel.isPinned tab model
+            let select () =
                 match tab with
-                | TerminalTab id ->
-                    match TerminalProjection.tryFind id model.Terminals with
-                    | Some view -> terminalTabButton view
-                    | None -> Lit.nothing
-                | BlockTab _ | StretchTab _ -> readonlyTabButton tab
-            let label =
-                match tab with
-                | TerminalTab id ->
-                    TerminalProjection.tryFind id model.Terminals
-                    |> Option.map (fun v -> v.Title)
-                    |> Option.defaultValue (TerminalId.value id)
-                | BlockTab (_, blockId) -> BlockId.value blockId
-                | StretchTab stretch -> stretch.Title
-            html $"""<span class="{Style.paneTabGroup}">{inner}{pinToggle tab label}</span>"""
+                | TerminalTab id -> dispatch (SelectTerminalMsg id)
+                | BlockTab _ | StretchTab _ -> dispatch (SelectPaneTabMsg tab)
+            let activate () =
+                if isOn tab && pinnable then dispatch (TogglePinMsg tab) else select ()
+            // The mark says the tab is kept, and only when it is. `role="img"` with a name,
+            // because a colour and a glyph are not a fact anything that cannot see them can
+            // read — and the state is not on the button itself: a `tab` cannot also be a
+            // toggle, so `aria-pressed` here would be two roles arguing.
+            let pinMark =
+                if not pinned then Lit.nothing
+                else html $"""<span class="{Style.paneTabPinMark}" role="img" aria-label="{Dom.Text.pinned}">{Icon.pinSm}</span>"""
+            // Said where a pointer can find it, since a gesture with no target has nowhere
+            // else to announce itself. Only on the tab it would act on — the selected one.
+            let hint =
+                if not (isOn tab && pinnable) then ""
+                elif pinned then Dom.Text.unpinHint
+                else Dom.Text.pinHint
+            let pinnedAttr = if not pinnable then "" elif pinned then "true" else "false"
+            match tab with
+            | TerminalTab id ->
+                match TerminalProjection.tryFind id model.Terminals with
+                | Some view -> terminalTabButton activate pinMark pinnedAttr hint view
+                | None -> Lit.nothing
+            | BlockTab _ | StretchTab _ -> readonlyTabButton activate pinMark pinnedAttr hint tab
         let terminalBody (view: TerminalView) =
             let feed = ClientModel.terminalFeed view.TerminalId model
             let truncated =
