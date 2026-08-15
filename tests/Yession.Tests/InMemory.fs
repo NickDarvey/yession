@@ -223,7 +223,7 @@ let tests =
                 let! started = host.Sandboxes.Ensure caller test []
                 Expect.isTrue (Result.isOk started) "the sandbox starts"
 
-                match! host.TerminalCommands.Execute (Some (InSandbox test)) "echo hi" false agentActing with
+                match! host.TerminalCommands.Execute { CommandRequest.ofCommand "echo hi" with Target = Some (InSandbox test) } agentActing with
                 | Error e -> failwithf "the command did not run: %s" e
                 | Ok outcome ->
                     Expect.equal outcome.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran"
@@ -349,14 +349,14 @@ let tests =
                 // No terminal is open, so the FIRST call opens the agent's own — titled with
                 // what it is for, and in `AutoRun`, which is what keeps the agent's autonomy
                 // exactly what it was before the tool changed.
-                match! host.TerminalCommands.Execute None "first" false agentActing with
+                match! host.TerminalCommands.Execute (CommandRequest.ofCommand "first") agentActing with
                 | Error reason -> failwith reason
                 | Ok first ->
                     Expect.equal first.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran, inside the call"
                     Expect.isTrue (first.OutputTail.Contains "ran<first>") "and its real output came back"
                     // Conditioned on what the first one printed — the whole point of chaining.
                     let next = if first.OutputTail.Contains "ran<first>" then "second" else "wrong"
-                    match! host.TerminalCommands.Execute (Some (InTerminal first.Terminal)) next false agentActing with
+                    match! host.TerminalCommands.Execute { CommandRequest.ofCommand next with Target = Some (InTerminal first.Terminal) } agentActing with
                     | Error reason -> failwith reason
                     | Ok second ->
                         Expect.equal second.Status (TerminalCommandRan (CommandSucceeded 0)) "the second ran too"
@@ -398,7 +398,7 @@ let tests =
                 let terminal =
                     (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
                 // ApproveAgent is the default, so this is the out-of-the-box case.
-                let! outcome = host.TerminalCommands.Execute (Some (InTerminal terminal)) "rm -rf build" false agentActing
+                let! outcome = host.TerminalCommands.Execute { CommandRequest.ofCommand "rm -rf build" with Target = Some (InTerminal terminal) } agentActing
                 match outcome with
                 | Error reason -> failwith reason
                 | Ok outcome ->
@@ -452,7 +452,7 @@ let tests =
                 // queue, awaiting her. Started in the background because it WAITS: that is the
                 // whole change, and the point of this test is that an approval arriving inside
                 // the grace is answered in the same call rather than yielding a handle.
-                let! running = Async.StartChild (host.TerminalCommands.Execute (Some (InTerminal terminal)) "rm -rf build" false agentActing)
+                let! running = Async.StartChild (host.TerminalCommands.Execute { CommandRequest.ofCommand "rm -rf build" with Target = Some (InTerminal terminal) } agentActing)
                 do! a.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalQueue terminal m)))
                 let entry = ClientModel.terminalQueue terminal (a.Runner.Model ()) |> List.head
                 Expect.isTrue (ClientModel.awaitsApproval entry (a.Runner.Model ())) "and Ada sees it waiting"

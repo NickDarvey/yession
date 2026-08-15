@@ -122,12 +122,29 @@ type CommandTarget =
     /// makes a started sandbox usable rather than merely listed.
     | InSandbox of SandboxName
 
-/// `background` (Plan 20, stage 2) asks for the command to be queued and left running: the
-/// call answers as soon as there is something to say rather than waiting out the process, and
-/// the completion becomes a wake instead of a returned outcome. It changes who WAITS and
-/// nothing else — a background command is queued, editable and refusable exactly as every
-/// other one is, and it runs through the same one door.
-type ExecuteCommand = CommandTarget option -> string -> bool -> Async<Result<TerminalCommandOutcome, string>>
+/// One request to run a command (Plan 20). A record rather than positional arguments, because
+/// this is the one door and every capability the agent gains arrives here — `background` came
+/// in at stage 2, and a bare `None "npm test" false` at the call site was already the shape
+/// nobody can read.
+type CommandRequest =
+    { /// The shell command line.
+      Command : string
+      /// Where to run it. `None` is the agent's own terminal in the default sandbox.
+      Target : CommandTarget option
+      /// Queue it and leave it running (Plan 20, stage 2): the call answers as soon as there
+      /// is something to say rather than waiting out the process, and the completion becomes a
+      /// wake instead of a returned outcome. It changes who WAITS and nothing else — a
+      /// background command is queued, editable and refusable exactly as every other one is,
+      /// and it runs through the same one door.
+      Background : bool }
+
+module CommandRequest =
+
+    /// The plain case: a command, waited for, in the default sandbox's agent terminal.
+    let ofCommand (command: string) : CommandRequest =
+        { Command = command; Target = None; Background = false }
+
+type ExecuteCommand = CommandRequest -> Async<Result<TerminalCommandOutcome, string>>
 
 /// Where a COMMAND the agent asked for has got to (Plan 15, stage 3b). The same three shapes
 /// `TerminalCommandStatus` has, minus the two that are about a process: a command has no pty
@@ -239,6 +256,39 @@ type TerminalTail = { Text : string; Elided : int }
 /// question.
 type ReadTerminal = TerminalId -> Async<Result<TerminalTail, string>>
 
+/// One terminal, as the AGENT is told about it (Plan 20, stage 3). What a person reads off a
+/// row in the list, in the shape a model reads — the same facts, because they are looking at
+/// the same thing.
+type TerminalSummary =
+    { Terminal : TerminalId
+      /// What it is FOR. The agent names its own; a person's carries whatever they opened it
+      /// as.
+      Name : string
+      /// Which WorkSandbox its shell lives in. `None` for a stream somebody else produces.
+      Sandbox : SandboxName option
+      /// Whether the agent opened it. Not a permission — it is what the agent needs in order
+      /// to know which of these are its own to close.
+      Mine : bool
+      /// Whether a command is running in it right now.
+      Busy : bool }
+
+/// Open a terminal for the agent's own use (Plan 20, stage 3): the same verb a person has,
+/// over the same terminals. `name` is what it is for, and becomes the title everyone reads.
+///
+/// Refuses, with the limit named, when the sandbox already has as many as the agent may hold.
+/// A refusal rather than a queue: the agent is the only party who can decide which of its own
+/// terminals is finished with, so the answer has to reach it where it can act on it.
+type OpenTerminal = string -> SandboxName option -> Async<Result<TerminalId, string>>
+
+/// Close one of the agent's own terminals. Refuses on a terminal a PERSON opened: a human
+/// typing in their shell is not the agent's to end, and the list gives them the same verb over
+/// the agent's if they want it.
+type CloseTerminal = TerminalId -> Async<Result<unit, string>>
+
+/// Every terminal this session has, so the agent knows what it can use rather than guessing
+/// from whichever blocks happened to land in its last digest.
+type ListTerminals = unit -> Async<Result<TerminalSummary list, string>>
+
 /// The read-only repo verbs (Plan 14): clone-and-orient, NO mutation of history and NO
 /// push — everything irreversible goes through `ExecuteCommand` in the WorkSandbox,
 /// where the approval gate and the transcript already are. Git runs confined beside the
@@ -319,6 +369,12 @@ type AgentCapabilities =
       WriteTerminal : WriteTerminal
       /// Read what such a terminal has said. Takes no lease: a reader is not a writer.
       ReadTerminal : ReadTerminal
+      /// The terminal verbs a person already has (Plan 20, stage 3), so the agent can hold
+      /// several things open at once and say what each is for. One implementation, two
+      /// surfaces: these and the list's buttons reach the same manager.
+      OpenTerminal : OpenTerminal
+      CloseTerminal : CloseTerminal
+      ListTerminals : ListTerminals
       RunGated : RunGatedCommand
       SetSecret : SetSessionSecret
       ListSecrets : ListSessionSecrets
@@ -366,10 +422,13 @@ module AgentCapabilities =
 
     /// A turn with no environment authority at all (Phase 1 behaviour).
     let none : AgentCapabilities =
-        { ExecuteCommand = fun _ _ _ -> async { return Error "no terminal capability" }
+        { ExecuteCommand = fun _ -> async { return Error "no terminal capability" }
           CheckPending = fun _ -> async { return Error "no terminal capability" }
           WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
           ReadTerminal = fun _ -> async { return Error "no terminal capability" }
+          OpenTerminal = fun _ _ -> async { return Error "no terminal capability" }
+          CloseTerminal = fun _ -> async { return Error "no terminal capability" }
+          ListTerminals = fun () -> async { return Error "no terminal capability" }
           // A denial that still RUNS the command: the gate is a wrapper, and a session with
           // no collaborative state to park an act in must not lose the act.
           RunGated =

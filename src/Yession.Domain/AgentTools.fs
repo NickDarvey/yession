@@ -33,11 +33,9 @@ module private ToolArgs =
     let string (key: string) (json: string) : Result<string, string> =
         read (Decode.object (fun get -> get.Required.Field key Decode.string)) json
 
-    /// `execute_command`'s pair: the line to run, and which named sandbox to run it in.
-    /// An absent or empty `sandbox` is the default one, which is what the optional
-    /// parameter degrades to.
-    /// `execute_command`'s three: the line, where to run it, and whether the caller intends
-    /// to wait for it (Plan 20, stage 2).
+    /// `execute_command`'s three: the line, which named sandbox to run it in, and whether the
+    /// caller intends to wait for it (Plan 20, stage 2). An absent or empty `sandbox` is the
+    /// default one, which is what the optional parameter degrades to.
     let commandSandbox (json: string) : Result<string * string * bool, string> =
         read
             (Decode.object (fun get ->
@@ -47,6 +45,14 @@ module private ToolArgs =
             json
 
     /// `start_work_sandbox`'s pair: the sandbox name, and the credentials to forward.
+    /// `open_terminal`'s pair: what the terminal is for, and which sandbox to open it in.
+    let nameSandbox (json: string) : Result<string * string, string> =
+        read
+            (Decode.object (fun get ->
+                get.Required.Field "name" Decode.string,
+                get.Optional.Field "sandbox" Decode.string |> Option.defaultValue ""))
+            json
+
     let nameForward (json: string) : Result<string * string list, string> =
         read
             (Decode.object (fun get ->
@@ -152,7 +158,12 @@ module AgentTools =
 
     // The two verbs that produce a BLOCK say so, because the tool-use record needs to know
     // — a call that became a block draws no chip of its own, and only the call can tell.
-    let private executeCommand (capabilities: AgentCapabilities) (command: string) (sandbox: string) (background: bool) : Async<ToolAnswer> =
+    let private executeCommand
+        (capabilities: AgentCapabilities)
+        (command: string)
+        (sandbox: string)
+        (background: bool)
+        : Async<ToolAnswer> =
         async {
             let target =
                 if sandbox = "" then Ok None
@@ -160,7 +171,7 @@ module AgentTools =
             match target with
             | Error e -> return ToolAnswer.text (sprintf "not a sandbox name: %s" e)
             | Ok target ->
-                match! capabilities.ExecuteCommand target command background with
+                match! capabilities.ExecuteCommand { Command = command; Target = target; Background = background } with
                 | Ok outcome -> return { Text = renderOutcome outcome; Block = outcome.Block; Stream = None }
                 | Error reason -> return ToolAnswer.text (sprintf "could not run the command: %s" reason)
         }
@@ -356,6 +367,74 @@ module AgentTools =
                     | Ok (command, sandbox, background) ->
                         return! answered (executeCommand capabilities command sandbox background)
                 })
+
+          // The terminal verbs a person already has (Plan 20, stage 3). Deliberately the same
+          // three a human uses from the list — open, close, see what there is — because the
+          // agent and the people in the session are working on ONE set of terminals, and a
+          // second vocabulary for the agent's would make its terminals a different kind of
+          // thing on every surface that draws them.
+          tool
+              "open_terminal"
+              "Open a terminal of your own and say what it is for. Use it to work on several things at once: each terminal runs one command at a time, so a build in one does not hold up a test in another. The name is what everyone in the session reads, so name it for the job (\"tests\", \"docs build\"). You get a terminal id back; pass it to execute_command as `terminal` to run there. There is a limit per sandbox — if you have reached it, this says so, and close_terminal is how you make room."
+              [ ToolField.required "name" "string" "what this terminal is for, e.g. \"tests\""
+                ToolField.optional "sandbox" "string" "the work sandbox to open it in; omit for the default one" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.nameSandbox args with
+                      | Error e -> return Error e
+                      | Ok (name, sandbox) ->
+                          let sandbox =
+                              if sandbox = "" then Ok None
+                              else SandboxName.create sandbox |> Result.map Some
+                          match sandbox with
+                          | Error e -> return ToolAnswer.text (sprintf "not a sandbox name: %s" e) |> Ok
+                          | Ok sandbox ->
+                              match! capabilities.OpenTerminal name sandbox with
+                              | Ok id ->
+                                  return
+                                      Ok (ToolAnswer.text (sprintf "opened terminal %s for %s" (TerminalId.value id) name))
+                              | Error reason -> return Ok (ToolAnswer.text reason)
+                  })
+
+          tool
+              "close_terminal"
+              "Close one of the terminals you opened, when you have finished with it. Its recording stays in the session for anyone to read; what ends is the shell. You can only close your own — the people here can close any of them, including yours."
+              [ ToolField.required "terminal" "string" "the terminal id from open_terminal" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.string "terminal" args with
+                      | Error e -> return Error e
+                      | Ok raw ->
+                          match TerminalId.create raw with
+                          | Error e -> return Ok (ToolAnswer.text (sprintf "not a terminal id: %s" e))
+                          | Ok id ->
+                              match! capabilities.CloseTerminal id with
+                              | Ok () -> return Ok (ToolAnswer.text (sprintf "closed terminal %s" raw))
+                              | Error reason -> return Ok (ToolAnswer.text reason)
+                  })
+
+          tool
+              "list_terminals"
+              "See every terminal open in this session — yours and the people's — what each is for, and whether something is running in it. Use it to find out what you already have before opening another, and to pick one to run in."
+              []
+              (fun _ ->
+                  async {
+                      match! capabilities.ListTerminals () with
+                      | Error reason -> return Ok (ToolAnswer.text reason)
+                      | Ok [] -> return Ok (ToolAnswer.text "no terminals are open")
+                      | Ok terminals ->
+                          let line (t: TerminalSummary) =
+                              sprintf
+                                  "%s — %s%s%s%s"
+                                  (TerminalId.value t.Terminal)
+                                  t.Name
+                                  (match t.Sandbox with
+                                   | Some s when s <> SandboxName.defaultName -> sprintf " in %s" (SandboxName.value s)
+                                   | _ -> "")
+                                  (if t.Mine then " (yours)" else "")
+                                  (if t.Busy then " — running something" else "")
+                          return Ok (ToolAnswer.text (terminals |> List.map line |> String.concat "\n"))
+                  })
 
           tool
               "check_pending"
