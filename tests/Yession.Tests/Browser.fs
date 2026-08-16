@@ -221,6 +221,42 @@ let private connected = """document.querySelector('[data-connection]')?.textCont
 // drafts are read-only one-line summaries.
 let private composer = """[data-rich-readonly="false"] .ProseMirror"""
 
+// --- Terminal command lines --------------------------------------------------------------
+//
+// The composer of the terminal a tab strip is showing: its key names the terminal, so asking
+// for one by id also asserts that the pane really moved. `:not([readonly])` picks the line
+// this peer may type into rather than a collaborator's mirror of theirs.
+let private commandLine (terminal: string) =
+    sprintf "[data-terminal-input^='term-draft:%s:']:not([readonly])" terminal
+
+/// What a command line currently says, once it exists.
+let private commandLineValue (page: IPage) (selector: string) : Async<string> =
+    async {
+        let! _ = await (page.WaitForSelectorAsync selector)
+        return! await (page.EvaluateAsync<string> ("sel => document.querySelector(sel)?.value ?? ''", selector))
+    }
+
+/// Wait for a command line to say something, and when it never does, FAIL SAYING WHAT IT
+/// SAYS. The interesting failures here are lines holding the wrong terminal's text or
+/// wiping themselves as they are typed into, and a bare timeout hides exactly that.
+let private waitCommandLine (page: IPage) (selector: string) (expected: string) : Async<unit> =
+    async {
+        try
+            do!
+                await (page.WaitForFunctionAsync (
+                        "([sel, want]) => document.querySelector(sel)?.value === want",
+                        [| box selector; box expected |]))
+                |> Async.Ignore
+        with _ ->
+            let! actual = commandLineValue page selector
+            failwithf "expected the command line %s to say %A, it says %A" selector expected actual
+    }
+
+/// The terminals the tab strip is offering, in the order it offers them.
+let private terminalTabs (page: IPage) : Async<string[]> =
+    await (page.EvaluateAsync<string[]> (
+            """() => [...document.querySelectorAll('[data-terminal-tab]')].map(t => t.getAttribute('data-terminal-tab'))"""))
+
 let tests =
     testList "Browser E2E" [
         testCaseAsync "markdown typed in the rich composer renders formatted, converges, and sends as markdown" <|
@@ -361,6 +397,68 @@ let tests =
                     await (pageA.WaitForFunctionAsync
                             "document.querySelector(\"[data-terminal-input^='term-draft:']:not([readonly])\")?.value === ''")
                     |> Async.Ignore
+            })
+
+        // A command line belongs to ONE terminal. The domain says so — a draft is keyed by
+        // terminal AND author precisely so a person can be mid-command in two at once
+        // (`BodyKey.terminalDraft`) — and the browser is the only place that promise can
+        // break: the pane shows one terminal at a time, so switching tabs hands the SAME
+        // `<input>` to a different terminal, and what it writes to has to be the terminal it
+        // is showing rather than the one it was first rendered for.
+        //
+        // The report this comes from: with two terminals open, the older one could not be
+        // typed into, and switching away and back left only the last character — a line
+        // writing into its neighbour, wiped by every render that pushed its own text back in.
+        //
+        // `Srt` because opening a terminal starts a shell in the session's work sandbox: on a
+        // box that cannot host one, no terminal ever appears and this waits out its timeout
+        // instead of failing.
+        Tag.needs "two terminals at once" [ Tag.Browser; Tag.Native; Tag.Srt ] (fun () ->
+        testCaseAsync "each terminal's composer types into that terminal's command line" <|
+            async {
+                // The reopen control is present only while the column is SHUT (there are never
+                // two controls for one column), and a case that ran before this one may have
+                // left it open.
+                let! shut =
+                    await (pageA.EvaluateAsync<bool> ("""() => !!document.querySelector('[data-terminal-toggle="show"]')"""))
+                if shut then do! awaitU (pageA.Locator("[data-terminal-toggle='show']").First.ClickAsync ())
+                let! before = terminalTabs pageA
+                do! awaitU (pageA.Locator("[data-terminal-new]").First.ClickAsync ())
+                do! awaitU (pageA.Locator("[data-terminal-new]").First.ClickAsync ())
+                do!
+                    await (pageA.WaitForFunctionAsync (
+                            "n => document.querySelectorAll('[data-terminal-tab]').length >= n",
+                            box (before.Length + 2)))
+                    |> Async.Ignore
+                let! tabs = terminalTabs pageA
+                let opened = tabs |> Array.filter (fun id -> not (Array.contains id before))
+                Expect.isTrue (opened.Length >= 2) (sprintf "expected two more terminals, the strip offers: %s" (String.Join (", ", tabs)))
+                let one, two = opened.[0], opened.[1]
+
+                // One command, half-written, in the first terminal.
+                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" one))
+                do! awaitU (pageA.ClickAsync (commandLine one))
+                do! awaitU (pageA.Keyboard.TypeAsync "echo one")
+                do! waitCommandLine pageA (commandLine one) "echo one"
+
+                // The second terminal is a second command line, not the first one's: it opens
+                // empty, and typing into it stays in it.
+                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" two))
+                let! fresh = commandLineValue pageA (commandLine two)
+                Expect.equal fresh "" "a terminal opens with its own empty command line"
+                do! awaitU (pageA.ClickAsync (commandLine two))
+                do! awaitU (pageA.Keyboard.TypeAsync "echo two")
+                do! waitCommandLine pageA (commandLine two) "echo two"
+
+                // And the half-written command is still where it was written. Both directions,
+                // because a line that writes into its neighbour breaks whichever of the two
+                // the input was bound to first.
+                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" one))
+                let! kept = commandLineValue pageA (commandLine one)
+                Expect.equal kept "echo one" "the first terminal kept the command written in it"
+                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" two))
+                let! keptToo = commandLineValue pageA (commandLine two)
+                Expect.equal keptToo "echo two" "and the second kept its own"
             })
 
         // Plan 11. THE discriminating check for the manager origin: this fixture sets no
