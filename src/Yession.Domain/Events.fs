@@ -167,6 +167,15 @@ and AgentTurnStarted =
 and WakeReason =
     /// A command the agent asked to run in the background finished while it was not running.
     | CommandFinished
+    /// A terminal whose bytes came from a stream somebody else produces (Plan 16, part D)
+    /// closed. The agent was reading a source that is now gone, and no tool call it made is
+    /// still open to tell it so.
+    | StreamEnded of TerminalId
+    /// A terminal's shell stopped answering our marks (Plan 13, stage 2f) while the agent had
+    /// a block open there. This is the one wake that reports the agent being STUCK rather than
+    /// something finishing: from here the Process cannot tell when that block ended, so the
+    /// queue behind it is held and nothing else will arrive to say why.
+    | IntegrationLost of TerminalId
 
 and AgentContextBuilt =
     { AgentTurnId : AgentTurnId

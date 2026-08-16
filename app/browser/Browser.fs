@@ -193,6 +193,13 @@ let private keepSurfacesPinned (selector: string) : unit = jsNative
 // (`anchor`,`head` indices), size its highlight span to `lo..hi` and offset the caret bar to
 // `head`. Colour is set by the view (`PeerColour`); this only positions. Called per Title peer
 // after every render — the DOM is up to date synchronously.
+//
+// Everything the marker needs is READ OFF THE FIELD, never assumed from the stylesheet: the
+// marker is a sibling of the input inside the title block, and where the input's text sits in
+// that block is a function of the input's own offset, padding and content box. The title is a
+// 28/32 heading at one width and a 19/24 pivot at the other, and its padding is spent outward
+// so a fill can appear without moving a glyph — a marker placed from constants would be right
+// at exactly one of those and silently wrong at the rest.
 [<Emit("""(function(peer, a, h){
   const input = document.querySelector('input[data-session-title]')
   const marker = document.querySelector('[data-cursor-peer="' + peer + '"]')
@@ -204,10 +211,16 @@ let private keepSurfacesPinned (selector: string) : unit = jsNative
   const value = input.value || ''
   const clamp = (i) => Math.max(0, Math.min(value.length, i | 0))
   const lo = Math.min(clamp(a), clamp(h)), up = Math.max(clamp(a), clamp(h)), head = clamp(h)
-  const padLeft = parseFloat(cs.paddingLeft) || 0, scroll = input.scrollLeft || 0
-  const xOf = (i) => padLeft + ctx.measureText(value.slice(0, i)).width - scroll
+  const px = (v) => parseFloat(v) || 0
+  const padLeft = px(cs.paddingLeft), padTop = px(cs.paddingTop), scroll = input.scrollLeft || 0
+  const left = input.offsetLeft + px(cs.borderLeftWidth) + padLeft
+  const top = input.offsetTop + px(cs.borderTopWidth) + padTop
+  const height = input.clientHeight - padTop - px(cs.paddingBottom)
+  const xOf = (i) => left + ctx.measureText(value.slice(0, i)).width - scroll
   const loX = xOf(lo)
   marker.style.left = loX + 'px'
+  marker.style.top = top + 'px'
+  marker.style.height = height + 'px'
   marker.style.width = Math.max(0, xOf(up) - loX) + 'px'
   if (marker.firstElementChild) marker.firstElementChild.style.left = (xOf(head) - loX) + 'px'
 })($0, $1, $2)""")>]
@@ -396,6 +409,10 @@ let private setInputValue (el: obj) (value: string) : unit = jsNative
 /// same element does not stack a second handler on it — and one that creates a fresh element
 /// gets its own.
 ///
+/// Because it is once, the handlers passed here must decide from the ELEMENT what they are
+/// acting on: an input Lit hands to a second terminal is this same element with a new
+/// `data-terminal-input`, and these listeners are the ones it keeps.
+///
 /// Enter RUNS the command, the same bargain the message composer strikes (`Editor`'s keymap).
 /// A command line is one line, so there is no new line for Alt-Enter to insert and none is
 /// bound. `isComposing` guards the IME: mid-composition Enter commits the candidate word, and
@@ -503,8 +520,10 @@ let private historyCacheName () = persistenceKey () + "/events"
 [<Emit("window.caches.open($0)")>]
 let private openCache (name: string) : JS.Promise<obj> = jsNative
 
-// `keys()` answers in INSERTION order, which is fetch order, which is ascending — so a replay
-// is "read them in order" and never parses an address to sort by.
+// `keys()` answers in insertion order, and insertion order is NOT log order: `put` of an
+// address already kept deletes the entry and appends the new one, so an answer two tabs both
+// fetched moves to the end of the enumeration. The replay orders by what the answers hold
+// (`App.EventFetch.replay`); this is a bag of addresses and promises nothing about their order.
 [<Emit("$0.keys().then(rs => rs.map(r => r.url))")>]
 let private cacheKeys (cache: obj) : JS.Promise<string array> = jsNative
 
@@ -552,10 +571,10 @@ let private openHistoryCache () : Async<App.HistoryCache> =
     }
 
 // --- One store per terminal (Plan 22) -----------------------------------------------------
-// Same Cache API, one cache per terminal, so a replay can walk one terminal's answers in
-// insertion order without asking whose each entry is. The terminal's id is in the cache's NAME,
-// which is what makes that question already answered when the walk starts — and what keeps a
-// hole in one terminal's history from stopping another's.
+// Same Cache API, one cache per terminal, so a replay can walk one terminal's answers without
+// asking whose each entry is. The terminal's id is in the cache's NAME, which is what makes
+// that question already answered when the walk starts — and what keeps a hole in one
+// terminal's history from stopping another's.
 
 let private transcriptCachePrefix () = persistenceKey () + "/terminals/"
 
@@ -908,34 +927,52 @@ let private start () =
         /// identity), so a remote keystroke in one does not necessarily reach the model.
         let syncTerminalInputs () =
             for el in terminalInputs () do
-                let key = terminalInputKey el
-                if not (isNull (box key)) && key <> "" then
-                    let reportFocus () =
+                // WHICH line an input is, and whether it may be written to, are read off the
+                // element every time a handler runs — never captured when it was bound.
+                //
+                // Lit reuses one `<input>` across a tab switch (same template, same position,
+                // a different terminal's key) and the handlers are attached once per element,
+                // so a captured key outlives the terminal it named: keystrokes went into the
+                // terminal the input was FIRST rendered for while its value was pushed from
+                // the one it now shows, which wiped the line being typed into on every render
+                // and left the command in the other terminal, last character only. Same for
+                // read-only: a collaborator's slot and your own composer are the same
+                // position in that template, so "bind only the editable one" bound whichever
+                // it was first and got the other wrong ever after.
+                let lineOf () =
+                    let key = terminalInputKey el
+                    if isNull (box key) || key = "" then None
+                    // A read-only line (a collaborator's slot) still shows live text; it just
+                    // never writes back, and never claims a caret.
+                    elif terminalInputReadOnly el then None
+                    else Some key
+                let reportFocus () =
+                    match lineOf () with
+                    | Some key ->
                         match fieldOfKey key, inputSelection el with
                         | Some field, Some (anchor, head) ->
                             let root = box (texts.Text key)
                             let enc i = ProseMirror.relPosFromTypeIndex root i |> ProseMirror.encodeRel
                             sendFocus (Some { Field = field; Pos = { Anchor = enc anchor; Head = enc head } })
                         | _ -> sendFocus None
-                    // Enter runs a command from a composer SLOT — the line you are writing.
-                    // A queued command's line has already been sent; Enter there does
-                    // nothing rather than queueing it twice.
-                    let onEnter () =
-                        match fieldOfKey key with
-                        | Some (TerminalDraftBody (terminal, author)) ->
-                            connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
-                        | _ -> ()
-                    // A read-only line (a collaborator's slot) still shows live text; it just
-                    // never writes back, and never claims a caret.
-                    if not (terminalInputReadOnly el) then
-                        bindTerminalInput
-                            el
-                            (fun () -> TerminalText.setTo texts key (inputValue el))
-                            reportFocus
-                            (fun () -> sendFocus None)
-                            onEnter
-                        |> ignore
-                    setInputValue el (TerminalText.read texts key)
+                    | None -> sendFocus None
+                // Enter runs a command from a composer SLOT — the line you are writing.
+                // A queued command's line has already been sent; Enter there does
+                // nothing rather than queueing it twice.
+                let onEnter () =
+                    match lineOf () |> Option.bind fieldOfKey with
+                    | Some (TerminalDraftBody (terminal, author)) ->
+                        connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
+                    | _ -> ()
+                bindTerminalInput
+                    el
+                    (fun () -> lineOf () |> Option.iter (fun key -> TerminalText.setTo texts key (inputValue el)))
+                    reportFocus
+                    (fun () -> sendFocus None)
+                    onEnter
+                |> ignore
+                let key = terminalInputKey el
+                if not (isNull (box key)) && key <> "" then setInputValue el (TerminalText.read texts key)
 
         /// Fetch the keyframes the open tabs need, once each (Plan 14, stage 4). A keyframe
         /// is immutable at a position that never moves, so the browser cache serves the

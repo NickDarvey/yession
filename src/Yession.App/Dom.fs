@@ -186,6 +186,12 @@ module Dom =
         /// says who ran what and how it went.
         let chatToolRun = "data-chat-tool-run"
         let chatTool = "data-chat-tool"
+        /// One agent burst in the CHAT (Plan 20, stage 4): a `<details>` per RUN of
+        /// consecutive commands from one turn, carrying the turn id. Its lines are ordinary
+        /// block chips, addressable by `chatBlock` exactly as an ungrouped one is — a chip
+        /// that moved inside a card is still the same chip, and a test that has to know
+        /// whether it was grouped is a test of the grouping, not of the chip.
+        let chatTaskCard = "data-chat-task-card"
         /// The call's outcome, in the SAME tokens a block's status uses (`running` / `ok` /
         /// `failed`) rather than a parallel vocabulary meaning the same three things.
         let chatToolStatus = "data-chat-tool-status"
@@ -214,8 +220,12 @@ module Dom =
         let paneReplay = "data-pane-replay"
         /// A stretch's facts, above its recording.
         let paneStretch = "data-pane-stretch"
-        /// The step-out from a block's sliced view to the whole terminal's recording.
+        /// The step-out from a block's view to the whole terminal's recording.
         let panePlayWhole = "data-pane-play-whole"
+        /// A block's own way between its two reads: the output it printed, and the recording
+        /// of it printing. One control saying whichever the reader is not looking at, so the
+        /// press that swaps the body keeps the focus it was pressed with.
+        let panePlay = "data-pane-play"
         /// The live screen of a terminal in live mode (Plan 14, stage 6). Its value is the
         /// terminal's id; the holder's copy is the one that takes keystrokes, and every other
         /// peer's is the same screen read-only.
@@ -227,6 +237,12 @@ module Dom =
         /// explain rather than a feature.
         let terminalRewind = "data-terminal-rewind"
         let terminalLive = "data-terminal-live"
+        /// The same pair on a CLOSED terminal: the way into its recording, and the way back
+        /// to the blocks it ran. One mechanism with two ends — a recording is somewhere you
+        /// GO, live or finished — so these sit in the same two slots as the DVR's and hand
+        /// focus on the same way.
+        let terminalPlay = "data-terminal-play"
+        let terminalBlocks = "data-terminal-blocks"
         /// How far behind live the rewound reader is, growing as the terminal keeps
         /// printing under them.
         let terminalBehind = "data-terminal-behind"
@@ -322,6 +338,10 @@ module Dom =
         let composerKeys = "Enter sends · Shift+Enter line · Alt+Enter paragraph"
         /// What the timeline's pulse means, for a reader who cannot see it pulse (Plan 20).
         let readingHistory = "Reading this session's history"
+        /// What stands where history this device does not hold would be (Plan 20). Said only
+        /// while nothing is coming to fill it — see `View.chat` — so it is a fact about this
+        /// client's own store rather than a complaint about the network.
+        let historyMissingLocally = "earlier history is not on this device"
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.
@@ -362,6 +382,10 @@ module Dom =
         /// Why a turn nobody asked for exists (Plan 20, stage 2). The token a test reads off
         /// `data-message-woke`; the word beside it on screen is `turnWoke`.
         let wokeCommandFinished = "command-finished"
+        /// The vocabulary's other two reasons (Plan 20, stage 5). One token per reason, so a
+        /// test asserting WHY a turn exists never has to read the sentence a person reads.
+        let wokeStreamEnded = "stream-ended"
+        let wokeIntegrationLost = "integration-lost"
         /// What a woken turn wears in the chat, in the slot its siblings — *streaming*,
         /// *interrupted* — already occupy. A word rather than a new glyph: this design says
         /// a message's state in one lowercase word, and a mark nobody can decode without a
@@ -370,6 +394,8 @@ module Dom =
         /// The same fact, at length, for the reader who wants it. Never the visible label:
         /// the chat's meta line is three short words wide.
         let turnWokeCommandFinished = "The agent picked this up on its own: a command it left running in the background finished."
+        let turnWokeStreamEnded = "The agent picked this up on its own: a terminal it had been working in was attached to a stream that has now ended."
+        let turnWokeIntegrationLost = "The agent picked this up on its own: a terminal it had a command running in stopped reporting, so nothing further will say how that command ended."
         // Conversation item status.
         let complete = "complete"
         let streaming = "streaming"

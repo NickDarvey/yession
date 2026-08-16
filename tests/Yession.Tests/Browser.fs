@@ -221,6 +221,42 @@ let private connected = """document.querySelector('[data-connection]')?.textCont
 // drafts are read-only one-line summaries.
 let private composer = """[data-rich-readonly="false"] .ProseMirror"""
 
+// --- Terminal command lines --------------------------------------------------------------
+//
+// The composer of the terminal a tab strip is showing: its key names the terminal, so asking
+// for one by id also asserts that the pane really moved. `:not([readonly])` picks the line
+// this peer may type into rather than a collaborator's mirror of theirs.
+let private commandLine (terminal: string) =
+    sprintf "[data-terminal-input^='term-draft:%s:']:not([readonly])" terminal
+
+/// What a command line currently says, once it exists.
+let private commandLineValue (page: IPage) (selector: string) : Async<string> =
+    async {
+        let! _ = await (page.WaitForSelectorAsync selector)
+        return! await (page.EvaluateAsync<string> ("sel => document.querySelector(sel)?.value ?? ''", selector))
+    }
+
+/// Wait for a command line to say something, and when it never does, FAIL SAYING WHAT IT
+/// SAYS. The interesting failures here are lines holding the wrong terminal's text or
+/// wiping themselves as they are typed into, and a bare timeout hides exactly that.
+let private waitCommandLine (page: IPage) (selector: string) (expected: string) : Async<unit> =
+    async {
+        try
+            do!
+                await (page.WaitForFunctionAsync (
+                        "([sel, want]) => document.querySelector(sel)?.value === want",
+                        [| box selector; box expected |]))
+                |> Async.Ignore
+        with _ ->
+            let! actual = commandLineValue page selector
+            failwithf "expected the command line %s to say %A, it says %A" selector expected actual
+    }
+
+/// The terminals the tab strip is offering, in the order it offers them.
+let private terminalTabs (page: IPage) : Async<string[]> =
+    await (page.EvaluateAsync<string[]> (
+            """() => [...document.querySelectorAll('[data-terminal-tab]')].map(t => t.getAttribute('data-terminal-tab'))"""))
+
 let tests =
     testList "Browser E2E" [
         testCaseAsync "markdown typed in the rich composer renders formatted, converges, and sends as markdown" <|
@@ -361,6 +397,68 @@ let tests =
                     await (pageA.WaitForFunctionAsync
                             "document.querySelector(\"[data-terminal-input^='term-draft:']:not([readonly])\")?.value === ''")
                     |> Async.Ignore
+            })
+
+        // A command line belongs to ONE terminal. The domain says so — a draft is keyed by
+        // terminal AND author precisely so a person can be mid-command in two at once
+        // (`BodyKey.terminalDraft`) — and the browser is the only place that promise can
+        // break: the pane shows one terminal at a time, so switching tabs hands the SAME
+        // `<input>` to a different terminal, and what it writes to has to be the terminal it
+        // is showing rather than the one it was first rendered for.
+        //
+        // The report this comes from: with two terminals open, the older one could not be
+        // typed into, and switching away and back left only the last character — a line
+        // writing into its neighbour, wiped by every render that pushed its own text back in.
+        //
+        // `Srt` because opening a terminal starts a shell in the session's work sandbox: on a
+        // box that cannot host one, no terminal ever appears and this waits out its timeout
+        // instead of failing.
+        Tag.needs "two terminals at once" [ Tag.Browser; Tag.Native; Tag.Srt ] (fun () ->
+        testCaseAsync "each terminal's composer types into that terminal's command line" <|
+            async {
+                // The reopen control is present only while the column is SHUT (there are never
+                // two controls for one column), and a case that ran before this one may have
+                // left it open.
+                let! shut =
+                    await (pageA.EvaluateAsync<bool> ("""() => !!document.querySelector('[data-terminal-toggle="show"]')"""))
+                if shut then do! awaitU (pageA.Locator("[data-terminal-toggle='show']").First.ClickAsync ())
+                let! before = terminalTabs pageA
+                do! awaitU (pageA.Locator("[data-terminal-new]").First.ClickAsync ())
+                do! awaitU (pageA.Locator("[data-terminal-new]").First.ClickAsync ())
+                do!
+                    await (pageA.WaitForFunctionAsync (
+                            "n => document.querySelectorAll('[data-terminal-tab]').length >= n",
+                            box (before.Length + 2)))
+                    |> Async.Ignore
+                let! tabs = terminalTabs pageA
+                let opened = tabs |> Array.filter (fun id -> not (Array.contains id before))
+                Expect.isTrue (opened.Length >= 2) (sprintf "expected two more terminals, the strip offers: %s" (String.Join (", ", tabs)))
+                let one, two = opened.[0], opened.[1]
+
+                // One command, half-written, in the first terminal.
+                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" one))
+                do! awaitU (pageA.ClickAsync (commandLine one))
+                do! awaitU (pageA.Keyboard.TypeAsync "echo one")
+                do! waitCommandLine pageA (commandLine one) "echo one"
+
+                // The second terminal is a second command line, not the first one's: it opens
+                // empty, and typing into it stays in it.
+                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" two))
+                let! fresh = commandLineValue pageA (commandLine two)
+                Expect.equal fresh "" "a terminal opens with its own empty command line"
+                do! awaitU (pageA.ClickAsync (commandLine two))
+                do! awaitU (pageA.Keyboard.TypeAsync "echo two")
+                do! waitCommandLine pageA (commandLine two) "echo two"
+
+                // And the half-written command is still where it was written. Both directions,
+                // because a line that writes into its neighbour breaks whichever of the two
+                // the input was bound to first.
+                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" one))
+                let! kept = commandLineValue pageA (commandLine one)
+                Expect.equal kept "echo one" "the first terminal kept the command written in it"
+                do! awaitU (pageA.ClickAsync (sprintf "[data-terminal-tab='%s']" two))
+                let! keptToo = commandLineValue pageA (commandLine two)
+                Expect.equal keptToo "echo two" "and the second kept its own"
             })
 
         // Plan 11. THE discriminating check for the manager origin: this fixture sets no
@@ -718,10 +816,13 @@ let editorTests =
                         """document.activeElement?.getAttribute('data-pane-tab')?.startsWith('terminal:') === true""")
                 let! _ = await (page.WaitForFunctionAsync showingBlock)
 
-                // The block's recording is PLAYED, not printed: the real player, over the
-                // ranged cast the model built, inside the tab the chip opened. A stream
-                // renderer would show a cursor-moving program as garbage, which is the whole
-                // reason the transcript was written as asciicast.
+                // The block reads as TEXT, and its recording is one press away — the two reads
+                // of one history, with the cheap one first. Pressing play mounts the real
+                // player over the ranged cast the model built, inside the tab the chip
+                // opened: a stream renderer would show a cursor-moving program as garbage,
+                // which is the whole reason the transcript was written as asciicast.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-block] [data-terminal-output]")
+                do! awaitU (page.ClickAsync "#shell [data-pane-play]")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay] .ap-overlay-start")
                 do! awaitU (page.ClickAsync "#shell [data-pane-replay] .ap-overlay-start")
                 let! _ =
@@ -806,6 +907,47 @@ let editorTests =
                     await (page.WaitForFunctionAsync
                         "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().left >= window.innerWidth - 1")
                 let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+        // What an agent says does not fit a phone: paths, URLs and fenced commands are all
+        // longer than a 326px column and none of them has a space where the break has to go.
+        // The timeline is a scroller on the vertical axis and therefore on both, so anything
+        // that hangs out of the column slides the whole conversation sideways under a header
+        // that stays put — which is what it looked like on iOS: every message shifted a
+        // character or two off the left edge, with no way to put it back.
+        //
+        // The document-level check the case above makes cannot see this: the timeline's own
+        // scrollbox absorbs the overflow, so `documentElement.scrollWidth` stays honest while
+        // the conversation is unreadable. What is asserted is the column, and only the column.
+        testCaseAsync "a message no line break fits inside never scrolls the timeline sideways" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 10)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! ctx =
+                    await (br.NewContextAsync (
+                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 390, Height = 844))))
+                let! page = await (ctx.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 10)))
+                let! width = await (page.EvaluateAsync<int> "() => window.innerWidth")
+                Expect.equal width 390 "a true phone viewport, not a clamped window"
+
+                // The fixture's wide message is present — otherwise this passes by rendering
+                // nothing that could have overflowed.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-message-body] pre")
+                let! sideways =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const timeline = document.querySelector('#shell [data-conversation]')
+                                 return timeline.scrollWidth > timeline.clientWidth + 1
+                               }""")
+                Expect.isFalse sideways "the conversation column does not scroll sideways"
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()
@@ -1148,6 +1290,54 @@ let editorTests =
                     await (page.WaitForFunctionAsync
                         """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel') === 'terminal:term-live'""")
                 let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+
+        // Task cards (Plan 20, stage 4). WHICH commands group, in what order, and what the
+        // summary counts are all folds the cheap tier pins. What only a browser can answer is
+        // that grouping does not cost a person a control: a burst's commands are behind a
+        // disclosure now, and a line inside it has to be the same reachable, pressable thing
+        // the chip was before it was grouped. Nothing here asserts the card's layout — that
+        // is the design, and the design is what a card is FOR.
+        testCaseAsync "a task card's lines stay real controls, reachable and pressable without a pointer" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 10)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! page = await (br.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 10)))
+
+                // A real `<details>`, so the disclosure is the browser's: keyboard-operable
+                // and announced without a handler or an ARIA role of our own.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-task-card]")
+                do! awaitU (page.FocusAsync "#shell [data-chat-task-card] summary")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-chat-task-card]')?.open === true""")
+
+                // The failed command leads, which is the one thing the ordering promises —
+                // and it is a BUTTON, not a div someone hung a click on.
+                let! first =
+                    await (page.EvaluateAsync<string>
+                        """() => {
+                             const line = document.querySelector('#shell [data-chat-task-card] [data-chat-block]')
+                             return line.tagName + ':' + line.getAttribute('data-chat-block')
+                           }""")
+                Expect.equal first "BUTTON:block-burst-failed" "the failure leads, as a real button"
+
+                // And pressing it does what an ungrouped chip does: opens that block.
+                do! awaitU (page.Keyboard.PressAsync "Tab")
+                do! awaitU (page.Keyboard.PressAsync "Enter")
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel') === 'block:term-harness:block-burst-failed'""")
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()

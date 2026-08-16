@@ -251,6 +251,29 @@ The grouping is a pure view-level fold over `TimelineProjection`'s output (a
 `ConversationProjection` untouched and byte-identical). Human-authored blocks never group:
 grouping is for work nobody is hand-driving.
 
+**As built.** The pass is not a second one. `rows` is already the view-level fold over the
+projection's output, and it already groups a turn's consecutive tool calls into a row — so
+the card is a second case there (`RowTaskCard`) rather than a `TimelineCards` beside it. The
+two groupings stop at the same boundary for the same reason, and that rule is worth stating
+once: a card that swallowed the message between two commands would tell a reader the wrong
+story about the order.
+
+Three things the sketch did not say, each decided by trying it:
+
+- **A card forms on the SECOND command.** One command from a turn stays a chip. A disclosure
+  around a single line hides the only thing the row has to say behind a click and buys
+  nothing back.
+- **The grouping key is the turn, recorded at the block's START.** `ToolUseFinished` already
+  names the same pair — its `Block` is the block that call became — but a foreground call
+  finishes when its COMMAND does, so that join arrives too late to group a running block. A
+  card whose lines appear only once they are done is empty for exactly as long as it matters.
+  So the fold carries the turn it is inside (`CurrentTurn`, from `AgentTurnStarted`) and
+  stamps it on each block the AGENT starts. The clock says a command happened *during* a
+  turn; only the authority says whose it was.
+- **The summary prints only what is news.** `N commands`, then each non-zero count in its
+  established glyph and colour. `0 ✗` prints red where nothing is wrong, which is the one
+  thing that line must never do.
+
 ## Delivery
 
 Six stages, each independently shippable. Stages 0–1 are pure client/view work and are
@@ -321,12 +344,14 @@ genuinely running commands at once.
 
 ### Stage 4 — task cards
 
-The `TimelineCards` fold; the card render; failure-first collapse ordering; preview
-opening from card lines.
+The card as a `rows` case; the card render; failure-first ordering; preview opening from
+card lines.
 
 *Tests:* cheap tier for the fold (agent bursts group, human blocks never, statuses
-mutate in place, anchor at first start) and for the one availability invariant (a card
-line is a real button). Nothing pins the card's layout.
+mutate in place, anchor at first start) and for what the summary counts. The one
+availability invariant — a card line is a real button, reachable and pressable without a
+pointer — is `Browser` rather than cheap: the chat is not server-rendered, so no string
+this tier can read contains it. Nothing pins the card's layout.
 
 ### Stage 5 — the unified wake vocabulary
 
@@ -338,6 +363,45 @@ nudge across a restart costs a delay, not a fact — stated, not hidden).
 *Tests:* cheap tier for reason precedence and coalescing across kinds;
 `Jumpstarter` for a real provider's `list_changed` producing a woken turn whose roster
 differs.
+
+**Shipped in two, because the two halves share only a type.** `StreamEnded` and
+`IntegrationLost` are folds over the log, like `CommandFinished` — same window, same
+restart-safety, same file. `ToolsChanged` is none of those things: it needs the MCP client
+to read unsolicited server→client notifications (it only ever writes one today), a
+process-local nudge that survives no restart, and a provider in `examples/jumpstarter` that
+actually sends one. **Stage 5a is the log-derived half; `ToolsChanged` is still owed.**
+
+**As built (5a).**
+
+- **Where a terminal-shaped reason finds its owner.** `TerminalOpened` records only who
+  ASKED for the terminal, and for the agent's own terminals that is the agent — an actor
+  with no credential. So `StreamEnded` and `IntegrationLost` take the owner of the most
+  recent agent-authored block in that terminal: the turn that last did work there is the
+  turn this concerns. A terminal the agent never ran anything in wakes nothing, which is
+  both the safe direction and the honest one — a source ending under somebody else's
+  terminal is not the agent's news. The alternative considered and not taken was putting an
+  `Authority` on `TerminalOpened` the way stage 2b put one on `TerminalBlockStarted`; it is
+  the better answer the day a terminal-shaped wake must fire with no prior agent work in
+  that terminal, and nothing needs it before then.
+- **Which closes count.** Only a terminal whose `Sandbox` is `None` — one taking its bytes
+  from a stream somebody else produces. A sandbox shell closing is somebody deciding,
+  usually the agent itself through `close_terminal`, and waking an agent to tell it what it
+  just did would be a loop with a delay in it.
+- **Precedence, and what it does not reorder.** Owed reasons resolve to ONE turn whose
+  attribution is the most consequential: `IntegrationLost` (the queue is held and nothing
+  further will arrive) outranks `StreamEnded` (a source it was reading is gone) outranks
+  `CommandFinished` (ordinary news). Everything else is inside that turn's digest window
+  regardless, exactly as several completions already coalesce. Within one rank the first
+  owed still wins — precedence is across KINDS, and it does not reorder what already
+  coalesced.
+- **One thing the fold does not reset at a turn.** The debt resets at every
+  `AgentTurnStarted`, as it always has. Who the agent has BEEN in each terminal does not:
+  that is not something owed, and a loss two turns after the work still has to run as
+  somebody rather than as nobody.
+- **One word on screen, whichever reason.** The chat's meta line is three short words wide
+  and a turn that ran unasked says the same thing about itself however it came to. Which
+  reason lives in the `data-message-woke` token a test reads and the title a person can ask
+  for.
 
 ### Stage 6 — the agent lease and the handoff
 

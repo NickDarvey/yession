@@ -233,12 +233,34 @@ let private storeTests =
                     "and the read position moved, which is what the resume reads"
             }
 
-        testCaseAsync "a hole stops the fold at its edge, and says which offsets are missing" <|
+        testCaseAsync "kept answers the store hands back out of order still fold in log order" <|
+            async {
+                // The store's own order is not ascending and cannot be made to be: the Cache
+                // API's `put` of an address already held deletes the entry and appends the new
+                // one, so two tabs of one session fetching the same range moves the earliest
+                // answer to the end. Walking in that order read a later answer first and
+                // called every event before it missing, on a client that held them all.
+                let store = storeOf [ answerOf 3L 2; answerOf 0L 3 ]
+                let seen = ResizeArray ()
+                do! App.EventFetch.replay store seen.Add
+                let offsets =
+                    seen
+                    |> Seq.collect (fun msg ->
+                        match msg with
+                        | LocalHistoryMsg page -> page.Events |> List.map (fun e -> EventOffset.value e.Offset)
+                        | _ -> [])
+                    |> List.ofSeq
+                Expect.equal offsets [ 0L; 1L; 2L; 3L; 4L ] "every kept event, once, in log order"
+                Expect.isFalse
+                    (seen |> Seq.exists (function LocalHistoryGapMsg _ -> true | _ -> false))
+                    "and nothing is missing — the events were all here, in a bag rather than a queue"
+            }
+
+        testCaseAsync "a hole stops the fold at its edge" <|
             async {
                 // An entry evicted from the middle leaves the rest kept. Folding over the gap
                 // would advance the read position past events nothing will ever offer again,
-                // so the walk stops AT the hole — and reports it, rather than looking like
-                // the end of history.
+                // so the walk stops AT the hole rather than looking like the end of history.
                 let store = storeOf [ answerOf 0L 2; answerOf 5L 2 ]
                 let seen = ResizeArray ()
                 do! App.EventFetch.replay store seen.Add
@@ -250,16 +272,57 @@ let private storeTests =
                         | _ -> [])
                     |> List.ofSeq
                 Expect.equal folded [ 0L; 1L ] "everything up to the hole, and nothing past it"
+            }
+
+        testCaseAsync "a hole is reported as history this device lacks, never as the feed's health" <|
+            async {
+                // Nothing has been read from the network when a replay runs, so a hole can
+                // say nothing whatever about the feed. Reported as one, it flashed a red
+                // "history paused" over every cold open with a hole in it — moments before
+                // the first page repaired the thing it was complaining about.
+                let store = storeOf [ answerOf 0L 2; answerOf 5L 2 ]
+                let seen = ResizeArray ()
+                do! App.EventFetch.replay store seen.Add
+                Expect.isFalse
+                    (seen |> Seq.exists (function EventFeedMsg _ -> true | _ -> false))
+                    "a local read reports no feed health at all"
                 let reported =
-                    seen
-                    |> Seq.tryPick (fun msg ->
-                        match msg with
-                        | EventFeedMsg (FeedStalled reason) -> Some reason
-                        | _ -> None)
+                    seen |> Seq.tryPick (function LocalHistoryGapMsg at -> Some at | _ -> None)
                 match reported with
                 | None -> failwith "a hole must be reported, not silently treated as the end"
-                | Some reason ->
-                    Expect.stringContains reason "offset 2" "naming where the fill has to start"
+                | Some at ->
+                    Expect.equal (EventOffset.value at) 5L "naming where the kept history resumes"
+            }
+
+        testCaseAsync "a page off the network clears the gap it fills" <|
+            async {
+                // The read resumes at the cursor the replay parked at, which is exactly where
+                // the fill has to start — so a page arriving from the network means the hole
+                // is being filled, and what is left to arrive is ordinary catch-up.
+                let store = storeOf [ answerOf 0L 2; answerOf 5L 2 ]
+                let seen = ResizeArray ()
+                do! App.EventFetch.replay store seen.Add
+                let model =
+                    seen
+                    |> Seq.fold
+                        (fun m msg -> ClientModel.update msg m)
+                        (ClientModel.init { PeerId = PeerId.create "p" |> expect; DisplayName = "P" })
+                Expect.equal
+                    (model.EventConsumer.MissingBefore |> Option.map EventOffset.value)
+                    (Some 5L)
+                    "the replay left the hole on the model"
+                let fill =
+                    match App.EventFetch.decodeLines (snd (answerOf 2L 3)) with
+                    | Ok envelopes -> envelopes
+                    | Error fault -> failwith (App.FeedFault.describe fault)
+                let filled =
+                    ClientModel.update
+                        (EventsPageMsg
+                            { Events = fill
+                              LastOffset = fill |> List.tryLast |> Option.map (fun e -> e.Offset)
+                              IsEnd = false })
+                        model
+                Expect.equal filled.EventConsumer.MissingBefore None "and a page off the network takes it away"
             }
 
         testCaseAsync "an answer is kept under the address it came back FROM, not the one asked for" <|

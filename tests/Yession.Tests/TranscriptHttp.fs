@@ -295,6 +295,19 @@ let private storeTests =
                 Expect.equal readThrough 5 "one past the last line kept"
             }
 
+        testCaseAsync "answers the store hands back out of order still fold in recording order" <|
+            async {
+                // The store's own order is not ascending and cannot be made to be: the Cache
+                // API's `put` of an address already held deletes the entry and appends the new
+                // one, so two tabs of one session fetching the same range moves the earliest
+                // answer to the end. The line an answer starts on is kept beside its bytes,
+                // and that — never the store's order — is what the walk goes by.
+                let store = storeOf [ terminal, [ answerOf 3 2; answerOf 0 3 ] ]
+                let seen = ResizeArray ()
+                do! App.TranscriptFetch.replay store seen.Add
+                Expect.equal (recordsIn seen terminal) [ 1; 2; 3; 4 ] "every kept line, once, in recording order"
+            }
+
         testCaseAsync "a hole stops that terminal's walk at its edge" <|
             async {
                 // An entry evicted from the middle leaves the rest kept. Folding over the gap

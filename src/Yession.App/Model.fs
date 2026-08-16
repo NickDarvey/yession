@@ -52,7 +52,19 @@ type EventConsumerState =
       /// Whether reads are getting through at all. `IsCatchingUp` says there is more to
       /// read; this says whether reading is possible — the distinction the old design had
       /// no way to express, because a failed fetch was reported as an empty final page.
-      Feed                : FeedHealth }
+      Feed                : FeedHealth
+      /// Where this client's KEPT history resumes, when the boot replay could not walk to
+      /// it (Plan 20): everything between `LastProcessedOffset` and this offset is not on
+      /// this device. `None` is the ordinary state — nothing kept, or everything kept in
+      /// one unbroken run.
+      ///
+      /// A fact about the STORE, never about the feed: it is settled before a single read
+      /// leaves this client, so it can neither prove nor deny that history is arriving. The
+      /// feed repairs it — a read resumes at the cursor, which the replay parked at exactly
+      /// the offset the fill has to start from — which is why any page off the network
+      /// clears it. Reported as feed health, it flashed a red "history paused" over every
+      /// cold open with an out-of-order store, moments before the first page fixed it.
+      MissingBefore       : EventOffset option }
 
 type AgentViewState = { ActiveTurn : AgentTurnId option }
 
@@ -347,11 +359,19 @@ type ClientModel =
       /// field to keep in step with this one — a pinned tab and a previewed tab differ by
       /// whether the pin list names it, which is the only fact there is.
       PaneChoice    : PaneTab option
-      /// Where a whole-terminal recording should start playing, when a chip stepped out to
-      /// it (Plan 14, stage 4). The transcript line, turned into a time by the records the
-      /// client has — a "play whole terminal" from a block chip lands on that block, in the
-      /// context around it, which is the question the sliced view cannot answer.
-      PaneStartAt   : (TerminalId * int) option
+      /// The tab whose RECORDING this reader asked to watch, and the transcript line it
+      /// should start at (Plan 14, stage 4).
+      ///
+      /// Both halves are one fact, which is why they are one field: a start position with no
+      /// player is meaningless, and "watching" without saying from where is the same
+      /// question with a `None` answer. A surface whose recording IS its only read
+      /// (`ReplayIsTheRead`, a stretch) plays without appearing here — this is the reader's
+      /// CHOICE, not the state of the pane, and `playsRecording` is where the two meet.
+      ///
+      /// The line, turned into a time by the records the client has: "play whole terminal"
+      /// from a block chip lands on that block, in the context around it, which is the
+      /// question the sliced view cannot answer.
+      PanePlaying   : (PaneTab * int option) option
       /// A live terminal this client has REWOUND, and the transcript length it was rewound
       /// at (Plan 14, stage 7). While set, the pane plays what has been recorded so far
       /// instead of showing the live screen — the terminal keeps running and its records
@@ -397,6 +417,14 @@ type ClientMsg =
     /// off the local store proves only that this client kept it, and an offline client
     /// reporting a live history feed would be lying about the one leg that is down.
     | LocalHistoryMsg of EventPage<SessionEvent>
+    /// The boot replay could not walk all the way through what this client kept (Plan 20):
+    /// the carried offset is where the kept history resumes, and everything between the read
+    /// cursor and it is not on this device.
+    ///
+    /// Its own message rather than a feed fault, because it is not one: no read has been
+    /// attempted when it is dispatched, and the next one repairs it. See
+    /// `EventConsumerState.MissingBefore`.
+    | LocalHistoryGapMsg of EventOffset
     /// The client has finished reading what it already had (Plan 20) — whether that was a
     /// full conversation, or nothing at all because it keeps nothing. Either way it has now
     /// LOOKED, which is what the timeline needs to know before it can claim a session is
@@ -485,10 +513,16 @@ type ClientMsg =
     /// unpinning a terminal leaves it running and leaves its row in the list, and the one
     /// verb that ends a terminal lives on that row.
     | TogglePinMsg of PaneTab
-    /// Step out from a block's sliced view to the terminal's WHOLE recording, landing on
-    /// that block (Plan 14, stage 4). Two paths on purpose: the slice answers "what did this
-    /// command print", the whole answers "what was going on around it".
-    | PlayWholeTerminalMsg of TerminalId * fromSeq: int
+    /// Watch a tab's RECORDING rather than read its text — the one way into a player, on
+    /// every surface that has one.
+    ///
+    /// `fromSeq` is where it starts, which is what makes this one message rather than two:
+    /// stepping out from a block to the whole terminal (Plan 14, stage 4) is playing the
+    /// terminal's tab FROM that block's first line, and playing a closed terminal from the
+    /// top is the same act with nowhere in particular to land. Two paths through one verb —
+    /// the slice answers "what did this command print", the whole answers "what was going
+    /// on around it".
+    | PlayRecordingMsg of PaneTab * fromSeq: int option
     /// Rewind a LIVE terminal (Plan 14, stage 7): play what it has recorded so far, from a
     /// transcript length pinned now, while the terminal keeps running.
     | RewindTerminalMsg of TerminalId
@@ -558,7 +592,9 @@ module ClientModel =
               IsCatchingUp = false
               CatchUpIsSlow = false
               // Nothing has failed yet; the first read decides.
-              Feed = FeedLive }
+              Feed = FeedLive
+              // Nothing has been looked at yet; the replay decides.
+              MissingBefore = None }
           Agent = { ActiveTurn = None }
           Presence = Map.empty
           Peers = Map.empty
@@ -570,7 +606,7 @@ module ClientModel =
           TerminalScreens = Map.empty
           Pins = []
           PaneChoice = None
-          PaneStartAt = None
+          PanePlaying = None
           PaneRewound = None
           TerminalsOpen = false
           TerminalList = false
@@ -744,6 +780,22 @@ module ClientModel =
         let feed = model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty
         feed.Header |> Option.map (fun header -> rangedCastFrom header feed model terminal fromSeq toSeq)
 
+    /// The transcript range a block's recording covers, when it has one.
+    ///
+    /// A block's range is only a RANGE once it has an end. While it runs, its recording grows
+    /// on every record, and a player rebuilt on each one would thrash through a streaming
+    /// build; a refused command never ran at all. Both are cases the surface reports rather
+    /// than plays.
+    ///
+    /// One rule, two callers: what a player is handed (`paneReplay`) and whether a player is
+    /// OFFERED (`playable`) are the same question asked at two moments, and a surface that
+    /// offered a control the builder then refused would be a button that does nothing.
+    let private blockRange (terminal: TerminalId) (blockId: BlockId) (model: ClientModel) : (int * int) option =
+        TerminalProjection.tryFind terminal model.Terminals
+        |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
+        |> Option.filter (fun block -> match block.Status with BlockRejected _ -> false | _ -> true)
+        |> Option.bind (fun block -> block.ToSeq |> Option.map (fun toSeq -> block.FromSeq, toSeq))
+
     /// What a tab's player should be handed (Plan 14, stage 4).
     ///
     /// Assembled here rather than in the browser entry because every part of it is a
@@ -761,16 +813,9 @@ module ClientModel =
         | Some header ->
             match tab with
             | BlockTab (terminal, blockId) ->
-                TerminalProjection.tryFind terminal model.Terminals
-                |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
-                // A block's range is only a RANGE once it has an end. While it runs, its
-                // recording grows on every record, and a player rebuilt on each one would
-                // thrash through a streaming build; a refused command never ran at all. Both
-                // are cases the surface reports rather than plays.
-                |> Option.bind (fun block -> block.ToSeq |> Option.map (fun toSeq -> block, toSeq))
-                |> Option.filter (fun (block, _) -> match block.Status with BlockRejected _ -> false | _ -> true)
-                |> Option.map (fun (block, toSeq) ->
-                    { Cast = rangedCastFrom header feed model terminal block.FromSeq toSeq
+                blockRange terminal blockId model
+                |> Option.map (fun (fromSeq, toSeq) ->
+                    { Cast = rangedCastFrom header feed model terminal fromSeq toSeq
                       // One command is one chapter; there is nothing to mark.
                       Markers = []
                       StartAt = None
@@ -825,9 +870,10 @@ module ClientModel =
                         match pinnedEdge with
                         | Some at -> Some at
                         | None ->
-                            model.PaneStartAt
-                            |> Option.filter (fun (id, _) -> id = terminal)
-                            |> Option.bind (fun (_, seq) -> timeOf seq)
+                            model.PanePlaying
+                            |> Option.filter (fun (playing, _) -> PaneTab.key playing = PaneTab.key tab)
+                            |> Option.bind snd
+                            |> Option.bind timeOf
                       Poster = pinnedEdge
                       BehindLive = pin |> Option.map (fun _ -> terminal) }
 
@@ -889,6 +935,61 @@ module ClientModel =
     /// What a terminal's row offers this reader.
     let affordances (view: TerminalView) (model: ClientModel) : TerminalAffordances =
         TerminalAffordances.ofView (hasRecording view.TerminalId model) view
+
+    /// Whether this tab has a recording to play at all — what decides whether a surface
+    /// OFFERS one. Cheap on purpose: map lookups and a list find, no cast built, so a view
+    /// can ask it on every render without assembling a recording nobody watches.
+    ///
+    /// The header gates every case because it is transcript line 0: without it the geometry
+    /// is a guess, and a recording replayed under the wrong one rewraps every line in it.
+    let playable (tab: PaneTab) (model: ClientModel) : bool =
+        (terminalFeed (PaneTab.terminal tab) model).Header |> Option.isSome
+        && match tab with
+           // A whole terminal's recording starts at the start, and the header is its
+           // keyframe: there is nothing else to resolve.
+           | TerminalTab _ -> true
+           | BlockTab (terminal, blockId) -> blockRange terminal blockId model |> Option.isSome
+           // A stretch with no recorded bounds is a gap in the record, which the surface
+           // states rather than playing an empty player over.
+           | StretchTab stretch -> Option.isSome stretch.Range
+
+    /// Whether the pane shows this tab as its RECORDING rather than as its text.
+    ///
+    /// The two reads of one history: what a terminal PRINTED, which the client can render as
+    /// text from the same transcript bytes, and how it BEHAVED, which only a player can show.
+    /// Showing both at once made the second redundant wherever the first said everything — a
+    /// command and its result, with a player of the same two lines beneath — so text is the
+    /// read and the recording is a destination you go to.
+    ///
+    /// Except where there is no text read to go back to, and then the recording is not a
+    /// destination, it is the surface. That rule is a fact about the terminal, so it lives
+    /// with the terminal (`ReplayIsTheRead`) and this only asks it.
+    ///
+    /// Every player in the pane is here, the DVR included: rewinding a live terminal is this
+    /// same swap with a moving end (`RewindTerminalMsg` asks for the recording like any other
+    /// way in), and a second condition beside this one is how two surfaces that mount the
+    /// same player start disagreeing about when.
+    ///
+    /// Not gated on `playable`: the mode is what the READER asked for, and a recording whose
+    /// header has not arrived yet is a mount that fills in on the render after it does. The
+    /// two questions are separate on purpose — `playable` decides what to OFFER, this decides
+    /// what is SHOWN, and a control is only ever offered where the first says yes.
+    let playsRecording (tab: PaneTab) (model: ClientModel) : bool =
+        let chosen =
+            model.PanePlaying |> Option.exists (fun (playing, _) -> PaneTab.key playing = PaneTab.key tab)
+        match tab with
+        // A stretch IS a stretch of recording: somebody held the keyboard, and what they did
+        // is bytes rather than commands. There are no blocks to read instead, so it plays
+        // wherever there is anything to play — and where there is not, the surface says so in
+        // words rather than mounting a player over a gap.
+        | StretchTab _ -> playable tab model
+        // A block's output is the cheaper read of the same bytes, so a block plays only
+        // where its reader said so.
+        | BlockTab _ -> chosen
+        | TerminalTab id ->
+            chosen
+            || (TerminalProjection.tryFind id model.Terminals
+                |> Option.exists (fun view -> (affordances view model).ReplayIsTheRead))
 
     /// The terminal list, in the order it renders (Plan 20, stage 0): the OPEN terminals in
     /// open order, then the closed ones most recently opened first.
@@ -1143,7 +1244,18 @@ module ClientModel =
                       Feed =
                         match msg with
                         | EventsPageMsg _ -> FeedLive
-                        | _ -> model.EventConsumer.Feed } }
+                        | _ -> model.EventConsumer.Feed
+                      // A page off the NETWORK resumes at the cursor and runs unbroken from
+                      // it, so whatever the store was missing before it is being filled —
+                      // what is left to arrive is ordinary catch-up, which `IsCatchingUp`
+                      // already says. A page off the local store is what found the hole in
+                      // the first place and cannot have repaired it.
+                      MissingBefore =
+                        match msg with
+                        | EventsPageMsg _ -> None
+                        | _ -> model.EventConsumer.MissingBefore } }
+        | LocalHistoryGapMsg resumesAt ->
+            { model with EventConsumer = { model.EventConsumer with MissingBefore = Some resumesAt } }
         | HistoryReadMsg -> { model with HistoryRead = true }
         | EventFeedMsg health ->
             { model with EventConsumer = { model.EventConsumer with Feed = health } }
@@ -1269,28 +1381,37 @@ module ClientModel =
         | TerminalScreenMsg (terminal, screen) ->
             { model with TerminalScreens = Map.add terminal screen model.TerminalScreens }
         | SelectTerminalMsg terminal ->
-            { model with PaneChoice = Some (TerminalTab terminal); PaneStartAt = None; PaneRewound = None; TerminalsOpen = true }
+            { model with PaneChoice = Some (TerminalTab terminal); PanePlaying = None; PaneRewound = None; TerminalsOpen = true }
         | SelectPaneTabMsg tab ->
             // The start hint belongs to the step-out that set it, so choosing anything else
             // drops it — a recording that opened halfway through because of a chip somebody
             // tapped ten minutes ago would be a surprise with no cause on screen.
-            { model with PaneChoice = Some tab; PaneStartAt = None; PaneRewound = None; TerminalsOpen = true }
+            { model with PaneChoice = Some tab; PanePlaying = None; PaneRewound = None; TerminalsOpen = true }
         | RewindTerminalMsg terminal ->
             // The length is pinned NOW rather than followed. A recording that grew under a
             // reader would move the scrub bar out from under them, which is the one thing
             // rewinding exists to avoid.
             let length = (model.TerminalFeeds |> Map.tryFind terminal |> Option.defaultValue TerminalFeed.empty).KnownLength
+            // Rewinding IS asking to watch the recording, so it says so the same way every
+            // other way in does; the pin is the extra fact, not a second kind of watching.
+            // What that buys: a terminal that CLOSES under a rewound reader keeps playing
+            // rather than dropping them back into its blocks, because the pin was the only
+            // part of their state that died with the live edge.
             { model with
                 PaneChoice = Some (TerminalTab terminal)
                 PaneRewound = Some (terminal, length)
-                PaneStartAt = None
+                PanePlaying = Some (TerminalTab terminal, None)
                 TerminalsOpen = true }
         | JumpToLiveMsg terminal ->
-            { model with PaneRewound = None; PaneChoice = Some (TerminalTab terminal); TerminalsOpen = true }
-        | PlayWholeTerminalMsg (terminal, fromSeq) ->
             { model with
+                PaneRewound = None
+                PanePlaying = None
                 PaneChoice = Some (TerminalTab terminal)
-                PaneStartAt = Some (terminal, fromSeq)
+                TerminalsOpen = true }
+        | PlayRecordingMsg (tab, fromSeq) ->
+            { model with
+                PaneChoice = Some tab
+                PanePlaying = Some (tab, fromSeq)
                 TerminalsOpen = true }
         | OpenPaneTabMsg tab ->
             // Straight into the preview slot, which is simply the choice while nothing pins
@@ -1299,7 +1420,7 @@ module ClientModel =
             // way down a busy chat ends up with is exactly one wide.
             { model with
                 PaneChoice = Some tab
-                PaneStartAt = None
+                PanePlaying = None
                 PaneRewound = None
                 TerminalsOpen = true }
         | TogglePinMsg tab ->
@@ -1323,7 +1444,7 @@ module ClientModel =
             // over the terminal it had just chosen.
             { model with
                 PaneChoice = Some (TerminalTab terminal)
-                PaneStartAt = None
+                PanePlaying = None
                 PaneRewound = None
                 TerminalList = false
                 TerminalsOpen = true }

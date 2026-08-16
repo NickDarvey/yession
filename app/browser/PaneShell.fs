@@ -38,19 +38,21 @@ let toPane () : unit = jsNative
 })""")>]
 let toChatItem (tabKey: string) : unit = jsNative
 
-/// Hand focus to whichever DVR control is on screen for this terminal (Plan 14, stage 7).
-/// Rewind and Jump-to-live swap each other out of the document, so the press that swaps them
-/// — or the catch-up that fires when a rewound cast plays off its end — would otherwise
-/// strand focus on a control that has gone. One selector for both: only one of the pair is
-/// ever rendered. Guarded on focus actually being stranded (on `body`, or inside the player
-/// that is being unmounted): the automatic catch-up must never yank focus out of a composer
-/// somebody is typing in.
+/// Hand focus to whichever replay control is on screen for this terminal (Plan 14, stage 7).
+/// The way in and the way out swap each other out of the document — rewind for Jump-to-live
+/// on a live terminal, play for Back-to-blocks on a closed one — so the press that swaps
+/// them, or the catch-up that fires when a rewound cast plays off its end, would otherwise
+/// strand focus on a control that has gone. One selector for all four: a terminal renders
+/// exactly one of them at a time. Guarded on focus actually being stranded (on `body`, or
+/// inside the player that is being unmounted): the automatic catch-up must never yank focus
+/// out of a composer somebody is typing in.
 [<Emit("""requestAnimationFrame(() => {
   const active = document.activeElement
   const stranded = !active || active === document.body || active.closest('[data-pane-replay]')
   if (!stranded) return
   const next = document.querySelector(
-    '[data-terminal-live="' + $0 + '"], [data-terminal-rewind="' + $0 + '"]')
+    '[data-terminal-live="' + $0 + '"], [data-terminal-rewind="' + $0 + '"], ' +
+    '[data-terminal-blocks="' + $0 + '"], [data-terminal-play="' + $0 + '"]')
   if (next) next.focus()
 })""")>]
 let toDvrControl (terminalId: string) : unit = jsNative

@@ -129,8 +129,30 @@ let private shellModel : ClientModel =
     /// A CLOSED terminal, for the list's other half — a recording rather than a place to type.
     let doneId : TerminalId = TerminalId.create "term-done" |> expect
     let blockId : BlockId = BlockId.create "block-harness" |> expect
+    /// A burst: three commands ONE agent turn ran, so the chat has a task card to draw
+    /// (Plan 20, stage 4). Three rather than two, and in three different states, because
+    /// what a card does that a chip cannot is count and order them — a burst that was all
+    /// one state would exercise the disclosure and nothing else.
+    let agentTurn : AgentTurnId = AgentTurnId.create "turn-harness" |> expect
+    let burstOk : BlockId = BlockId.create "block-burst-ok" |> expect
+    let burstFailed : BlockId = BlockId.create "block-burst-failed" |> expect
+    let burstRunning : BlockId = BlockId.create "block-burst-running" |> expect
     let peerId : PeerId = PeerId.create "ada" |> expect
     let messageId : MessageId = MessageId.create "msg-harness" |> expect
+    /// What the agent actually says, which is the hard case for a phone: a fenced block whose
+    /// lines are far wider than the screen, and prose carrying tokens no line break fits
+    /// inside — a path, a URL. Nothing here may be allowed to size the timeline, or the whole
+    /// conversation slides sideways under a header that stays put (photographed on iOS).
+    let wideId : MessageId = MessageId.create "msg-wide" |> expect
+    let wideBody =
+        String.concat
+            "\n"
+            [ "Cleared the broken checkout at /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/repos/NickDarvey/yession"
+              "and retried, see https://github.com/NickDarvey/yession/actions/runs/1234567890123/job/9876543210987."
+              ""
+              "```"
+              "git -C /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/repos clone --depth 1 --filter=blob:none https://github.com/NickDarvey/yession.git"
+              "```" ]
     let offset (n: int64) : EventOffset = EventOffset.create n |> expect
     { ClientModel.init { PeerId = peerId; DisplayName = "swift-heron" } with
         Connection = Connected
@@ -143,9 +165,27 @@ let private shellModel : ClientModel =
                     Status = Complete
                     Kind = ConversationItemKind.Message
                     Offset = offset 1L
+                    Woke = None }
+                  { MessageId = wideId
+                    Author = ActorRef.Agent
+                    Body = wideBody
+                    Status = Complete
+                    Kind = ConversationItemKind.Message
+                    Offset = offset 3L
                     Woke = None } ]
               ActiveAgentMessages = Map.empty; WokenTurn = None }
-        Timeline = { TimelineProjection.empty with TerminalItems = [ TimelineBlock (offset 2L, terminalId, blockId) ] }
+        Timeline =
+            { TimelineProjection.empty with
+                TerminalItems =
+                    [ TimelineBlock (offset 2L, terminalId, blockId)
+                      TimelineBlock (offset 3L, terminalId, burstOk)
+                      TimelineBlock (offset 4L, terminalId, burstFailed)
+                      TimelineBlock (offset 5L, terminalId, burstRunning) ]
+                BlockTurns =
+                    Map.ofList
+                        [ BlockId.value burstOk, agentTurn
+                          BlockId.value burstFailed, agentTurn
+                          BlockId.value burstRunning, agentTurn ] }
         Terminals =
             { Terminals =
                 [ { TerminalId = terminalId
@@ -165,7 +205,31 @@ let private shellModel : ClientModel =
                           Background = false
                           FromSeq = 0
                           ToSeq = Some 2
-                          Status = BlockFinished (CommandSucceeded 0) } ]
+                          Status = BlockFinished (CommandSucceeded 0) }
+                        { BlockId = burstOk
+                          QueueId = None
+                          Authority = Authority.agentFor (PeerRef peerId)
+                          Command = "npm run build"
+                          Background = false
+                          FromSeq = 2
+                          ToSeq = Some 2
+                          Status = BlockFinished (CommandSucceeded 0) }
+                        { BlockId = burstFailed
+                          QueueId = None
+                          Authority = Authority.agentFor (PeerRef peerId)
+                          Command = "npm test"
+                          Background = false
+                          FromSeq = 2
+                          ToSeq = Some 2
+                          Status = BlockFinished (CommandFailed 1) }
+                        { BlockId = burstRunning
+                          QueueId = None
+                          Authority = Authority.agentFor (PeerRef peerId)
+                          Command = "git status"
+                          Background = true
+                          FromSeq = 2
+                          ToSeq = None
+                          Status = BlockRunning } ]
                     DroppedBytes = 0 }
                   { TerminalId = liveId
                     Title = "shell"

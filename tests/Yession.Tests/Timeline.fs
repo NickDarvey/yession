@@ -394,9 +394,10 @@ let private paneTests =
                   "the panel showing it", Dom.attr Dom.Hooks.panePanel "block:term-a:b-1"
                   "the block's read-only view", Dom.attr Dom.Hooks.paneBlock "b-1"
                   "the command", "ls -la"
-                  // The output is PLAYED, not printed: what a command wrote is a recording,
-                  // and a stream renderer would show a cursor-moving program as garbage.
-                  "where its recording mounts", Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1" ]
+                  // What it printed, as TEXT — the cheap read of the same bytes, through the
+                  // same renderer the terminal's own history uses. Whether the OTHER read is
+                  // offered is a different question, and `readsTests` is where it is asked.
+                  "what it printed", "total 0" ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
             // Read-only: no composer for a block you are reading back.
@@ -588,7 +589,7 @@ let private videoTests =
             // print", the whole is "what was going on around it".
             let model =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (PlayWholeTerminalMsg (terminalA, 3))
+                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, Some 3))
             Expect.equal
                 (ClientModel.selectedPane model |> Option.map PaneTab.key)
                 (Some "terminal:term-a")
@@ -600,7 +601,7 @@ let private videoTests =
         testCase "a start hint belongs to the step-out that set it, and dies with it" <| fun () ->
             let model =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (PlayWholeTerminalMsg (terminalA, 3))
+                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, Some 3))
                 |> ClientModel.update (SelectTerminalMsg terminalA)
             match ClientModel.paneReplay (TerminalTab terminalA) model with
             | Some replay -> Expect.isNone replay.StartAt "choosing the tab again starts it from the start"
@@ -708,6 +709,96 @@ let private videoTests =
     ]
 
 // --- The DVR (stage 7) -------------------------------------------------------------------------
+
+// --- The two reads of one history -------------------------------------------------------------
+
+/// A terminal that was only ever typed in: somebody took the lease, bytes were recorded, and
+/// it closed without a command ever resolving into a block. What a device attached over a
+/// stream that cannot be instrumented also looks like from here.
+let private liveOnlyTerminal =
+    [ at 1L 0.0 (opened terminalA "shell")
+      at 2L 1.0 (took terminalA (PeerRef bob) 1)
+      at 3L 5.0 (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" }) ]
+
+let private readsTests =
+    testList "Which read a surface shows" [
+
+        // Text and recording are two reads of the same bytes, and the rule is the same on
+        // every surface that has both: the text is the read, the recording is somewhere you
+        // go. Each of these is a BICONDITIONAL — the swap happening when it is asked for, and
+        // not happening when it is not — because a predicate that answered `true` always
+        // would satisfy either half alone.
+
+        testCase "a closed terminal that ran commands reads as its commands" <| fun () ->
+            // What the player under the blocks was: a recording of the same two lines the
+            // block above it had already printed.
+            let model = withRecords (clientOf recordedTerminal)
+            Expect.isFalse (ClientModel.playsRecording (TerminalTab terminalA) model) "the blocks are the read"
+
+        testCase "asking for the recording swaps the read" <| fun () ->
+            let model =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, None))
+            Expect.isTrue (ClientModel.playsRecording (TerminalTab terminalA) model) "now it plays"
+            Expect.isFalse
+                (ClientModel.playsRecording (TerminalTab terminalB) model)
+                "and only the terminal that was asked for"
+
+        testCase "a closed terminal with nothing but a recording plays without being asked" <| fun () ->
+            // There is no cheaper read to default to: an empty block list is not a read, it
+            // is a `$`. Making a reader press play to see the only thing there is would be a
+            // control whose answer is never no.
+            let model = withRecords (clientOf liveOnlyTerminal)
+            Expect.isTrue (ClientModel.playsRecording (TerminalTab terminalA) model) "the recording IS the surface"
+
+        testCase "the way back is offered only where there is something behind the player" <| fun () ->
+            let played =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, None))
+            Expect.isTrue
+                ((Support.render played).Contains (Dom.attr Dom.Hooks.terminalBlocks (TerminalId.value terminalA)))
+                "blocks to go back to"
+            Expect.isFalse
+                ((Support.render (withRecords (clientOf liveOnlyTerminal))).Contains Dom.Hooks.terminalBlocks)
+                "and none where the recording is the only read — that control undoes itself"
+
+        testCase "a rewind that outlives its live edge is still a reader watching a recording" <| fun () ->
+            // The pin dies with the live edge; the watching does not. Dropping a reader back
+            // into the blocks because the terminal they were watching finished would answer
+            // a question they never asked.
+            let live = recordedTerminal |> List.filter (fun e -> match e.Event with SessionEvent.TerminalClosed _ -> false | _ -> true)
+            let model =
+                withRecords (clientOf live)
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+                |> ClientModel.update
+                    (EventsPageMsg
+                        { Events = [ at 6L 61.0 (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "done" }) ]
+                          LastOffset = Some (EventOffset.create 6L |> expect)
+                          IsEnd = true })
+            Expect.isFalse (ClientModel.isRewound terminalA model) "no live edge, no rewind"
+            Expect.isTrue (ClientModel.playsRecording (TerminalTab terminalA) model) "and still the recording"
+
+        testCase "a recording the cap ate is never offered" <| fun () ->
+            // The stated gap. A control that opens an empty player is indistinguishable from
+            // a terminal that printed nothing, which is the fact the drop is recorded to say.
+            let model = clientOf recordedTerminal
+            Expect.isFalse (ClientModel.playable (TerminalTab terminalA) model) "nothing kept, nothing to play"
+            Expect.isFalse ((Support.render model).Contains Dom.Hooks.terminalPlay) "so nothing offers it"
+
+        testCase "a block's output is text until somebody asks for the recording" <| fun () ->
+            // The case that made the rule: a command and its result, printed, needed no
+            // player of the same two lines under it.
+            let model =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+            Expect.isFalse
+                ((Support.render model).Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1"))
+                "read as text"
+            let played = ClientModel.update (PlayRecordingMsg (BlockTab (terminalA, block "1"), None)) model
+            Expect.isTrue
+                ((Support.render played).Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1"))
+                "and played when asked"
+    ]
 
 let private dvrTests =
     testList "Rewinding a live terminal (Plan 14, stage 7)" [
@@ -877,7 +968,8 @@ let private drawn (events: EventEnvelope<SessionEvent> list) : string list =
     TimelineProjection.rows conversation timeline
     |> List.map (function
         | RowItem item -> List.head (shapes [ item ])
-        | RowToolRun (t, items) -> sprintf "run:%s:%d" (AgentTurnId.value t) (List.length items))
+        | RowToolRun (t, items) -> sprintf "run:%s:%d" (AgentTurnId.value t) (List.length items)
+        | RowTaskCard (t, items) -> sprintf "card:%s:%d" (AgentTurnId.value t) (List.length items))
 
 let private toolTests =
     testList "Tool use in the chat" [
@@ -1129,17 +1221,189 @@ let private pinTests =
                 "still in the list, which is where every terminal is"
     ]
 
+// --- Task cards (Plan 20, stage 4) --------------------------------------------------------
+
+let private turnStarted (t: string) =
+    AgentTurnStarted { AgentTurnId = turn t; TriggeredByMessageId = Some (message "1"); Woke = None }
+
+let private rejected (id: TerminalId) (n: string) (author: ActorRef) (command: string) =
+    SessionEvent.TerminalCommandRejected
+        { TerminalId = id
+          QueueId = QueueId.create ("q-" + n) |> expect
+          BlockId = block n
+          Author = author
+          RejectedBy = PeerRef ada
+          Command = command
+          Reason = Some "not that one" }
+
+let private cardTests =
+    testList "Task cards (Plan 20, stage 4)" [
+
+        testCase "consecutive commands from one turn are one card" <| fun () ->
+            // An agent working across several of its terminals is the second item a single
+            // turn can emit a dozen of, after tool use — and it costs one row, not twelve.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (opened terminalB "agent 2")
+                  at 4L 3.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 5L 4.0 (started terminalB "2" ActorRef.Agent "npm test" 1)
+                  at 6L 5.0 (started terminalA "3" ActorRef.Agent "git status" 40) ]
+            Expect.equal (drawn events) [ "card:turn-a:3" ] "three commands, one card"
+
+        testCase "a card forms on the SECOND command, never the first" <| fun () ->
+            // A disclosure around one chip hides the only thing the row has to say behind a
+            // click, and buys nothing back.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1) ]
+            Expect.equal (drawn events) [ "ran:b-1" ] "one command is a chip"
+
+        testCase "a message between two commands splits the card" <| fun () ->
+            // The same boundary a tool run stops at, for the same reason: swallowing what was
+            // said in the middle would tell a reader the wrong story about the order.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (started terminalA "2" ActorRef.Agent "npm test" 40)
+                  at 5L 4.0 (sent "1" "how's it going?")
+                  at 6L 5.0 (started terminalA "3" ActorRef.Agent "git status" 80)
+                  at 7L 6.0 (started terminalA "4" ActorRef.Agent "git diff" 120) ]
+            Expect.equal
+                (drawn events)
+                [ "card:turn-a:2"; "said:m-1"; "card:turn-a:2" ]
+                "two cards, and the message stays between them"
+
+        testCase "commands from two turns never share a card" <| fun () ->
+            // A burst is one turn's work. Two turns' commands adjacent in the log are two
+            // pieces of work that happened to touch, and a card saying otherwise invents a
+            // task nobody ran.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (started terminalA "2" ActorRef.Agent "npm test" 40)
+                  at 5L 4.0 (turnStarted "b")
+                  at 6L 5.0 (started terminalA "3" ActorRef.Agent "git status" 80)
+                  at 7L 6.0 (started terminalA "4" ActorRef.Agent "git diff" 120) ]
+            Expect.equal (drawn events) [ "card:turn-a:2"; "card:turn-b:2" ] "one card per turn"
+
+        testCase "a person's commands never group, even during a turn" <| fun () ->
+            // Grouping is for work nobody is hand-driving. The clock says a command happened
+            // DURING a turn; only the authority says whose it was, and a person typing while
+            // the agent works is still a person typing.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "build")
+                  at 3L 2.0 (started terminalA "1" (PeerRef ada) "make" 1)
+                  at 4L 3.0 (started terminalA "2" (PeerRef ada) "npm test" 40) ]
+            Expect.equal (drawn events) [ "ran:b-1"; "ran:b-2" ] "two chips, no card"
+
+        testCase "a command nobody's turn started never groups" <| fun () ->
+            // A block the Session Process ran on its own behalf, before any turn: no turn to
+            // attribute it to, and inventing one would be a task nobody asked for.
+            let events =
+                [ at 1L 0.0 (opened terminalA "boot")
+                  at 2L 1.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 3L 2.0 (started terminalA "2" ActorRef.Agent "npm test" 40) ]
+            Expect.equal (drawn events) [ "ran:b-1"; "ran:b-2" ] "two chips, no card"
+
+        testCase "a refused command joins the card of the turn that proposed it" <| fun () ->
+            // The refusal is the more interesting half of the pair, and a card that left it
+            // out would say the turn ran fewer commands than it asked to.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (rejected terminalA "2" ActorRef.Agent "rm -rf /") ]
+            Expect.equal (drawn events) [ "card:turn-a:2" ] "the proposal counts, whether or not it ran"
+
+        testCase "a card anchors where its FIRST command started" <| fun () ->
+            // The chip's anchoring rule, unchanged: a burst that takes four minutes stays
+            // above the messages sent while it ran rather than jumping to the bottom.
+            let events =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (started terminalA "2" ActorRef.Agent "npm test" 40)
+                  at 5L 4.0 (sent "1" "how's it going?")
+                  at 6L 9.0 (completed terminalA "1" (CommandSucceeded 0) 40) ]
+            let conversation, _ = ConversationProjection.applyEvents None events ConversationProjection.empty
+            let timeline, _ = TimelineProjection.applyEvents None events TimelineProjection.empty
+            match TimelineProjection.rows conversation timeline with
+            | (RowTaskCard _ as card) :: _ ->
+                Expect.equal (EventOffset.value (TimelineRow.offset card)) 3L "the offset of the first command"
+            | other -> failwithf "expected the card first, got %A" other
+
+        testCase "a card carries NO status of its own — the row is the same either way" <| fun () ->
+            // What makes a card's lines mutate in place for free, exactly as chips do: the
+            // row holds which blocks and where, `TerminalProjection` holds what they say.
+            let running =
+                [ at 1L 0.0 (turnStarted "a")
+                  at 2L 1.0 (opened terminalA "agent 1")
+                  at 3L 2.0 (started terminalA "1" ActorRef.Agent "make" 1)
+                  at 4L 3.0 (started terminalA "2" ActorRef.Agent "npm test" 40) ]
+            let finished = running @ [ at 5L 9.0 (completed terminalA "1" (CommandFailed 2) 40) ]
+            let rowsOf events =
+                let conversation, _ = ConversationProjection.applyEvents None events ConversationProjection.empty
+                let timeline, _ = TimelineProjection.applyEvents None events TimelineProjection.empty
+                TimelineProjection.rows conversation timeline
+            Expect.equal (rowsOf running) (rowsOf finished) "the card does not move or change as its work does"
+    ]
+
+let private tallyTests =
+    testList "What a task card counts (Plan 20, stage 4)" [
+
+        testCase "a refusal counts as a failure" <| fun () ->
+            // Red on every other surface for the same reason: a command the agent proposed
+            // and did not get to run is what a person scanning for trouble is scanning for.
+            Expect.equal (TaskCard.stateOf (BlockRejected (PeerRef ada, Some "no"))) TaskFailed "refused reads as failed"
+
+        testCase "a non-zero exit and a timeout are one bucket" <| fun () ->
+            // The exact code is on the line and in the block behind it. A summary that
+            // counted `exit 2` apart from `timed out` would be longer and say less.
+            Expect.equal (TaskCard.stateOf (BlockFinished (CommandFailed 2))) TaskFailed "exit 2 failed"
+            Expect.equal (TaskCard.stateOf (BlockFinished CommandTimedOut)) TaskFailed "so did the timeout"
+
+        testCase "the summary counts every command once" <| fun () ->
+            let states = [ TaskDone; TaskFailed; TaskDone; TaskRunning; TaskDone ]
+            Expect.equal
+                (TaskCard.tally states)
+                { Commands = 5; Failed = 1; Running = 1; Done = 3 }
+                "5 commands, 3 done, 1 failed, 1 running"
+
+        testCase "failures sort first, then what is still going" <| fun () ->
+            // A burst of twenty commands with one failure buried at line fourteen makes a
+            // person hunt for the one thing the card exists to show them.
+            let lines = [ "a", TaskDone; "b", TaskRunning; "c", TaskFailed; "d", TaskDone ]
+            Expect.equal
+                (TaskCard.ordered lines |> List.map fst)
+                [ "c"; "b"; "a"; "d" ]
+                "failed, running, then done"
+
+        testCase "lines keep their order WITHIN a group" <| fun () ->
+            // So the only thing a finishing command changes is which group it is in: a line
+            // never jumps a place inside one, which is what lets the card be read twice.
+            let lines = [ "a", TaskFailed; "b", TaskFailed; "c", TaskFailed ]
+            Expect.equal (TaskCard.ordered lines |> List.map fst) [ "a"; "b"; "c" ] "chronological within the group"
+    ]
+
 let tests =
     testList "Timeline and the pane (Plan 14)" [
         listTests
         pinTests
         orderTests
         toolTests
+        cardTests
+        tallyTests
         chipTests
         stretchTests
         unchangedTests
         paneTests
         keyframeTests
         videoTests
+        readsTests
         dvrTests
     ]

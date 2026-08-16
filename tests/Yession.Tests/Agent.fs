@@ -516,6 +516,153 @@ let private wakeTests =
                 "and the turn it starts is told about both"
     ]
 
+// --- The rest of the wake vocabulary (Plan 20, stage 5) ------------------------------------
+
+let private terminalB = TerminalId.create "term-b" |> expect
+
+let private openedIn (id: TerminalId) (sandbox: SandboxName option) =
+    SessionEvent.TerminalOpened
+        { TerminalId = id; OpenedBy = ActorRef.Agent; Title = "work"; Sandbox = sandbox; Renewable = false }
+
+/// A block in a NAMED terminal, so a case can put the agent's work somewhere other than the
+/// `term-a` every helper above is pinned to.
+let private blockStartedIn (id: TerminalId) (n: string) (background: bool) (owner: ActorRef option) =
+    SessionEvent.TerminalBlockStarted
+        { TerminalId = id
+          BlockId = BlockId.create n |> expect
+          QueueId = None
+          Authority = Authority.rehydrate ActorRef.Agent owner None
+          Command = "make"
+          FromSeq = 0
+          Background = background }
+
+let private integrationLost (id: TerminalId) =
+    SessionEvent.TerminalIntegrationLost { TerminalId = id; BlockId = None }
+
+let private closedNow (id: TerminalId) =
+    SessionEvent.TerminalClosed { TerminalId = id; Reason = "the source went away" }
+
+let private vocabularyTests =
+    testList "The rest of the wake vocabulary (Plan 20, stage 5)" [
+
+        testCase "an attached terminal's stream ending owes the agent a turn" <| fun () ->
+            // Nothing else will say so: no tool call of the agent's is still open, and the
+            // source it was reading is simply gone.
+            Expect.equal
+                (AgentWake.pendingReason
+                    [ turnStarted "1"
+                      openedIn terminalB None
+                      blockStartedIn terminalB "b1" false (Some (PeerRef bob))
+                      closedNow terminalB ]
+                 |> Option.map fst)
+                (Some (StreamEnded terminalB))
+                "the terminal it names is the one that ended"
+
+        testCase "a SHELL closing owes nothing — that was somebody deciding" <| fun () ->
+            // Usually the agent itself, through `close_terminal`. Waking an agent to tell it
+            // what it just did would be a loop with a delay in it.
+            Expect.isNone
+                (AgentWake.pendingReason
+                    [ turnStarted "1"
+                      openedIn terminalB (Some SandboxName.defaultName)
+                      blockStartedIn terminalB "b1" false (Some (PeerRef bob))
+                      closedNow terminalB ])
+                "a sandbox shell is not a stream"
+
+        testCase "a terminal the agent never worked in wakes nothing when it ends" <| fun () ->
+            // A source ending under somebody else's terminal is not the agent's news, and
+            // there is no turn to continue the authority of.
+            Expect.isNone
+                (AgentWake.pendingReason [ turnStarted "1"; openedIn terminalB None; closedNow terminalB ])
+                "no work there, no turn"
+
+        testCase "an integration lost under the agent's work owes the agent a turn" <| fun () ->
+            // The one wake that reports the agent being STUCK: from here nothing can say how
+            // that block ended, and the queue behind it is held.
+            Expect.equal
+                (AgentWake.pendingReason
+                    [ turnStarted "1"
+                      openedIn terminalB (Some SandboxName.defaultName)
+                      blockStartedIn terminalB "b1" false (Some (PeerRef bob))
+                      integrationLost terminalB ]
+                 |> Option.map fst)
+                (Some (IntegrationLost terminalB))
+                "and it names where"
+
+        testCase "a terminal-shaped wake runs as whoever the agent last worked there for" <| fun () ->
+            // `TerminalOpened` records only who ASKED for the terminal, which for the agent's
+            // own is the agent — an actor with no credential. So the reason takes the owner of
+            // the most recent agent-authored block there: the turn that last did work in this
+            // place is the turn this concerns.
+            Expect.equal
+                (AgentWake.pendingReason
+                    [ turnStarted "1"
+                      openedIn terminalB (Some SandboxName.defaultName)
+                      blockStartedIn terminalB "b1" false (Some (PeerRef bob))
+                      integrationLost terminalB ]
+                 |> Option.map snd)
+                (Some (PeerRef bob))
+                "the party the work was queued for"
+
+        testCase "being STUCK outranks being told something finished" <| fun () ->
+            // They resolve to one turn, and its attribution is the most consequential of
+            // them: a held queue changes what the agent should do next, a completion is news.
+            // The completion is inside that turn's digest window either way.
+            Expect.equal
+                (AgentWake.pendingReason
+                    [ turnStarted "1"
+                      openedIn terminalB (Some SandboxName.defaultName)
+                      blockStarted "b1" true (Some (PeerRef ada))
+                      blockCompleted "b1"
+                      blockStartedIn terminalB "b2" false (Some (PeerRef bob))
+                      integrationLost terminalB ]
+                 |> Option.map fst)
+                (Some (IntegrationLost terminalB))
+                "the loss wins, however late it arrived"
+
+        testCase "within one kind the FIRST owed still wins" <| fun () ->
+            // Precedence is across kinds; it does not reorder what already coalesced.
+            Expect.equal
+                (AgentWake.pendingReason
+                    [ turnStarted "1"
+                      blockStarted "b1" true (Some (PeerRef ada))
+                      blockStartedIn terminalB "b2" true (Some (PeerRef bob))
+                      blockCompleted "b1"
+                      SessionEvent.TerminalBlockCompleted
+                          { TerminalId = terminalB
+                            BlockId = BlockId.create "b2" |> expect
+                            Result = CommandSucceeded 0
+                            ToSeq = 4 } ]
+                 |> Option.map snd)
+                (Some (PeerRef ada))
+                "the one that was owed first"
+
+        testCase "the turn a terminal-shaped wake started takes that wake with it" <| fun () ->
+            // The same window trick every reason rides: an `AgentTurnStarted` resets the
+            // debt, so a wake cannot fire twice for one loss.
+            Expect.isNone
+                (AgentWake.pendingReason
+                    [ openedIn terminalB (Some SandboxName.defaultName)
+                      blockStartedIn terminalB "b1" false (Some (PeerRef bob))
+                      integrationLost terminalB
+                      turnStarted "woken" ])
+                "the turn that was owed has run"
+
+        testCase "who the agent has been in a terminal SURVIVES the turn that established it" <| fun () ->
+            // The debt resets at every turn; this does not. It is not something owed, it is
+            // who the agent is in that place — and a loss two turns later still has to run as
+            // somebody rather than as nobody.
+            Expect.equal
+                (AgentWake.pendingReason
+                    [ openedIn terminalB (Some SandboxName.defaultName)
+                      blockStartedIn terminalB "b1" false (Some (PeerRef bob))
+                      turnStarted "later"
+                      integrationLost terminalB ]
+                 |> Option.map snd)
+                (Some (PeerRef bob))
+                "still bob's, one turn on"
+    ]
+
 // --- The arm (Plan 20, stage 2): the wake, wired to the scheduler that runs it -------------
 
 /// A scheduler over an in-memory log, with an agent that answers immediately. `duringTurn`
@@ -676,6 +823,7 @@ let tests =
     testList "Agent" [
         turnTests
         wakeTests
+        vocabularyTests
         attributionTests
         armTests
         Tag.needs "Agent E2E" [ Tag.Ports; Tag.Native ] (fun () -> e2eTests)
