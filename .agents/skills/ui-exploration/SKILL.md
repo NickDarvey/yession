@@ -47,6 +47,16 @@ trust a hover capture. `Emulation.setEmulatedMedia` cannot set it (hover/pointer
 emulatable features) and `Emulation.setTouchEmulationEnabled` switches it back off. Below
 600px leave the default — a phone genuinely has no hover, and that is what you want to see.
 
+## The third trap: focus states that never apply
+
+Same shape, one layer down. A headless page is not the frontmost window, so `:focus` matches
+nothing: `el.focus()` moves `document.activeElement` and not one focus style applies —
+`getComputedStyle` reports the rest colours and `el.matches(':focus')` is `false` while that
+element is plainly the active one. `shot.mjs` turns on CDP focus emulation for you; if you
+drive Chromium yourself, send `Emulation.setFocusEmulationEnabled {enabled: true}` before
+navigating. Check it the same way: `el.matches(':focus')` must be true before you trust a
+focus capture.
+
 ## The loop
 
 1. **Boot the real app.** From the repo root, inside devenv (see AGENTS.md Bootstrap):
@@ -86,6 +96,20 @@ emulatable features) and `Emulation.setTouchEmulationEnabled` switches it back o
 
    Classic finding this catches: a flex child's `min-width:auto` tracking a table's
    min-content and pushing the whole page wider than the viewport (`min-w-0` fixes it).
+
+   The expression may return a Promise (it is awaited), which is how you capture a state
+   the page has to settle into: focus or hover a control, resolve a few hundred ms later,
+   and the shot shows where the transition arrived instead of the frame it started from.
+
+   ```
+   node .agents/skills/ui-exploration/shot.mjs http://127.0.0.1:8321/ 390 844 out.png \
+     "new Promise(r => { document.querySelector('input').focus(); setTimeout(() => r('{}'), 400) })"
+   ```
+
+   Classic finding THIS catches: a class that is present, served, and inert. Tailwind v4's
+   `outline-none` sets `--tw-outline-style:none`, which every later outline utility resolves
+   through — so a control wearing `outline-none` plus a focus ring draws no ring, and only
+   the computed style says so.
 
 6. **Fix, rebuild, reshoot.** Every edit needs `devenv shell -- build` (Fable recompiles
    the changed module AND Tailwind rescans the F# sources — a class name that never

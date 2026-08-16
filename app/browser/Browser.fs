@@ -193,6 +193,13 @@ let private keepSurfacesPinned (selector: string) : unit = jsNative
 // (`anchor`,`head` indices), size its highlight span to `lo..hi` and offset the caret bar to
 // `head`. Colour is set by the view (`PeerColour`); this only positions. Called per Title peer
 // after every render — the DOM is up to date synchronously.
+//
+// Everything the marker needs is READ OFF THE FIELD, never assumed from the stylesheet: the
+// marker is a sibling of the input inside the title block, and where the input's text sits in
+// that block is a function of the input's own offset, padding and content box. The title is a
+// 28/32 heading at one width and a 19/24 pivot at the other, and its padding is spent outward
+// so a fill can appear without moving a glyph — a marker placed from constants would be right
+// at exactly one of those and silently wrong at the rest.
 [<Emit("""(function(peer, a, h){
   const input = document.querySelector('input[data-session-title]')
   const marker = document.querySelector('[data-cursor-peer="' + peer + '"]')
@@ -204,10 +211,16 @@ let private keepSurfacesPinned (selector: string) : unit = jsNative
   const value = input.value || ''
   const clamp = (i) => Math.max(0, Math.min(value.length, i | 0))
   const lo = Math.min(clamp(a), clamp(h)), up = Math.max(clamp(a), clamp(h)), head = clamp(h)
-  const padLeft = parseFloat(cs.paddingLeft) || 0, scroll = input.scrollLeft || 0
-  const xOf = (i) => padLeft + ctx.measureText(value.slice(0, i)).width - scroll
+  const px = (v) => parseFloat(v) || 0
+  const padLeft = px(cs.paddingLeft), padTop = px(cs.paddingTop), scroll = input.scrollLeft || 0
+  const left = input.offsetLeft + px(cs.borderLeftWidth) + padLeft
+  const top = input.offsetTop + px(cs.borderTopWidth) + padTop
+  const height = input.clientHeight - padTop - px(cs.paddingBottom)
+  const xOf = (i) => left + ctx.measureText(value.slice(0, i)).width - scroll
   const loX = xOf(lo)
   marker.style.left = loX + 'px'
+  marker.style.top = top + 'px'
+  marker.style.height = height + 'px'
   marker.style.width = Math.max(0, xOf(up) - loX) + 'px'
   if (marker.firstElementChild) marker.firstElementChild.style.left = (xOf(head) - loX) + 'px'
 })($0, $1, $2)""")>]

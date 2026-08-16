@@ -100,6 +100,14 @@ module Style =
     /// The keyboard focus ring, worn by every control that can take focus. One value, so a
     /// control cannot ship with half a ring (`outline-2` with no `outline`, which is how the
     /// terminal tabs used to draw nothing at all).
+    ///
+    /// NEVER compose it with `outline-none`, which is not the opposite of a ring but a
+    /// SETTING: Tailwind v4 emits `.outline-none{--tw-outline-style:none}` and every outline
+    /// utility resolves its style through that variable, so a control wearing both draws no
+    /// ring at all — the class is present, the CSS is served, and the keyboard gets nothing
+    /// (measured live: `outlineStyle: "none"` on a focused control carrying the full ring).
+    /// A control that must suppress the UA's own box wears `fieldBare`, whose signal is its
+    /// container's; a control that draws its own wears this and nothing else.
     let focusRing =
         "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue focus-visible:outline-offset-2"
 
@@ -510,23 +518,25 @@ module Style =
 
     let mainColumn = "flex-1 flex flex-col min-w-0 h-full"
 
-    /// The phone's band is a COMPRESSED one, not a different anatomy — but it has to hold what
-    /// the desktop's does not: the session id, which is out of flow above `md` and in flow
-    /// below it (see `titleId`). At 64px it did not. The 28/32 title plus its 16px id line is
-    /// 51px, and 51 + the 12px foot left the heading's box starting at y=0 — the title's own
-    /// top edge on the viewport's, which on a phone reads as a heading sliced off by the
-    /// browser (measured live at 390: `top: 0`). 80px is the smallest step that seats that
-    /// stack with air above it.
+    /// The phone's band is a ROW, not a compressed copy of the desktop's stack: the two
+    /// chevrons a phone always has in this band — the sidebar's and the terminals' — and the
+    /// title between them, on one line, because that is what they are. Stacked, the 28/32
+    /// heading over its id spent 80px of an 844px screen (10%) restating the tab you are on;
+    /// the title steps down a size (`titleInput`) and the id keeps hanging out of flow under
+    /// it (`titleId`), which seats the whole band in 56px.
+    ///
+    /// Above `md` the stack stays: the header and the sidebar wordmark share one bottom edge
+    /// (`h-band`, `items-end`), and that shared baseline is the whole reason the band exists.
     let header =
-        "relative h-band shrink-0 flex items-end gap-4 px-8 pb-5 max-md:h-20 max-md:px-4 max-md:pb-3 " + Stroke.dividerBottom
+        "relative h-band shrink-0 flex items-end gap-4 px-8 pb-5 "
+        + "max-md:h-14 max-md:items-center max-md:gap-2 max-md:px-4 max-md:pb-4 "
+        + Stroke.dividerBottom
 
-    /// Indent the heading one avatar column (20px + 12px gutter) so its left edge sits
-    /// exactly on the message-text column below.
-    let headerTitle = "ml-8"
     /// The header's right-hand group: sync status, and — only while the sidebar is off screen —
     /// the agent's absence. `pb-[1px]` is optical, not rhythm: it drops the 11px caps line's
-    /// baseline onto the wordmark/title baseline (pb-1 left it 3px high, measured live).
-    let headerAside = "ml-auto shrink-0 flex items-end gap-5 pb-[1px]"
+    /// baseline onto the wordmark/title baseline (pb-1 left it 3px high, measured live). On a
+    /// phone there is no wordmark to meet: the group centres on the title's line instead.
+    let headerAside = "ml-auto shrink-0 flex items-end gap-5 pb-[1px] max-md:items-center max-md:gap-3 max-md:pb-0"
     let headerStatus = "shrink-0"
 
     /// The agent's absence, FOLLOWING the surface that normally says it: shown only when the
@@ -547,46 +557,72 @@ module Style =
 
     /// The title block: the editable heading over its dim secondary id. `relative` anchors
     /// the absolutely-positioned remote-cursor overlays; `ml-8` keeps it on the content column.
-    let titleWrap = "relative flex flex-col min-w-0 ml-8"
+    /// On a phone the chevron is in the row and pays part of that indent: it occupies 12px
+    /// (a 24px target with `-m-1.5` around it) plus the row's 8px gap, so 12px more is what
+    /// puts the heading back on the 32px rail every message below it sits on — measured live
+    /// at 390, where the title's text and the timeline's caret both start at x=48.
+    /// `max-md:flex-1` is what makes the phone's band a row: the title takes the space the
+    /// two chevrons leave rather than sizing to an input's default 20 characters.
+    let titleWrap = "relative flex flex-col min-w-0 ml-8 max-md:ml-3 max-md:flex-1"
 
-    /// The title itself: the heading, worn by a text input. No chrome except a subtle dotted
-    /// underline (the editable affordance) that goes solid blue on focus. Edits in place, no
-    /// save button — the model is the collaborative `Title` text. `md:top-[2px]` is optical:
-    /// a 28/32 line box holds its baseline 2px higher over the shared bottom edge than the
-    /// wordmark's 32/36 does, so the input steps down to put both on one line (measured
-    /// live; mobile has no cross-column baseline to meet, so no nudge there).
+    /// The title itself: the heading, worn by a text input — and worn as a HEADING at rest.
+    /// It used to carry a dotted underline whose job was to say "this edits"; a rule under 28px
+    /// type is a rule, and it said it whether or not anyone was going to type. So the field
+    /// says it the way the composer band does instead: the surface lifts a tone under the
+    /// pointer and while focused, and the heading becomes a box you are typing in exactly when
+    /// you are typing in it. The 8px padding is spent OUTWARD (`-mx-2`), so the glyphs do not
+    /// move when the fill appears — the box grows around the text already on screen. Sideways
+    /// only: a phone's band seats the id 2px under the title's line box, and vertical padding
+    /// put the fill and its ring through it.
+    ///
+    /// `focusRing` is what a keyboard sees. The fill alone is a real focus signal for a
+    /// pointer, but it is a tone step on a dark ground; the ring is the product's own
+    /// vocabulary and the UI baseline's floor (AGENTS.md), so the two ride together.
+    ///
+    /// `md:top-[2px]` is optical: a 28/32 line box holds its baseline 2px higher over the
+    /// shared bottom edge than the wordmark's 32/36 does, so the input steps down to put both
+    /// on one line (measured live). A phone has no cross-column baseline to meet and no room
+    /// for 28px in a 56px row, so it takes the pivot step (19/24) and no nudge.
     let titleInput =
-        cls [ "w-full min-w-0 bg-transparent outline-none px-0 py-0"
-              Stroke.underline; Stroke.dotted; Stroke.faint; Stroke.focus
-              "font-extralight text-heading tracking-[-0.01em] lowercase text-ink"
+        cls [ "w-full min-w-0 bg-transparent border-0 px-2 -mx-2 py-0"
+              "hover:bg-surface-2 focus:bg-surface-2 transition-colors"; focusRing
+              "font-extralight text-heading max-md:text-pivot tracking-[-0.01em] lowercase text-ink"
               "placeholder:text-ink-faint truncate relative md:top-[2px]" ]
 
     /// The session id, shown small and dim under the title as a stable secondary identifier.
-    /// On md+ it hangs OUT OF FLOW below the title, into the header band's bottom padding:
-    /// in flow it added 18px under the title inside the bottom-aligned stack and lifted the
-    /// title's baseline that far off the wordmark's (measured 41.5 vs 61 at 1440). On mobile
-    /// the sidebar is off-canvas (no baseline to meet) and the band is only 64px, so the id
-    /// stays in flow there.
+    /// It hangs OUT OF FLOW below the title, into the band's bottom padding: in flow it added
+    /// 18px under the title inside the bottom-aligned stack and lifted the title's baseline
+    /// that far off the wordmark's (measured 41.5 vs 61 at 1440) — and on a phone it is what
+    /// made the band a stack rather than the row it now is.
+    /// `mt-1` rather than the old `mt-0.5`: the title now draws a focus ring 2px outside its
+    /// own box, and 2px of clearance is what keeps that ring off this line on a phone.
     let titleId =
-        "font-terminal text-code-sm text-ink-faint truncate mt-0.5 "
-        + "md:absolute md:top-full md:left-0 md:right-0"
+        "font-terminal text-code-sm text-ink-faint truncate mt-1 absolute top-full left-0 right-0"
 
     /// A collaborator's selection highlight in the title: an absolutely-positioned span the
-    /// browser sizes to `lo..hi` by measurement (the translucent background is set inline).
+    /// browser places and sizes against the input's own box by measurement (the translucent
+    /// background is set inline). The `h-8` is the desktop line box, and it is only what the
+    /// span wears until that measurement lands — the title is 28/32 at one width and 19/24 at
+    /// the other, so the height a marker keeps is the one the browser read off the field.
     /// Ignores pointer events so it never blocks typing; a collapsed selection has zero width.
     let remoteCursor = "absolute top-0 h-8 pointer-events-none rounded-sm"
     /// The caret bar inside a remote selection, offset to the peer's `head` by the browser.
-    let remoteCursorCaret = "absolute top-0 w-0.5 h-8 -ml-px"
+    /// Full height of the marker, so it answers to that one measurement rather than a second.
+    let remoteCursorCaret = "absolute top-0 w-0.5 h-full -ml-px"
     /// The peer-name pill floating just above a remote caret.
     let remoteCursorLabel =
         "absolute -top-3 left-0 whitespace-nowrap font-semibold text-[9px] leading-3 "
         + "tracking-[0.08em] uppercase px-1 text-bg"
 
-    /// The reopen chevron, floated in the gutter left of the title so it never shifts the
-    /// heading off the content column. Hidden while the sidebar is visible.
+    /// The reopen chevron. Above `md` it is floated in the gutter left of the title so that
+    /// collapsing the sidebar never shifts the heading off the content column. On a phone it
+    /// is IN the row — the band is a line of chrome with the title in it, and a control
+    /// hovering over that line would be the one thing on it that is not. It is a 24px target
+    /// occupying 12px of flow (`-m-1.5`), which with the row's 8px gap pays 20 of the 32px
+    /// indent the heading gives up there (`titleWrap`). Hidden while the sidebar is visible.
     let navReopen =
         "absolute left-2 bottom-4.5 w-6 h-6 place-items-center hidden md:[.nav-alt_&]:grid "
-        + "max-md:grid max-md:[.nav-alt_&]:hidden max-md:bottom-2.5"
+        + "max-md:static max-md:grid max-md:[.nav-alt_&]:hidden"
 
     // --- Timeline --------------------------------------------------------------------------
 
@@ -741,6 +777,12 @@ module Style =
     // --- Queue: editable until drained; the green leading edge says so ------------------------
 
     let queue = "shrink-0 flex flex-col gap-0.5 px-8 pt-4 max-md:px-4"
+
+    /// The same band holding nothing. Padding is what a band spends on the rows inside it, and
+    /// with no rows the `pt-4` was 16px of ground between the agent's activity strip and the
+    /// composer — a gap that said something was there. Nothing is there, so it takes no room:
+    /// the composer's rail sits directly under whatever is above it.
+    let queueEmpty = "shrink-0"
     let queueHead = "flex items-baseline gap-3 pb-2"
     let queueCount = caps + " text-green"
 
@@ -972,7 +1014,7 @@ module Style =
     /// control that invented its own border would be the third thing the chrome-consistency
     /// suite exists to rule out.
     let private terminalPropBase =
-        cls [ caps; "bg-transparent border-0 outline-none appearance-none cursor-pointer shrink-0"
+        cls [ caps; "bg-transparent border-0 appearance-none cursor-pointer shrink-0"
               "pl-1.5 pr-4 py-1 transition-colors"; focusRing ]
     let terminalProp = cls [ terminalPropBase; "text-ink-faint hover:text-ink" ]
     /// The same readout wearing the alarm, for the setting that lets commands run unasked. A

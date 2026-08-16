@@ -842,7 +842,7 @@ module View =
         html $"""
             <header class="{Style.header}">
               <button type="button" class="{Style.cls [ Style.navChevronForward; Style.navReopen ]}" aria-label="Show sidebar" data-nav-toggle="show" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.right}</button>
-              <div class="{Style.cls [ Style.titleWrap; Style.headerTitle ]}">
+              <div class="{Style.titleWrap}">
                 <input type="text" class="{Style.titleInput}" data-session-title aria-label="Session title" placeholder="session"
                        autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
                        value="{titleStr}"
@@ -896,7 +896,8 @@ module View =
                         <button type="button" class="{Style.btnIconDanger}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>{Icon.close}</button>
                       </div>
                     </article>""")
-        html $"""<section class="{Style.queue}" data-message-queue>{head}{items}</section>"""
+        let band = if List.isEmpty entries then Style.queueEmpty else Style.queue
+        html $"""<section class="{band}" data-message-queue>{head}{items}</section>"""
 
     /// The composer: ONE draft open, everyone else's as a line you can open.
     ///

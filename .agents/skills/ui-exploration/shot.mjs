@@ -38,6 +38,11 @@ ws.onmessage = e => { const m = JSON.parse(e.data); if (m.id && pending.has(m.id
 await new Promise(r => { ws.onopen = r })
 
 await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 2, mobile: w < 600 })
+// A headless page is never the focused window, so `:focus` matches NOTHING — `el.focus()`
+// moves `document.activeElement` and the focus styles do not apply, which is the hover trap
+// again wearing different clothes: the "focused" capture is the rest state. This makes the
+// page believe it is frontmost, so focus rings, focus fills and `:focus-within` render.
+await send('Emulation.setFocusEmulationEnabled', { enabled: true })
 await send('Page.enable', {})
 await send('Page.navigate', { url })
 await new Promise(r => setTimeout(r, 2500))
@@ -47,7 +52,10 @@ const metrics = await send('Runtime.evaluate', {
   returnByValue: true })
 console.log(metrics.result.value)
 if (expression) {
-  const extra = await send('Runtime.evaluate', { expression, returnByValue: true })
+  // `awaitPromise` so an expression can settle the page before the capture: focus a control
+  // and resolve a tick later, and the shot shows the state the transition arrived at rather
+  // than the frame it started from.
+  const extra = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
   console.log(extra.result.value ?? JSON.stringify(extra))
 }
 if (out !== '/dev/null') {
