@@ -72,6 +72,16 @@ module ConversationProjection =
     let private updateItem (messageId: MessageId) (f: ConversationItem -> ConversationItem) (items: ConversationItem list) =
         items |> List.map (fun item -> if item.MessageId = messageId then f item else item)
 
+    /// A failed turn's item body: whatever it managed to say, and why it stopped. Both, and
+    /// never only the first — a failure a reader cannot name is a failure they re-run to
+    /// diagnose. Separated by a blank line so the model's own prose stays distinguishable
+    /// from the machine's account of what happened to it.
+    let private withReason (body: string) (reason: string) : string =
+        let said = reason.Trim ()
+        if body.Trim () = "" then said
+        elif said = "" then body
+        else body + "\n\n" + said
+
     /// Why the given turn exists, if nobody asked for it. Matched on the turn id rather than
     /// taken on trust: a late event from a turn the wake did not start must not inherit the
     /// current one's reason.
@@ -297,9 +307,18 @@ module ConversationProjection =
         | AgentTurnFailed a ->
             match Map.tryFind a.AgentTurnId proj.ActiveAgentMessages with
             | Some messageId ->
-                // The streaming item keeps whatever partial body it accumulated.
+                // The streaming item keeps whatever partial body it accumulated, AND the
+                // reason joins it — the same thing the branch below does when no message
+                // had started, for the same reason. A turn that streamed nothing before it
+                // died (a tool-only turn, which is most of them) used to leave an empty item
+                // wearing a red "failed" and no way to find out why: the reason was in the
+                // event log, on a screen nobody has, and out of reach of the NEXT turn's
+                // transcript too, so the agent could not read what had happened to it either.
                 { proj with
-                    Items = proj.Items |> updateItem messageId (fun item -> { item with Status = Failed })
+                    Items =
+                        proj.Items
+                        |> updateItem messageId (fun item ->
+                            { item with Body = withReason item.Body a.Reason; Status = Failed })
                     ActiveAgentMessages = Map.remove a.AgentTurnId proj.ActiveAgentMessages }
             | None ->
                 // The turn failed before its message started: the failure still shows in

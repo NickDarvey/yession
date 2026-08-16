@@ -185,7 +185,7 @@ let private turnTests =
                 [ "partial", ConversationItemStatus.Interrupted ]
                 "late deltas are ignored once the item left Streaming"
 
-        testCase "a turn failure marks the streaming item Failed (partial body kept)" <| fun () ->
+        testCase "a turn failure marks the streaming item Failed, keeping what it said and adding why it stopped" <| fun () ->
             let projection, _ =
                 ConversationProjection.applyEvents
                     None
@@ -195,8 +195,24 @@ let private turnTests =
                     ConversationProjection.empty
             Expect.equal
                 (projection.Items |> List.map (fun i -> i.Body, i.Status))
-                [ "partial", ConversationItemStatus.Failed ]
+                [ "partial\n\noverloaded", ConversationItemStatus.Failed ]
                 "the streaming item fails in place"
+
+        // The screenshot case, and the one the projection used to drop on the floor: a turn
+        // that spent itself on tool calls and never streamed a word. The reason was in the
+        // event log and nowhere a reader — or the NEXT turn, which reads this projection as
+        // its transcript — could reach it, so an empty red item was the whole account.
+        testCase "a turn that said nothing before it failed still says why" <| fun () ->
+            let projection, _ =
+                ConversationProjection.applyEvents
+                    None
+                    [ envelope 0L (AgentMessageStarted { AgentTurnId = turnId; MessageId = agentMessageId })
+                      envelope 1L (AgentTurnFailed { AgentTurnId = turnId; Reason = "stopped at its step limit" }) ]
+                    ConversationProjection.empty
+            Expect.equal
+                (projection.Items |> List.map (fun i -> i.Body, i.Status))
+                [ "stopped at its step limit", ConversationItemStatus.Failed ]
+                "the reason is the item's account of itself"
 
         testCase "a turn that fails before its message started still shows in the conversation" <| fun () ->
             let projection, _ =

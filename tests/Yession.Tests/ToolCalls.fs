@@ -147,7 +147,8 @@ let private servicesOver (service: Repos.ReposService) : Commands.CommandService
 let private cloningAt (branch: string) =
     openToolSession (
         servicesOver (
-            reposAnswering (fun repo -> async { return Ok { Repo = repo; Branch = branch; Dirty = false } })))
+            reposAnswering (fun repo ->
+                async { return Ok { Repo = repo; Branch = branch; Dirty = false; Path = "/repos/octo/hello" } })))
 
 /// A session whose `add_repo` does not come back until the test says so — a clone in
 /// progress, which is what every first `add_repo` is for its first several seconds.
@@ -160,7 +161,7 @@ let private slowlyCloning () : ToolSession * (unit -> unit) =
                 reposAnswering (fun repo ->
                     async {
                         do! cloning
-                        return Ok { Repo = repo; Branch = "main"; Dirty = false }
+                        return Ok { Repo = repo; Branch = "main"; Dirty = false; Path = "/repos/octo/hello" }
                     })))
     session, fun () -> finish ()
 
@@ -186,6 +187,16 @@ let private tests' =
                 let text = answered answer
                 Expect.stringContains text "added octo/hello" "the service's own words came back"
                 Expect.isFalse (text.Contains "WAITING") "nobody was waiting on anything"
+            }
+
+        // The answer has to carry the one fact the next step needs. "added octo/hello" on
+        // its own leaves the path to be guessed, and a guess is spent as a TERMINAL COMMAND
+        // — `ls ~/repos`, and the next guess after that — off a turn that has a ceiling.
+        testCaseAsync "the answer names the path a terminal reaches the checkout at" <|
+            async {
+                let session = cloningAt "main"
+                let! answer = addRepo session "octo/hello"
+                Expect.stringContains (answered answer) "/repos/octo/hello" "where to cd, not just what was cloned"
             }
 
         // A repo name the domain refuses never reaches the gate, and the model is told what
