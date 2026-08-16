@@ -106,7 +106,8 @@ let private representativeModel : ClientModel =
           // Long enough to be worth saying, so the catch-up status and its offsets are on
           // screen for the checklist. A brief one is deliberately silent (`CatchUpIsSlow`).
           CatchUpIsSlow = true
-          Feed = FeedLive }
+          Feed = FeedLive
+          MissingBefore = None }
       Agent = { ActiveTurn = Some turnId }
       Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } } } ]
       // The roster names a draft's author even when they are not here: a label, never a peer id.

@@ -338,6 +338,10 @@ module Dom =
         let composerKeys = "Enter sends · Shift+Enter line · Alt+Enter paragraph"
         /// What the timeline's pulse means, for a reader who cannot see it pulse (Plan 20).
         let readingHistory = "Reading this session's history"
+        /// What stands where history this device does not hold would be (Plan 20). Said only
+        /// while nothing is coming to fill it — see `View.chat` — so it is a fact about this
+        /// client's own store rather than a complaint about the network.
+        let historyMissingLocally = "earlier history is not on this device"
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.

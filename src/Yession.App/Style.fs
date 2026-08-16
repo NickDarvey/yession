@@ -590,8 +590,16 @@ module Style =
 
     // --- Timeline --------------------------------------------------------------------------
 
+    /// The reading column. `break-words` is not typography, it is containment: a scroller on
+    /// the vertical axis is a scroller on BOTH (`overflow-x` computes to `auto` beside an
+    /// `auto` `overflow-y`), so anything that hangs out of this column takes the whole
+    /// conversation sideways with it — under a header that stays put, which is what makes it
+    /// read as a broken page rather than as a wide line. A phone column is ~326px and an agent
+    /// says things like `/home/user/.yession/sessions/AAZFRYD.../repos`, so a token wider than
+    /// the column is the ordinary case, not the pathological one. `overflow-wrap` inherits, so
+    /// the rule is stated once for everything the timeline will ever hold.
     let timeline =
-        "flex-1 overflow-y-auto px-8 py-6 flex flex-col gap-6 max-md:px-4 max-md:py-4 max-md:gap-5"
+        "flex-1 overflow-y-auto px-8 py-6 flex flex-col gap-6 max-md:px-4 max-md:py-4 max-md:gap-5 break-words"
 
     /// Message rhythm: one 16px meta line + 8px gap + n×24px body lines, on a
     /// `20px avatar · 12px gutter · content` grid.
@@ -600,8 +608,12 @@ module Style =
     let messageMeta = "flex items-baseline gap-2.5"
     let who = caps + " text-ink-dim"
     let whoAgent = caps + " text-blue"
-    let messageBody = "col-start-2 font-light text-body text-ink"
-    let messageBodyStreaming = "col-start-2 font-light text-body text-ink-dim"
+    /// `min-w-0` because a grid item's automatic minimum is its MIN-CONTENT width, so the
+    /// content column was sized by the longest thing in it rather than by the grid: one URL in
+    /// one message made this box 619px wide inside a 326px column (measured at 390). The track
+    /// is what decides how wide the column is; the message is what has to fit in it.
+    let messageBody = "col-start-2 min-w-0 font-light text-body text-ink"
+    let messageBodyStreaming = "col-start-2 min-w-0 font-light text-body text-ink-dim"
 
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
@@ -683,6 +695,12 @@ module Style =
     let actNote = "max-w-[46rem] pl-[32px]"
     let actNoteText = caps + " text-ink-faint"
 
+    /// History this device does not hold, standing at the top of the timeline where it would
+    /// have been. An act note's voice and column, because it is the same kind of line — a
+    /// thing that happened to this conversation rather than a thing anyone said.
+    let historyGap = actNote
+    let historyGapText = actNoteText
+
     /// Read-only rendered Markdown in the timeline (the mirror of the composer's live
     /// formatting). Preflight strips heading/list defaults, so each rendered element carries
     /// its own utilities — the same "F# composes utilities, no hand CSS" rule as everything
@@ -701,7 +719,12 @@ module Style =
     // Inline code keeps the paragraph's line box (no leading of its own), so only the size
     // is set — 13px, the small step, but written bare to leave line-height inherited.
     let proseCode = "font-terminal text-[13px] bg-surface-2 text-ink px-1 py-0.5"
-    let prosePre = "font-terminal text-code leading-5 bg-surface-2 text-ink p-3 [&:not(:first-child)]:mt-2 overflow-x-auto whitespace-pre-wrap"
+    /// A fenced block WRAPS, as the terminal's own output does — it does not scroll inside
+    /// itself. The `overflow-x-auto` it used to carry was the second answer to a question the
+    /// column already answers: with the timeline's `break-words` reaching in here, no line can
+    /// exceed the block, so the scroll container never had anything to scroll and only hid
+    /// which rule was doing the work.
+    let prosePre = "font-terminal text-code leading-5 bg-surface-2 text-ink p-3 [&:not(:first-child)]:mt-2 whitespace-pre-wrap"
     let proseQuote = Stroke.lead + " " + Stroke.hair + " pl-3 text-ink-dim [&:not(:first-child)]:mt-2"
     let proseLink = "text-blue underline decoration-1 underline-offset-2 hover:text-blue-bright"
     let proseHr = "border-0 " + Stroke.dividerTop + " my-3"

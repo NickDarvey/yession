@@ -1269,6 +1269,25 @@ module View =
         //
         // `aria-hidden`, because it is a typographic mark rather than content: a reader that
         // cannot see it is told the timeline is empty by the timeline being empty.
+        // History this client's own store does not hold (Plan 20), said ONLY while nothing is
+        // coming to fill it. The feed repairs a hole by reading from the cursor the replay
+        // parked at, so while this client can read, what is missing is arriving — and a line
+        // that appeared on every cold open and vanished a round trip later would be the red
+        // "history paused" this replaced, one voice quieter. What is left is the case nobody
+        // can fix from here: a client that cannot reach its session, holding a conversation
+        // that starts in the middle. The gate is the degradation strip's own — a settled,
+        // REASONED disconnection — so a client that has not yet asked `/me` says nothing.
+        let missing =
+            match model.EventConsumer.MissingBefore, model.Connection, model.EventConsumer.Feed with
+            | None, _, _ -> None
+            | Some _, Disconnected (Some _), _
+            | Some _, _, FeedStalled _ ->
+                Some (
+                    html $"""
+                        <p class="{Style.historyGap}" data-history-gap>
+                          <span class="{Style.historyGapText}">{Dom.Text.historyMissingLocally}</span>
+                        </p>""")
+            | Some _, _, _ -> None
         let body =
             match rows, model.HistoryRead with
             // Nothing here, and this client has not looked yet — which after the local store
@@ -1282,10 +1301,15 @@ module View =
                        <span class="{Style.srOnly}">{Dom.Text.readingHistory}</span>
                      </div>""" ]
             // Looked, and there is genuinely nothing: the caret now only ever means what it
-            // has always said, which is why it can stay wordless and decorative.
+            // has always said, which is why it can stay wordless and decorative. Unless what
+            // is known is that history is missing — then the timeline is truncated rather
+            // than empty, and the line saying so stands where the caret would have.
             | [], true ->
-                [ html $"""<div class="{Style.timelineIdle}" aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
-            | _ -> items
+                match missing with
+                | Some line -> [ line ]
+                | None ->
+                    [ html $"""<div class="{Style.timelineIdle}" aria-hidden="true"><span class="{Style.caretIdle}"></span></div>""" ]
+            | _ -> Option.toList missing @ items
         html $"""<section class="{Style.timeline}" data-conversation>{body}</section>"""
 
     /// Everything a block printed, as TEXT — the cheap read of the same bytes the recording

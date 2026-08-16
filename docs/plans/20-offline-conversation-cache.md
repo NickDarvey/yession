@@ -123,6 +123,16 @@ Four properties, and each one deletes something this plan previously had to carr
 - **`cache.keys()` is the index.** Entries come back in insertion order, which is the order they
   were fetched, which is ascending — so a replay is "read them in order" with no parsing of the
   URLs and no arithmetic anywhere in the client.
+
+  **Correction (later fix).** Insertion order is not ascending, and the store cannot promise that
+  it ever will be: `cache.put` of an address already held DELETES the entry and appends the new
+  one, so two tabs of one session fetching the same range moves the earliest answer to the END of
+  the enumeration. A walk that trusted it read a later answer first and reported every event
+  before it as missing — a client whose store held the whole conversation flashing "22 event(s)
+  missing locally from offset 0" over its own cold open. The replay now orders by what the
+  answers HOLD (their first offset, and for a transcript the first-line header that already rides
+  beside the bytes), which is the same rule the gap detection follows: read the events, never the
+  addresses, and never the store's own order.
 - **`navigator.storage.persist()` covers it.** Requested once, best-effort, alongside the doc
   store's identical exposure.
 - **The cache NAME carries the session id**, which closes the recycled-port collision inside the
@@ -166,7 +176,7 @@ code learns where bytes come from — `EventFeed` is unchanged in shape.
 /// cache that cannot be opened reads empty, and the client asks the network from
 /// its cursor exactly as it does today.
 type HistoryCache =
-    { Stored : unit -> Async<string list>         // cache.keys (), insertion order
+    { Stored : unit -> Async<string list>         // cache.keys (), in no promised order
       Read   : string -> Async<string option>     // one stored answer, or a miss
       Write  : string -> string -> Async<unit> }  // resolved url -> body, after a settled fetch
 ```
@@ -457,8 +467,9 @@ caches nothing at all. Recorded in full above.
 
 **A linked chain**: `Link: rel=next` on every range and a mutable `/events/head` as the entry
 point. It fixed the tail and made enumeration a walk rather than a guess, and it carried three
-things the cursor does not need. Its `next` header duplicated what the store already knows,
-because `cache.keys()` enumerates in insertion order. Its `head` route duplicated what a cursor
+things the cursor does not need. Its `next` header duplicated what the answers already carry —
+their own offsets, which is what a replay orders by (see the correction above). Its `head` route
+duplicated what a cursor
 request answers for free with `204`. And the draft had the feed follow a link *and* fall back to
 minting a range when it had none — a fallback beside a primary, which is exactly the shape the
 no-belt-and-braces rule names.
