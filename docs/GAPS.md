@@ -351,12 +351,20 @@ Items are roughly ordered by how much they matter.
   option), and the queued-message UI has no "locked" visual during the drain broadcast
   window (a peer can briefly type into an entry that is about to vanish — the edit is
   safely discarded, but the UX flickers).
-- **A turn has a step ceiling and cannot ask for more.** `Agent.maxTurns` bounds one turn at
-  32 model turns; past it the SDK stops the query and the turn ENDS — the item keeps whatever
-  it streamed and now carries the reason (`Conversation.applyEvent`), so a person can say
-  "carry on" and the next turn resumes from the transcript. What is missing is anything
-  automatic: no continuation turn, no budget the model can see, and no signal to it that it is
-  approaching the ceiling. A long errand is therefore a conversation, not one call.
+- **A turn has a step ceiling, and the ceiling is ours.** `maxTurns` is OPTIONAL on the Agent
+  SDK's `query()`, and unset means no cap — interactive Claude Code sets none, and `claude -p`
+  takes `--max-turns` only when an automation asks for one. So `error_max_turns` is a state
+  this repository opted into: `Agent.maxTurns` bounds one turn at 32 model turns, past which
+  the SDK stops the query and the turn ENDS. The item keeps whatever it streamed and now
+  carries the reason (`Conversation.applyEvent`), so a person can say "carry on" and the next
+  turn resumes from the transcript.
+
+  It is opted into because the setting differs from a terminal's. A turn spends the TURN
+  HUMAN's credential in a session other people can watch and nobody need be watching, so the
+  interrupt — which is what bounds a runaway turn in Claude Code — is a bound only while
+  somebody is present. What is missing is everything automatic: no continuation turn, no
+  budget the model can see, and no signal to it that it is approaching the ceiling. A long
+  errand is therefore a conversation, not one call.
 - **Repo integration is the read-only bootstrap slice** ([Plan 14](plans/14-git-repos.md)):
   typed clone-and-orient verbs beside the agent, one repos dir shared into the
   WorkSandbox, GitHub sign-in per user over the device flow. Remaining, deliberate:
