@@ -1077,8 +1077,17 @@ module View =
             let wokeInner =
                 match item.Woke with
                 | None -> Lit.nothing
-                | Some CommandFinished ->
-                    html $"""<span class="{Style.statusFaint}" data-message-woke="{Dom.Text.wokeCommandFinished}" title="{Dom.Text.turnWokeCommandFinished}">{Dom.Text.turnWoke}</span>"""
+                | Some reason ->
+                    // One word on screen whatever the reason — the meta line is three short
+                    // words wide, and a turn that ran unasked says the same thing about
+                    // itself however it came to. WHICH reason lives in the hook a test reads
+                    // and the title a person can ask for.
+                    let token, title =
+                        match reason with
+                        | CommandFinished -> Dom.Text.wokeCommandFinished, Dom.Text.turnWokeCommandFinished
+                        | StreamEnded _ -> Dom.Text.wokeStreamEnded, Dom.Text.turnWokeStreamEnded
+                        | IntegrationLost _ -> Dom.Text.wokeIntegrationLost, Dom.Text.turnWokeIntegrationLost
+                    html $"""<span class="{Style.statusFaint}" data-message-woke="{token}" title="{title}">{Dom.Text.turnWoke}</span>"""
             let statusInner =
                 match item.Status with
                 | Complete -> Lit.nothing

@@ -97,6 +97,10 @@ module Codec =
                 | "system" -> Decode.succeed System
                 | other -> Decode.fail (sprintf "Unknown actor kind: %s" other)) }
 
+    let terminalId : Codec<TerminalId> =
+        { Encode = TerminalId.value >> Encode.string
+          Decode = viaSmartCtor TerminalId.create Decode.string }
+
     /// The three parties behind an act, on the wire (Plan 20). Not a nested object: these
     /// keys sit at the payload's top level and always have, and an event log is read back for
     /// the life of its session — so what changed is where the value lives in F#, and nothing
@@ -163,11 +167,17 @@ module Codec =
         { Encode =
             (fun r ->
                 match r with
-                | CommandFinished -> Encode.object [ "kind", Encode.string "commandFinished" ])
+                | CommandFinished -> Encode.object [ "kind", Encode.string "commandFinished" ]
+                | StreamEnded id ->
+                    Encode.object [ "kind", Encode.string "streamEnded"; "terminalId", terminalId.Encode id ]
+                | IntegrationLost id ->
+                    Encode.object [ "kind", Encode.string "integrationLost"; "terminalId", terminalId.Encode id ])
           Decode =
             Decode.field "kind" Decode.string
             |> Decode.andThen (function
                 | "commandFinished" -> Decode.succeed CommandFinished
+                | "streamEnded" -> Decode.field "terminalId" terminalId.Decode |> Decode.map StreamEnded
+                | "integrationLost" -> Decode.field "terminalId" terminalId.Decode |> Decode.map IntegrationLost
                 | other -> Decode.fail (sprintf "Unknown wake reason: %s" other)) }
 
     let private agentTurnStarted : Codec<AgentTurnStarted> =
@@ -391,10 +401,6 @@ module Codec =
             Decode.object (fun get ->
                 { CommandCompleted.CommandId = get.Required.Field "commandId" commandId.Decode
                   CommandCompleted.Result = get.Required.Field "result" commandResult.Decode }) }
-
-    let terminalId : Codec<TerminalId> =
-        { Encode = TerminalId.value >> Encode.string
-          Decode = viaSmartCtor TerminalId.create Decode.string }
 
     let blockId : Codec<BlockId> =
         { Encode = BlockId.value >> Encode.string

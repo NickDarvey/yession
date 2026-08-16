@@ -368,6 +368,10 @@ module Dom =
         /// Why a turn nobody asked for exists (Plan 20, stage 2). The token a test reads off
         /// `data-message-woke`; the word beside it on screen is `turnWoke`.
         let wokeCommandFinished = "command-finished"
+        /// The vocabulary's other two reasons (Plan 20, stage 5). One token per reason, so a
+        /// test asserting WHY a turn exists never has to read the sentence a person reads.
+        let wokeStreamEnded = "stream-ended"
+        let wokeIntegrationLost = "integration-lost"
         /// What a woken turn wears in the chat, in the slot its siblings — *streaming*,
         /// *interrupted* — already occupy. A word rather than a new glyph: this design says
         /// a message's state in one lowercase word, and a mark nobody can decode without a
@@ -376,6 +380,8 @@ module Dom =
         /// The same fact, at length, for the reader who wants it. Never the visible label:
         /// the chat's meta line is three short words wide.
         let turnWokeCommandFinished = "The agent picked this up on its own: a command it left running in the background finished."
+        let turnWokeStreamEnded = "The agent picked this up on its own: a terminal it had been working in was attached to a stream that has now ended."
+        let turnWokeIntegrationLost = "The agent picked this up on its own: a terminal it had a command running in stopped reporting, so nothing further will say how that command ended."
         // Conversation item status.
         let complete = "complete"
         let streaming = "streaming"

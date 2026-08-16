@@ -528,28 +528,94 @@ module AgentWake =
     /// safe direction an unreadable owner already takes elsewhere — run on nothing rather
     /// than on somebody else's credential — and the alternative, picking whoever spoke most
     /// recently, would run one person's work as another.
-    let pending (events: SessionEvent list) : ActorRef option =
+    ///
+    /// **Where a terminal-shaped reason finds its owner** (Plan 20, stage 5). A stream ending
+    /// and an integration going missing are facts about a TERMINAL, and `TerminalOpened`
+    /// records only who asked for it — which for the agent's own terminals is the agent, an
+    /// actor with no credential of its own. So those reasons take the owner of the most recent
+    /// agent-authored block in that terminal: the turn that last did work there is the turn
+    /// this concerns. A terminal the agent has never run anything in wakes nothing, which is
+    /// the same safe direction as an unreadable owner and, here, also the honest answer — a
+    /// source ending under a terminal the agent never used is not the agent's news.
+    ///
+    /// **Precedence, when several reasons are owed at once.** They resolve to ONE turn, whose
+    /// attribution is the most consequential of them; the rest are inside that turn's digest
+    /// window regardless, exactly as several completions already coalesce. The order is how
+    /// much each changes what the agent should do next: an integration loss means its queue is
+    /// HELD and nothing further will arrive; a stream ending means a source it was reading is
+    /// gone; a completion is ordinary news.
+    let private rank =
+        function
+        | IntegrationLost _ -> 0
+        | StreamEnded _ -> 1
+        | CommandFinished -> 2
+
+    /// Why a turn is owed and who it would run as, or `None` when nothing is.
+    let pendingReason (events: SessionEvent list) : (WakeReason * ActorRef) option =
+        // Owed reasons are collected rather than short-circuited, because precedence is across
+        // KINDS and the highest-ranked one can arrive last.
+        let better (candidate: WakeReason * ActorRef) (best: (WakeReason * ActorRef) option) =
+            match best with
+            // Strictly better, so within one rank the FIRST owed still wins — the rest
+            // coalesce into it, as they always have.
+            | Some (kept, _) when rank (fst candidate) >= rank kept -> best
+            | _ -> Some candidate
+        // Which terminals take their bytes from a stream somebody else produces (Plan 16,
+        // part D) — the only ones whose CLOSE is a source ending rather than a shell being
+        // shut. A sandbox shell closing is somebody deciding, usually the agent itself
+        // through `close_terminal`, and waking an agent to tell it what it just did would be
+        // a loop with a delay in it.
+        let attached =
+            events
+            |> List.choose (function
+                | SessionEvent.TerminalOpened e when Option.isNone e.Sandbox -> Some (TerminalId.value e.TerminalId)
+                | _ -> None)
+            |> Set.ofList
         events
         |> List.fold
-            (fun (background: Map<string, ActorRef>, woken: ActorRef option) event ->
+            (fun (background: Map<string, ActorRef>, lastAgent: Map<string, ActorRef>, owed) event ->
                 match event with
                 // A new turn takes everything before it: whatever those blocks did, that
-                // turn's digest reported it.
-                | AgentTurnStarted _ -> Map.empty, None
-                | SessionEvent.TerminalBlockStarted b when b.Background ->
-                    match Authority.onBehalfOf b.Authority with
-                    | Some owner -> Map.add (BlockId.value b.BlockId) owner background, woken
-                    | None -> background, woken
+                // turn's digest reported it. `lastAgent` is NOT reset — it is not a debt, it
+                // is who the agent has been in that terminal, and that outlives the turn.
+                | AgentTurnStarted _ -> Map.empty, lastAgent, None
+                | SessionEvent.TerminalBlockStarted b ->
+                    let lastAgent =
+                        match Authority.onBehalfOf b.Authority with
+                        | Some owner -> Map.add (TerminalId.value b.TerminalId) owner lastAgent
+                        | None -> lastAgent
+                    let background =
+                        match b.Background, Authority.onBehalfOf b.Authority with
+                        | true, Some owner -> Map.add (BlockId.value b.BlockId) owner background
+                        | _ -> background
+                    background, lastAgent, owed
                 | SessionEvent.TerminalBlockCompleted b ->
-                    // The FIRST owed turn wins, and the rest coalesce into it: they are all
-                    // reported by the digest of whichever turn runs, so a second wake would
-                    // be a second turn reading the same window.
-                    let owner = Map.tryFind (BlockId.value b.BlockId) background
-                    background, (match woken with Some _ -> woken | None -> owner)
-                | _ -> background, woken)
-            (Map.empty, None)
-        |> snd
+                    let owed =
+                        match Map.tryFind (BlockId.value b.BlockId) background with
+                        | Some owner -> better (CommandFinished, owner) owed
+                        | None -> owed
+                    background, lastAgent, owed
+                // Only a terminal the agent has worked in, and only the loss — the RESTORE
+                // needs no turn, because a queue that started moving again says so by moving.
+                | SessionEvent.TerminalIntegrationLost e ->
+                    let owed =
+                        match Map.tryFind (TerminalId.value e.TerminalId) lastAgent with
+                        | Some owner -> better (IntegrationLost e.TerminalId, owner) owed
+                        | None -> owed
+                    background, lastAgent, owed
+                | SessionEvent.TerminalClosed e when Set.contains (TerminalId.value e.TerminalId) attached ->
+                    let owed =
+                        match Map.tryFind (TerminalId.value e.TerminalId) lastAgent with
+                        | Some owner -> better (StreamEnded e.TerminalId, owner) owed
+                        | None -> owed
+                    background, lastAgent, owed
+                | _ -> background, lastAgent, owed)
+            (Map.empty, Map.empty, None)
+        |> fun (_, _, owed) -> owed
+
+    /// The actor a woken turn would run AS, for the readers that do not need the reason.
+    let pending (events: SessionEvent list) : ActorRef option = pendingReason events |> Option.map snd
 
     /// Whether a turn is owed at all. `pending` says who; this says whether, for the readers
     /// that only need the question answered.
-    let due (events: SessionEvent list) : bool = pending events |> Option.isSome
+    let due (events: SessionEvent list) : bool = pendingReason events |> Option.isSome
