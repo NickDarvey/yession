@@ -396,6 +396,10 @@ let private setInputValue (el: obj) (value: string) : unit = jsNative
 /// same element does not stack a second handler on it — and one that creates a fresh element
 /// gets its own.
 ///
+/// Because it is once, the handlers passed here must decide from the ELEMENT what they are
+/// acting on: an input Lit hands to a second terminal is this same element with a new
+/// `data-terminal-input`, and these listeners are the ones it keeps.
+///
 /// Enter RUNS the command, the same bargain the message composer strikes (`Editor`'s keymap).
 /// A command line is one line, so there is no new line for Alt-Enter to insert and none is
 /// bound. `isComposing` guards the IME: mid-composition Enter commits the candidate word, and
@@ -908,34 +912,52 @@ let private start () =
         /// identity), so a remote keystroke in one does not necessarily reach the model.
         let syncTerminalInputs () =
             for el in terminalInputs () do
-                let key = terminalInputKey el
-                if not (isNull (box key)) && key <> "" then
-                    let reportFocus () =
+                // WHICH line an input is, and whether it may be written to, are read off the
+                // element every time a handler runs — never captured when it was bound.
+                //
+                // Lit reuses one `<input>` across a tab switch (same template, same position,
+                // a different terminal's key) and the handlers are attached once per element,
+                // so a captured key outlives the terminal it named: keystrokes went into the
+                // terminal the input was FIRST rendered for while its value was pushed from
+                // the one it now shows, which wiped the line being typed into on every render
+                // and left the command in the other terminal, last character only. Same for
+                // read-only: a collaborator's slot and your own composer are the same
+                // position in that template, so "bind only the editable one" bound whichever
+                // it was first and got the other wrong ever after.
+                let lineOf () =
+                    let key = terminalInputKey el
+                    if isNull (box key) || key = "" then None
+                    // A read-only line (a collaborator's slot) still shows live text; it just
+                    // never writes back, and never claims a caret.
+                    elif terminalInputReadOnly el then None
+                    else Some key
+                let reportFocus () =
+                    match lineOf () with
+                    | Some key ->
                         match fieldOfKey key, inputSelection el with
                         | Some field, Some (anchor, head) ->
                             let root = box (texts.Text key)
                             let enc i = ProseMirror.relPosFromTypeIndex root i |> ProseMirror.encodeRel
                             sendFocus (Some { Field = field; Pos = { Anchor = enc anchor; Head = enc head } })
                         | _ -> sendFocus None
-                    // Enter runs a command from a composer SLOT — the line you are writing.
-                    // A queued command's line has already been sent; Enter there does
-                    // nothing rather than queueing it twice.
-                    let onEnter () =
-                        match fieldOfKey key with
-                        | Some (TerminalDraftBody (terminal, author)) ->
-                            connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
-                        | _ -> ()
-                    // A read-only line (a collaborator's slot) still shows live text; it just
-                    // never writes back, and never claims a caret.
-                    if not (terminalInputReadOnly el) then
-                        bindTerminalInput
-                            el
-                            (fun () -> TerminalText.setTo texts key (inputValue el))
-                            reportFocus
-                            (fun () -> sendFocus None)
-                            onEnter
-                        |> ignore
-                    setInputValue el (TerminalText.read texts key)
+                    | None -> sendFocus None
+                // Enter runs a command from a composer SLOT — the line you are writing.
+                // A queued command's line has already been sent; Enter there does
+                // nothing rather than queueing it twice.
+                let onEnter () =
+                    match lineOf () |> Option.bind fieldOfKey with
+                    | Some (TerminalDraftBody (terminal, author)) ->
+                        connectionRef |> Option.iter (fun c -> c.SendTerminalDraft terminal author)
+                    | _ -> ()
+                bindTerminalInput
+                    el
+                    (fun () -> lineOf () |> Option.iter (fun key -> TerminalText.setTo texts key (inputValue el)))
+                    reportFocus
+                    (fun () -> sendFocus None)
+                    onEnter
+                |> ignore
+                let key = terminalInputKey el
+                if not (isNull (box key)) && key <> "" then setInputValue el (TerminalText.read texts key)
 
         /// Fetch the keyframes the open tabs need, once each (Plan 14, stage 4). A keyframe
         /// is immutable at a position that never moves, so the browser cache serves the
