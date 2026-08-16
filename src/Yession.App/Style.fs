@@ -664,6 +664,20 @@ module Style =
     /// The arguments as recorded. Dim and truncated: this is evidence, not content.
     let chatToolArgs = "font-terminal text-code-sm text-ink-faint truncate min-w-0 flex-1"
 
+    /// One agent burst (Plan 20, stage 4). A `<details>` on the same content column the chips
+    /// and tool runs sit on, for the same reason: a turn that ran twelve commands reads as
+    /// one line until somebody wants the twelve.
+    let chatTaskCard = "w-full max-w-[46rem] pl-[32px] py-0.5"
+    /// Its summary. A real `<summary>`, so the disclosure is the browser's and arrives
+    /// keyboard-operable and correctly announced.
+    let chatTaskSummary =
+        cls [ "flex items-baseline gap-2 cursor-pointer list-none"
+              "text-ink-dim hover:text-ink transition-colors duration-150 ease-out"
+              focusRing ]
+    /// The counts, at the end of the summary line. Baseline-aligned with the sentence beside
+    /// them so the glyphs sit on the text's line rather than floating above it.
+    let chatTaskCounts = "flex items-baseline gap-2 shrink-0"
+
     /// A repo note in the timeline (Plan 14): one quiet act-line, indented past the
     /// avatar gutter so the reading edge lines up with message bodies.
     let actNote = "max-w-[46rem] pl-[32px]"
@@ -1022,24 +1036,18 @@ module Style =
     /// the strip rather than only from inside it.
     let terminalTabPeers = "inline-flex items-center gap-0.5 ml-1.5 align-[1px]"
 
-    /// A tab a person opened from the chat (Plan 14, stage 2): the tab itself plus its own
-    /// close control. A group rather than one control, because a `<button>` inside a
-    /// `<button>` is not markup — and the two do different things.
-    let paneTabGroup = "inline-flex items-stretch shrink-0"
-    /// The pin control, sized to the tab band beside it (Plan 20, stage 1).
+    /// The pin is a MARK now, not a control (Plan 20, stage 1 revised).
     ///
-    /// Two faces of ONE control, and neither is destructive: pinned is blue, exactly as the
-    /// selected tab is blue, because both mean "this is mine and it stays"; unpinned is the
-    /// faint ink every quiet affordance wears. It replaced a close control in the `err`
-    /// face, and the colour change is the substance — nothing in the strip destroys anything
-    /// any more, so nothing in it wears the danger tone.
-    let paneTabPin =
-        cls [ "bg-transparent cursor-pointer px-1.5 grid place-items-center transition-colors"
-              Stroke.clear; "text-ink-faint hover:text-blue"; focusRing ]
-
-    let paneTabPinned =
-        cls [ "bg-transparent cursor-pointer px-1.5 grid place-items-center transition-colors"
-              Stroke.clear; "text-blue hover:text-ink"; focusRing ]
+    /// It used to be a second button beside every keepable tab, wearing one of two faces so
+    /// that a glance could tell pinned from not. But a strip of tabs each trailing its own
+    /// button is a strip of two controls per terminal, and on a touch screen the quiet one
+    /// was a 24px target beside a 30px one. The gesture replaced it: activating the tab you
+    /// are ALREADY on is the toggle, which every pointer, finger and keyboard already has.
+    ///
+    /// So this says one thing — that the tab is kept — and only when it is true. Blue,
+    /// exactly as the selected tab's rule is blue, because both mean "this is mine and it
+    /// stays". Nothing here destroys anything, so nothing here wears the danger tone.
+    let paneTabPinMark = "ml-1.5 text-blue"
 
     /// The pane's body — whatever the selected tab shows. It takes the column's remaining
     /// height so the thing inside it scrolls rather than the column.

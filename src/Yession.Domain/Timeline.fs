@@ -98,6 +98,56 @@ module TimelineItem =
         | TimelineStretch stretch -> stretch.Offset
         | TimelineToolUse (offset, _) -> offset
 
+/// What a task card says about one of its commands — coarser than `TerminalBlockStatus`, and
+/// coarser on purpose. A card is read at a glance to answer three questions: is anything
+/// wrong, is anything still going, is it finished. The exact exit code is on the line itself
+/// and in the block behind it; a card that counted `exit 2` separately from `timed out` would
+/// be a longer summary saying less.
+///
+/// A refusal counts as a failure. It is red on every other surface for the same reason: a
+/// command the agent proposed and did not get to run is the thing a person scanning for
+/// trouble is scanning for.
+type TaskState =
+    | TaskFailed
+    | TaskRunning
+    | TaskDone
+
+/// A burst counted by state — the card's summary line, as a value.
+type TaskTally =
+    { Commands : int
+      Failed : int
+      Running : int
+      Done : int }
+
+module TaskCard =
+
+    /// How one block reads on a card.
+    let stateOf =
+        function
+        | BlockRunning -> TaskRunning
+        | BlockFinished (CommandSucceeded _) -> TaskDone
+        | BlockFinished _ -> TaskFailed
+        | BlockRejected _ -> TaskFailed
+
+    /// What the summary line counts. Blocks whose status this client cannot resolve yet are
+    /// simply not passed in: a card at a page boundary says less rather than guessing.
+    let tally (states: TaskState list) : TaskTally =
+        let count state = states |> List.filter ((=) state) |> List.length
+        { Commands = List.length states
+          Failed = count TaskFailed
+          Running = count TaskRunning
+          Done = count TaskDone }
+
+    /// The order a card's lines are read in: what went wrong, then what is still going, then
+    /// what is done. Red is what a person scans for, and a burst of twenty commands with one
+    /// failure buried at line fourteen makes them scan for it.
+    ///
+    /// Chronological WITHIN each group, so the only thing a finishing command changes is
+    /// which group it is in — the line itself never jumps a place inside one.
+    let ordered (lines: ('line * TaskState) list) : ('line * TaskState) list =
+        let inState state = lines |> List.filter (fun (_, s) -> s = state)
+        inState TaskFailed @ inState TaskRunning @ inState TaskDone
+
 /// One tool call, as the chat currently knows it. `Outcome = None` is a call still running:
 /// it already holds its place, and says so, rather than appearing out of nowhere when it
 /// finishes.
@@ -120,17 +170,23 @@ module ToolUse =
 
 /// One DRAWN row of the chat. A row is usually one item; a run of consecutive tool calls
 /// from one turn is one row holding several, so the chat costs a line per turn rather than
-/// a line per call.
+/// a line per call. A burst of commands from one turn groups the same way, into a task card.
 type TimelineRow =
     | RowItem of TimelineItem
     | RowToolRun of AgentTurnId * TimelineItem list
+    /// One agent burst: consecutive blocks the same turn started, across whichever of the
+    /// agent's terminals they ran in (Plan 20, stage 4). Never one block — a card around a
+    /// single chip is a disclosure over nothing — and never a human's, because grouping is
+    /// for work nobody is hand-driving.
+    | RowTaskCard of AgentTurnId * TimelineItem list
 
 module TimelineRow =
 
     let offset =
         function
         | RowItem item -> TimelineItem.offset item
-        | RowToolRun (_, items) ->
+        | RowToolRun (_, items)
+        | RowTaskCard (_, items) ->
             items |> List.tryHead |> Option.map TimelineItem.offset |> Option.defaultValue EventOffset.zero
 
 /// The terminal side of the timeline, folded from the log. Conversation items are not
@@ -151,12 +207,35 @@ type TimelineProjection =
       /// projection of its own because this is already the chat's fold and the two would
       /// have to be applied in lockstep anyway — `OpenLeases` is the same kind of
       /// bookkeeping.
-      ToolUses : Map<string, ToolUse> }
+      ToolUses : Map<string, ToolUse>
+      /// The turn the fold is inside, from the last `AgentTurnStarted` it saw.
+      /// Projection-internal bookkeeping, exactly like `OpenLeases`: it exists so a block
+      /// can be attributed to the turn that started it.
+      CurrentTurn : AgentTurnId option
+      /// Which turn started each of the AGENT's blocks — the grouping key a task card is
+      /// built on (Plan 20, stage 4).
+      ///
+      /// Recorded at the block's START rather than joined from `ToolUseFinished`'s `Block`,
+      /// which names the same pair. The tool call finishes when the COMMAND does, so that
+      /// join arrives too late to group a running block — and a card whose lines appear only
+      /// once they are done is a card that is empty for exactly as long as it matters.
+      BlockTurns : Map<string, AgentTurnId> }
 
 module TimelineProjection =
 
     let empty : TimelineProjection =
-        { TerminalItems = []; OpenLeases = Map.empty; Titles = Map.empty; ToolUses = Map.empty }
+        { TerminalItems = []
+          OpenLeases = Map.empty
+          Titles = Map.empty
+          ToolUses = Map.empty
+          CurrentTurn = None
+          BlockTurns = Map.empty }
+
+    /// The turn that started this block, when the agent started it. `None` for a human's
+    /// command, for one the Session Process ran on its own behalf, and for any block whose
+    /// start this fold has not seen — all three mean the same thing to a card: not mine.
+    let blockTurn (id: BlockId) (proj: TimelineProjection) : AgentTurnId option =
+        Map.tryFind (BlockId.value id) proj.BlockTurns
 
     /// What one tool-use item currently says.
     let toolUse (id: ToolUseId) (proj: TimelineProjection) : ToolUse option =
@@ -180,20 +259,30 @@ module TimelineProjection =
 
     let private applyEvent (proj: TimelineProjection) (envelope: EventEnvelope<SessionEvent>) : TimelineProjection =
         let append item = { proj with TerminalItems = proj.TerminalItems @ [ item ] }
+        // Attribute a block to the turn running when it started, and only when the AGENT
+        // wrote it. A person's command typed while a turn happens to be open is theirs — the
+        // clock says "during", and only the authority says "whose".
+        let attributed (author: ActorRef) (id: BlockId) (proj: TimelineProjection) =
+            match author, proj.CurrentTurn with
+            | ActorRef.Agent, Some turn -> { proj with BlockTurns = Map.add (BlockId.value id) turn proj.BlockTurns }
+            | _ -> proj
         match envelope.Event with
         | SessionEvent.TerminalOpened e ->
             { proj with Titles = Map.add (TerminalId.value e.TerminalId) e.Title proj.Titles }
+        | SessionEvent.AgentTurnStarted e -> { proj with CurrentTurn = Some e.AgentTurnId }
         | SessionEvent.TerminalBlockStarted e ->
             // Anchored at the START, and it mutates in place as it finishes — so a
             // four-minute build's result lands above messages sent while it ran. The
             // alternative, appearing only on completion, makes long work invisible while it
             // is the only thing happening.
             append (TimelineBlock (envelope.Offset, e.TerminalId, e.BlockId))
+            |> attributed (Authority.author e.Authority) e.BlockId
         | SessionEvent.TerminalCommandRejected e ->
             // A refusal gets a chip too. "The agent proposed this and a human said no" is
             // the more interesting half of the two, and a rejection that appears nowhere is
             // indistinguishable from a bug.
             append (TimelineBlock (envelope.Offset, e.TerminalId, e.BlockId))
+            |> attributed e.Author e.BlockId
         | SessionEvent.TerminalLeaseTaken e ->
             { proj with
                 OpenLeases =
@@ -297,15 +386,26 @@ module TimelineProjection =
 
     /// The chat as it is DRAWN, which is not quite the chat as it happened.
     ///
-    /// Two rules apply here rather than in the fold, because both are about rendering and
-    /// the fold is about facts: a call that became a block is dropped (its block already
-    /// draws), and consecutive calls from ONE turn collapse into a run. The events already
-    /// carry the turn, and a chatty turn should cost one line rather than twenty — tool use
-    /// is the first item a single turn can emit a dozen of.
+    /// Three rules apply here rather than in the fold, because all three are about rendering
+    /// and the fold is about facts: a call that became a block is dropped (its block already
+    /// draws), consecutive calls from ONE turn collapse into a run, and consecutive BLOCKS
+    /// from one turn collapse into a task card. The events already carry the turn, and a
+    /// chatty turn should cost one line rather than twenty — tool use is the first item a
+    /// single turn can emit a dozen of, and an agent working across several terminals is the
+    /// second.
+    ///
+    /// Both groupings take the same shape and stop at the same boundary: only CONSECUTIVE
+    /// items group, so anything said in the middle splits the row. That is not a shared
+    /// implementation detail, it is the rule — a card that swallowed the message between two
+    /// commands would tell a reader the wrong story about the order.
     let rows (conversation: ConversationProjection) (proj: TimelineProjection) : TimelineRow list =
         let turnOf item =
             match item with
             | TimelineToolUse (_, id) -> toolUse id proj |> Option.map (fun u -> u.AgentTurnId)
+            | _ -> None
+        let burstOf item =
+            match item with
+            | TimelineBlock (_, _, id) -> blockTurn id proj
             | _ -> None
         items conversation proj
         |> List.filter (fun item ->
@@ -314,13 +414,17 @@ module TimelineProjection =
             | _ -> true)
         |> List.fold
             (fun rows item ->
-                match turnOf item, rows with
-                // Only CONSECUTIVE calls group: a message between two of them means the turn
-                // said something in the middle, and hiding that inside one line would tell a
-                // reader the wrong story about the order.
-                | Some turn, RowToolRun (previous, earlier) :: rest when previous = turn ->
+                match turnOf item, burstOf item, rows with
+                | Some turn, _, RowToolRun (previous, earlier) :: rest when previous = turn ->
                     RowToolRun (turn, earlier @ [ item ]) :: rest
-                | Some turn, _ -> RowToolRun (turn, [ item ]) :: rows
-                | None, _ -> RowItem item :: rows)
+                | Some turn, _, _ -> RowToolRun (turn, [ item ]) :: rows
+                | _, Some turn, RowTaskCard (previous, earlier) :: rest when previous = turn ->
+                    RowTaskCard (turn, earlier @ [ item ]) :: rest
+                // The card forms on the SECOND command, not the first: one command from a
+                // turn is a chip, and wrapping it in a disclosure would hide the only thing
+                // the row has to say behind a click.
+                | _, Some turn, RowItem (TimelineBlock _ as first) :: rest when burstOf first = Some turn ->
+                    RowTaskCard (turn, [ first; item ]) :: rest
+                | _, _, _ -> RowItem item :: rows)
             []
         |> List.rev
