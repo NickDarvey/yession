@@ -351,6 +351,21 @@ Items are roughly ordered by how much they matter.
   option), and the queued-message UI has no "locked" visual during the drain broadcast
   window (a peer can briefly type into an entry that is about to vanish — the edit is
   safely discarded, but the UX flickers).
+- **`add_repo` has no end-to-end test, and the attempt at one did not pass.** Every tier below
+  it substitutes exactly the two halves that break in practice: the fixtures clone `file://`
+  URLs with an empty egress list, and no tier below the release gate has a model to choose the
+  verb. A `[LiveAgent]` suite driving a real Manager, a real child session and a real clone of
+  a public repo was written and withdrawn after two release runs. What it established: the
+  session launches and binds its peer, and **172 seconds later the checkout has not appeared**
+  — far past what a 5MB clone plus a model turn should take, so something in that path does
+  not work under CI. What it did not establish is WHICH thing, because the whole Node suite
+  shares one 240s budget (`tasks.fsx`), so a per-case deadline long enough to outlast the
+  clone kills the suite before the case can report anything.
+
+  Two things have to change before it can be tried again: a live case needs a deadline that
+  fits inside the suite's budget (or the budget needs to be per-tier), and it needs to be
+  runnable somewhere other than master — `LiveAgent` is release-gate only, so every iteration
+  on a live test is a red master for everyone.
 - **A turn has a step ceiling, and the ceiling is ours.** `maxTurns` is OPTIONAL on the Agent
   SDK's `query()`, and unset means no cap — interactive Claude Code sets none, and `claude -p`
   takes `--max-turns` only when an automation asks for one. So `error_max_turns` is a state
