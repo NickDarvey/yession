@@ -184,9 +184,9 @@ module Scheduler =
                     async {
                         let! page = log.Read None System.Int32.MaxValue
                         let events = page.Events |> List.map (fun envelope -> envelope.Event)
-                        match AgentWake.pending events with
+                        match AgentWake.pendingReason events with
                         | None -> drainBusy <- false
-                        | Some turnActor ->
+                        | Some (reason, turnActor) ->
                             generation <- generation + 1
                             let turn =
                                 { Generation = generation
@@ -215,7 +215,7 @@ module Scheduler =
                                     sessionId
                                     projection.Items
                                     terminals
-                                    (AgentTurn.FromWake (CommandFinished, turnActor))
+                                    (AgentTurn.FromWake (reason, turnActor))
                             match running with
                             | Some current when current.Generation = turn.Generation ->
                                 running <- None

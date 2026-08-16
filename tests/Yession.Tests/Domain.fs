@@ -194,6 +194,18 @@ let private frameSerializationTests =
                   MessageSent { MessageId = messageId; QueueId = None; Author = PeerRef peerId; Body = "hi" }
                   MessageSent { MessageId = messageId; QueueId = Some (QueueId.create "q-1" |> expect); Author = ActorRef.System; Body = "" }
                   AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = Some (messageId); Woke = None }
+                  // Every wake reason (Plan 20, stages 2 and 5). A turn nobody asked for is
+                  // the one whose attribution a reader most needs, and a reason that failed
+                  // to decode would take the whole page with it — so each rides this list.
+                  AgentTurnStarted { AgentTurnId = turnId; TriggeredByMessageId = None; Woke = Some CommandFinished }
+                  AgentTurnStarted
+                    { AgentTurnId = turnId
+                      TriggeredByMessageId = None
+                      Woke = Some (StreamEnded (TerminalId.create "term-1" |> expect)) }
+                  AgentTurnStarted
+                    { AgentTurnId = turnId
+                      TriggeredByMessageId = None
+                      Woke = Some (IntegrationLost (TerminalId.create "term-1" |> expect)) }
                   AgentContextBuilt { AgentTurnId = turnId; MessageCount = 3 }
                   AgentMessageStarted { AgentTurnId = turnId; MessageId = messageId }
                   AgentMessageDelta { AgentTurnId = turnId; MessageId = messageId; Delta = "d" }
