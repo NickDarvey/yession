@@ -289,27 +289,43 @@ let private nodeExecutable : string = jsNative
 /// hardened invocation env, srt's egress), and small because the point is not bandwidth.
 let private liveRepo = "octocat/Hello-World"
 
-/// Wait for a live turn to reach an END — either one. Waiting for SUCCESS is what makes a
-/// live suite illegible: a turn that fails satisfies no predicate, so the wait dies of its
-/// own deadline and the report is "the model never said the thing", never "it failed, and
-/// here is what it said". This settles on both, and the assertion afterwards is what decides.
-let private awaitTurnEnd (client: Client) : Async<unit> =
-    client.Runner.WaitFor (fun model ->
-        model.Conversation.Items
-        |> List.exists (fun item ->
-            item.Author = ActorRef.Agent
-            && (item.Status = Complete || item.Status = ConversationItemStatus.Failed)))
+/// How long a live case waits. `Runner.WaitFor`'s own 30s is a HANG DETECTOR, sized in
+/// `Support.fs` against a model-free suite whose slowest whole test is under nine seconds —
+/// the right instrument there and the wrong one here, where one wait spans a spawned session
+/// process, a real model turn, srt raising its filtering proxy, and a clone over the network.
+/// Both of these cases first ran in CI on that deadline and both died on it. Sized for the
+/// slow case rather than the typical one: it costs nothing when things work, and it buys a
+/// red that means "this did not happen" rather than "this box took longer than nine seconds".
+let private liveDeadlineMs = 180_000
 
-/// Everything the agent put in the timeline, statuses included — the fixture's half of the
-/// bargain in `CLAUDE.md`: a live case can only fail by an assertion about a machine three
-/// processes away, so it prints what that machine said rather than leaving it to be guessed.
-/// Since a failed turn now carries its reason (`Conversation.applyEvent`), this is the whole
-/// account: what it said, what it was doing, and why it stopped.
+/// Everything the agent put in the timeline, statuses included. The empty case is spelled out
+/// because it is a different fault from all the others: no turn at all means the session never
+/// ran one (no credential reached the child, the message never landed), while a Streaming item
+/// means the turn is going and the deadline was simply short.
 let private agentTranscript (client: Client) : string =
-    (client.Runner.Model ()).Conversation.Items
-    |> List.filter (fun item -> item.Author = ActorRef.Agent)
-    |> List.map (fun item -> sprintf "  [%A] %s" item.Status item.Body)
-    |> String.concat "\n"
+    match (client.Runner.Model ()).Conversation.Items |> List.filter (fun item -> item.Author = ActorRef.Agent) with
+    | [] -> "  (nothing — no agent turn ever reached the timeline)"
+    | items ->
+        items
+        |> List.map (fun item -> sprintf "  [%A] %s" item.Status item.Body)
+        |> String.concat "\n"
+
+/// Wait for `settled`, and SAY WHAT WAS SEEN when it never comes. The one thing a live case
+/// must not do is fail with a bare timeout: that red names the WAIT and never the fault, and
+/// every diagnosis after it costs another run of a gate that needs a model credential to run
+/// at all — which is the expensive-looking `CLAUDE.md` warns about, and which both of these
+/// cases cost on their first CI run. The report is the fixture keeping its half of that bargain.
+let private awaiting (what: string) (report: unit -> string) (settled: unit -> bool) : Async<unit> =
+    let rec go (remaining: int) =
+        async {
+            if settled () then return ()
+            elif remaining <= 0 then
+                return failwithf "%s did not happen within %dms.\nWhat the agent said:\n%s" what liveDeadlineMs (report ())
+            else
+                do! Async.Sleep 250
+                return! go (remaining - 1)
+        }
+    go (liveDeadlineMs / 250)
 
 let private liveTests =
     testList "add_repo, as somebody asks for it" [
@@ -337,14 +353,16 @@ let private liveTests =
             // verb to work is an instruction the product cannot claim to take.
             do! compose ada ada.Hello.PeerId (sprintf "Clone %s" liveRepo)
             ada.Connection.SendDraft ada.Hello.PeerId
-            do! awaitTurnEnd ada
 
-            // The FILESYSTEM is the answer, here as everywhere else in this file: the clone
-            // either landed under the session's own repos directory or it did not, and no
-            // amount of agreeable prose about having cloned it counts.
-            Expect.isTrue
-                (exists nodeFs (sprintf "%s/%s/repos/%s/.git" dataDir record.DataDir liveRepo))
-                (sprintf "the checkout is in the session. What the agent said:\n%s" (agentTranscript ada))
+            // Waited for on the FILESYSTEM, which is the answer here as everywhere else in
+            // this file: the clone either landed under the session's own repos directory or it
+            // did not, and no amount of agreeable prose about having cloned it counts. Waiting
+            // on the checkout rather than on the turn's last word also settles at the moment
+            // the thing under test happens, instead of after the model finishes talking.
+            do! awaiting
+                    "the checkout landing in the session"
+                    (fun () -> agentTranscript ada)
+                    (fun () -> exists nodeFs (sprintf "%s/%s/repos/%s/.git" dataDir record.DataDir liveRepo))
 
             do! ada.Channel.Close ()
             do! pm.StopAll ()
@@ -372,7 +390,19 @@ let private liveTests =
 
             do! compose ada ada.Hello.PeerId (sprintf "Clone %s and tell me what is in it" liveRepo)
             ada.Connection.SendDraft ada.Hello.PeerId
-            do! awaitTurnEnd ada
+
+            // Settles on EITHER ending, and the assertion below is what decides which. Waiting
+            // for the good one is what makes a live suite illegible: a turn that failed
+            // satisfies no predicate, so the wait dies of its own deadline and reports that the
+            // model never said the thing, rather than that it failed and why.
+            do! awaiting
+                    "the agent's turn ending"
+                    (fun () -> agentTranscript ada)
+                    (fun () ->
+                        (ada.Runner.Model ()).Conversation.Items
+                        |> List.exists (fun item ->
+                            item.Author = ActorRef.Agent
+                            && (item.Status = Complete || item.Status = ConversationItemStatus.Failed)))
 
             Expect.isFalse
                 ((ada.Runner.Model ()).Conversation.Items
