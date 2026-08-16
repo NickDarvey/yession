@@ -1052,11 +1052,20 @@ module Style =
     /// The pane's body — whatever the selected tab shows. It takes the column's remaining
     /// height so the thing inside it scrolls rather than the column.
     let paneBody = "flex-1 min-h-0 flex flex-col"
-    /// A read-only tab's body: the same scrolling region the block history uses, so a block
-    /// read from the chat looks exactly like the block read in its terminal.
+    /// A read-only region: a player's own mount, or text shown rather than typed into. The
+    /// same scrolling box the block history uses, so a block read from the chat looks exactly
+    /// like the block read in its terminal — without the bottom anchoring, because a player
+    /// is one child and belongs at the top of its region.
+    ///
+    /// One name for one box. It had two, and the second was reached for by whichever surface
+    /// its author happened to be reading.
     let paneReadonly = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
     /// A stretch tab's facts, above whatever renders its recording.
     let paneFacts = "shrink-0 flex flex-col gap-1 px-3 py-3 " + Stroke.dividerBottom
+    /// A read-only tab's verbs, under whatever it is showing: the way to the recording, and
+    /// the way back. A row rather than a column, because they are alternatives to each other
+    /// rather than a list of facts.
+    let paneActions = "shrink-0 flex items-center gap-2 px-3 py-3 " + Stroke.dividerTop
 
     // --- The terminal list (Plan 20, stage 0) --------------------------------------------
 
@@ -1105,11 +1114,6 @@ module Style =
     /// edge can float over this box rather than take a band from it.
     let terminalScrollback = "relative flex-1 min-h-0 overflow-y-auto flex flex-col px-3 py-3"
     let terminalStream = "flex flex-col gap-2"
-
-    /// The player's own mount, and any other read-only region that shows a recording rather
-    /// than a run of blocks: the same box, without the bottom anchoring (a player is one
-    /// child and belongs at the top of its region).
-    let terminalBlocks = "flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 px-3 py-3"
 
     /// One block: the command that ran, then everything it printed.
     ///

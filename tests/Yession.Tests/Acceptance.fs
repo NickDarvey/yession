@@ -150,7 +150,7 @@ let private representativeModel : ClientModel =
       TerminalScreens = Map.empty
       Pins = []
       PaneChoice = None
-      PaneStartAt = None
+      PanePlaying = None
       PaneRewound = None
       TerminalsOpen = true
       // The pane shows a TAB by default; the list is what the cases below turn on.
@@ -492,16 +492,17 @@ let private uiChecklistTests =
                   Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingIntegration ] do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
 
-        testCase "a closed terminal is reachable, and shows the recording rather than a composer" <| fun () ->
+        testCase "a closed terminal is reachable, and shows what it ran rather than a composer" <| fun () ->
             let html = Support.render closedTerminalModel
             for label, marker in
                 [ "a closed terminal has a tab of its own",
                   Dom.attr Dom.Hooks.terminalClosedTab (TerminalId.value terminalId)
-                  "and the mount the player attaches to",
-                  Dom.attr Dom.Hooks.paneReplay (PaneTab.key (TerminalTab terminalId))
-                  // The blocks are still the other half of the read: what ran, beside how it
-                  // behaved.
-                  "the commands it ran are still listed", Dom.attr Dom.Hooks.terminalBlock "block-ui" ] do
+                  // What it RAN is the read; how it behaved is a recording one press away.
+                  // Both at once put a player of the same two lines under every command and
+                  // its result.
+                  "the commands it ran are listed", Dom.attr Dom.Hooks.terminalBlock "block-ui"
+                  "and the way to its recording is offered",
+                  Dom.attr Dom.Hooks.terminalPlay (TerminalId.value terminalId) ] do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
             // Nothing can be run in a closed terminal, so nothing offers to: a command line
             // that queues into a terminal with no shell behind it is the misleading half.
