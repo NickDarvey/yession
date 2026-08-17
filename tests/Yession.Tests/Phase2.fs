@@ -555,6 +555,48 @@ let private testEnvTests =
             }
     ]
 
+// The other half of the same story. A case's deadline is spent out of the whole Node run's
+// budget, and a case that asks for more than the run can afford does not fail as itself — it
+// reaches its deadline, the runner kills the process, and every other suite dies unnamed with
+// it. That cost two red release runs to work out. `settledWithin` refuses at the CALL instead,
+// which is the only moment the two numbers are both in view.
+let private testWaitTests =
+    testList "The test harness's waits (a deadline the run can afford)" [
+        testCaseAsync "a deadline at or beyond the run's whole budget is refused, naming both numbers" <|
+            async {
+                do!
+                    Support.withEnv [ "YESSION_TEST_BUDGET_MS", Some "1000" ] (fun () -> async {
+                        let! outcome = Support.settledWithin 2_000 (fun () -> false) |> Async.Catch
+                        match outcome with
+                        | Choice1Of2 _ -> failwith "expected an unaffordable deadline to be refused"
+                        | Choice2Of2 e ->
+                            Expect.isTrue (e.Message.Contains "2000" && e.Message.Contains "1000")
+                                "the refusal names what was asked for and what the run has"
+                    })
+            }
+
+        testCaseAsync "a deadline inside the budget is simply waited out" <|
+            async {
+                do!
+                    Support.withEnv [ "YESSION_TEST_BUDGET_MS", Some "10000" ] (fun () -> async {
+                        let! held = Support.settledWithin 1_000 (fun () -> true)
+                        Expect.isTrue held "the condition already held, so the wait answered true"
+                    })
+            }
+
+        testCaseAsync "with no budget declared, a deadline is not second-guessed" <|
+            async {
+                // A bundle run by hand (`node tests/…/out/Main.js`) spends nothing, so there is
+                // nothing to refuse against — and refusing there would break the one way to run
+                // the suite without `check`.
+                do!
+                    Support.withEnv [ "YESSION_TEST_BUDGET_MS", None ] (fun () -> async {
+                        let! held = Support.settledWithin 999_999 (fun () -> true)
+                        Expect.isTrue held "no budget, no refusal"
+                    })
+            }
+    ]
+
 let private commandFoldTests =
     testList "Command execution (local)" [
         testCaseAsync "a host-sandbox command never inherits the session's credentials (leak regression)" <|
@@ -851,6 +893,7 @@ let tests =
         sandboxPolicyTests
         environmentProjectionTests
         testEnvTests
+        testWaitTests
         commandFoldTests
         acceptanceTests
         // Needs ports: everything that binds ports / spawns hosts over real WebRTC.

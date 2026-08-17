@@ -308,8 +308,10 @@ let private listDir (fs: obj) (path: string) : string = jsNative
 
 let private liveRepo = "octocat/Hello-World"
 
-/// Ten times a passing run, and well inside the Node suite's shared 240s budget — so a
-/// failure here is this case's report, never the runner killing every suite at once.
+/// Ten times a passing run, and well inside what the `LiveAgent` tier's budget buys
+/// (`tasks.fsx` `nodeBudgetMs`) — so a failure here is this case's report, never the runner
+/// killing every suite at once. `settledWithin` refuses a deadline the run cannot afford, so
+/// this number can no longer quietly outgrow the run it is spent from.
 let private cloneDeadlineMs = 90_000
 
 let private liveClone =
@@ -365,21 +367,16 @@ let private liveClone =
             do! compose ada ada.Hello.PeerId (sprintf "Clone %s" liveRepo)
             ada.Connection.SendDraft ada.Hello.PeerId
 
-            // Settles on the checkout OR the turn ending, whichever comes first — then prints.
+            // Settles on the checkout OR the turn ending, whichever comes first. `settledWithin`
+            // rather than `waitUntilWithin` because not settling is not this case's verdict —
+            // the report below is, and a throw here would take it with it.
             let settled () =
                 exists nodeFs checkout
                 || (ada.Runner.Model ()).Conversation.Items
                    |> List.exists (fun i ->
                        i.Author = ActorRef.Agent
                        && (i.Status = Complete || i.Status = ConversationItemStatus.Failed))
-            let rec waitFor (remaining: int) =
-                async {
-                    if settled () || remaining <= 0 then return ()
-                    else
-                        do! Async.Sleep 250
-                        return! waitFor (remaining - 1)
-                }
-            do! waitFor (cloneDeadlineMs / 250)
+            do! settledWithin cloneDeadlineMs settled |> Async.Ignore
 
             // Printed on the happy path too: a green run that says nothing teaches nothing, and
             // this is the only place a CI reader can see what the live session actually did.
