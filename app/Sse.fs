@@ -88,7 +88,7 @@ let stream (req: IncomingMessage) (res: ServerResponse) (encode: Encode<'a>) (su
     while (!cancelled) {
       try {
         const res = await fetch($0, { method: 'GET', headers: { ...Object.fromEntries($1), 'accept': 'text/event-stream' }, signal: controller.signal });
-        if (!res.ok) throw new Error('sse subscribe failed: ' + res.status);
+        if (!res.ok) { if (!$3(res.status)) return; throw new Error('sse subscribe failed: ' + res.status); }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -111,9 +111,39 @@ let stream (req: IncomingMessage) (res: ServerResponse) (encode: Encode<'a>) (su
   run();
   return () => { cancelled = true; controller.abort(); };
 })()""")>]
-let private openStream (url: string) (headers: (string * string)[]) (onEvent: Sink<string>) : (unit -> unit) = jsNative
+let private openStream
+    (url: string)
+    (headers: (string * string)[])
+    (onEvent: Sink<string>)
+    (retry: int -> bool)
+    : (unit -> unit) =
+    jsNative
+
+/// Whether a connect that was REFUSED should be tried again, asked once per failure with the
+/// status the server answered.
+///
+/// The default is yes, forever, and that is right for every leg inside this product: the
+/// Manager is coming back, and a stream is the only way it can reach us. It is wrong the
+/// moment we talk to a server somebody else wrote — a refusal can mean "this endpoint does
+/// not exist here", which is permanent, and retrying it every second is a hot loop against a
+/// server behaving correctly. So the caller that knows what a status MEANS says so; this
+/// module does not guess.
+type Retry = int -> bool
+
+module Retry =
+
+    /// Keep trying whatever the server says. What the control legs and the registry stream
+    /// want: the peer is ours, and its absence is always temporary.
+    let always : Retry = fun _ -> true
+
+/// Subscribe, but stop for good when `retry` says a refusal is permanent. The stopped
+/// subscription is inert rather than errored: a server that does not offer a stream is not a
+/// fault, it is a server whose news has to arrive another way.
+let subscribeWhile (url: string) (headers: (string * string) list) (retry: Retry) (onFrame: Sink<string>) : Subscription =
+    Subscription.ofStop (
+        openStream url (Array.ofList headers) (fun event -> dataOf event |> Option.iter onFrame) retry)
 
 /// Subscribe to an SSE stream, receiving one call per event carrying data (comment-only
 /// keep-alives are dropped). `headers` ride every connect and reconnect.
 let subscribe (url: string) (headers: (string * string) list) (onFrame: Sink<string>) : Subscription =
-    Subscription.ofStop (openStream url (Array.ofList headers) (fun event -> dataOf event |> Option.iter onFrame))
+    subscribeWhile url headers Retry.always onFrame
