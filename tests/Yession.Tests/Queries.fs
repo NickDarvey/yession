@@ -394,6 +394,50 @@ let private routeTests =
                             | _ -> false))
                 subscription.Stop ()
             }
+
+        // A stream the server does not OFFER (Plan 20, stage 5b). Every leg inside this
+        // product retries a refusal for ever, because the peer is ours and its absence is
+        // always temporary. That is exactly wrong against a server somebody else wrote: MCP
+        // makes the GET stream optional, a conforming server answers 405, and retrying that
+        // every second is a hot loop against a server behaving correctly.
+        testCaseAsync "a refusal the caller calls permanent is asked ONCE, not in a loop" <|
+            async {
+                let attempts = ResizeArray<int> ()
+                let handler (_req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+                    attempts.Add 1
+                    res.writeHead (405, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                    res.``end`` "no stream here"
+                let server = Interop.createServer handler
+                let! listening =
+                    Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+                let url = sprintf "http://127.0.0.1:%d/stream" (Interop.serverPort listening)
+                let subscription = Sse.subscribeWhile url [] (fun status -> status <> 405) ignore
+                // The retry delay is one second, so anything past it that still reads ONE is
+                // a subscription that gave up rather than one that has not come round yet.
+                let! _ = Async.Sleep 2500
+                Expect.equal (Seq.length attempts) 1 "asked once, and believed the answer"
+                subscription.Stop ()
+            }
+
+        testCaseAsync "a refusal the caller calls temporary is asked again" <|
+            async {
+                // The other half, and the reason it is a separate case: the verdict is the
+                // CALLER's, so a change that made every refusal permanent would pass the
+                // test above and silently stop the control legs from ever reconnecting.
+                let attempts = ResizeArray<int> ()
+                let handler (_req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+                    attempts.Add 1
+                    res.writeHead (503, Fable.Core.JsInterop.createObj [ "content-type", box "text/plain" ]) |> ignore
+                    res.``end`` "not yet"
+                let server = Interop.createServer handler
+                let! listening =
+                    Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+                let url = sprintf "http://127.0.0.1:%d/stream" (Interop.serverPort listening)
+                let subscription = Sse.subscribeWhile url [] (fun status -> status <> 405) ignore
+                let! _ = Async.Sleep 2500
+                Expect.isTrue (Seq.length attempts > 1) "a server that is merely down is still coming back"
+                subscription.Stop ()
+            }
     ]
 
 let tests =
