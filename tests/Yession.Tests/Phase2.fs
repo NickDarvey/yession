@@ -99,12 +99,6 @@ let private launchTests =
 // there is no cross-session handle to forge.)
 // -----------------------------------------------------------------------------
 
-[<Fable.Core.Emit("process.env[$0] = $1")>]
-let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNative
-
-[<Fable.Core.Emit("delete process.env[$0]")>]
-let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
-
 // A promise that is already rejected when the workflow gets to it — the shape every
 // backend produces routinely (a docker 404 for a container that is not there).
 [<Fable.Core.Emit("Promise.reject(new Error($0))")>]
@@ -513,6 +507,54 @@ let private hostSandboxFor (sessionId: SessionId) : CreateSandbox =
 //
 // What must not be lost is the SECURITY property, which is about the sandbox seam rather than
 // about any tool on top of it.
+
+// The case below plants a credential in the process env, and the suite is ONE process — so
+// how it hands the environment back is load-bearing for everything compiled after it. It
+// once handed it back by DELETING the name, which silently disarmed the whole LiveAgent
+// tier: those sessions started with no credential, `SessionMain` answers that by starting no
+// agent at all, and a turn just never got a reply. `Support.withEnv` is the fix; these three
+// are what make its red mean something.
+[<Fable.Core.Emit("(process.env[$0] ?? null)")>]
+let private envRaw (name: string) : string option = Fable.Core.Util.jsNative
+
+let private testEnvTests =
+    testList "The test environment (take and give back)" [
+        testCaseAsync "a variable that was there is put back with the value it had" <|
+            async {
+                do! Support.withEnv [ "YESSION_ENV_PROBE", Some "before" ] (fun () -> async { () })
+                do!
+                    Support.withEnv [ "YESSION_ENV_PROBE", Some "before" ] (fun () -> async {
+                        do! Support.withEnv [ "YESSION_ENV_PROBE", Some "during" ] (fun () -> async { () })
+                        Expect.equal (envRaw "YESSION_ENV_PROBE") (Some "before") "the outer value survives the inner take"
+                    })
+            }
+
+        testCaseAsync "a variable that was absent is absent again — never left blank or planted" <|
+            async {
+                do!
+                    Support.withEnv [ "YESSION_ENV_ABSENT", None ] (fun () -> async {
+                        do! Support.withEnv [ "YESSION_ENV_ABSENT", Some "planted" ] (fun () -> async { () })
+                        Expect.equal (envRaw "YESSION_ENV_ABSENT") None "absence is a value, and it is restored"
+                    })
+            }
+
+        testCaseAsync "a body that throws still gives the environment back" <|
+            async {
+                do!
+                    Support.withEnv [ "YESSION_ENV_PROBE", Some "before" ] (fun () -> async {
+                        let! outcome =
+                            Support.withEnv [ "YESSION_ENV_PROBE", Some "during" ] (fun () -> async {
+                                return failwith "the body blew up"
+                            })
+                            |> Async.Catch
+                        match outcome with
+                        | Choice1Of2 _ -> failwith "expected the body's exception to propagate"
+                        | Choice2Of2 _ -> ()
+                        Expect.equal (envRaw "YESSION_ENV_PROBE") (Some "before") "restored on the exceptional path too"
+                    })
+            }
+    ]
+
 let private commandFoldTests =
     testList "Command execution (local)" [
         testCaseAsync "a host-sandbox command never inherits the session's credentials (leak regression)" <|
@@ -521,29 +563,33 @@ let private commandFoldTests =
                 // plants a credential there and proves the seam keeps it out. Driven through
                 // `Spawn`, which is what the terminal drain uses and therefore what every
                 // agent command now goes through.
-                setEnv "ANTHROPIC_API_KEY" "planted-credential"
-                try
-                    let sessionId = SessionId.create "cmd-leak" |> expect
-                    let log =
-                        Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
-                    let environment = hostEnvironment log "cmd-leak"
-                    let! _ = environment.Ensure None "leak probe"
-                    let mutable output = ""
-                    let! spawned =
-                        environment.Spawn
-                            { Executable = "node"
-                              Arguments = [ "-e"; "console.log('key=' + (process.env.ANTHROPIC_API_KEY || 'absent'))" ]
-                              Env = Map.empty
-                              WorkingDirectory = None }
-                            (fun (_, text) -> output <- output + text)
-                    match spawned with
-                    | Error e -> failwith e
-                    | Ok handle ->
-                        let! ended = handle.Exited
-                        Expect.equal ended (SandboxExited 0) "the probe ran"
-                        Expect.isTrue (output.Contains "key=absent") "the planted credential does not reach the command"
-                finally
-                    unsetEnv "ANTHROPIC_API_KEY"
+                // `withEnv`, not set-then-delete: this ran with the REAL credential in CI, and
+                // deleting it on the way out left every later suite without one.
+                return!
+                    Support.withEnv [ "ANTHROPIC_API_KEY", Some "planted-credential" ] (fun () -> async {
+                        let sessionId = SessionId.create "cmd-leak" |> expect
+                        let log =
+                            Yession.SessionProcess.InMemoryEventLog.create sessionId (fun () -> DateTimeOffset.UtcNow)
+                        let environment = hostEnvironment log "cmd-leak"
+                        let! _ = environment.Ensure None "leak probe"
+                        let mutable output = ""
+                        let! spawned =
+                            environment.Spawn
+                                { Executable = "node"
+                                  Arguments =
+                                    [ "-e"; "console.log('key=' + (process.env.ANTHROPIC_API_KEY || 'absent'))" ]
+                                  Env = Map.empty
+                                  WorkingDirectory = None }
+                                (fun (_, text) -> output <- output + text)
+                        match spawned with
+                        | Error e -> failwith e
+                        | Ok handle ->
+                            let! ended = handle.Exited
+                            Expect.equal ended (SandboxExited 0) "the probe ran"
+                            Expect.isTrue
+                                (output.Contains "key=absent")
+                                "the planted credential does not reach the command"
+                    })
             }
     ]
 
@@ -804,6 +850,7 @@ let tests =
         promiseAwaitTests
         sandboxPolicyTests
         environmentProjectionTests
+        testEnvTests
         commandFoldTests
         acceptanceTests
         // Needs ports: everything that binds ports / spawns hosts over real WebRTC.

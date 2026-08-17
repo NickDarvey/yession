@@ -351,23 +351,13 @@ Items are roughly ordered by how much they matter.
   option), and the queued-message UI has no "locked" visual during the drain broadcast
   window (a peer can briefly type into an entry that is about to vanish — the edit is
   safely discarded, but the UX flickers).
-- **`add_repo` has no end-to-end test, and the attempt at one did not pass.** Every tier below
-  it substitutes exactly the two halves that break in practice: the fixtures clone `file://`
-  URLs with an empty egress list, and no tier below the release gate has a model to choose the
-  verb. A `[LiveAgent]` suite driving a real Manager, a real child session and a real clone of
-  a public repo was written and withdrawn after two release runs. What it established: the
-  session launches and binds its peer, and **172 seconds later the checkout has not appeared**
-  — far past what a 5MB clone plus a model turn should take, so something in that path does
-  not work under CI. What it did not establish is WHICH thing, because the whole Node suite
-  shares one 240s budget (`tasks.fsx`), so a per-case deadline long enough to outlast the
-  clone kills the suite before the case can report anything.
-
-  One of the two things blocking another attempt is now fixed: `verify.yml` is dispatchable
-  (`gh workflow run verify.yml --ref <branch> -f capabilities=… -f only=…`), so a live suite is
-  developed against a branch instead of by merging it and watching the release gate. What is
-  still open is the BUDGET: the whole Node suite shares one 240s timeout, so a per-case
-  deadline generous enough for a real clone can only fit if the run is narrowed with `only`.
-  A live case that has to survive the un-narrowed gate needs that budget to be per-tier first.
+- **The Node suite's timeout is one budget for every tier.** `tasks.fsx` gives the whole Node
+  run 240s, so a per-case deadline is spent out of a pool every other suite is drawing on: a
+  case that legitimately needs two minutes cannot have them without risking the runner killing
+  the run before any suite reports. That is not hypothetical — it is how the first live clone
+  case failed, and the reason the one that ships is capped at 90s (ten times its real 6.9s)
+  rather than at something comfortable. A tier that spawns real processes and a tier of pure
+  folds want different budgets; they have one.
 - **A turn has a step ceiling, and the ceiling is ours.** `maxTurns` is OPTIONAL on the Agent
   SDK's `query()`, and unset means no cap — interactive Claude Code sets none, and `claude -p`
   takes `--max-turns` only when an automation asks for one. So `error_max_turns` is a state
@@ -478,6 +468,17 @@ Items are roughly ordered by how much they matter.
   is how every release up to `v5.0.0-beta.0` shipped with the live suite silently
   skipped). A cheap-tier run simply never asks. `YESSION_CLAUDE_PATH` matters in sandboxes
   that kill the SDK's vendored binary.
+
+  What that gate does NOT cover is the credential going missing after it passes. It is
+  probed once, in the parent, before the suite starts; the suites read it out of the process
+  env, and the suite is one process, so anything that mutates that env changes what every
+  later suite is testing. That happened: `Phase2`'s credential-leak regression planted a key
+  and DELETED it on the way out, and the live clone case — compiled after it — got a session
+  with no credential. `SessionMain` answers no credential by starting **no agent at all**, so
+  the turn produced no reply, no error, and nothing anywhere said why. `Support.withEnv` (one
+  verb: take and give back, absence included) closes the known cause, and three cheap-tier
+  cases pin it. The CLASS is still open: nothing re-checks a declared capability at the point
+  a suite uses it, so the next mutation of process-wide state is silent in the same way.
 
 ## Delivery & operations
 

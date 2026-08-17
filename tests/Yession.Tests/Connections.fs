@@ -833,15 +833,6 @@ let private routeTests =
 open Yession.Oidc
 open Yession.Tests.Support
 
-[<Emit("process.env[$0] = $1")>]
-let private setEnv (name: string) (value: string) : unit = Util.jsNative
-
-[<Emit("delete process.env[$0]")>]
-let private unsetEnv (name: string) : unit = Util.jsNative
-
-[<Emit("(process.env[$0] ?? null)")>]
-let private getEnvRaw (name: string) : string option = Util.jsNative
-
 [<Emit("process.execPath")>]
 let private nodePath : string = Util.jsNative
 
@@ -878,25 +869,22 @@ let private e2eTests =
                     sprintf "tests/Yession.Tests/out/.data/conn-e2e-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
                 // The child must see NO ambient credentials, whatever this test process
                 // inherited (CI's LiveAgent tier exports one): blank both for the spawn.
-                let savedKey = getEnvRaw "ANTHROPIC_API_KEY"
-                let savedToken = getEnvRaw "CLAUDE_CODE_OAUTH_TOKEN"
-                setEnv "ANTHROPIC_API_KEY" ""
-                setEnv "CLAUDE_CODE_OAUTH_TOKEN" ""
-                setEnv "YESSION_AGENT" "credential-probe"
-                let! pm =
-                    ProcessManager.create
-                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
-                            Strategy = Some Strategy.localhost
-                            Secrets = Some (ProcessManager.EphemeralSecrets ProcessManager.OperatorChose) }
-                let record = pm.CreateSession "conn-child" "Connections child" |> expect
-                let! launched = pm.Launch record.SessionId
-                unsetEnv "YESSION_AGENT"
-                let restore name saved =
-                    match saved with
-                    | Some v -> setEnv name v
-                    | None -> unsetEnv name
-                restore "ANTHROPIC_API_KEY" savedKey
-                restore "CLAUDE_CODE_OAUTH_TOKEN" savedToken
+                let! pm, launched =
+                    Support.withEnv
+                        [ "ANTHROPIC_API_KEY", Some ""
+                          "CLAUDE_CODE_OAUTH_TOKEN", Some ""
+                          "YESSION_AGENT", Some "credential-probe" ]
+                        (fun () -> async {
+                            let! pm =
+                                ProcessManager.create
+                                    { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                                        Strategy = Some Strategy.localhost
+                                        Secrets =
+                                            Some (ProcessManager.EphemeralSecrets ProcessManager.OperatorChose) }
+                            let record = pm.CreateSession "conn-child" "Connections child" |> expect
+                            let! launched = pm.Launch record.SessionId
+                            return pm, launched
+                        })
                 let port = launched |> expect
                 let sessionUrl = sprintf "http://127.0.0.1:%d" port
 
@@ -997,25 +985,22 @@ let private e2eTests =
                 // anywhere.
                 let dataDir =
                     sprintf "tests/Yession.Tests/out/.data/conn-byo-%d" (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
-                let savedKey = getEnvRaw "ANTHROPIC_API_KEY"
-                let savedToken = getEnvRaw "CLAUDE_CODE_OAUTH_TOKEN"
-                setEnv "ANTHROPIC_API_KEY" ""
-                setEnv "CLAUDE_CODE_OAUTH_TOKEN" ""
-                setEnv "YESSION_AGENT" "credential-probe"
-                let! pm =
-                    ProcessManager.create
-                        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
-                            Strategy = Some Strategy.trustedHeaders
-                            Secrets = Some (ProcessManager.EphemeralSecrets ProcessManager.OperatorChose) }
-                let record = pm.CreateSession "byo-child" "BYO child" |> expect
-                let! launched = pm.Launch record.SessionId
-                unsetEnv "YESSION_AGENT"
-                let restore name saved =
-                    match saved with
-                    | Some v -> setEnv name v
-                    | None -> unsetEnv name
-                restore "ANTHROPIC_API_KEY" savedKey
-                restore "CLAUDE_CODE_OAUTH_TOKEN" savedToken
+                let! pm, launched =
+                    Support.withEnv
+                        [ "ANTHROPIC_API_KEY", Some ""
+                          "CLAUDE_CODE_OAUTH_TOKEN", Some ""
+                          "YESSION_AGENT", Some "credential-probe" ]
+                        (fun () -> async {
+                            let! pm =
+                                ProcessManager.create
+                                    { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+                                        Strategy = Some Strategy.trustedHeaders
+                                        Secrets =
+                                            Some (ProcessManager.EphemeralSecrets ProcessManager.OperatorChose) }
+                            let record = pm.CreateSession "byo-child" "BYO child" |> expect
+                            let! launched = pm.Launch record.SessionId
+                            return pm, launched
+                        })
                 let port = launched |> expect
                 let sessionUrl = sprintf "http://127.0.0.1:%d" port
 
@@ -1181,23 +1166,11 @@ let private startGitHubRoutes (connections: ControlClient.SessionConnections) (s
 /// Point the module at the stub for the duration of one test, and put the environment back
 /// afterwards — these are process-wide and the suite runs beside others.
 let private withStubGitHub (stub: StubGitHub) (clientId: string option) (body: unit -> Async<unit>) : Async<unit> =
-    async {
-        let names = [ "YESSION_GITHUB_DEVICE_URL"; "YESSION_GITHUB_TOKEN_URL"; "YESSION_GITHUB_CLIENT_ID" ]
-        let saved = names |> List.map (fun n -> n, getEnvRaw n)
-        setEnv "YESSION_GITHUB_DEVICE_URL" stub.DeviceUrl
-        setEnv "YESSION_GITHUB_TOKEN_URL" stub.TokenUrl
-        match clientId with
-        | Some id -> setEnv "YESSION_GITHUB_CLIENT_ID" id
-        | None -> unsetEnv "YESSION_GITHUB_CLIENT_ID"
-        try
-            do! body ()
-        finally
-            saved
-            |> List.iter (fun (n, v) ->
-                match v with
-                | Some original -> setEnv n original
-                | None -> unsetEnv n)
-    }
+    Support.withEnv
+        [ "YESSION_GITHUB_DEVICE_URL", Some stub.DeviceUrl
+          "YESSION_GITHUB_TOKEN_URL", Some stub.TokenUrl
+          "YESSION_GITHUB_CLIENT_ID", clientId ]
+        body
 
 let private githubRouteTests =
     testList "github sign-in routes" [

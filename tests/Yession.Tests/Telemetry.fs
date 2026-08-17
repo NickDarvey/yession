@@ -23,12 +23,6 @@ let private expect = function Ok v -> v | Error e -> failwith e
 [<Emit("$0[$1]")>]
 let private field (o: obj) (key: string) : obj = jsNative
 
-[<Emit("process.env[$0] = $1")>]
-let private setEnv (key: string) (value: string) : unit = jsNative
-
-[<Emit("delete process.env[$0]")>]
-let private unsetEnv (key: string) : unit = jsNative
-
 /// A logger backed by an in-memory exporter, plus the exporter for assertions.
 let private inMemoryLogger () : Logger * InMemoryLogRecordExporter =
     let mem = inMemoryExporter ()
@@ -108,12 +102,12 @@ let private emitterTests =
         testCaseAsync "OTEL_LOGS_EXPORTER=none (or OTEL_SDK_DISABLED) yields a disabled emitter" <|
             async {
                 let sessionId = SessionId.create "sess-none" |> expect
-                setEnv "OTEL_LOGS_EXPORTER" "none"
-                let off = Telemetry.fromEnv sessionId
-                off.Emit (AgentTurnId.create "t" |> expect)
-                    { InputTokens = 9; OutputTokens = 9; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
-                do! off.Shutdown () |> Async.AwaitPromise
-                unsetEnv "OTEL_LOGS_EXPORTER"
+                do! Support.withEnv [ "OTEL_LOGS_EXPORTER", Some "none" ] (fun () -> async {
+                    let off = Telemetry.fromEnv sessionId
+                    off.Emit (AgentTurnId.create "t" |> expect)
+                        { InputTokens = 9; OutputTokens = 9; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
+                    do! off.Shutdown () |> Async.AwaitPromise
+                })
             }
 
         testCaseAsync "a dead OTLP endpoint never throws on Emit; Shutdown flushes cleanly" <|
@@ -175,14 +169,15 @@ let private forwardingTests =
             async {
                 let! stub = OtlpStub.start ()
                 let sessionId = SessionId.create "env-sess" |> expect
-                setEnv "OTEL_LOGS_EXPORTER" "otlp"
-                setEnv "OTEL_EXPORTER_OTLP_ENDPOINT" stub.Url
-                let emitter = Telemetry.fromEnv sessionId
-                emitter.Emit (AgentTurnId.create "env-turn" |> expect)
-                    { InputTokens = 5; OutputTokens = 6; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
-                do! emitter.Shutdown () |> Async.AwaitPromise
-                unsetEnv "OTEL_LOGS_EXPORTER"
-                unsetEnv "OTEL_EXPORTER_OTLP_ENDPOINT"
+                do! Support.withEnv
+                        [ "OTEL_LOGS_EXPORTER", Some "otlp"
+                          "OTEL_EXPORTER_OTLP_ENDPOINT", Some stub.Url ]
+                        (fun () -> async {
+                            let emitter = Telemetry.fromEnv sessionId
+                            emitter.Emit (AgentTurnId.create "env-turn" |> expect)
+                                { InputTokens = 5; OutputTokens = 6; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
+                            do! emitter.Shutdown () |> Async.AwaitPromise
+                        })
 
                 match stub.Received () |> List.choose OtlpStub.turnUsage with
                 | [ u ] ->
@@ -200,16 +195,16 @@ let private forwardingTests =
             async {
                 let! stub = OtlpStub.start ()
                 let sessionId = SessionId.create "ovr-sess" |> expect
-                setEnv "OTEL_LOGS_EXPORTER" "otlp"
-                setEnv "OTEL_EXPORTER_OTLP_ENDPOINT" stub.Url
-                setEnv "OTEL_RESOURCE_ATTRIBUTES" "service.version=set-by-operator"
-                let emitter = Telemetry.fromEnv sessionId
-                emitter.Emit (AgentTurnId.create "ovr-turn" |> expect)
-                    { InputTokens = 1; OutputTokens = 1; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
-                do! emitter.Shutdown () |> Async.AwaitPromise
-                unsetEnv "OTEL_LOGS_EXPORTER"
-                unsetEnv "OTEL_EXPORTER_OTLP_ENDPOINT"
-                unsetEnv "OTEL_RESOURCE_ATTRIBUTES"
+                do! Support.withEnv
+                        [ "OTEL_LOGS_EXPORTER", Some "otlp"
+                          "OTEL_EXPORTER_OTLP_ENDPOINT", Some stub.Url
+                          "OTEL_RESOURCE_ATTRIBUTES", Some "service.version=set-by-operator" ]
+                        (fun () -> async {
+                            let emitter = Telemetry.fromEnv sessionId
+                            emitter.Emit (AgentTurnId.create "ovr-turn" |> expect)
+                                { InputTokens = 1; OutputTokens = 1; CacheReadTokens = 0; CacheCreationTokens = 0; Model = None }
+                            do! emitter.Shutdown () |> Async.AwaitPromise
+                        })
 
                 match stub.Received () with
                 | r :: _ ->
