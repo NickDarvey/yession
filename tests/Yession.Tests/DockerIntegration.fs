@@ -35,12 +35,6 @@ let private makeWorldWritable (fs: obj) (path: string) : unit = jsNative
 [<Emit("$0.readFileSync($1, 'utf8')")>]
 let private readFile (fs: obj) (path: string) : string = jsNative
 
-[<Emit("process.env[$0] = $1")>]
-let private setEnv (name: string) (value: string) : unit = jsNative
-
-[<Emit("delete process.env[$0]")>]
-let private unsetEnv (name: string) : unit = jsNative
-
 // --- Fixtures / helpers ------------------------------------------------------------------
 
 let private alpineSpec =
@@ -188,29 +182,30 @@ let tests =
             })
 
             testCaseAsync "secret refs resolve at spawn; missing secrets fail creation" (async {
-                setEnv "YESSION_TEST_SECRET" "s3cr3t-value"
-                let resolvedSpec =
-                    { alpineSpec with EnvironmentVariables = Map.ofList [ "TOKEN", SecretRef (SecretName.create "YESSION_TEST_SECRET" |> expect) ] }
-                let! name, sandbox =
-                    async {
-                        match! start envSecrets resolvedSpec with
-                        | Error reason -> return failwithf "docker sandbox failed: %s" reason
-                        | Ok started -> return started
-                    }
-                let! _, out, _ = runInSandbox sandbox "printenv" [ "TOKEN" ] Map.empty None
-                Expect.isTrue (out.Contains "s3cr3t-value") "the referenced secret reaches the container env"
-                do! sandbox.Dispose ()
-                unsetEnv "YESSION_TEST_SECRET"
-                ignore name
+                do! Support.withEnv [ "YESSION_TEST_SECRET", Some "s3cr3t-value" ] (fun () -> async {
+                    let resolvedSpec =
+                        { alpineSpec with EnvironmentVariables = Map.ofList [ "TOKEN", SecretRef (SecretName.create "YESSION_TEST_SECRET" |> expect) ] }
+                    let! _, sandbox =
+                        async {
+                            match! start envSecrets resolvedSpec with
+                            | Error reason -> return failwithf "docker sandbox failed: %s" reason
+                            | Ok started -> return started
+                        }
+                    let! _, out, _ = runInSandbox sandbox "printenv" [ "TOKEN" ] Map.empty None
+                    Expect.isTrue (out.Contains "s3cr3t-value") "the referenced secret reaches the container env"
+                    do! sandbox.Dispose ()
+                })
 
-                // An unresolved secret ref fails creation with a legible reason — before
-                // any container exists.
-                unsetEnv "YESSION_MISSING_SECRET"
-                let missingSpec =
-                    { alpineSpec with EnvironmentVariables = Map.ofList [ "TOKEN", SecretRef (SecretName.create "YESSION_MISSING_SECRET" |> expect) ] }
-                match! start envSecrets missingSpec with
-                | Error reason -> Expect.isTrue (reason.Contains "YESSION_MISSING_SECRET") "the failure names the missing secret"
-                | Ok _ -> failwith "creation should fail when a secret ref cannot be resolved"
+                // An unresolved secret ref fails creation with a legible reason — before any
+                // container exists. `None` is the arrangement here (the name must be ABSENT),
+                // and `withEnv` still puts back whatever this box had.
+                do! Support.withEnv [ "YESSION_MISSING_SECRET", None ] (fun () -> async {
+                    let missingSpec =
+                        { alpineSpec with EnvironmentVariables = Map.ofList [ "TOKEN", SecretRef (SecretName.create "YESSION_MISSING_SECRET" |> expect) ] }
+                    match! start envSecrets missingSpec with
+                    | Error reason -> Expect.isTrue (reason.Contains "YESSION_MISSING_SECRET") "the failure names the missing secret"
+                    | Ok _ -> failwith "creation should fail when a secret ref cannot be resolved"
+                })
             })
 
             testCaseAsync "the Manager's secret store feeds resolve-at-spawn, gated by the ABAC walk (Plan 06)" (async {
@@ -225,22 +220,22 @@ let tests =
                 let secretName n = SecretName.create n |> expect
                 let! _ = store.Set { Scope = SessionScope sessionId; Name = secretName "SESSION_TOKEN" } "session-held"
                 let! _ = store.Set { Scope = UserScope alice; Name = secretName "USER_TOKEN" } "user-held"
-                setEnv "SESSION_TOKEN" "env-shadowed"
-                let walk = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) (fun _ -> Set.empty) (fun _ -> false) SecretStore.SecretResolution.processEnv
-                let spec =
-                    { alpineSpec with
-                        EnvironmentVariables =
-                            Map.ofList
-                                [ "SESSION_TOKEN", SecretRef (secretName "SESSION_TOKEN")
-                                  "USER_TOKEN", SecretRef (secretName "USER_TOKEN") ] }
-                match! start (fun n -> walk sessionId n) spec with
-                | Error reason -> failwithf "docker sandbox failed: %s" reason
-                | Ok (_, sandbox) ->
-                    let! _, out, _ = runInSandbox sandbox "printenv" [] Map.empty None
-                    Expect.isTrue (out.Contains "SESSION_TOKEN=session-held") "the store's session secret shadows the env fallback"
-                    Expect.isTrue (out.Contains "USER_TOKEN=user-held") "a bound user's secret injects"
-                    do! sandbox.Dispose ()
-                unsetEnv "SESSION_TOKEN"
+                do! Support.withEnv [ "SESSION_TOKEN", Some "env-shadowed" ] (fun () -> async {
+                    let walk = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.singleton alice) (fun _ -> Set.empty) (fun _ -> false) SecretStore.SecretResolution.processEnv
+                    let spec =
+                        { alpineSpec with
+                            EnvironmentVariables =
+                                Map.ofList
+                                    [ "SESSION_TOKEN", SecretRef (secretName "SESSION_TOKEN")
+                                      "USER_TOKEN", SecretRef (secretName "USER_TOKEN") ] }
+                    match! start (fun n -> walk sessionId n) spec with
+                    | Error reason -> failwithf "docker sandbox failed: %s" reason
+                    | Ok (_, sandbox) ->
+                        let! _, out, _ = runInSandbox sandbox "printenv" [] Map.empty None
+                        Expect.isTrue (out.Contains "SESSION_TOKEN=session-held") "the store's session secret shadows the env fallback"
+                        Expect.isTrue (out.Contains "USER_TOKEN=user-held") "a bound user's secret injects"
+                        do! sandbox.Dispose ()
+                })
 
                 // Without the user binding, the user-scoped secret is unreachable.
                 let unbound = SecretStore.SecretResolution.compose (fun _ _ _ -> ()) store (fun _ -> Set.empty) (fun _ -> Set.empty) (fun _ -> false) SecretStore.SecretResolution.processEnv

@@ -296,12 +296,6 @@ let private processTests =
 // with a per-launch secret, and the Manager's registry still decides everything.
 // -----------------------------------------------------------------------------
 
-[<Emit("process.env[$0] = $1")>]
-let private setEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNative
-
-[<Emit("delete process.env[$0]")>]
-let private unsetEnv (name: string) : unit = Fable.Core.Util.jsNative
-
 /// A port nothing is listening on, taken by binding :0 and releasing it. Needed where a
 /// Manager's PUBLIC origin has to be known BEFORE it starts: that origin is its OIDC
 /// issuer, and a launched session fetches discovery against it, so — exactly as in a real
@@ -356,9 +350,8 @@ let private controlRpcTests =
                 let record = pm.CreateSession "rpc-child" "RPC child" |> expect
 
                 // The child inherits our environment: run its built-in diagnostic agent.
-                setEnv "YESSION_AGENT" "diagnostic"
-                let! launched = pm.Launch record.SessionId
-                unsetEnv "YESSION_AGENT"
+                let! launched =
+                    Support.withEnv [ "YESSION_AGENT", Some "diagnostic" ] (fun () -> pm.Launch record.SessionId)
                 let port = launched |> expect
 
                 let! opened = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" port)
@@ -933,13 +926,12 @@ let private telemetryTests =
 
                 // The child inherits our environment: run its usage-probe agent and export OTLP
                 // straight to the stub collector (no Manager receiver).
-                setEnv "YESSION_AGENT" "usage-probe"
-                setEnv "OTEL_LOGS_EXPORTER" "otlp"
-                setEnv "OTEL_EXPORTER_OTLP_ENDPOINT" stub.Url
-                let! launched = pm.Launch record.SessionId
-                unsetEnv "YESSION_AGENT"
-                unsetEnv "OTEL_LOGS_EXPORTER"
-                unsetEnv "OTEL_EXPORTER_OTLP_ENDPOINT"
+                let! launched =
+                    Support.withEnv
+                        [ "YESSION_AGENT", Some "usage-probe"
+                          "OTEL_LOGS_EXPORTER", Some "otlp"
+                          "OTEL_EXPORTER_OTLP_ENDPOINT", Some stub.Url ]
+                        (fun () -> pm.Launch record.SessionId)
                 let port = launched |> expect
 
                 // A real client messages the child; access rides the OIDC bounce; the probe
@@ -1493,49 +1485,48 @@ let private registryStreamTests =
                 do! waitUntil "the empty snapshot" (fun () -> frames |> Seq.exists (fun f -> List.isEmpty f.Sessions))
 
                 let record = pm.CreateSession "reg-1" "Registry One" |> expect
-                setEnv "YESSION_MANAGER_URL" managerUrl
-                setEnv "YESSION_SESSION_URL" sessionUrl
-                try
-                    let! launched = pm.Launch record.SessionId
-                    let port = expect launched
-                    do! waitUntil "the launch frame" (fun () ->
-                            frames
-                            |> Seq.exists (fun f ->
-                                f.Sessions
-                                |> List.exists (fun e -> SessionId.value e.Id = "reg-1" && e.Port = port && e.Name = "Registry One")))
+                do! Support.withEnv
+                        [ "YESSION_MANAGER_URL", Some managerUrl
+                          "YESSION_SESSION_URL", Some sessionUrl ]
+                        (fun () -> async {
+                            let! launched = pm.Launch record.SessionId
+                            let port = expect launched
+                            do! waitUntil "the launch frame" (fun () ->
+                                    frames
+                                    |> Seq.exists (fun f ->
+                                        f.Sessions
+                                        |> List.exists (fun e -> SessionId.value e.Id = "reg-1" && e.Port = port && e.Name = "Registry One")))
 
-                    // A reconnect's FIRST frame is the current snapshot — reconnecting IS
-                    // the recovery protocol, and one connect-read-disconnect is a poll.
-                    let mutable second : ControlWire.SessionRegistryFrame option = None
-                    let cancelSecond = ControlClient.subscribeSessions baseUrl (fun f -> if second.IsNone then second <- Some f)
-                    do! waitUntil "the second subscription's snapshot" (fun () -> second.IsSome)
-                    cancelSecond.Stop ()
-                    Expect.isTrue
-                        (second.Value.Sessions |> List.exists (fun e -> e.Port = port))
-                        "a fresh subscriber's first frame is the current snapshot"
+                            // A reconnect's FIRST frame is the current snapshot — reconnecting IS
+                            // the recovery protocol, and one connect-read-disconnect is a poll.
+                            let mutable second : ControlWire.SessionRegistryFrame option = None
+                            let cancelSecond = ControlClient.subscribeSessions baseUrl (fun f -> if second.IsNone then second <- Some f)
+                            do! waitUntil "the second subscription's snapshot" (fun () -> second.IsSome)
+                            cancelSecond.Stop ()
+                            Expect.isTrue
+                                (second.Value.Sessions |> List.exists (fun e -> e.Port = port))
+                                "a fresh subscriber's first frame is the current snapshot"
 
-                    // The public address reaches both browser-facing URLs: the open link
-                    // and the session's registered OAuth redirect URI (via the env the
-                    // child inherited at spawn).
-                    let! rendered = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
-                    Expect.isTrue
-                        (rendered.Contains (sprintf "href=\"http://home.example.ts.net:%d/\"" port))
-                        "the open link carries the public origin"
-                    let! login = OidcHttp.getWithJar (OidcHttp.newJar ()) (sprintf "http://127.0.0.1:%d/login" port)
-                    Expect.equal login.Status 302 "/login redirects into the authorize chain"
-                    Expect.isTrue
-                        (login.Location.Contains (sprintf "home.example.ts.net%%3A%d%%2Fcallback" port))
-                        "the registered redirect URI carries the public origin"
+                            // The public address reaches both browser-facing URLs: the open link
+                            // and the session's registered OAuth redirect URI (via the env the
+                            // child inherited at spawn).
+                            let! rendered = Interop.getText (baseUrl + "/") |> Async.AwaitPromise
+                            Expect.isTrue
+                                (rendered.Contains (sprintf "href=\"http://home.example.ts.net:%d/\"" port))
+                                "the open link carries the public origin"
+                            let! login = OidcHttp.getWithJar (OidcHttp.newJar ()) (sprintf "http://127.0.0.1:%d/login" port)
+                            Expect.equal login.Status 302 "/login redirects into the authorize chain"
+                            Expect.isTrue
+                                (login.Location.Contains (sprintf "home.example.ts.net%%3A%d%%2Fcallback" port))
+                                "the registered redirect URI carries the public origin"
 
-                    // A stop pushes a fresh frame without the session.
-                    let seen = frames.Count
-                    let! stopped = pm.Stop record.SessionId
-                    expect stopped
-                    do! waitUntil "the stop frame" (fun () ->
-                            frames |> Seq.skip seen |> Seq.exists (fun f -> List.isEmpty f.Sessions))
-                finally
-                    unsetEnv "YESSION_MANAGER_URL"
-                    unsetEnv "YESSION_SESSION_URL"
+                            // A stop pushes a fresh frame without the session.
+                            let seen = frames.Count
+                            let! stopped = pm.Stop record.SessionId
+                            expect stopped
+                            do! waitUntil "the stop frame" (fun () ->
+                                    frames |> Seq.skip seen |> Seq.exists (fun f -> List.isEmpty f.Sessions))
+                        })
 
                 cancel.Stop ()
                 do! pm.StopAll ()

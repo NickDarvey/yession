@@ -19,8 +19,11 @@ open Fable.Core
 open Fable.Core.JsInterop
 open Fable.Pyxpecto
 open Yession.Domain
+open Yession.Oidc
+open Yession.App
 open Yession.Host
 open Yession.SessionProcess
+open Yession.Tests.Support
 
 let private expect =
     function
@@ -277,8 +280,123 @@ let private srtTests =
         }
     ]
 
+// --- [LiveAgent]: the clone path, as somebody actually asks for it -------------------------
+//
+// The verbs above are driven directly, against local fixtures. This one is the whole path a
+// person uses: a real model, a real turn, `add_repo` chosen by the agent rather than called by
+// the test, and a real checkout from GitHub landing on disk.
+//
+// It took four attempts to get here, and each failure is why a piece of this looks the way it
+// does. The first died on `Runner.WaitFor`'s 30s hang detector (sized for sub-9s tests), so
+// this case owns its deadline. The second set that deadline to 180s and blew the Node suite's
+// shared 240s budget, killing every suite before a word was printed — hence 90s, which is more
+// than ten times the 6.9s a passing run takes. The third reported "no checkout" with an empty
+// conversation, and the report below is the only reason that was diagnosable: `Phase2` was
+// deleting `ANTHROPIC_API_KEY` from the process env on its way out, so this session started
+// with no credential and therefore no agent at all. `Support.withEnv` is what stopped that.
+//
+// So the report stays, printed on green as well as red. A red here means the clone path is
+// broken, and the report is what says which way: no turn ran at all (no agent item), a turn ran
+// and the clone was refused (the agent's words carry git's), or the clone hung (a turn in
+// flight, nothing on disk).
+
+[<Emit("process.execPath")>]
+let private nodeExecutable : string = jsNative
+
+[<Emit("(() => { try { return $0.readdirSync($1).join(', ') || '<empty>' } catch (e) { return '<' + (e.code || e.message) + '>' } })()")>]
+let private listDir (fs: obj) (path: string) : string = jsNative
+
+let private liveRepo = "octocat/Hello-World"
+
+/// Ten times a passing run, and well inside the Node suite's shared 240s budget — so a
+/// failure here is this case's report, never the runner killing every suite at once.
+let private cloneDeadlineMs = 90_000
+
+let private liveClone =
+    testList "add_repo, as somebody asks for it" [
+        testCaseAsync "a person asks the agent for a repo, and the checkout lands" <| async {
+            let dataDir =
+                sprintf
+                    "tests/Yession.Tests/out/.data/clone-live-%d"
+                    (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+            let! pm =
+                ProcessManager.create
+                    { ProcessManager.Options.defaults dataDir nodeExecutable [ "app/SessionMain.js" ] with
+                        Strategy = Some Strategy.localhost }
+            let record = pm.CreateSession "clone-live" "Clone" |> expect
+            let! launched = pm.Launch record.SessionId
+            let port = launched |> expect
+            let! opened = OidcHttp.openSession (sprintf "http://127.0.0.1:%d" port)
+            let! ada = connectClient (sprintf "http://127.0.0.1:%d/signal" port) opened.PeerToken "ada" "Ada"
+
+            let sessionDir = sprintf "%s/%s" dataDir record.DataDir
+            let reposDir = sprintf "%s/repos" sessionDir
+            let checkout = sprintf "%s/%s/.git" reposDir liveRepo
+
+            /// Everything a reader needs to tell the three faults apart, printed whatever happens.
+            let report (why: string) =
+                let model = ada.Runner.Model ()
+                let items =
+                    match model.Conversation.Items with
+                    | [] -> "    (no conversation items at all)"
+                    | items ->
+                        items
+                        |> List.map (fun i -> sprintf "    %A [%A] %s" i.Author i.Status (i.Body.Replace ("\n", " ")))
+                        |> String.concat "\n"
+                let terminals =
+                    match model.Terminals.Terminals with
+                    | [] -> "    (none opened)"
+                    | ts ->
+                        ts
+                        |> List.collect (fun t ->
+                            t.Blocks |> List.map (fun b -> sprintf "    %s -> %A" b.Command b.Status))
+                        |> function [] -> "    (terminals, no blocks)" | ls -> String.concat "\n" ls
+                sprintf
+                    "CLONE: %s\n  environment: %A\n  conversation:\n%s\n  terminal blocks:\n%s\n  session dir: %s\n  repos dir: %s\n  owner dir: %s\n  checkout present: %b"
+                    why
+                    model.Environment
+                    items
+                    terminals
+                    (listDir nodeFs sessionDir)
+                    (listDir nodeFs reposDir)
+                    (listDir nodeFs (sprintf "%s/octocat" reposDir))
+                    (exists nodeFs checkout)
+
+            do! compose ada ada.Hello.PeerId (sprintf "Clone %s" liveRepo)
+            ada.Connection.SendDraft ada.Hello.PeerId
+
+            // Settles on the checkout OR the turn ending, whichever comes first — then prints.
+            let settled () =
+                exists nodeFs checkout
+                || (ada.Runner.Model ()).Conversation.Items
+                   |> List.exists (fun i ->
+                       i.Author = ActorRef.Agent
+                       && (i.Status = Complete || i.Status = ConversationItemStatus.Failed))
+            let rec waitFor (remaining: int) =
+                async {
+                    if settled () || remaining <= 0 then return ()
+                    else
+                        do! Async.Sleep 250
+                        return! waitFor (remaining - 1)
+                }
+            do! waitFor (cloneDeadlineMs / 250)
+
+            // Printed on the happy path too: a green run that says nothing teaches nothing, and
+            // this is the only place a CI reader can see what the live session actually did.
+            printfn "%s" (report (if exists nodeFs checkout then "the checkout landed" else "no checkout"))
+            Expect.isTrue (exists nodeFs checkout) (report "the checkout never landed")
+
+            do! ada.Channel.Close ()
+            do! pm.StopAll ()
+        }
+    ]
+
 let tests =
     testList "GitIntegration" [
         pureTests
         Tag.needs "Repo verbs (srt)" [ Tag.Srt ] (fun () -> srtTests)
+        Tag.needs
+            "add_repo (live model, real GitHub)"
+            [ Tag.LiveAgent; Tag.Ports; Tag.Native; Tag.Srt ]
+            (fun () -> liveClone)
     ]

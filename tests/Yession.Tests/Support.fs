@@ -317,6 +317,41 @@ module OidcHttp =
     let openSession (sessionBaseUrl: string) : Async<{| Jar: Jar; PeerToken: string |}> =
         openSessionVia [] "/login" sessionBaseUrl
 
+// --- The process env, taken and given back ------------------------------------------------
+//
+// A test that plants a variable and DELETES it on the way out has not restored the
+// environment, it has cleared it — and the suite is one process, so everything compiled
+// after it runs without. `Phase2`'s credential-leak regression did exactly that with
+// `ANTHROPIC_API_KEY`: every `LiveAgent` suite after it got a session with no credential,
+// which `SessionMain` answers by starting NO AGENT — so a turn simply never got a reply
+// and nothing said why. Take-then-restore is one verb because the half that gives it back
+// is the half a caller forgets.
+
+[<Fable.Core.Emit("process.env[$0] = $1")>]
+let private setEnvRaw (name: string) (value: string) : unit = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("delete process.env[$0]")>]
+let private unsetEnvRaw (name: string) : unit = Fable.Core.Util.jsNative
+
+[<Fable.Core.Emit("(process.env[$0] ?? null)")>]
+let private getEnvRaw (name: string) : string option = Fable.Core.Util.jsNative
+
+/// Run `body` with these environment variables replaced (`None` removes one), then put back
+/// exactly what was there — including absence — whether the body returns or throws.
+let withEnv (bindings: (string * string option) list) (body: unit -> Async<'a>) : Async<'a> =
+    async {
+        let saved = bindings |> List.map (fun (name, _) -> name, getEnvRaw name)
+        let apply (name, value) =
+            match value with
+            | Some v -> setEnvRaw name v
+            | None -> unsetEnvRaw name
+        bindings |> List.iter apply
+        try
+            return! body ()
+        finally
+            saved |> List.iter apply
+    }
+
 /// Poll a predicate until it holds, failing loudly with `label` if it never does. For the few
 /// signals that are not model changes (an SSE frame arriving, a hub publishing) — a model waiter
 /// is `Runner.WaitFor` and needs no polling.
