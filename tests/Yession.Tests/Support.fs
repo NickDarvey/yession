@@ -327,14 +327,30 @@ module OidcHttp =
 // and nothing said why. Take-then-restore is one verb because the half that gives it back
 // is the half a caller forgets.
 
+// Runtime-aware, because this file is compiled for BOTH runtimes: a bare `jsNative` here is a
+// trap that springs the first time a browser-tier suite reaches for the environment.
+
 [<Fable.Core.Emit("process.env[$0] = $1")>]
-let private setEnvRaw (name: string) (value: string) : unit = Fable.Core.Util.jsNative
+let private jsSetEnv (name: string) (value: string) : unit = Fable.Core.Util.jsNative
 
 [<Fable.Core.Emit("delete process.env[$0]")>]
-let private unsetEnvRaw (name: string) : unit = Fable.Core.Util.jsNative
+let private jsUnsetEnv (name: string) : unit = Fable.Core.Util.jsNative
 
 [<Fable.Core.Emit("(process.env[$0] ?? null)")>]
-let private getEnvRaw (name: string) : string option = Fable.Core.Util.jsNative
+let private jsGetEnv (name: string) : string option = Fable.Core.Util.jsNative
+
+let private setEnvRaw (name: string) (value: string) : unit =
+    if Compiler.isDotnet then System.Environment.SetEnvironmentVariable (name, value) else jsSetEnv name value
+
+let private unsetEnvRaw (name: string) : unit =
+    if Compiler.isDotnet then System.Environment.SetEnvironmentVariable (name, null) else jsUnsetEnv name
+
+let private getEnvRaw (name: string) : string option =
+    if Compiler.isDotnet then
+        match System.Environment.GetEnvironmentVariable name with
+        | null -> None
+        | v -> Some v
+    else jsGetEnv name
 
 /// Run `body` with these environment variables replaced (`None` removes one), then put back
 /// exactly what was there — including absence — whether the body returns or throws.
@@ -352,19 +368,61 @@ let withEnv (bindings: (string * string option) list) (body: unit -> Async<'a>) 
             saved |> List.iter apply
     }
 
-/// Poll a predicate until it holds, failing loudly with `label` if it never does. For the few
-/// signals that are not model changes (an SSE frame arriving, a hub publishing) — a model waiter
-/// is `Runner.WaitFor` and needs no polling.
-let waitUntil (label: string) (condition: unit -> bool) : Async<unit> =
+// --- Waiting on a signal that is not a model change ---------------------------------------
+//
+// For the few signals a model waiter cannot see (a file appearing, an SSE frame arriving, a hub
+// publishing) — a model waiter is `Runner.WaitFor` and needs no polling.
+
+let private pollMs = 50
+
+/// The whole Node run's budget, as `check` computed it from the capabilities this run declared
+/// (`tasks.fsx` `nodeBudgetMs`). Read per call rather than at module init so a test can drive it.
+/// `None` when the bundle was started by hand, which is not an error — nothing is being spent.
+let private runBudgetMs () : int option =
+    getEnvRaw "YESSION_TEST_BUDGET_MS"
+    |> Option.bind (fun raw ->
+        match System.Int32.TryParse raw with
+        | true, ms when ms > 0 -> Some ms
+        | _ -> None)
+
+/// Poll until the condition holds or `timeoutMs` elapses, ANSWERING which — for the few cases
+/// that have something to say about not settling (the live clone case prints what the session
+/// actually did before it fails). `waitUntilWithin` is this plus the failure, and is what
+/// almost every wait wants.
+///
+/// A case's deadline is spent out of the whole run's budget, so one that exceeds it is refused
+/// before it waits at all, naming both numbers. A 180s deadline under a 240s run budget once
+/// took the runner down four minutes later, killing every other suite and naming none of them —
+/// discovering that at the deadline rather than at the wait cost two red release runs.
+let settledWithin (timeoutMs: int) (condition: unit -> bool) : Async<bool> =
     let rec go (remaining: int) =
         async {
-            if condition () then return ()
-            elif remaining <= 0 then return failwithf "timed out waiting for %s" label
+            if condition () then return true
+            elif remaining <= 0 then return false
             else
-                do! Async.Sleep 50
+                do! Async.Sleep pollMs
                 return! go (remaining - 1)
         }
-    go 100
+    async {
+        match runBudgetMs () with
+        | Some budget when timeoutMs >= budget ->
+            return
+                failwithf
+                    "a case asked to wait up to %dms, but this whole Node run's budget is %dms — reaching that deadline would kill every other suite with it. Narrow the run (`check --only \"<part of a test name>\"`), or give the tier a bigger allowance in tasks.fsx."
+                    timeoutMs
+                    budget
+        | _ -> return! go (max 1 (timeoutMs / pollMs))
+    }
+
+/// Poll until the condition holds, failing loudly with `label` if it never does.
+let waitUntilWithin (timeoutMs: int) (label: string) (condition: unit -> bool) : Async<unit> =
+    async {
+        let! held = settledWithin timeoutMs condition
+        if not held then failwithf "timed out waiting for %s" label
+    }
+
+/// The everyday wait: 5s, a hang detector for a signal that normally arrives in milliseconds.
+let waitUntil (label: string) (condition: unit -> bool) : Async<unit> = waitUntilWithin 5_000 label condition
 
 /// One full connected client against a host. `Registry` is the client's `BodyRegistry` (over
 /// its doc), so the body seam below binds the same top-level fragment roots the app does.

@@ -662,8 +662,14 @@ let private hasAny (caps: Set<string>) names = names |> List.exists caps.Contain
 
 // Run the Fable-compiled test bundle on Node with a hard timeout, so a hung WebRTC connection
 // (or any hang) can never block the suite. Inherits stdio (output streams; env passes through,
-// incl. YESSION_TEST_CAPS) and forwards the suite's exit code; a timeout is a failure.
-let private runNodeSuite (target: string) (timeoutMs: int) =
+// incl. YESSION_TEST_CAPS and YESSION_TEST_BUDGET_MS) and forwards the suite's exit code.
+//
+// This is the LAST resort, not the working deadline. A single model wait fails at 30s
+// (`Support.Harness.waitForTimeoutMs`) and a case with its own deadline fails as itself
+// (`Support.settledWithin`), both naming the case. A kill here means something hung outside
+// both — so the message says what the budget was and what bought it, because the one thing this
+// failure cannot say is which test it was.
+let private runNodeSuite (target: string) (caps: string list) (timeoutMs: int) =
     let psi = ProcessStartInfo "node"
     psi.ArgumentList.Add target
     psi.WorkingDirectory <- repoRoot
@@ -672,7 +678,12 @@ let private runNodeSuite (target: string) (timeoutMs: int) =
     if p.WaitForExit timeoutMs then
         if p.ExitCode <> 0 then failwithf "tests failed (exit %d)" p.ExitCode
     else
-        eprintfn "tests: timed out after %dms — killing" timeoutMs
+        eprintfn
+            "tests: the Node suite outran this run's budget of %dms (capabilities: %s) — killing.\n\
+             A single wait fails at 30s and a case's own deadline fails as itself, so this is a hang\n\
+             outside both. Narrow with `check --only \"<part of a test name>\"` to find it."
+            timeoutMs
+            (if List.isEmpty caps then "none (cheap tier)" else String.concat " " caps)
         p.Kill true
         failwith "tests timed out"
 
@@ -811,6 +822,36 @@ let private requireCapabilities (caps: string list) =
             "check: this box cannot host every capability it was asked for:\n  - %s\nRun a tier it can host, or install what is missing."
             (String.concat "\n  - " missing)
 
+// THE BUDGET IS THE TIER'S, NOT ONE NUMBER FOR ALL OF THEM.
+//
+// It was 240s flat, which is two different mistakes at once. On the cheap tier (57s here) it is
+// four minutes of nothing before a hang reports — a detector that dull may as well not fire. On
+// a tier that spawns real processes it is a pool every suite draws on, so a case that
+// legitimately needs two minutes cannot have them: a live clone case with a 180s deadline blew
+// the whole run's 240s and the runner killed every suite before a word was printed, which is
+// how that fault took two release runs and a dispatched gate to name.
+//
+// So: a base that covers the cheap tier, plus what each capability's suites actually cost. The
+// allowances are deliberately generous against measured times (57s cheap, 86s with
+// Ports/Native/Srt on this box) for the same reason `waitForTimeoutMs` is 30s against sub-9s
+// waits — this is a hang detector, and the sharp instruments are elsewhere.
+//
+// `Browser` and `Nix` buy nothing: the browser suite is a separate .NET CLR run and the Nix
+// build happens after this process has exited. A capability that adds no Node suite adds no
+// time here, and one added later that does carries its own allowance in.
+let private nodeBudgetMs (caps: Set<string>) =
+    let allowing (name: string) (ms: int) = if caps.Contains name then ms else 0
+    150_000
+    + allowing "Ports" 90_000
+    + allowing "Native" 30_000
+    + allowing "Srt" 45_000
+    + allowing "LiveAgent" 150_000
+    + allowing "Docker" 150_000
+    + allowing "Keyring" 45_000
+    + allowing "Pty" 45_000
+    + allowing "Serial" 45_000
+    + allowing "Jumpstarter" 90_000
+
 // Build the installable from the WORKING TREE and boot it.
 //
 // Every nix build CI runs goes through a flake, and a flake source copy is what git tracks —
@@ -840,7 +881,12 @@ let private runCheckOnce (requested: string list) =
     let caps = requested
     requireCapabilities caps
     let capSet = Set.ofList caps
+    let budgetMs = nodeBudgetMs capSet
     Environment.SetEnvironmentVariable ("YESSION_TEST_CAPS", String.concat " " caps)
+    // The suite is told its own budget, because a case's deadline is spent out of it: a wait
+    // that asks for more than the run can afford is refused at the call rather than taking the
+    // runner down later (`Support.settledWithin`).
+    Environment.SetEnvironmentVariable ("YESSION_TEST_BUDGET_MS", string budgetMs)
     progress (sprintf "capabilities: %s" (if List.isEmpty caps then "none (cheap tier)" else String.concat " " caps))
     progress "building the solution"
     exec "dotnet" [ "build"; "Yession.slnx" ]
@@ -859,8 +905,8 @@ let private runCheckOnce (requested: string list) =
     // The Node (Fable/JS) path — always runs; self-skips suites whose caps/runtime don't match.
     progress "compiling the suite"
     fable false "tests/Yession.Tests/Yession.Tests.fsproj" "tests/Yession.Tests/out"
-    progress "running the Node suite"
-    runNodeSuite "tests/Yession.Tests/out/Main.js" 240000
+    progress (sprintf "running the Node suite (budget %ds)" (budgetMs / 1000))
+    runNodeSuite "tests/Yession.Tests/out/Main.js" caps budgetMs
 
     // The .NET CLR (Playwright) path — only when a Browser-tagged suite is enabled.
     if capSet.Contains "Browser" then
