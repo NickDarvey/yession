@@ -168,6 +168,18 @@ jobs:
       # A version is claimed by exactly one commit. Serialising the workflow is what stops two
       # runs computing the same number; this is what makes a failure to do so LOUD rather than
       # a tag that silently moves to whichever release finished last.
+      # An EMPTY version is the one value this guard's sibling below cannot catch: `v$VERSION`
+      # is then the tag `v`, `refs/tags/v` does not exist yet, so "already tagged" is false and
+      # the release publishes. That happened, and the tag it left was selectable by the version
+      # computation's `--match` — so every release after it computed against a tag that carried
+      # no version, and a 6.13.1 line restarted at 1.0.0. The computation now refuses such a
+      # tag; this refuses to create one.
+      - name: Refuse to publish an empty version
+        run: |
+          if [ -z "$VERSION" ]; then
+            echo "the computed version is empty: this run has nothing to tag, and 'v' is not a version."
+            exit 1
+          fi
       - name: Refuse to publish a version that already exists
         run: |
           git fetch --tags --quiet
