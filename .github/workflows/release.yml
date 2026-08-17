@@ -68,9 +68,32 @@ jobs:
       - name: "Compute version (1.0.0-beta.<n>, or a +semver: marker bump)"
         id: version
         # tasks.fsx owns the version policy. `devenv shell` prints its own banner/build progress
-        # to stdout, so take only the last line (the version) — capturing all of it corrupts the
-        # step output.
-        run: echo "version=$(devenv shell -- version | tail -n1)" >> "$GITHUB_OUTPUT"
+        # to stderr and the version to stdout, so take only the last line — capturing all of it
+        # corrupts the step output.
+        #
+        # Capture into a variable rather than interpolating the substitution straight into `echo`.
+        # A command substitution's exit status is DISCARDED when it is an argument, so
+        # `echo "version=$(...)"` is green whether or not the computation ran, and `-e` never sees
+        # it. That is not hypothetical: a transient invalid store path made `devenv shell` fail to
+        # evaluate, this step wrote a bare `version=` and reported success, the next step was
+        # handed nothing and quietly computed its own version, and the release job — which has no
+        # such fallback — tagged the commit `v`. Every release after it computed against a tag
+        # carrying no version, and a 6.13.1 line restarted at 1.0.0.
+        #
+        # `pipefail` is what carries that failure through the pipe into `tail`; the emptiness check
+        # is what catches a computation that exits 0 and says nothing.
+        run: |
+          set -euo pipefail
+          version="$(devenv shell -- version | tail -n1)"
+          if [ -z "$version" ]; then
+            echo "the version computation produced no output: refusing to build an unversioned release."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Unquoted deliberately: `package` with no argument computes its own version, which is how a
+      # laptop runs it and is the fallback that hid the empty version above. The guard belongs at
+      # the computation, not here — a second refusal in this step would leave two mechanisms for
+      # one requirement and no way to tell which is live.
       - name: Assemble the npm package (compile + bundle + smoke + pack)
         run: devenv shell -- package ${{ steps.version.outputs.version }}
       # Prove a clean install of the published tarball pulls the platform-native deps
