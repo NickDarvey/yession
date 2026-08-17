@@ -88,6 +88,11 @@ let all =
         // derivation for real; it is the only check of a contract every CI route is blind to
         // (they build flake source copies, which git already filtered).
         Tag.needs "Nix build source" [ Tag.Nix ] (fun () -> NixSource.tests)
+        // The other source contract, and this one needs nothing but the files: only Support.fs
+        // may write the process env, because a suite that writes it writes it for every suite
+        // after it in the same process. Cheap tier deliberately — the mutation happens there,
+        // and only its consequence needs a live tier.
+        Tag.needs "Test sources" [] (fun () -> TestSources.tests)
         // The rich editor rendering E2E stands alone: it needs a browser but NOT the native
         // WebRTC host, so it runs wherever Chromium exists ([Browser]). The full two-peer
         // convergence/persistence E2E spawns the real Session Process, so it also needs Native.
