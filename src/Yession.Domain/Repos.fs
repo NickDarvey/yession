@@ -50,10 +50,20 @@ type RepoListing =
       Branch : string
       /// Uncommitted changes present. Told, not fixed: resume drift is a fact to
       /// surface, never something a list call quietly cleans.
-      Dirty : bool }
+      Dirty : bool
+      /// Where the checkout is, as a TERMINAL in this session sees it — the one fact an
+      /// agent needs to do anything with a repo it just cloned, and the one nothing used
+      /// to tell it. Answering "added octo/hello" and leaving the path to be guessed is
+      /// how a clone turns into `ls ~/repos`, twice, and then a turn that ran out of steps.
+      Path : string }
 
 module RepoListing =
 
     /// Render one listing line the way both interfaces say it.
     let describe (listing: RepoListing) : string =
-        sprintf "%s (branch %s%s)" (RepoRef.value listing.Repo) listing.Branch (if listing.Dirty then ", uncommitted changes" else "")
+        sprintf
+            "%s (branch %s%s) at %s"
+            (RepoRef.value listing.Repo)
+            listing.Branch
+            (if listing.Dirty then ", uncommitted changes" else "")
+            listing.Path

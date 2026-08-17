@@ -106,7 +106,8 @@ let private representativeModel : ClientModel =
           // Long enough to be worth saying, so the catch-up status and its offsets are on
           // screen for the checklist. A brief one is deliberately silent (`CatchUpIsSlow`).
           CatchUpIsSlow = true
-          Feed = FeedLive }
+          Feed = FeedLive
+          MissingBefore = None }
       Agent = { ActiveTurn = Some turnId }
       Presence = Map.ofList [ bob, { DisplayName = "brave-owl"; Focus = { Field = Title; Pos = { Anchor = "AQI="; Head = "AwQ=" } } } ]
       // The roster names a draft's author even when they are not here: a label, never a peer id.
@@ -150,7 +151,7 @@ let private representativeModel : ClientModel =
       TerminalScreens = Map.empty
       Pins = []
       PaneChoice = None
-      PaneStartAt = None
+      PanePlaying = None
       PaneRewound = None
       TerminalsOpen = true
       // The pane shows a TAB by default; the list is what the cases below turn on.
@@ -492,16 +493,17 @@ let private uiChecklistTests =
                   Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingIntegration ] do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
 
-        testCase "a closed terminal is reachable, and shows the recording rather than a composer" <| fun () ->
+        testCase "a closed terminal is reachable, and shows what it ran rather than a composer" <| fun () ->
             let html = Support.render closedTerminalModel
             for label, marker in
                 [ "a closed terminal has a tab of its own",
                   Dom.attr Dom.Hooks.terminalClosedTab (TerminalId.value terminalId)
-                  "and the mount the player attaches to",
-                  Dom.attr Dom.Hooks.paneReplay (PaneTab.key (TerminalTab terminalId))
-                  // The blocks are still the other half of the read: what ran, beside how it
-                  // behaved.
-                  "the commands it ran are still listed", Dom.attr Dom.Hooks.terminalBlock "block-ui" ] do
+                  // What it RAN is the read; how it behaved is a recording one press away.
+                  // Both at once put a player of the same two lines under every command and
+                  // its result.
+                  "the commands it ran are listed", Dom.attr Dom.Hooks.terminalBlock "block-ui"
+                  "and the way to its recording is offered",
+                  Dom.attr Dom.Hooks.terminalPlay (TerminalId.value terminalId) ] do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
             // Nothing can be run in a closed terminal, so nothing offers to: a command line
             // that queues into a terminal with no shell behind it is the misleading half.
@@ -1173,11 +1175,29 @@ let private chromeTests =
                     (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
                     (sprintf "a control has no visible focus ring: %s" classes)
 
+        // The other way to ship no focus ring, and the quieter one: declare it and then turn
+        // outlines off. Tailwind v4's `outline-none` is not the absence of an outline but a
+        // SETTING — `--tw-outline-style: none` — and every outline utility resolves its style
+        // through that variable, so a control wearing both has the classes, is served the CSS,
+        // and draws nothing (measured live on the terminal's approval readout: `outlineStyle`
+        // reported `none` on a focused control carrying the whole ring).
+        //
+        // The token is matched exactly, not by substring: `[&_.ProseMirror]:outline-none`
+        // reaches a DESCENDANT (a mounted editor's contenteditable, whose focus signal is its
+        // container's) and is the one legitimate way to write those characters.
+        testCase "a declared focus ring is never switched off by outline-none" <| fun () ->
+            let tags = [ "button"; "a "; "input"; "select"; "textarea" ]
+            for classes in classesOf tags (shell + settingsShell + listShell) do
+                if classes.Contains "focus-visible:outline" then
+                    Expect.isFalse
+                        (classes.Split ' ' |> Array.contains "outline-none")
+                        (sprintf "a control declares a focus ring and then disables outlines: %s" classes)
+
         // Deliberately no "focus is blue, everywhere" here. That focus is BLUE rather than
         // green is house style, not a floor — a design that moved it would fail such a test
         // while breaking nothing, which is the shape this suite does not keep (AGENTS.md,
-        // "Writing tests"). That focus is VISIBLE is the invariant, and the two cases above
-        // are what hold it.
+        // "Writing tests"). That focus is VISIBLE is the invariant, and the cases above are
+        // what hold it.
     ]
 
 // What the session page must keep saying, whatever it comes to look like: one person wears

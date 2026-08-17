@@ -252,6 +252,7 @@ check Jumpstarter            # + our MCP client driven against the Python exampl
                              #   over two real child processes. Needs uv and a CPython.
 verify                       # == check Browser Ports Native Docker LiveAgent Keyring Nix Srt
                              #    Pty Serial Jumpstarter. Release gate; what CI runs on master.
+                             #    Takes check's trailing args, so `verify --only "<text>"` works.
 lint                         # actionlint over .github/workflows. Runs first in the PR gate.
 check --only "<text>"        # narrow BOTH runtimes to cases whose full name contains <text>.
                              #   Buys back the RUNNING, not the compiling: 66s -> 44s on the
@@ -262,6 +263,40 @@ check --only "<text>"        # narrow BOTH runtimes to cases whose full name con
 workflow file when it RUNS, and `release.yml` runs on master — after a merge — so a syntax
 error there is invisible to PR CI and lands already broken. The PR gate runs `lint` first to
 catch that class of break in seconds.
+
+### Running a tier this box cannot host (`verify.yml`, on demand)
+
+`Docker` and `LiveAgent` need a daemon and a real model credential, so no laptop reliably has
+both and no pull request runs either. Before `verify.yml` existed the only thing that ever ran
+them was a master push, which meant developing anything that needed one by merging it and
+watching the release gate. Do not do that: a red master stops everybody else releasing, and the
+live clone suite cost two of them and produced no diagnosis either time.
+
+Dispatch the gate against the branch instead. Same job the release gate runs — `release.yml`
+calls the same file — so a green run here means what a green master means:
+
+```
+gh workflow run verify.yml --ref <branch>                      # the whole gate
+gh workflow run verify.yml --ref <branch> \
+  -f capabilities="LiveAgent Ports Native Srt"                 # one tier
+gh workflow run verify.yml --ref <branch> \
+  -f capabilities="LiveAgent Ports Native Srt" -f only="add_repo"   # one tier, one case
+gh run watch "$(gh run list --workflow=verify.yml -L1 --json databaseId -q '.[0].databaseId')"
+```
+
+(Or the Actions tab → verify → Run workflow, which takes the same two fields.)
+
+**Reach for it when** a suite you are writing needs a capability this box lacks, or a release
+run failed inside one and you need another look. **Narrow it with `only`** — that is the
+difference between a 9-minute gate and a run that answers one question, and it is also how a
+live case stays inside the Node suite's shared 240s budget (`tasks.fsx`), which a long
+per-case deadline otherwise blows for every suite at once.
+
+Two edges worth knowing before the first attempt. GitHub only offers a `workflow_dispatch` for
+workflows on the DEFAULT branch, so the file must be on master before a branch can be
+dispatched against it — a new dispatchable workflow lands on its own, ahead of whatever needs
+it. And the credential is a repository secret, so a run dispatched from a fork gets none: the
+tier fails rather than skipping, which is the point (see below).
 
 **Asking for a capability requires it.** A tier names what it wants, and `check` refuses to
 start — naming every missing one and how to get it — when this box cannot host something it

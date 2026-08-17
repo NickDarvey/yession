@@ -6,6 +6,13 @@ module Yession.Tests.GitIntegration
 // tier; the [Srt] suite proves the interesting property, which is not "clone works" but
 // that repo-controlled execution stays OFF: a hook and an fsmonitor planted in the
 // checkout (exactly what the WorkSandbox could write) must not fire through the verbs.
+//
+// What is still MISSING is the one thing neither tier can be: "somebody asked for a repo and
+// got it". Both halves that failed in the session this came from are substituted here — a real
+// model choosing the verb, and github.com over https — so every layer can be green while the
+// errand a person actually types is the thing that does not work. A live suite for it was
+// written and withdrawn (see docs/GAPS.md): it never passed, and the only tier that runs a
+// live agent is the release gate, so every iteration on it costs a red master.
 
 open System
 open Fable.Core
@@ -61,6 +68,13 @@ let private pureTests =
             Expect.isError (Repos.validBranchName "x.lock") "ref lock suffix"
             Expect.isError (Repos.validBranchName "a//b") "double slash"
             Expect.isError (Repos.validBranchName "") "empty"
+
+        // The mount target, the sandbox's write path and the path a verb reports are three
+        // uses of one answer. Pinned as a mapping so a fourth caller cannot invent a second.
+        testCase "where a checkout is reachable from is decided by the work backend, once" <| fun () ->
+            Expect.equal (Sandboxes.reposVisibleAt HostBackend "/data/repos") "/data/repos" "the directory itself"
+            Expect.equal (Sandboxes.reposVisibleAt SrtBackend "/data/repos") "/data/repos" "srt binds the same path"
+            Expect.equal (Sandboxes.reposVisibleAt DockerBackend "/data/repos") "/repos" "docker reaches its mount target"
 
         testCase "capped output states its elision" <| fun () ->
             Expect.equal (Repos.capText 10 "short") "short" "under the cap, untouched"
@@ -124,6 +138,8 @@ let private serviceIn (root: string) (log: EventLog<SessionEvent>) : Repos.Repos
     Repos.create
         { Backend = SrtBackend
           ReposDir = reposDir
+          // Host-family: a terminal reaches the checkouts at the directory itself.
+          VisibleAt = Sandboxes.reposVisibleAt SrtBackend reposDir
           ExtraReadPaths = [ fixtures ]
           AllowedDomains = []
           AllowProtocol = "file"
@@ -170,7 +186,10 @@ let private srtTests =
             Expect.equal (List.length events) 1 "and records nothing new"
 
             let! listed = service.ListRepos ()
-            Expect.equal (expect listed) [ { Repo = repo; Branch = "main"; Dirty = false } ] "the listing is the filesystem's answer"
+            Expect.equal
+                (expect listed)
+                [ { Repo = repo; Branch = "main"; Dirty = false; Path = sprintf "%s/repos/octo/hello" root } ]
+                "the listing is the filesystem's answer, and it says where"
         }
 
         testCaseAsync "a clone brings no hook templates with it" <| async {

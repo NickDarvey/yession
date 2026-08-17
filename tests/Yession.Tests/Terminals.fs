@@ -2349,6 +2349,29 @@ let private affordanceTests =
             Expect.isTrue
                 ((TerminalAffordances.ofView false (viewOf false true)).CanReattach)
                 "the way back is about the stream, not about what was kept of it"
+
+        testCase "the recording is the only read exactly where a closed terminal ran nothing" <| fun () ->
+            // The rule that keeps a player from being redundant. A terminal with blocks has a
+            // cheaper read of the same history — the commands and what they printed — so its
+            // recording is somewhere you go. A terminal with none has no such read: a device
+            // whose source could never be instrumented, or a shell that only ever held a
+            // lease, is entirely in its recording, and an empty block list is not a read.
+            let afforded recorded view = (TerminalAffordances.ofView recorded view).ReplayIsTheRead
+            let ran =
+                { viewOf false false with
+                    Blocks =
+                        [ { BlockId = block "1"
+                            QueueId = None
+                            Authority = Authority.ofAuthor (PeerRef ada)
+                            Command = "make"
+                            Background = false
+                            FromSeq = 1
+                            ToSeq = Some 3
+                            Status = BlockFinished (CommandSucceeded 0) } ] }
+            Expect.isTrue (afforded true (viewOf false false)) "closed, recorded, and nothing ran in it"
+            Expect.isFalse (afforded true ran) "the commands it ran are the read instead"
+            Expect.isFalse (afforded false (viewOf false false)) "and a recording the cap ate is no read at all"
+            Expect.isFalse (afforded true (viewOf true false)) "a live terminal is not a recording yet"
     ]
 
 // The agent's own terminal (Plan 15, stage 2), as a rule the manager owns rather than one the

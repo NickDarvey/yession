@@ -351,6 +351,37 @@ Items are roughly ordered by how much they matter.
   option), and the queued-message UI has no "locked" visual during the drain broadcast
   window (a peer can briefly type into an entry that is about to vanish — the edit is
   safely discarded, but the UX flickers).
+- **`add_repo` has no end-to-end test, and the attempt at one did not pass.** Every tier below
+  it substitutes exactly the two halves that break in practice: the fixtures clone `file://`
+  URLs with an empty egress list, and no tier below the release gate has a model to choose the
+  verb. A `[LiveAgent]` suite driving a real Manager, a real child session and a real clone of
+  a public repo was written and withdrawn after two release runs. What it established: the
+  session launches and binds its peer, and **172 seconds later the checkout has not appeared**
+  — far past what a 5MB clone plus a model turn should take, so something in that path does
+  not work under CI. What it did not establish is WHICH thing, because the whole Node suite
+  shares one 240s budget (`tasks.fsx`), so a per-case deadline long enough to outlast the
+  clone kills the suite before the case can report anything.
+
+  One of the two things blocking another attempt is now fixed: `verify.yml` is dispatchable
+  (`gh workflow run verify.yml --ref <branch> -f capabilities=… -f only=…`), so a live suite is
+  developed against a branch instead of by merging it and watching the release gate. What is
+  still open is the BUDGET: the whole Node suite shares one 240s timeout, so a per-case
+  deadline generous enough for a real clone can only fit if the run is narrowed with `only`.
+  A live case that has to survive the un-narrowed gate needs that budget to be per-tier first.
+- **A turn has a step ceiling, and the ceiling is ours.** `maxTurns` is OPTIONAL on the Agent
+  SDK's `query()`, and unset means no cap — interactive Claude Code sets none, and `claude -p`
+  takes `--max-turns` only when an automation asks for one. So `error_max_turns` is a state
+  this repository opted into: `Agent.maxTurns` bounds one turn at 32 model turns, past which
+  the SDK stops the query and the turn ENDS. The item keeps whatever it streamed and now
+  carries the reason (`Conversation.applyEvent`), so a person can say "carry on" and the next
+  turn resumes from the transcript.
+
+  It is opted into because the setting differs from a terminal's. A turn spends the TURN
+  HUMAN's credential in a session other people can watch and nobody need be watching, so the
+  interrupt — which is what bounds a runaway turn in Claude Code — is a bound only while
+  somebody is present. What is missing is everything automatic: no continuation turn, no
+  budget the model can see, and no signal to it that it is approaching the ceiling. A long
+  errand is therefore a conversation, not one call.
 - **Repo integration is the read-only bootstrap slice** ([Plan 14](plans/14-git-repos.md)):
   typed clone-and-orient verbs beside the agent, one repos dir shared into the
   WorkSandbox, GitHub sign-in per user over the device flow. Remaining, deliberate:

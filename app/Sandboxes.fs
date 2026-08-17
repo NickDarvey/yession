@@ -76,6 +76,22 @@ let egressFor (backend: SandboxBackend) (ambient: Map<string, string>) : string 
         |> List.ofArray
         |> Some
 
+/// Where the session's repos directory is reachable from INSIDE a work sandbox. The
+/// host-family backends share the directory itself (srt binds the same absolute path, so
+/// the name does not change); the docker backend cannot share a host path by policy and
+/// carries it as a bind mount instead, where it is reachable under the target and nothing
+/// else.
+///
+/// One function because three things have to name the same place and cannot be allowed to
+/// drift: the mount, the sandbox's write path, and — the half that was missing — the
+/// ANSWER a repo verb gives. A checkout the agent cannot name is a checkout it hunts for,
+/// and hunting is what the step ceiling gets spent on.
+let reposVisibleAt (backend: SandboxBackend) (hostReposDir: string) : string =
+    match backend with
+    | HostBackend
+    | SrtBackend -> hostReposDir
+    | DockerBackend -> "/repos"
+
 let policyFor
     (backend: SandboxBackend)
     (ambient: Map<string, string>)

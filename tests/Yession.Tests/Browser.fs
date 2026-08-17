@@ -816,10 +816,13 @@ let editorTests =
                         """document.activeElement?.getAttribute('data-pane-tab')?.startsWith('terminal:') === true""")
                 let! _ = await (page.WaitForFunctionAsync showingBlock)
 
-                // The block's recording is PLAYED, not printed: the real player, over the
-                // ranged cast the model built, inside the tab the chip opened. A stream
-                // renderer would show a cursor-moving program as garbage, which is the whole
-                // reason the transcript was written as asciicast.
+                // The block reads as TEXT, and its recording is one press away — the two reads
+                // of one history, with the cheap one first. Pressing play mounts the real
+                // player over the ranged cast the model built, inside the tab the chip
+                // opened: a stream renderer would show a cursor-moving program as garbage,
+                // which is the whole reason the transcript was written as asciicast.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-block] [data-terminal-output]")
+                do! awaitU (page.ClickAsync "#shell [data-pane-play]")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay] .ap-overlay-start")
                 do! awaitU (page.ClickAsync "#shell [data-pane-replay] .ap-overlay-start")
                 let! _ =
@@ -904,6 +907,47 @@ let editorTests =
                     await (page.WaitForFunctionAsync
                         "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().left >= window.innerWidth - 1")
                 let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
+
+                do! awaitU (br.CloseAsync ())
+                pw.Dispose ()
+                server.Stop ()
+            }
+        // What an agent says does not fit a phone: paths, URLs and fenced commands are all
+        // longer than a 326px column and none of them has a space where the break has to go.
+        // The timeline is a scroller on the vertical axis and therefore on both, so anything
+        // that hangs out of the column slides the whole conversation sideways under a header
+        // that stays put — which is what it looked like on iOS: every message shifted a
+        // character or two off the left edge, with no way to put it back.
+        //
+        // The document-level check the case above makes cannot see this: the timeline's own
+        // scrollbox absorbs the overflow, so `documentElement.scrollWidth` stays honest while
+        // the conversation is unreadable. What is asserted is the column, and only the column.
+        testCaseAsync "a message no line break fits inside never scrolls the timeline sideways" <|
+            async {
+                let server = serveStatic harnessRoot (EDITOR_PORT + 10)
+                let! pw = await (Playwright.CreateAsync ())
+                let! br =
+                    await (pw.Chromium.LaunchAsync (
+                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+                let! ctx =
+                    await (br.NewContextAsync (
+                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 390, Height = 844))))
+                let! page = await (ctx.NewPageAsync ())
+                page.SetDefaultTimeout 15000.0f
+                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 10)))
+                let! width = await (page.EvaluateAsync<int> "() => window.innerWidth")
+                Expect.equal width 390 "a true phone viewport, not a clamped window"
+
+                // The fixture's wide message is present — otherwise this passes by rendering
+                // nothing that could have overflowed.
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-conversation] [data-message-body] pre")
+                let! sideways =
+                    await (page.EvaluateAsync<bool>
+                            """() => {
+                                 const timeline = document.querySelector('#shell [data-conversation]')
+                                 return timeline.scrollWidth > timeline.clientWidth + 1
+                               }""")
+                Expect.isFalse sideways "the conversation column does not scroll sideways"
 
                 do! awaitU (br.CloseAsync ())
                 pw.Dispose ()

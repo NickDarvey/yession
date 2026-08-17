@@ -125,7 +125,10 @@ let private makeSandboxes
         match workBackend with
         | DockerBackend ->
             { EnvironmentSpec.defaults with
-                Mounts = [ { Source = HostPath reposDir; Target = "/repos"; Mode = ReadWrite } ] }
+                Mounts =
+                    [ { Source = HostPath reposDir
+                        Target = Sandboxes.reposVisibleAt workBackend reposDir
+                        Mode = ReadWrite } ] }
         | HostBackend
         | SrtBackend -> EnvironmentSpec.defaults
     // Host-family sandboxes work under the session's own data directory; a docker
@@ -461,6 +464,9 @@ Async.StartImmediate (
             match Repos.create
                     { Backend = agentBackend
                       ReposDir = reposDir
+                      // What the verbs SAY a checkout is at is the work sandbox's view of
+                      // it, not the git sandbox's: nobody runs a build in the git sandbox.
+                      VisibleAt = Sandboxes.reposVisibleAt workBackend reposDir
                       ExtraReadPaths = []
                       AllowedDomains = [ "github.com" ]
                       AllowProtocol = "https"

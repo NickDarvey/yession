@@ -394,9 +394,10 @@ let private paneTests =
                   "the panel showing it", Dom.attr Dom.Hooks.panePanel "block:term-a:b-1"
                   "the block's read-only view", Dom.attr Dom.Hooks.paneBlock "b-1"
                   "the command", "ls -la"
-                  // The output is PLAYED, not printed: what a command wrote is a recording,
-                  // and a stream renderer would show a cursor-moving program as garbage.
-                  "where its recording mounts", Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1" ]
+                  // What it printed, as TEXT — the cheap read of the same bytes, through the
+                  // same renderer the terminal's own history uses. Whether the OTHER read is
+                  // offered is a different question, and `readsTests` is where it is asked.
+                  "what it printed", "total 0" ]
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
             // Read-only: no composer for a block you are reading back.
@@ -588,7 +589,7 @@ let private videoTests =
             // print", the whole is "what was going on around it".
             let model =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (PlayWholeTerminalMsg (terminalA, 3))
+                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, Some 3))
             Expect.equal
                 (ClientModel.selectedPane model |> Option.map PaneTab.key)
                 (Some "terminal:term-a")
@@ -600,7 +601,7 @@ let private videoTests =
         testCase "a start hint belongs to the step-out that set it, and dies with it" <| fun () ->
             let model =
                 withRecords (clientOf recordedTerminal)
-                |> ClientModel.update (PlayWholeTerminalMsg (terminalA, 3))
+                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, Some 3))
                 |> ClientModel.update (SelectTerminalMsg terminalA)
             match ClientModel.paneReplay (TerminalTab terminalA) model with
             | Some replay -> Expect.isNone replay.StartAt "choosing the tab again starts it from the start"
@@ -708,6 +709,96 @@ let private videoTests =
     ]
 
 // --- The DVR (stage 7) -------------------------------------------------------------------------
+
+// --- The two reads of one history -------------------------------------------------------------
+
+/// A terminal that was only ever typed in: somebody took the lease, bytes were recorded, and
+/// it closed without a command ever resolving into a block. What a device attached over a
+/// stream that cannot be instrumented also looks like from here.
+let private liveOnlyTerminal =
+    [ at 1L 0.0 (opened terminalA "shell")
+      at 2L 1.0 (took terminalA (PeerRef bob) 1)
+      at 3L 5.0 (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "closed by a peer" }) ]
+
+let private readsTests =
+    testList "Which read a surface shows" [
+
+        // Text and recording are two reads of the same bytes, and the rule is the same on
+        // every surface that has both: the text is the read, the recording is somewhere you
+        // go. Each of these is a BICONDITIONAL — the swap happening when it is asked for, and
+        // not happening when it is not — because a predicate that answered `true` always
+        // would satisfy either half alone.
+
+        testCase "a closed terminal that ran commands reads as its commands" <| fun () ->
+            // What the player under the blocks was: a recording of the same two lines the
+            // block above it had already printed.
+            let model = withRecords (clientOf recordedTerminal)
+            Expect.isFalse (ClientModel.playsRecording (TerminalTab terminalA) model) "the blocks are the read"
+
+        testCase "asking for the recording swaps the read" <| fun () ->
+            let model =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, None))
+            Expect.isTrue (ClientModel.playsRecording (TerminalTab terminalA) model) "now it plays"
+            Expect.isFalse
+                (ClientModel.playsRecording (TerminalTab terminalB) model)
+                "and only the terminal that was asked for"
+
+        testCase "a closed terminal with nothing but a recording plays without being asked" <| fun () ->
+            // There is no cheaper read to default to: an empty block list is not a read, it
+            // is a `$`. Making a reader press play to see the only thing there is would be a
+            // control whose answer is never no.
+            let model = withRecords (clientOf liveOnlyTerminal)
+            Expect.isTrue (ClientModel.playsRecording (TerminalTab terminalA) model) "the recording IS the surface"
+
+        testCase "the way back is offered only where there is something behind the player" <| fun () ->
+            let played =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (PlayRecordingMsg (TerminalTab terminalA, None))
+            Expect.isTrue
+                ((Support.render played).Contains (Dom.attr Dom.Hooks.terminalBlocks (TerminalId.value terminalA)))
+                "blocks to go back to"
+            Expect.isFalse
+                ((Support.render (withRecords (clientOf liveOnlyTerminal))).Contains Dom.Hooks.terminalBlocks)
+                "and none where the recording is the only read — that control undoes itself"
+
+        testCase "a rewind that outlives its live edge is still a reader watching a recording" <| fun () ->
+            // The pin dies with the live edge; the watching does not. Dropping a reader back
+            // into the blocks because the terminal they were watching finished would answer
+            // a question they never asked.
+            let live = recordedTerminal |> List.filter (fun e -> match e.Event with SessionEvent.TerminalClosed _ -> false | _ -> true)
+            let model =
+                withRecords (clientOf live)
+                |> ClientModel.update (RewindTerminalMsg terminalA)
+                |> ClientModel.update
+                    (EventsPageMsg
+                        { Events = [ at 6L 61.0 (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "done" }) ]
+                          LastOffset = Some (EventOffset.create 6L |> expect)
+                          IsEnd = true })
+            Expect.isFalse (ClientModel.isRewound terminalA model) "no live edge, no rewind"
+            Expect.isTrue (ClientModel.playsRecording (TerminalTab terminalA) model) "and still the recording"
+
+        testCase "a recording the cap ate is never offered" <| fun () ->
+            // The stated gap. A control that opens an empty player is indistinguishable from
+            // a terminal that printed nothing, which is the fact the drop is recorded to say.
+            let model = clientOf recordedTerminal
+            Expect.isFalse (ClientModel.playable (TerminalTab terminalA) model) "nothing kept, nothing to play"
+            Expect.isFalse ((Support.render model).Contains Dom.Hooks.terminalPlay) "so nothing offers it"
+
+        testCase "a block's output is text until somebody asks for the recording" <| fun () ->
+            // The case that made the rule: a command and its result, printed, needed no
+            // player of the same two lines under it.
+            let model =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (OpenPaneTabMsg (BlockTab (terminalA, block "1")))
+            Expect.isFalse
+                ((Support.render model).Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1"))
+                "read as text"
+            let played = ClientModel.update (PlayRecordingMsg (BlockTab (terminalA, block "1"), None)) model
+            Expect.isTrue
+                ((Support.render played).Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-1"))
+                "and played when asked"
+    ]
 
 let private dvrTests =
     testList "Rewinding a live terminal (Plan 14, stage 7)" [
@@ -1313,5 +1404,6 @@ let tests =
         paneTests
         keyframeTests
         videoTests
+        readsTests
         dvrTests
     ]

@@ -121,15 +121,17 @@ module App =
 
     type HttpGet = string -> Async<Result<HttpAnswer, HttpFailure>>
 
-    /// A client's own copy of the answers it has been given, oldest first. The browser backs
-    /// this with the Cache API — whole responses, keyed by the address they came from,
-    /// enumerable and persistable — but nothing above this type knows that.
+    /// A client's own copy of the answers it has been given. The browser backs this with the
+    /// Cache API — whole responses, keyed by the address they came from, enumerable and
+    /// persistable — but nothing above this type knows that.
     ///
     /// Total, like the feed: a store that cannot be opened reads empty, and the client is
     /// exactly the client it is today, asking the network from its cursor.
     type HistoryCache =
-        { /// Every address kept, oldest first (insertion order IS fetch order, which is
-          /// ascending — so a replay never parses an address to sort them).
+        { /// Every address kept, in NO promised order — a bag, not a queue. The Cache API's
+          /// `put` of an address already held deletes and re-appends it, so an answer two tabs
+          /// both fetched moves to the end of the enumeration long after it was first kept.
+          /// The replay orders by what the answers hold; nothing may order by this.
           Stored : unit -> Async<string list>
           /// One kept answer's body, or `None` when it is no longer there.
           Read   : string -> Async<string option>
@@ -153,8 +155,8 @@ module App =
     /// being one — so the seq is kept BESIDE the bytes, taken from what the client asked for
     /// rather than parsed back out of the address it was given.
     type TranscriptCache =
-        { /// Every address kept, oldest first (insertion order IS fetch order, which is
-          /// ascending — so a replay never parses an address to sort them).
+        { /// Every address kept, in NO promised order — see `HistoryCache.Stored`. The line an
+          /// answer starts on is what a walk goes by, and it rides beside the bytes.
           Stored : unit -> Async<string list>
           /// One kept answer: the line its first line is, and the bytes.
           Read   : string -> Async<(int * string) option>
@@ -163,12 +165,11 @@ module App =
 
     /// Every terminal's store, one per terminal.
     ///
-    /// Not one store with everything in it, and the reason is the replay. `Stored` answers in
-    /// insertion order, which is what lets a walk be "read them in order" with no sorting and
-    /// no address parsing. Two terminals' answers in one store interleave by whichever fetched
-    /// first, and a walk over that would have to ask, of every entry, whose it is — which
-    /// means parsing an address. The store's own name answers it instead, before the walk
-    /// starts.
+    /// Not one store with everything in it, and the reason is the replay. A walk orders one
+    /// terminal's answers by the line each starts on, which says nothing about WHOSE they are:
+    /// two terminals' answers in one store would interleave, and telling them apart means
+    /// parsing an address — the one thing this client is never allowed to read meaning out of.
+    /// The store's own name answers it instead, before the walk starts.
     type TranscriptCaches =
         { /// The store for one terminal.
           For  : TerminalId -> Async<TranscriptCache>
@@ -344,6 +345,13 @@ module App =
         /// said so, and records folded before that event has been folded have nowhere to
         /// land.
         ///
+        /// **The order comes from the answers, never from the store** — the event replay's
+        /// rule, for the same reason: a Cache API `put` of an address already kept deletes and
+        /// re-appends it, so two tabs fetching one range moves the earliest answer to the end
+        /// and a walk that trusted the store's order would call everything before it a hole.
+        /// Here the line an answer starts on rides beside the bytes already (`TranscriptCache`),
+        /// so the ordering costs nothing but the sort.
+        ///
         /// **A gap stops that terminal's walk, and is noticed in the SEQUENCE rather than in
         /// the addresses.** An entry evicted from the middle leaves the rest in the store, so
         /// the walk reaches an answer whose first line is not one past the last folded. The
@@ -356,32 +364,36 @@ module App =
                 for terminal in terminals do
                     let! cache = caches.For terminal
                     let! stored = cache.Stored ()
+                    // What this terminal kept, in transcript order. An address the store listed
+                    // and then could not answer simply is not here, and the walk below notices
+                    // it as the hole it is.
+                    let kept = ResizeArray<int * string> ()
+                    for url in stored do
+                        match! cache.Read url with
+                        | None -> ()
+                        | Some answer -> kept.Add answer
+                    let ordered = kept |> Seq.sortBy fst |> List.ofSeq
                     // One past the last line folded. `0` before anything, because line 0 is
                     // the header and a first answer always carries it.
                     let mutable expected = 0
                     let mutable stop = false
-                    for url in stored do
+                    for (first, body) in ordered do
                         if not stop then
-                            match! cache.Read url with
-                            // An address the store listed and then could not answer is a gap
-                            // like any other: the next entry's first line will say so.
-                            | None -> ()
-                            | Some (first, body) ->
-                                if first > expected then stop <- true
-                                else
-                                    match decodeLines first body with
-                                    // A recording that will not decode is not history, it is
-                                    // a guess — and unlike the event log there is no feed
-                                    // health to report it on, because a terminal's history
-                                    // failing costs that terminal and nothing else.
-                                    | Error _ -> stop <- true
-                                    | Ok page ->
-                                        page.Header
-                                        |> Option.iter (fun h -> dispatch (TerminalHeaderMsg (terminal, h)))
-                                        for (seq, record) in page.Records do
-                                            dispatch (TerminalRecordMsg (terminal, seq, record))
-                                        dispatch (TerminalReadThroughMsg (terminal, page.NextSeq))
-                                        expected <- max expected page.NextSeq
+                            if first > expected then stop <- true
+                            else
+                                match decodeLines first body with
+                                // A recording that will not decode is not history, it is
+                                // a guess — and unlike the event log there is no feed
+                                // health to report it on, because a terminal's history
+                                // failing costs that terminal and nothing else.
+                                | Error _ -> stop <- true
+                                | Ok page ->
+                                    page.Header
+                                    |> Option.iter (fun h -> dispatch (TerminalHeaderMsg (terminal, h)))
+                                    for (seq, record) in page.Records do
+                                        dispatch (TerminalRecordMsg (terminal, seq, record))
+                                    dispatch (TerminalReadThroughMsg (terminal, page.NextSeq))
+                                    expected <- max expected page.NextSeq
             }
 
     /// How a connection consumes the event log (Step 07).
@@ -533,6 +545,15 @@ module App =
         /// what is already here, which is why it can run with no transport, no session, and no
         /// answer from `/me`.
         ///
+        /// **The order comes from the events, never from the store.** `Stored` answers in
+        /// whatever order the store happens to hold, and that order is not ascending: the
+        /// Cache API's `put` of an address already kept DELETES the entry and appends the new
+        /// one, so the first time two tabs of one session fetch the same range — both at the
+        /// same cursor, one storing what the other already had — the earliest answer moves to
+        /// the END. A walk that trusted the store's order then read a later answer first and
+        /// called every event before it missing, on a client whose store held them all. So the
+        /// answers are read, asked where they START, and walked in that order.
+        ///
         /// **A gap stops the fold, and is noticed in the events rather than in the
         /// addresses.** An entry evicted from the middle leaves the rest in the store, so the
         /// walk reaches an answer whose first offset is not one past the last folded. That
@@ -541,50 +562,52 @@ module App =
         /// advancing it over unread offsets would skip them for ever — but the gap is
         /// REPORTED, and the cursor is left sitting exactly where the fill has to start, so the
         /// next ordinary request repairs it.
+        ///
+        /// A gap is reported as what it is — history this DEVICE does not hold — and never as
+        /// the feed's health. Nothing has been read from the network at this point, so a
+        /// `FeedStalled` here says the read loop gave up before it had started, which is how a
+        /// cold open flashed a red "history paused" at everyone whose store was out of order.
         let replay (cache: HistoryCache) (dispatch: ClientMsg -> unit) : Async<unit> =
             async {
                 let! stored = cache.Stored ()
+                // What each kept answer holds, in log order. An address the store listed and
+                // then could not answer, an empty body, and a body that will not decode are
+                // all the same thing here — an answer this walk does not have — and each
+                // leaves a hole the offsets below notice, rather than a special case up here.
+                let kept = ResizeArray<int64 * EventEnvelope<SessionEvent> list> ()
+                for url in stored do
+                    match! cache.Read url with
+                    | None -> ()
+                    | Some body ->
+                        match decodeLines body with
+                        | Error _ | Ok [] -> ()
+                        | Ok envelopes -> kept.Add (EventOffset.value (List.head envelopes).Offset, envelopes)
+                let ordered = kept |> Seq.sortBy fst |> List.ofSeq
                 let mutable folded : EventOffset option = None
                 let mutable stop = false
-                for url in stored do
+                for (first, envelopes) in ordered do
                     if not stop then
-                        match! cache.Read url with
-                        // An address the store listed and then could not answer is a gap like
-                        // any other: keep walking, and let the offsets say so.
-                        | None -> ()
-                        | Some body ->
-                            match decodeLines body with
-                            | Error fault ->
-                                dispatch (EventFeedMsg (FeedStalled (FeedFault.describe fault)))
-                                stop <- true
-                            | Ok [] -> ()
-                            | Ok envelopes ->
-                                let first = EventOffset.value (List.head envelopes).Offset
-                                let expected =
-                                    match folded with
-                                    | Some o -> EventOffset.value o + 1L
-                                    | None -> 0L
-                                if first > expected then
-                                    dispatch (
-                                        EventFeedMsg (
-                                            FeedStalled (
-                                                sprintf
-                                                    "%d event(s) missing locally from offset %d"
-                                                    (first - expected)
-                                                    expected)))
-                                    stop <- true
-                                else
-                                    dispatch (
-                                        LocalHistoryMsg
-                                            { Events = envelopes
-                                              LastOffset =
-                                                envelopes |> List.tryLast |> Option.map (fun e -> e.Offset)
-                                              // The end of what is KEPT, never a claim about the
-                                              // log: the cursor decides that, and it has not
-                                              // been asked yet.
-                                              IsEnd = true })
-                                    folded <-
-                                        EventOffset.maxOption folded (Some (List.last envelopes).Offset)
+                        let expected =
+                            match folded with
+                            | Some o -> EventOffset.value o + 1L
+                            | None -> 0L
+                        if first > expected then
+                            // Where the kept history resumes. Everything between the cursor —
+                            // which is `expected - 1`, exactly where the fill has to start —
+                            // and this offset is not on this device.
+                            dispatch (LocalHistoryGapMsg (List.head envelopes).Offset)
+                            stop <- true
+                        else
+                            dispatch (
+                                LocalHistoryMsg
+                                    { Events = envelopes
+                                      LastOffset =
+                                        envelopes |> List.tryLast |> Option.map (fun e -> e.Offset)
+                                      // The end of what is KEPT, never a claim about the
+                                      // log: the cursor decides that, and it has not
+                                      // been asked yet.
+                                      IsEnd = true })
+                            folded <- EventOffset.maxOption folded (Some (List.last envelopes).Offset)
                 // Looked. Said even when nothing was kept and even when a gap cut the walk
                 // short: what the timeline needs to know is whether this client has been to
                 // look, not whether looking found anything.

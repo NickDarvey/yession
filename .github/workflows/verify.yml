@@ -1,0 +1,116 @@
+name: verify
+
+# The full verification gate, in its own file, so it can be run ON PURPOSE against any branch.
+#
+# `Docker` (needs a daemon) and `LiveAgent` (needs a real model credential) are the two
+# capabilities a pull request cannot satisfy, so before this file existed the only thing that
+# ever ran them was a master push. Developing anything that needs one meant merging to find
+# out — and the live clone suite is what that costs: two merges, two red releases, and no
+# per-case diagnosis from either, because the only tier that could run it was the one whose
+# red stops everybody else from releasing.
+#
+# ONE definition, two callers: release.yml calls this on every master push, and a person or an
+# agent dispatches it from the Actions tab (or `gh workflow run`) against a branch. Keeping the
+# gate in one file is what stops the on-demand run from quietly becoming a weaker check than
+# the one guarding master — the whole point is to run the SAME thing, earlier.
+#
+# Dispatching against a branch runs THAT branch's suite, but GitHub only offers the button for
+# workflows present on the default branch: this file has to be on master before a branch can be
+# dispatched against it. That is a one-time cost, and it is why this landed on its own.
+
+on:
+  # Called by release.yml. Both inputs are left at their defaults there: master gets the whole
+  # gate, always, and a release that could narrow its own gate would not be one.
+  workflow_call:
+    inputs:
+      capabilities:
+        description: Capability tier to run. Blank runs the whole gate.
+        type: string
+        default: ""
+      only:
+        description: Narrow both runtimes to cases whose full name contains this text.
+        type: string
+        default: ""
+  # Run by hand, against whatever ref is being worked on.
+  workflow_dispatch:
+    inputs:
+      capabilities:
+        description: 'Capabilities, space-separated (e.g. "LiveAgent Ports Native Srt"). Blank runs the whole gate.'
+        type: string
+        default: ""
+      only:
+        description: 'Narrow to cases whose name contains this text (e.g. "add_repo"). Needs capabilities to be named.'
+        type: string
+        default: ""
+
+# One at a time per ref. The gate spawns real child processes, binds real ports and talks to a
+# real Docker daemon, so two runs of it on one runner pool are two runs contending for the same
+# machine-wide resources. A dispatch supersedes its own earlier dispatch on the same ref;
+# release.yml's own `release` group is what serialises master, and it does not cancel.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # Master builds what pull requests consume. The derivations this repository defines have no
+      # public cache — libdatachannel and node-datachannel are C++ builds, and every pull request
+      # compiled them from scratch until they were published here. Nix keys by derivation hash, so
+      # a stale entry is never consulted: this can miss, it cannot serve a wrong answer.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: yession
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Install devenv
+        run: nix profile install nixpkgs#devenv
+      # The Docker integration suite talks to the daemon (dockerode over the local socket). This
+      # job runs on the VM host (no `container:` key), so the preinstalled daemon is reachable
+      # directly — and `verify` asks for Docker, so an unreachable one fails the gate rather
+      # than skipping. `verify` (check … Browser) provisions Chromium itself, so no separate
+      # Chromium step is needed either.
+      # The confining sandbox backend needs a NESTED user namespace for its strict profile, and
+      # Ubuntu 24.04's `kernel.apparmor_restrict_unprivileged_userns=1` forbids one — without
+      # this the release gate drops the `Srt` capability and the escape probes never run. The
+      # runner is an ephemeral VM; nothing about the product changes.
+      - name: Permit nested user namespaces (the sandbox escape probes need them)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Verification gate
+        env:
+          # The credential the live agent suites run on. This job used to name
+          # CLAUDE_CODE_OAUTH_TOKEN, which is not a secret this repository has, so the variable
+          # arrived empty — and back when an unavailable capability was silently dropped, that
+          # meant every release up to v5.0.0-beta.0 shipped green with the live agent suite
+          # skipped. `verify` asks for LiveAgent, so an empty credential now fails the gate.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Read as data rather than interpolated into the script: a dispatch input is a string
+          # somebody typed, and the one place it must not land is inside the shell this composes.
+          CAPABILITIES: ${{ inputs.capabilities }}
+          ONLY: ${{ inputs.only }}
+        # On this headless runner `check` self-wraps in a private D-Bus session +
+        # gnome-keyring (both provided by devenv) to stand in for a desktop Secret
+        # Service, so the OS-credential-manager suite runs for real.
+        run: |
+          if [ -n "$CAPABILITIES" ]; then
+            # Deliberately unquoted: the input is a space-separated list of capability names,
+            # and `check` takes them as separate arguments.
+            # shellcheck disable=SC2086
+            set -- check $CAPABILITIES
+          else
+            set -- verify
+          fi
+          if [ -n "$ONLY" ]; then
+            set -- "$@" --only "$ONLY"
+          fi
+          echo "running: devenv shell -- $*"
+          devenv shell -- "$@"
+      # Reused runners must not leak session containers/volumes between jobs.
+      - name: Clean up Yession Docker artefacts
+        if: always()
+        run: devenv shell -- clean-docker

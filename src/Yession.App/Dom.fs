@@ -220,8 +220,12 @@ module Dom =
         let paneReplay = "data-pane-replay"
         /// A stretch's facts, above its recording.
         let paneStretch = "data-pane-stretch"
-        /// The step-out from a block's sliced view to the whole terminal's recording.
+        /// The step-out from a block's view to the whole terminal's recording.
         let panePlayWhole = "data-pane-play-whole"
+        /// A block's own way between its two reads: the output it printed, and the recording
+        /// of it printing. One control saying whichever the reader is not looking at, so the
+        /// press that swaps the body keeps the focus it was pressed with.
+        let panePlay = "data-pane-play"
         /// The live screen of a terminal in live mode (Plan 14, stage 6). Its value is the
         /// terminal's id; the holder's copy is the one that takes keystrokes, and every other
         /// peer's is the same screen read-only.
@@ -233,6 +237,12 @@ module Dom =
         /// explain rather than a feature.
         let terminalRewind = "data-terminal-rewind"
         let terminalLive = "data-terminal-live"
+        /// The same pair on a CLOSED terminal: the way into its recording, and the way back
+        /// to the blocks it ran. One mechanism with two ends — a recording is somewhere you
+        /// GO, live or finished — so these sit in the same two slots as the DVR's and hand
+        /// focus on the same way.
+        let terminalPlay = "data-terminal-play"
+        let terminalBlocks = "data-terminal-blocks"
         /// How far behind live the rewound reader is, growing as the terminal keeps
         /// printing under them.
         let terminalBehind = "data-terminal-behind"
@@ -328,6 +338,10 @@ module Dom =
         let composerKeys = "Enter sends · Shift+Enter line · Alt+Enter paragraph"
         /// What the timeline's pulse means, for a reader who cannot see it pulse (Plan 20).
         let readingHistory = "Reading this session's history"
+        /// What stands where history this device does not hold would be (Plan 20). Said only
+        /// while nothing is coming to fill it — see `View.chat` — so it is a fact about this
+        /// client's own store rather than a complaint about the network.
+        let historyMissingLocally = "earlier history is not on this device"
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.
