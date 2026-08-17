@@ -362,10 +362,12 @@ Items are roughly ordered by how much they matter.
   shares one 240s budget (`tasks.fsx`), so a per-case deadline long enough to outlast the
   clone kills the suite before the case can report anything.
 
-  Two things have to change before it can be tried again: a live case needs a deadline that
-  fits inside the suite's budget (or the budget needs to be per-tier), and it needs to be
-  runnable somewhere other than master — `LiveAgent` is release-gate only, so every iteration
-  on a live test is a red master for everyone.
+  One of the two things blocking another attempt is now fixed: `verify.yml` is dispatchable
+  (`gh workflow run verify.yml --ref <branch> -f capabilities=… -f only=…`), so a live suite is
+  developed against a branch instead of by merging it and watching the release gate. What is
+  still open is the BUDGET: the whole Node suite shares one 240s timeout, so a per-case
+  deadline generous enough for a real clone can only fit if the run is narrowed with `only`.
+  A live case that has to survive the un-narrowed gate needs that budget to be per-tier first.
 - **A turn has a step ceiling, and the ceiling is ours.** `maxTurns` is OPTIONAL on the Agent
   SDK's `query()`, and unset means no cap — interactive Claude Code sets none, and `claude -p`
   takes `--max-turns` only when an automation asks for one. So `error_max_turns` is a state

@@ -32,51 +32,14 @@ permissions:
 jobs:
   # Master pushes: the full verification gate (verify-tagged suites + browser E2E);
   # green verify is what publishes a release. The cheap PR tier lives in pr.yaml.
+  #
+  # The gate itself lives in verify.yml, which is also dispatchable — so the run that guards
+  # master and the run somebody starts by hand on a branch are the same job, not two that have
+  # to be kept in step. Both inputs stay at their defaults here: master gets the whole gate.
+  # `secrets: inherit` is what carries CACHIX_AUTH_TOKEN and ANTHROPIC_API_KEY across the call.
   verify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-      # Master builds what pull requests consume. The derivations this repository defines have no
-      # public cache — libdatachannel and node-datachannel are C++ builds, and every pull request
-      # compiled them from scratch until they were published here. Nix keys by derivation hash, so
-      # a stale entry is never consulted: this can miss, it cannot serve a wrong answer.
-      - uses: cachix/cachix-action@v17
-        with:
-          name: yession
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - name: Install devenv
-        run: nix profile install nixpkgs#devenv
-      # The Docker integration suite talks to the daemon (dockerode over the local socket). This
-      # job runs on the VM host (no `container:` key), so the preinstalled daemon is reachable
-      # directly — and `verify` asks for Docker, so an unreachable one fails the gate rather
-      # than skipping. `verify` (check … Browser) provisions Chromium itself, so no separate
-      # Chromium step is needed either.
-      # The confining sandbox backend needs a NESTED user namespace for its strict profile, and
-      # Ubuntu 24.04's `kernel.apparmor_restrict_unprivileged_userns=1` forbids one — without
-      # this the release gate drops the `Srt` capability and the escape probes never run. The
-      # runner is an ephemeral VM; nothing about the product changes.
-      - name: Permit nested user namespaces (the sandbox escape probes need them)
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-      - name: Full verification gate
-        env:
-          # The credential the live agent suites run on. This job used to name
-          # CLAUDE_CODE_OAUTH_TOKEN, which is not a secret this repository has, so the variable
-          # arrived empty — and back when an unavailable capability was silently dropped, that
-          # meant every release up to v5.0.0-beta.0 shipped green with the live agent suite
-          # skipped. `verify` asks for LiveAgent, so an empty credential now fails the gate.
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        # On this headless runner `check` self-wraps in a private D-Bus session +
-        # gnome-keyring (both provided by devenv) to stand in for a desktop Secret
-        # Service, so the OS-credential-manager suite runs for real.
-        run: devenv shell -- verify
-      # Reused runners must not leak session containers/volumes between jobs.
-      - name: Clean up Yession Docker artefacts
-        if: always()
-        run: devenv shell -- clean-docker
+    uses: ./.github/workflows/verify.yml
+    secrets: inherit
 
   # One of the two parallel packaging channels (both only need `verify`): the npm tarball.
   package-npm:

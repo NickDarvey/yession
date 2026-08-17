@@ -954,10 +954,14 @@ let check (args: string list) =
     restore ()
     runCheckOnce caps
 
-let verify () =
+/// The release gate: every capability, no exceptions. Takes the same trailing arguments `check`
+/// does — which in practice means `--only`, so a gate run by hand can be narrowed to the case
+/// being worked on without the caller having to restate the tier list and get it subtly wrong.
+let verify (args: string list) =
     check
-        [ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt"; "Pty"; "Serial"
-          "Jumpstarter" ]
+        ([ "Browser"; "Ports"; "Native"; "Docker"; "LiveAgent"; "Keyring"; "Nix"; "Srt"; "Pty"; "Serial"
+           "Jumpstarter" ]
+         @ args)
 
 // --- lint: the GitHub Actions workflows -------------------------------------------------------
 
@@ -1027,7 +1031,7 @@ match arg 1 with
 | Some "version" -> printfn "%s" (defaultVersion ())
 | Some "stage" -> stage (arg 2 |> Option.defaultWith defaultVersion)
 | Some "check" -> check (rest 2)
-| Some "verify" -> verify ()
+| Some "verify" -> verify (rest 2)
 | Some "lint" -> lint ()
 | Some "package" -> package (arg 2 |> Option.defaultWith defaultVersion)
 | Some "install-smoke" ->
