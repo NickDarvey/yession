@@ -139,7 +139,12 @@ let private versionHistory () =
     if tryRun "git" [ "rev-parse"; "--is-shallow-repository" ] = Some "true" then
         failwith "version: shallow clone — the history IS the version (git fetch --unshallow --tags)"
 
-    let tag = tryRun "git" [ "describe"; "--tags"; "--abbrev=0"; "--match"; "v*" ]
+    // `v[0-9]*`, not `v*`. A tag that is merely v-SHAPED must not be selectable: `describe`
+    // walks history and answers with the nearest match, so one junk tag anywhere in the line
+    // becomes the answer for every commit after it. A release run that computed an empty
+    // version once pushed a tag named exactly `v`, and from that commit on every version was
+    // computed against it — which is how a 6.13.1 line restarted at 1.0.0.
+    let tag = tryRun "git" [ "describe"; "--tags"; "--abbrev=0"; "--match"; "v[0-9]*" ]
     let range = match tag with Some t -> t + "..HEAD" | None -> "HEAD"
     let messages =
         (run "git" [ "log"; range; "--reverse"; "--format=%B%x1e" ]).Split '\u001e'
@@ -170,8 +175,23 @@ let private computeVersion () =
         if Array.isEmpty marks then None
         else Some (marks |> Array.map snd |> Array.minBy (function Major -> 0 | Minor -> 1 | Patch -> 2))
 
+    // A tag `describe` FOUND but this scheme cannot read is a repository state somebody has to
+    // look at, never an input to guess from. Treating it as "no tag" seeds the line at 1.0.0 —
+    // which, on a repository already at 6.13.1, publishes a version that goes BACKWARDS, and a
+    // number that goes backwards is worse than no number: the guard against re-publishing an
+    // existing version passes happily, and every consumer reads the newest release as a
+    // downgrade. Refuse, exactly as the shallow-clone guard above refuses, and for the reason:
+    // the history IS the version, so history that makes no sense has no version.
+    match tag with
+    | Some found when Option.isNone (parseTag found) ->
+        failwithf
+            "version: the nearest release tag is %s, which is not this scheme's shape (vMAJOR.MINOR.PATCH[-beta.N]). Delete it, or fix the tag, before releasing."
+            found
+    | _ -> ()
+
     match tag |> Option.bind parseTag, strongest with
-    // No release tag yet — seed the line.
+    // No release tag yet — seed the line. Genuinely no tag, now: the unreadable case refused
+    // above rather than arriving here.
     | None, _ -> sprintf "1.0.0-beta.%d" count
 
     // No marker: carry the tag's own prerelease counter forward, so the number keeps climbing
