@@ -118,6 +118,28 @@ The corollary is that a seam belongs where it is USED. The terminal manager take
 reader because `Tail` needs one — not because a layer above it offered to read on its behalf.
 Passing state downward is colocation; reaching upward for it is not.
 
+## Fixing bugs
+
+**Fix the root cause upstream; harden against the symptom downstream. Both, not either.** The
+upstream fix stops THIS fault. The downstream guard stops the next one — a different fault
+arriving at the same place — from being silently converted into a plausible wrong answer.
+
+That is not belt-and-braces, which is two mechanisms for ONE requirement at one point. This is
+one mechanism each at two points, and they go red at different times: upstream while the
+diagnosis still exists, downstream before the damage is published.
+
+The version regression is the shape. A transient invalid store path made `devenv shell --
+version` fail; `echo "version=$(...)"` discards a substitution's exit status, so the step went
+green with an empty version, `package` fell back to computing its own, and the release job
+tagged the commit `v` — which then matched the computation's `--match 'v*'` and restarted the
+6.13.1 line at 1.0.0. Upstream: capture under `pipefail` and refuse an empty result, so a failed
+computation fails the run. Downstream: `--match 'v[0-9]*'`, and refuse a nearest tag that is not
+this scheme's shape, so no malformed tag can move the version again.
+
+The tell that you have done half: you can state the fault as a chain — X failed, so Y saw
+nothing, so Z published garbage — and your change touches one link. Ask what the other links do
+next time, given a different X.
+
 ## Examples
 
 `examples/` holds integrations built the way somebody OUTSIDE this repository would build
