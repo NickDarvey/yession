@@ -25,6 +25,7 @@ module Yession.Host.Repos
 // in the sandbox policy env, so nothing that outlives the invocation can read it.
 
 open System
+open System.Collections.Generic
 open Fable.Core
 open Yession.Domain
 open Yession.SessionProcess
@@ -150,6 +151,22 @@ let private rmRecursive (fs: obj) (path: string) : unit = jsNative
 
 let private outputLimit = 20000
 
+/// Where a clone is BUILT, under the repos directory, before it is anything.
+///
+/// `git clone` creates its target's `.git` within milliseconds and leaves it without a
+/// HEAD for the rest of the clone, so a checkout at its visible path was never evidence
+/// that there IS a checkout. Every reader in that window — a second `add_repo` taking the
+/// already-here branch, the `repos` query, `repo_status` — met a repository git then
+/// refused to describe: `fatal: ambiguous argument 'HEAD'`, which reads as "this repo is
+/// empty" and is not. Building here and renaming into place makes the visible path binary:
+/// absent, or whole.
+///
+/// The `~` is load-bearing. `RepoRef.create` admits only letters, digits, `-`, `_` and `.`
+/// in an owner segment, so this name can never parse as one — the listing scan cannot
+/// mistake a clone in progress for a repo BY CONSTRUCTION, rather than by every future
+/// reader of that scan remembering to skip it. `Repos` pins that in the cheap tier.
+let stagingDirName = "staging~"
+
 let create (config: ReposConfig) : Result<ReposService, string> =
     Sandboxes.forBackend config.Backend "git" EnvironmentSpec.defaults
     |> Result.map (fun createSandbox ->
@@ -268,28 +285,80 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 else return! inner ()
             }
 
+        /// Clone into the staging area and MOVE the finished thing into place. The rename
+        /// is the moment the repo exists; before it, nothing at the visible path suggests
+        /// one is coming, and a clone that dies leaves the wreckage somewhere nobody reads.
+        let cloneIntoPlace (caller: RepoCaller) (repo: RepoRef) : Async<Result<RepoListing, string>> =
+            async {
+                let! token = config.ResolveToken caller.Credential
+                // Relative, because the sandbox's working directory is the repos dir; git
+                // creates the leading directories itself.
+                let relative = sprintf "%s/%s" stagingDirName (string (Guid.NewGuid ()))
+                let staging = sprintf "%s/%s" config.ReposDir relative
+                // `--template=` is empty deliberately: git's default templates are a
+                // set of `.git/hooks/*.sample` files, and srt's macOS profile denies
+                // every write under `**/.git/hooks/**` unconditionally — so the copy
+                // that populates them is what fails, and a clone that asks for no
+                // templates never attempts it. Nothing here wants a hooks directory
+                // anyway: repo-controlled execution is off by construction.
+                match! runOk unconfined token [ "clone"; "--no-recurse-submodules"; "--template="; config.CloneUrl repo; relative ] with
+                | Error e ->
+                    // git removes a target it created itself, but not one it was killed
+                    // out of. Either way the staging area is ours to leave clean.
+                    rmRecursive fs staging
+                    return Error e
+                | Ok _ ->
+                    // The owner directory is the rename's destination PARENT, and git made
+                    // it inside the staging area rather than here.
+                    Fs.ensureDir (sprintf "%s/%s" config.ReposDir (RepoRef.owner repo))
+                    Fs.rename staging (pathOf repo)
+                    match! listingOf repo with
+                    | Error e -> return Error e
+                    | Ok listing ->
+                        do! append caller.Actor (SessionEvent.RepoAdded { MessageId = mintMessageId (); Repo = repo; Branch = listing.Branch; Actor = caller.Actor; ApprovedBy = caller.ApprovedBy })
+                        return Ok listing
+            }
+
+        /// Clones in flight, keyed by repo. A clone is not instant, and the same repo asked
+        /// for twice while the first is still running used to start a SECOND clone into the
+        /// same directory. Joining the first is both correct and the answer the caller
+        /// wanted — `Broker`'s token refresh is this shape for the same reason.
+        let cloning = Dictionary<string, JS.Promise<Result<RepoListing, string>>> ()
+
         let addRepo (caller: RepoCaller) (repo: RepoRef) : Async<Result<RepoListing, string>> =
             async {
                 if present repo then
                     // Already here: answer with the current state and record nothing —
-                    // a repeated add is a question, not an act.
-                    return! listingOf repo
+                    // a repeated add is a question, not an act. `present` can be trusted to
+                    // mean WHOLE now, which is what the staging rename above buys.
+                    match! listingOf repo with
+                    | Ok listing -> return Ok listing
+                    | Error e ->
+                        // The one bad state the rename cannot prevent, because it predates
+                        // it: a checkout an interrupted clone left at the visible path. git
+                        // describes it as `ambiguous argument 'HEAD'`, which reads as "this
+                        // repo is empty" and sent a whole session looking for the wrong
+                        // fault. Say what it is and how to clear it instead.
+                        return
+                            Error (
+                                sprintf
+                                    "%s is already checked out here, but git cannot read that checkout: %s. That is what an interrupted clone leaves behind — remove_repo it, then add it again."
+                                    (RepoRef.value repo)
+                                    e)
                 else
-                    let! token = config.ResolveToken caller.Credential
-                    // `--template=` is empty deliberately: git's default templates are a
-                    // set of `.git/hooks/*.sample` files, and srt's macOS profile denies
-                    // every write under `**/.git/hooks/**` unconditionally — so the copy
-                    // that populates them is what fails, and a clone that asks for no
-                    // templates never attempts it. Nothing here wants a hooks directory
-                    // anyway: repo-controlled execution is off by construction.
-                    match! runOk unconfined token [ "clone"; "--no-recurse-submodules"; "--template="; config.CloneUrl repo; RepoRef.relativePath repo ] with
-                    | Error e -> return Error e
-                    | Ok _ ->
-                        match! listingOf repo with
-                        | Error e -> return Error e
-                        | Ok listing ->
-                            do! append caller.Actor (SessionEvent.RepoAdded { MessageId = mintMessageId (); Repo = repo; Branch = listing.Branch; Actor = caller.Actor; ApprovedBy = caller.ApprovedBy })
-                            return Ok listing
+                    let key = RepoRef.value repo
+                    let pending =
+                        match cloning.TryGetValue key with
+                        | true, running -> running
+                        | _ ->
+                            let running = cloneIntoPlace caller repo |> Async.StartAsPromise
+                            cloning.[key] <- running
+                            // Cleared on settle, so a clone that failed can be retried. The
+                            // workflow answers with `Error` rather than rejecting, so this
+                            // runs on both outcomes.
+                            running.``then`` (fun outcome -> cloning.Remove key |> ignore; outcome) |> ignore
+                            running
+                    return! Interop.awaitPromise pending
             }
 
         let listRepos () : Async<Result<RepoListing list, string>> =

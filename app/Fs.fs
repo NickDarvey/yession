@@ -34,6 +34,11 @@ let ensureDir (path: string) : unit = mkdirSyncImpl fs path
 
 let readText (path: string) : string = readFileSyncImpl fs path
 
+/// Move a path. Within one filesystem this is atomic, which is what lets a thing be built
+/// out of sight and then APPEAR whole — the guarantee `writeTextAtomic` below leans on for
+/// a file, and the repo manager's clone leans on for a directory.
+let rename (from: string) (dest: string) : unit = renameSyncImpl fs from dest
+
 let private directoryOf (path: string) : string =
     let idx = path.LastIndexOf '/'
     if idx > 0 then path.Substring (0, idx) else ""
