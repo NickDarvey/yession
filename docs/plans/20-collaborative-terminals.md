@@ -369,7 +369,8 @@ differs.
 restart-safety, same file. `ToolsChanged` is none of those things: it needs the MCP client
 to read unsolicited server→client notifications (it only ever writes one today), a
 process-local nudge that survives no restart, and a provider in `examples/jumpstarter` that
-actually sends one. **Stage 5a is the log-derived half; 5b answered `ToolsChanged` by dropping it — see below.**
+actually sends one. **Stage 5a is the log-derived half; 5b answered `ToolsChanged` by dropping
+it — see below.**
 
 **As built (5a).**
 
@@ -420,21 +421,39 @@ author would add the event type this stage exists to avoid. And the plan already
 deciding point: *the turn rebuilds the roster regardless*. The wake buys promptness, not
 correctness, so it does not buy enough to be the first unowned turn.
 
-So `WakeReason` is unchanged, and 5b is what remains once the wake is gone: the client reads
-`notifications/tools/list_changed` off the GET stream to refresh a connection and invalidate
-the `mcp_servers` query, and nothing starts a turn.
+So `WakeReason` is unchanged — and with the wake gone, the GET stream the stage was going to
+open earns nothing, so it is not built either.
 
-**Deviation: the `Jumpstarter` `list_changed` test has no mechanism to test.** The stage named
-one, and the example cannot produce it: its eight tools are static, `driver_call` is the
-generic escape hatch that exists so the roster does NOT grow per driver, and unheld tools stay
-present-and-refusing on purpose (*"a refusal is an ANSWER, not an error"*). Manufacturing a
-roster change means contradicting one of those two decisions. The client half is pinned
-against a `Ports` stub that sends `list_changed` instead; the example is left as it is.
+**Why the client stream goes with it.** `PollIntervalMs` had already decided this, by name:
+the poll is *"the stream's replacement… one answer to 'when does this notice' instead of two
+that can disagree."* The wake was the only thing that needed a PUSH — a turn had to start —
+and without it the stream carries nothing the poll does not already get: `list_changed` lands
+within ten seconds, resources and prompts are unused, a long call's progress notifications
+arrive on the POST's own SSE response rather than the GET stream, and server→client requests
+(sampling, elicitation, roots) are unsupported. Nor can the stream REPLACE the poll, which is
+also reachability, reconnect, and the provider that appears thirty seconds late — and which a
+conforming server may refuse outright, since the GET is optional. Opened alongside, it is two
+mechanisms noticing one fact, which §No belt-and-braces forbids.
 
-**What the example did owe, and now pays.** Liveness. `Claims.touch` fires per HTTP request,
-which reads a polling client correctly and a streaming one exactly backwards: the optional GET
-stream is ONE request that arrives, stays open for the session's life, and says nothing, so a
-client more connected than any poller would lose its claim at the TTL. That invariant was
+Skipping the poll for streamed connections is the only way back to one mechanism, and it is
+worse: it assumes every provider counts an open stream as liveness. That is exactly the
+assumption the example below had to be FIXED for — our own habit, exported onto servers we did
+not write, where nothing verifies it and a dropped claim is what a person finds out about.
+
+**Deviation from the stage as written.** It named a `Jumpstarter` test for a real provider's
+`list_changed`, and there is nothing to test on either side now: no client stream to receive
+one, and no roster change in the example to send one. Its eight tools are static, `driver_call`
+is the generic escape hatch that exists so the roster does NOT grow per driver, and unheld
+tools stay present-and-refusing on purpose (*"a refusal is an ANSWER, not an error"*).
+Manufacturing a roster change means contradicting one of those two decisions, so the example
+keeps its shape.
+
+**What the example did owe, and now pays — the one thing 5b ships.** Liveness, and it stands
+whether or not THIS client ever streams, because the rule is the provider's. `Claims.touch`
+fires per HTTP request, which reads a polling client correctly and a streaming one exactly
+backwards: the optional GET stream is ONE request that arrives, stays open for the session's
+life, and says nothing, so a client more connected than any poller would lose its claim at
+the TTL. That invariant was
 holding only because our client happened to poll — the provider's own comment said as much
 ("a polling client is a live client") — which is the shape §Colocation names: a rule that lives
 in the caller's habit, and the next client has not got it. `Claims.streaming` is that rule
