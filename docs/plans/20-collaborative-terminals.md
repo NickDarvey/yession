@@ -369,7 +369,7 @@ differs.
 restart-safety, same file. `ToolsChanged` is none of those things: it needs the MCP client
 to read unsolicited server→client notifications (it only ever writes one today), a
 process-local nudge that survives no restart, and a provider in `examples/jumpstarter` that
-actually sends one. **Stage 5a is the log-derived half; `ToolsChanged` is still owed.**
+actually sends one. **Stage 5a is the log-derived half; 5b answered `ToolsChanged` by dropping it — see below.**
 
 **As built (5a).**
 
@@ -402,6 +402,43 @@ actually sends one. **Stage 5a is the log-derived half; `ToolsChanged` is still 
   and a turn that ran unasked says the same thing about itself however it came to. Which
   reason lives in the `data-message-woke` token a test reads and the title a person can ask
   for.
+
+**As decided (5b): `ToolsChanged` is not a wake.**
+
+Reading the seam settled it against the plan. Every other reason answers *whose work
+finished*, and takes its actor from the party who queued it — that is what makes a woken turn
+a turn with credentials (`Agent.fs`: "a turn that could not name one would be a turn with no
+credentials"). A roster change queues nothing and belongs to nobody; the code already says so,
+appending `McpServerAvailable` as `ActorRef.System` *"because nobody in the session did this"*,
+and `System` is not a credential the agent can call tools on.
+
+The two ways to give it one were both worse than not waking. Borrowing the last turn's actor
+would make it the first wake whose actor did not queue the work — the agent calling a
+newly-appeared tool on somebody's credentials for something they never asked for, which is
+precisely the autonomy risk this plan's closing section flags. Logging the change with a real
+author would add the event type this stage exists to avoid. And the plan already conceded the
+deciding point: *the turn rebuilds the roster regardless*. The wake buys promptness, not
+correctness, so it does not buy enough to be the first unowned turn.
+
+So `WakeReason` is unchanged, and 5b is what remains once the wake is gone: the client reads
+`notifications/tools/list_changed` off the GET stream to refresh a connection and invalidate
+the `mcp_servers` query, and nothing starts a turn.
+
+**Deviation: the `Jumpstarter` `list_changed` test has no mechanism to test.** The stage named
+one, and the example cannot produce it: its eight tools are static, `driver_call` is the
+generic escape hatch that exists so the roster does NOT grow per driver, and unheld tools stay
+present-and-refusing on purpose (*"a refusal is an ANSWER, not an error"*). Manufacturing a
+roster change means contradicting one of those two decisions. The client half is pinned
+against a `Ports` stub that sends `list_changed` instead; the example is left as it is.
+
+**What the example did owe, and now pays.** Liveness. `Claims.touch` fires per HTTP request,
+which reads a polling client correctly and a streaming one exactly backwards: the optional GET
+stream is ONE request that arrives, stays open for the session's life, and says nothing, so a
+client more connected than any poller would lose its claim at the TTL. That invariant was
+holding only because our client happened to poll — the provider's own comment said as much
+("a polling client is a live client") — which is the shape §Colocation names: a rule that lives
+in the caller's habit, and the next client has not got it. `Claims.streaming` is that rule
+moved back onto the state it governs, so any conforming client that streams keeps its board.
 
 ### Stage 6 — the agent lease and the handoff
 

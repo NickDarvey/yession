@@ -73,6 +73,59 @@ def test_somebody_elses_traffic_does_not_keep_a_claim_alive():
     assert claims.acquire("bob") == (True, None)
 
 
+def test_an_open_stream_keeps_a_claim_alive():
+    clock = Clock()
+    claims = Claims(ttl_seconds=60, now=clock)
+    claims.acquire("alice")
+    with claims.streaming("alice"):
+        # Alice says nothing at all for far longer than the timeout. She is holding a
+        # stream open, which is the same statement made by listening instead of asking.
+        clock.advance(600)
+        assert claims.holder == "alice"
+
+
+def test_a_claim_expires_once_the_stream_is_gone():
+    clock = Clock()
+    claims = Claims(ttl_seconds=60, now=clock)
+    claims.acquire("alice")
+    with claims.streaming("alice"):
+        pass
+    clock.advance(61)
+    assert claims.holder is None
+
+
+def test_a_closed_stream_leaves_a_whole_deadline_behind_it():
+    clock = Clock()
+    claims = Claims(ttl_seconds=60, now=clock)
+    claims.acquire("alice")
+    with claims.streaming("alice"):
+        clock.advance(600)
+    # The deadline runs from the stream CLOSING, not from the last request before it. A
+    # client whose stream outlived one timeout is still entitled to the whole of the next.
+    clock.advance(59)
+    assert claims.holder == "alice"
+
+
+def test_one_of_two_streams_closing_does_not_end_a_claim():
+    clock = Clock()
+    claims = Claims(ttl_seconds=60, now=clock)
+    claims.acquire("alice")
+    with claims.streaming("alice"):
+        with claims.streaming("alice"):
+            pass
+        clock.advance(600)
+        assert claims.holder == "alice"
+
+
+def test_somebody_elses_stream_does_not_keep_a_claim_alive():
+    clock = Clock()
+    claims = Claims(ttl_seconds=60, now=clock)
+    claims.acquire("alice")
+    with claims.streaming("bob"):
+        clock.advance(61)
+        assert claims.holder is None
+
+
 def test_two_clients_over_the_wire(provider: str):
     alice = Client(provider, name="alice")
     bob = Client(provider, name="bob")
@@ -99,6 +152,19 @@ def test_a_client_that_goes_quiet_loses_the_exporter(provider: str):
     time.sleep(5.5)
     bob = Client(provider, name="bob")
     assert "yours" in bob.tool("acquire")
+
+
+def test_a_client_holding_a_stream_open_keeps_the_exporter(provider: str):
+    alice = Client(provider, name="alice")
+    alice.tool("acquire")
+
+    with alice.stream():
+        # Alice sends nothing for longer than the provider's five-second claim (conftest).
+        # A client measured by requests alone would have lost the board here; she is
+        # holding a stream open, and that is the same statement made by listening.
+        time.sleep(5.5)
+        bob = Client(provider, name="bob")
+        assert alice.session_id[:8] in bob.tool("acquire")
 
 
 def test_ending_a_session_is_not_a_way_to_keep_the_hardware(provider: str):

@@ -15,6 +15,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -176,6 +177,28 @@ class Client:
         result = answer["result"]
         text = "\n".join(part.get("text", "") for part in result["content"])
         return text, result.get("_meta") or {}
+
+    @contextmanager
+    def stream(self):
+        """The optional server->client GET stream, held open for the block.
+
+        Opened rather than read: what a test needs from it is what an OPEN stream means to
+        the server, and nothing has to arrive on it for that to be a question.
+        """
+        request = urllib.request.Request(
+            self.url,
+            method="GET",
+            headers={
+                "accept": "text/event-stream",
+                "mcp-session-id": self.session_id,
+                "mcp-protocol-version": self.protocol,
+            },
+        )
+        response = urllib.request.urlopen(request, timeout=30)
+        try:
+            yield response
+        finally:
+            response.close()
 
     def end(self) -> int:
         request = urllib.request.Request(
