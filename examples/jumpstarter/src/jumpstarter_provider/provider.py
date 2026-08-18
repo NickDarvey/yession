@@ -14,8 +14,9 @@ promise of isolation the hardware does not keep.
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import anyio
 from mcp.server.mcpserver import Context, MCPServer
@@ -27,6 +28,13 @@ from .stream import Console
 # A claim follows a live MCP session. A session is alive while it is TALKING: every request
 # under its id — a tool call, or the `tools/list` a client polls with — pushes the deadline
 # out, and a client that has gone silent for this long has gone.
+#
+# ...or while it is LISTENING, which is the same fact arriving differently. Streamable HTTP
+# lets a client open one GET and leave it open for the session's whole life; measured by
+# requests that client spoke once and vanished, while it is in fact the most connected a
+# client gets. `Claims.streaming` is that second reading, and it is here rather than in the
+# caller because a rule that holds only while the caller keeps polling is not the claim's
+# rule — it is the caller's habit, and the next client has not got it.
 #
 # One rule, not two: an explicit goodbye (`release`, or the DELETE that ends the session)
 # and a crashed client are the same event seen at different speeds, and a second mechanism
@@ -60,6 +68,9 @@ class Claims:
         self._now = now
         self._on_release = on_release
         self._claim: _Claim | None = None
+        # Counted, not flagged: a client may hold more than one open stream at a time, and
+        # the first to close must not answer for the rest.
+        self._streaming: dict[str, int] = {}
 
     def touch(self, holder: str) -> None:
         """A session said something. Called for EVERY request, including the ones the MCP
@@ -69,9 +80,38 @@ class Claims:
         if self._claim is not None and self._claim.holder == holder:
             self._claim.last_seen = self._now()
 
+    @contextmanager
+    def streaming(self, holder: str) -> Iterator[None]:
+        """For as long as this session holds a stream open, it is talking.
+
+        Entered around the request that IS the stream, so the claim follows that request's
+        lifetime rather than its arrival — the one case the deadline cannot measure, because
+        nothing further arrives to measure.
+        """
+        self._streaming[holder] = self._streaming.get(holder, 0) + 1
+        try:
+            yield
+        finally:
+            remaining = self._streaming.get(holder, 0) - 1
+            if remaining > 0:
+                self._streaming[holder] = remaining
+            else:
+                self._streaming.pop(holder, None)
+                # The deadline starts NOW rather than from whenever this session last sent
+                # a request. It has been alive the whole time the stream was open, so
+                # measuring its silence from before that would expire a client that has
+                # said nothing wrong — instantly, if the stream outlived one TTL.
+                claim = self._claim
+                if claim is not None and claim.holder == holder:
+                    claim.last_seen = self._now()
+
     def expire(self) -> None:
         claim = self._claim
-        if claim is not None and self._now() - claim.last_seen > self.ttl_seconds:
+        if claim is None:
+            return
+        if self._streaming.get(claim.holder):
+            return
+        if self._now() - claim.last_seen > self.ttl_seconds:
             self._claim = None
             self._on_release()
 
@@ -196,8 +236,9 @@ class Provider:
             if not took:
                 return _said(f"the exporter is already held by {_short(other or '')} — it is in use, not broken")
             held = (
-                "the exporter is yours. It stays yours while you keep talking to this server, "
-                f"and is released automatically after {int(self.claims.ttl_seconds)}s of silence."
+                "the exporter is yours. It stays yours while your session keeps talking to this "
+                "server or keeps its event stream open, and is released automatically after "
+                f"{int(self.claims.ttl_seconds)}s of neither."
             )
             # The console, as a stream a CLIENT can open — in `_meta`, which is the place MCP
             # reserves for data meant for the client rather than the model. A client that has
@@ -314,19 +355,26 @@ class Provider:
         """The ASGI app, with the one thing the MCP server does not do for us wrapped
         around it: seeing every request, so a claim can follow a session it never hears
         about at the tool layer (`tools/list` is answered by the server itself, and a
-        polling client is a live client)."""
+        polling client is a live client — as is a streaming one, below)."""
         inner = self.mcp.streamable_http_app()
         claims = self.claims
         console = self.console
 
         async def app(scope: Any, receive: Any, send: Any) -> None:
             if scope["type"] == "http":
-                for name, value in scope.get("headers", []):
-                    if name == b"mcp-session-id":
-                        claims.touch(value.decode())
-                        break
+                session = _session_of(scope)
+                if session:
+                    claims.touch(session)
                 else:
                     claims.expire()
+                # The optional server->client stream is a GET that arrives once and stays
+                # open for the session's life. Touching it on arrival would credit it with
+                # one instant of liveness and then let the claim expire underneath a client
+                # that is still connected, so the claim follows the stream while it is OPEN.
+                if session and scope.get("method") == "GET":
+                    with claims.streaming(session):
+                        await inner(scope, receive, send)
+                    return
             # The data leg (Plan 19), on the same port as the control leg — which is the
             # whole reason a WebSocket was the right shape: the upgrade rides the listener
             # the provider already has.
@@ -340,6 +388,14 @@ class Provider:
             await inner(scope, receive, send)
 
         return app
+
+
+def _session_of(scope: Any) -> str:
+    """The MCP session id off an ASGI request, or "" for a request that carries none."""
+    for name, value in scope.get("headers", []):
+        if name == b"mcp-session-id":
+            return value.decode()
+    return ""
 
 
 def _timeout(seconds: float) -> float:
