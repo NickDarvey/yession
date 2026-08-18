@@ -79,6 +79,15 @@ let private pureTests =
             Expect.equal (Sandboxes.reposVisibleAt SrtBackend "/data/repos") "/data/repos" "srt binds the same path"
             Expect.equal (Sandboxes.reposVisibleAt DockerBackend "/data/repos") "/repos" "docker reaches its mount target"
 
+        // The listing scan walks the repos directory treating every entry as an OWNER. The
+        // staging area lives in there too (it must: the git sandbox may only write under the
+        // repos dir), so what keeps a clone in progress out of the listing is that its
+        // directory cannot be a repo NAME — not that the scan remembers to skip it.
+        testCase "the staging directory can never be read back as a repo" <| fun () ->
+            Expect.isError
+                (RepoRef.create (sprintf "%s/anything" Repos.stagingDirName))
+                "a clone in progress is unnameable as a repo, so the scan cannot surface one"
+
         testCase "capped output states its elision" <| fun () ->
             Expect.equal (Repos.capText 10 "short") "short" "under the cap, untouched"
             let capped = Repos.capText 5 "0123456789"
@@ -103,6 +112,17 @@ let private writeFile (fs: obj) (path: string) (content: string) : unit = jsNati
 
 [<Emit("$0.existsSync($1)")>]
 let private exists (fs: obj) (path: string) : bool = jsNative
+
+[<Emit("(() => { try { return $0.readdirSync($1) } catch { return [] } })()")>]
+let private readDirSafe (fs: obj) (path: string) : string array = jsNative
+
+/// A checkout that is FINISHED, rather than one that has started. `.git` appears within
+/// milliseconds of a clone beginning and says nothing about whether there is a work tree
+/// yet — which is the whole reason the clone now lands by rename. Anything beside `.git`
+/// only exists once git has checked the work tree out.
+let private checkoutWhole (fs: obj) (dir: string) : bool =
+    exists fs (sprintf "%s/.git" dir)
+    && readDirSafe fs dir |> Array.exists (fun entry -> entry <> ".git")
 
 [<Emit("$0.chmodSync($1, 0o755)")>]
 let private makeExecutable (fs: obj) (path: string) : unit = jsNative
@@ -260,6 +280,93 @@ let private srtTests =
             Expect.isFalse (exists nodeFs marker) "no planted code ran (hooksPath/fsmonitor forced off per invocation)"
         }
 
+        // The rename is what makes the visible path binary, and these are its two halves:
+        // a clone that never finished is not there at all, and a clone still running is not
+        // a second clone. Before this, `.git` existing was the only test of presence, and
+        // git creates that in the first milliseconds — so a concurrent reader met a repo
+        // with no HEAD and was told `fatal: ambiguous argument 'HEAD'`.
+        testCaseAsync "a checkout is never visible half-made: the path appears whole, or not at all" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let service = serviceIn root (freshLog ())
+            let repo = RepoRef.create "octo/hello" |> expect
+            let checkout = sprintf "%s/repos/octo/hello" root
+            let mutable halfMade = false
+            let mutable running = true
+            // Watch the visible path for as long as the clone runs. There are only two
+            // states it may ever be seen in: not there, or finished. A `.git` with no work
+            // tree beside it is the state that told a second reader "ambiguous argument
+            // 'HEAD'" and had it conclude the repo was empty.
+            //
+            // A sampler can only ever MISS, never cry wolf — and against a local fixture it
+            // gets a few hundred looks at a window that used to last the whole clone. It was
+            // confirmed by regressing the rename and watching this go red.
+            let watch =
+                async {
+                    while running do
+                        if exists nodeFs checkout && not (checkoutWhole nodeFs checkout) then halfMade <- true
+                        do! Async.Sleep 1
+                }
+            let add =
+                async {
+                    let! added = service.AddRepo caller repo
+                    running <- false
+                    expect added |> ignore
+                }
+            let! _ = Async.Parallel [ add; watch ]
+            Expect.isFalse halfMade "the path was never seen with a .git and no work tree"
+            Expect.isTrue (checkoutWhole nodeFs checkout) "and it is whole once the clone answers"
+        }
+
+        testCaseAsync "a clone that fails leaves nothing behind — not at the repo's path, not staged" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            // No fixture is made, so the clone URL names a bare repo that is not there.
+            let log = freshLog ()
+            let service = serviceIn root log
+            let repo = RepoRef.create "octo/missing" |> expect
+            let! added = service.AddRepo caller repo
+            Expect.isError added "a clone of something that is not there fails"
+            Expect.isFalse (exists nodeFs (sprintf "%s/repos/octo/missing" root)) "nothing at the visible path"
+            Expect.equal
+                (readDirSafe nodeFs (sprintf "%s/repos/%s" root Repos.stagingDirName))
+                [||]
+                "and nothing left in the staging area"
+            let! events = eventsOf log
+            Expect.isEmpty events "a clone that did not happen records nothing"
+        }
+
+        testCaseAsync "a checkout left behind by an interrupted clone is named, with the way out" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let service = serviceIn root (freshLog ())
+            let repo = RepoRef.create "octo/hello" |> expect
+            // Exactly what a clone that died partway used to leave at the visible path: a
+            // repository with no commit in it. Nothing can produce this any more, but a
+            // machine that ran the old code still has one.
+            let checkout = sprintf "%s/repos/octo/hello" root
+            mkdir nodeFs checkout
+            hostGit childProcess [| "init"; "-b"; "main" |] checkout
+            let! added = service.AddRepo caller repo
+            match added with
+            | Ok _ -> failwith "expected an unreadable checkout to be reported, not described"
+            | Error reason ->
+                Expect.isTrue (reason.Contains "octo/hello") "the answer names the repo"
+                Expect.isTrue (reason.Contains "remove_repo") "and how to clear it"
+        }
+
+        testCaseAsync "the same repo asked for twice at once is cloned once, and recorded once" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let log = freshLog ()
+            let service = serviceIn root log
+            let repo = RepoRef.create "octo/hello" |> expect
+            let! both = Async.Parallel [ service.AddRepo caller repo; service.AddRepo caller repo ]
+            let listings = both |> Array.map expect
+            Expect.equal listings.[0] listings.[1] "both callers are answered with the same listing"
+            let! events = eventsOf log
+            Expect.equal (List.length events) 1 "one clone happened, and it was recorded once"
+        }
+
         testCaseAsync "remove deletes the checkout and records who asked" <| async {
             let root = mkdtemp nodeFs nodeOs
             makeBareFixture root "hello" |> ignore
@@ -333,7 +440,7 @@ let private liveClone =
 
             let sessionDir = sprintf "%s/%s" dataDir record.DataDir
             let reposDir = sprintf "%s/repos" sessionDir
-            let checkout = sprintf "%s/%s/.git" reposDir liveRepo
+            let checkout = sprintf "%s/%s" reposDir liveRepo
 
             /// Everything a reader needs to tell the three faults apart, printed whatever happens.
             let report (why: string) =
@@ -354,7 +461,7 @@ let private liveClone =
                             t.Blocks |> List.map (fun b -> sprintf "    %s -> %A" b.Command b.Status))
                         |> function [] -> "    (terminals, no blocks)" | ls -> String.concat "\n" ls
                 sprintf
-                    "CLONE: %s\n  environment: %A\n  conversation:\n%s\n  terminal blocks:\n%s\n  session dir: %s\n  repos dir: %s\n  owner dir: %s\n  checkout present: %b"
+                    "CLONE: %s\n  environment: %A\n  conversation:\n%s\n  terminal blocks:\n%s\n  session dir: %s\n  repos dir: %s\n  owner dir: %s\n  checkout whole: %b"
                     why
                     model.Environment
                     items
@@ -362,7 +469,7 @@ let private liveClone =
                     (listDir nodeFs sessionDir)
                     (listDir nodeFs reposDir)
                     (listDir nodeFs (sprintf "%s/octocat" reposDir))
-                    (exists nodeFs checkout)
+                    (checkoutWhole nodeFs checkout)
 
             do! compose ada ada.Hello.PeerId (sprintf "Clone %s" liveRepo)
             ada.Connection.SendDraft ada.Hello.PeerId
@@ -371,7 +478,7 @@ let private liveClone =
             // rather than `waitUntilWithin` because not settling is not this case's verdict —
             // the report below is, and a throw here would take it with it.
             let settled () =
-                exists nodeFs checkout
+                checkoutWhole nodeFs checkout
                 || (ada.Runner.Model ()).Conversation.Items
                    |> List.exists (fun i ->
                        i.Author = ActorRef.Agent
@@ -380,8 +487,8 @@ let private liveClone =
 
             // Printed on the happy path too: a green run that says nothing teaches nothing, and
             // this is the only place a CI reader can see what the live session actually did.
-            printfn "%s" (report (if exists nodeFs checkout then "the checkout landed" else "no checkout"))
-            Expect.isTrue (exists nodeFs checkout) (report "the checkout never landed")
+            printfn "%s" (report (if checkoutWhole nodeFs checkout then "the checkout landed" else "no checkout"))
+            Expect.isTrue (checkoutWhole nodeFs checkout) (report "the checkout never landed")
 
             do! ada.Channel.Close ()
             do! pm.StopAll ()
