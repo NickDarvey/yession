@@ -100,9 +100,12 @@ module Icon =
     /// follows, exactly as `checkSm` is.
     let pinSm = stroked "w-3 h-3 inline-block align-[-1px]" pinPath
 
-    /// Inline with a status word: smaller, and nudged onto the caps baseline.
-    let checkSm = stroked "w-3 h-3 inline-block align-[-1px]" checkPath
-    let crossSm = stroked "w-3 h-3 inline-block align-[-1px]" crossPath
+    /// Inline with a status word: smaller, and nudged onto the caps baseline. `-3px`, not
+    /// `-1px`: the strokes sit inside the 12px box with ~3px of clear space under them (the
+    /// check's lowest vertex lands at y≈8.4 of 12), so at -1px the paint floated a couple of
+    /// pixels above the digits beside it — measured against the caps line in a tally.
+    let checkSm = stroked "w-3 h-3 inline-block align-[-3px]" checkPath
+    let crossSm = stroked "w-3 h-3 inline-block align-[-3px]" crossPath
     /// The mark a row wears when what it holds is a RECORDING rather than a terminal you
     /// can type into. Sits on the caps baseline beside the row's state, like the two above.
     let playSm = stroked "w-3 h-3 inline-block align-[-1px]" playPath

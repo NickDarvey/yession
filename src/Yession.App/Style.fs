@@ -46,8 +46,10 @@ module Style =
     //
     // Two widths, and only two:
     //   `ring` — 1px on all four sides. What you TYPE IN or PRESS (fields, buttons).
-    //   `lead` — 2px on the leading edge. What is LISTED (queued messages and commands,
-    //            a collaborator's collapsed draft), where the edge says what the row IS.
+    //   `lead` — 2px on the leading edge. What is LISTED where two states share one surface
+    //            (the terminal's queued commands, a collaborator's collapsed draft) and the
+    //            edge says what the row IS. The message queue is NOT one of these any more:
+    //            its rows are bands in the composer's dock (see `queueItem`).
     //   `underline` — the single exception, and it is a shape not a third width: a heading
     //            that edits in place (the session title), where a rectangle drawn round
     //            28px type reads as a box rather than a field.
@@ -170,6 +172,17 @@ module Style =
     let syncRow = "flex items-center gap-2"
 
     // --- Buttons: bordered Metro rectangles — hover brightens, press fills --------------
+    //
+    // WHEN A BUTTON WEARS ITS BORDER, and when it wears none — the rule, because "some have
+    // borders" is how two conventions breed a third:
+    //
+    //   * BORDERED — a STANDALONE act on the ground: it begins or ends something of its own
+    //     (connect, interrupt, sign in, open the terminal list). A Metro button IS its
+    //     rectangle; the rectangle is the claim to be a thing you press.
+    //   * BORDERLESS — a verb RIDING the thing it acts on: send/discard at a field's trailing
+    //     edge, reorder/delete on a listed row. The row or field already carries the
+    //     structure, so the verb borrows it — quiet at rest, ink (or err) under the hand —
+    //     and a second rectangle inside the first would be chrome describing chrome.
 
     /// Sized by construction, not padding arithmetic: the box is `h-control` with the line
     /// flex-centred in it — the old `py-[7px]` was that same height, hand-derived and easy to
@@ -230,13 +243,23 @@ module Style =
     let private btnIconDangerFace =
         " " + cls [ Stroke.rim; "text-ink-dim"; Stroke.hoverErr; "hover:text-err active:bg-err active:text-bg" ]
 
-    /// 24px square: the queue's reorder controls.
+    /// 24px square (composed up to 32 where it stands in a bar): the STANDALONE icon acts —
+    /// currently the terminal pane's list toggle. Row-riding verbs are `btnIconBare` below.
     let btnIcon = btnIconBase + " w-6 h-6" + btnIconNeutralFace
-    /// 24px square, destructive: delete / disconnect.
-    let btnIconDanger = btnIconBase + " w-6 h-6" + btnIconDangerFace
     /// 32px square, destructive: the composer's discard — the same height as the Send
     /// button it sits beside, so the pair shares top and bottom edges.
     let btnIconDangerLg = btnIconBase + " w-8 h-8" + btnIconDangerFace
+
+    /// The borderless icon verbs (see the rule at the head of this section): 24px square,
+    /// grid-centred, riding a listed row they act on — the queue's reorder and delete, a
+    /// terminal row's verbs, a roster row's disconnect. Faint at rest because the ROW is the
+    /// subject; ink (or err, when what they do destroys) under the hand; the focus ring is
+    /// the one piece of chrome they keep, because the keyboard has no hover.
+    let private btnIconBareBase =
+        cls [ "w-6 h-6 shrink-0 bg-transparent border-0 cursor-pointer p-0 grid place-items-center"
+              "transition-colors"; focusRing ]
+    let btnIconBare = cls [ btnIconBareBase; "text-ink-faint hover:text-ink" ]
+    let btnIconBareDanger = cls [ btnIconBareBase; "text-ink-faint hover:text-err" ]
 
     /// 32px square and BORDERLESS: the verb at the trailing edge of a field.
     ///
@@ -637,19 +660,33 @@ module Style =
     let timeline =
         "flex-1 overflow-y-auto px-8 py-6 flex flex-col gap-6 max-md:px-4 max-md:py-4 max-md:gap-5 break-words"
 
-    /// Message rhythm: one 16px meta line + 8px gap + n×24px body lines, on a
-    /// `20px avatar · 12px gutter · content` grid.
-    let message = "grid grid-cols-[20px_1fr] gap-x-3 gap-y-2 max-w-[46rem]"
-    let messageAvatar = "row-span-2 -mt-0.5" // optical: square top ≈ cap height
-    let messageMeta = "flex items-baseline gap-2.5"
+    /// One actor's consecutive run — their messages, the commands they ran, the tools they
+    /// called — under ONE author line. Attribution is said where it CHANGES, which is how a
+    /// conversation reads; a name repeated over every consecutive turn is wallpaper, and
+    /// wallpaper is what stops a reader noticing when the speaker actually turns over.
+    let messageGroup = "flex flex-col gap-3 max-w-[46rem]"
+
+    /// The author line: avatar and name, STICKY — while a long run scrolls, who is speaking
+    /// stays readable at the top of the column. The upward padding (cancelled by the negative
+    /// margin, so nothing moves at rest) is what the stuck line's ground covers: without it,
+    /// content scrolls visibly through the timeline's own top padding above the name. It is
+    /// ground over ground until the moment it is needed.
+    /// (`pb-1 -mb-1` is the same trick downward, one step: without it the stuck line's ground
+    /// ends exactly at the label's last pixel and scrolled text touches the name.)
+    let messageGroupHead =
+        "sticky top-0 z-10 bg-bg flex items-center gap-3 pt-6 -mt-6 max-md:pt-4 max-md:-mt-4 pb-1 -mb-1"
+
+    /// One item inside a group: its (rare) meta line over its body.
+    let messageItem = "flex flex-col gap-1"
+    /// The meta line carries only what is NEWS — streaming, failed, woke unasked. The author
+    /// is the group's to say, so a settled message has no meta line at all.
+    let messageMeta = "flex items-baseline gap-2.5 pl-8"
     let who = caps + " text-ink-dim"
     let whoAgent = caps + " text-blue"
-    /// `min-w-0` because a grid item's automatic minimum is its MIN-CONTENT width, so the
-    /// content column was sized by the longest thing in it rather than by the grid: one URL in
-    /// one message made this box 619px wide inside a 326px column (measured at 390). The track
-    /// is what decides how wide the column is; the message is what has to fit in it.
-    let messageBody = "col-start-2 min-w-0 font-light text-body text-ink"
-    let messageBodyStreaming = "col-start-2 min-w-0 font-light text-body text-ink-dim"
+    /// `pl-8` is the group head's own geometry — 20px avatar + 12px gutter — so bodies, chips
+    /// (`chatChip`, already at 32px) and tool runs all share one reading edge under the name.
+    let messageBody = "pl-8 font-light text-body text-ink"
+    let messageBodyStreaming = "pl-8 font-light text-body text-ink-dim"
 
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
@@ -774,23 +811,31 @@ module Style =
     let activityText = "font-light text-small text-blue"
     let activityTurn = "text-label text-ink-faint tabular-nums max-md:hidden"
 
-    // --- Queue: editable until drained; the green leading edge says so ------------------------
+    // --- Queue: editable until drained; the head's green count says so ------------------------
+    // The queue is the composer's dock, not a list floating over the ground: its rows are
+    // BANDS, running edge to edge exactly as the composer band below them does, told apart
+    // from the ground by their tone. They used to be lead-edged cards inside a padded strip —
+    // a third rectangle vocabulary two centimetres from the band that already had the answer.
 
-    let queue = "shrink-0 flex flex-col gap-0.5 px-8 pt-4 max-md:px-4"
+    let queue = "shrink-0 flex flex-col gap-0.5 pt-4"
 
     /// The same band holding nothing. Padding is what a band spends on the rows inside it, and
     /// with no rows the `pt-4` was 16px of ground between the agent's activity strip and the
     /// composer — a gap that said something was there. Nothing is there, so it takes no room:
     /// the composer's rail sits directly under whatever is above it.
     let queueEmpty = "shrink-0"
-    let queueHead = "flex items-baseline gap-3 pb-2"
+    /// On the composer's own gutter (`draftInput` spends px-4), because the head belongs to
+    /// the dock it heads, not to the timeline above it.
+    let queueHead = "flex items-baseline gap-3 pb-2 px-4"
+    /// Green, AT REST: "still editable" is a fact about the whole queue, said once at its
+    /// head — the rows beneath no longer repeat it per entry.
     let queueCount = caps + " text-green"
 
-    /// Green AT REST, not on hover: "still editable" is a fact about the entry, and the
-    /// terminal's queued commands (`terminalQueuedReady`) already said it that way — a
-    /// queued message and a queued command are the same act, so they wear the same edge.
+    /// A full-bleed band on the composer's gutter. The surface tone is what marks it (the
+    /// timeline's ground is `bg`, the dock's bands are `surface`), and interaction lifts the
+    /// surface exactly as every other actionable row here does.
     let queueItem =
-        cls [ "group items-center gap-3 h-10 px-3"; rowBase; Stroke.green; rowLift ]
+        cls [ "group flex items-center gap-3 h-10 px-4 bg-surface transition-colors"; rowLift ]
 
     /// `focus-within`, not `focus`: the caret lands in the editor MOUNTED INSIDE this host,
     /// so `focus:` on the host never fires and the brightening never happened.
@@ -871,7 +916,11 @@ module Style =
     /// it taught something, but it spent a permanent strip saying what one press teaches; it
     /// survives as `aria-keyshortcuts` on the control it describes, which is where a screen
     /// reader looks for it and where it cannot go stale.
-    let draftCommit = "shrink-0 flex items-center gap-1 pr-2 pb-2"
+    /// `pb-1`, derived, not eyeballed: the rest-state input is a 24px line inside `py-2`
+    /// (40px), so the line's centre sits 20px from the box top; a 32px control bottom-aligned
+    /// with 4px spent below centres at 20px too. `pb-2` put the pair 4px low of the text
+    /// beside them — measured as the send arrow riding under the line it sends.
+    let draftCommit = "shrink-0 flex items-center gap-1 pr-2 pb-1"
     let draftAuthor = "pl-4 pt-2 " + caps + " text-ink-faint truncate"
 
     // A draft nobody has open here: one line of it, so the composer reads as "what is being

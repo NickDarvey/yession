@@ -432,7 +432,7 @@ module View =
         let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
             match kind with
             | Some kind ->
-                html $"""<div class="{Style.sideRow}" data-claude-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconDanger}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>{Icon.close}</button></div>"""
+                html $"""<div class="{Style.sideRow}" data-claude-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconBareDanger}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>{Icon.close}</button></div>"""
             | None -> html $""""""
         let controls =
             match claude.Flow with
@@ -479,7 +479,7 @@ module View =
         let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
             match kind with
             | Some kind ->
-                html $"""<div class="{Style.sideRow}" data-github-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconDanger}" aria-label="Disconnect GitHub" data-github-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.GitHubDisconnect scopeChoice)}>{Icon.close}</button></div>"""
+                html $"""<div class="{Style.sideRow}" data-github-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconBareDanger}" aria-label="Disconnect GitHub" data-github-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.GitHubDisconnect scopeChoice)}>{Icon.close}</button></div>"""
             | None -> html $""""""
         let controls =
             match github.Flow with
@@ -891,9 +891,9 @@ module View =
                       <span class="{Style.cls [ Style.avatarSm; Style.humanAvatar (PeerId.value entry.Author) ]}"></span>
                       <div class="{Style.queueInput}" data-rich-body="{BodyKey.queued id}" data-rich-readonly="false" data-queue-input="{QueueId.value id}"></div>
                       <div class="{Style.queueTools}">
-                        <button type="button" class="{Style.btnIcon}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
-                        <button type="button" class="{Style.btnIcon}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
-                        <button type="button" class="{Style.btnIconDanger}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>{Icon.close}</button>
+                        <button type="button" class="{Style.btnIconBare}" aria-label="Move up" data-queue-up="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveUp synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                        <button type="button" class="{Style.btnIconBare}" aria-label="Move down" data-queue-down="{QueueId.value id}" @click={Ev(fun _ -> match QueueOrder.moveDown synced.Queue id with Some o -> dispatch (ReorderQueuedMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                        <button type="button" class="{Style.btnIconBareDanger}" aria-label="Delete" data-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeleteQueuedMsg id))}>{Icon.close}</button>
                       </div>
                     </article>""")
         let band = if List.isEmpty entries then Style.queueEmpty else Style.queue
@@ -1070,11 +1070,9 @@ module View =
                 </article>"""
         let messageItem (item: ConversationItem) =
             let isAgent = (item.Author = ActorRef.Agent)
-            let whoClass = if isAgent then Style.whoAgent else Style.who
-            // Why this turn exists, when nobody asked for it (Plan 20, stage 2). Beside the
-            // author rather than in the body: it is attribution, and attribution belongs on
-            // the line that says who — the body is what the agent said, and a sentence the
-            // agent did not say does not go in it.
+            // Why this turn exists, when nobody asked for it (Plan 20, stage 2). On the meta
+            // line rather than in the body: it is attribution, and the body is what the agent
+            // said — a sentence the agent did not say does not go in it.
             let wokeInner =
                 match item.Woke with
                 | None -> Lit.nothing
@@ -1100,48 +1098,39 @@ module View =
                 | Streaming -> Style.messageBodyStreaming, html $"""<span class="{Style.caret}"></span>"""
                 | _ -> Style.messageBody, Lit.nothing
             let bodyClass = Style.cls [ bodyClass; Style.messageVoice isAgent ]
+            // The author line is the GROUP's to say (see `group` below); a message's own meta
+            // line exists only while it has news of its own — streaming, failed, woken unasked.
+            let meta =
+                if item.Woke.IsSome || item.Status <> ConversationItemStatus.Complete then
+                    html $"""<div class="{Style.messageMeta}">{wokeInner}{statusInner}</div>"""
+                else Lit.nothing
             html $"""
-                <article class="{Style.message}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
-                  <span class="{Style.cls [ Style.avatar; Style.messageAvatar; authorAvatar item.Author ]}"></span>
-                  <div class="{Style.messageMeta}"><span class="{whoClass}">{authorName model item.Author}</span>{wokeInner}{statusInner}</div>
+                <article class="{Style.messageItem}" data-message-id="{MessageId.value item.MessageId}" data-message-author="{authorLabel item.Author}" data-message-status="{messageStatusLabel item.Status}">
+                  {meta}
                   <div class="{bodyClass}" data-message-body>{RichText.render item.Body}{caret}</div>
                 </article>"""
-        let message (item: ConversationItem) =
-            match item.Kind with
-            | ConversationItemKind.ActNote -> actNoteItem item
-            | ConversationItemKind.Message -> messageItem item
         // One line: who ran what, and how it went. No output — a tail inline would make the
         // chat noisiest exactly when it is busiest, and would put everything a command
         // printed one glance from anyone in the session rather than one tap.
         let blockOf (terminalId: TerminalId) (blockId: BlockId) =
             TerminalProjection.tryFind terminalId model.Terminals
             |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
-        // `who` is false only inside a task card, where the summary above already names the
-        // agent and every line is the agent's BY CONSTRUCTION — grouping is what makes it so.
-        // The same rule the terminal's own scrollback follows: a mark only when the answer is
-        // not the obvious one.
-        let blockChipBy (who: bool) (terminalId: TerminalId) (blockId: BlockId) =
-            match blockOf terminalId blockId with
-            // Both folds read the same page, so a chip without its block is a page boundary,
-            // not a bug: the next page brings it. Rendering nothing beats rendering a stub.
-            | None -> Lit.nothing
-            | Some block ->
-                let author =
-                    if who then
-                        html $"""<span class="{Style.chatChipWho}">{authorName model (Authority.author block.Authority)}</span>"""
-                    else Lit.nothing
-                html $"""
-                    <button type="button" class="{Style.chatChip}"
-                            data-chat-block="{BlockId.value blockId}"
-                            data-chat-block-status="{terminalBlockStatusLabel block.Status}"
-                            data-terminal-id="{TerminalId.value terminalId}"
-                            @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
-                      {author}
-                      <span class="{Style.terminalPrompt}">$</span>
-                      <code class="{Style.chatChipCommand}">{block.Command}</code>
-                      <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
-                    </button>"""
-        let blockChip = blockChipBy true
+        // No author of its own: WHO ran it is the group's author line above it (`group`
+        // below), the same answer a message gets. Takes the block already RESOLVED, because
+        // the grouping fold needs the block's authority before it can place the chip — a
+        // chip whose block a page boundary withheld never becomes an entry at all.
+        let blockChip (terminalId: TerminalId) (block: TerminalBlock) =
+            let blockId = block.BlockId
+            html $"""
+                <button type="button" class="{Style.chatChip}"
+                        data-chat-block="{BlockId.value blockId}"
+                        data-chat-block-status="{terminalBlockStatusLabel block.Status}"
+                        data-terminal-id="{TerminalId.value terminalId}"
+                        @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
+                  <span class="{Style.terminalPrompt}">$</span>
+                  <code class="{Style.chatChipCommand}">{block.Command}</code>
+                  <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
+                </button>"""
         let stretchItem (stretch: TerminalStretch) =
             let length = durationText (TerminalStretch.duration stretch)
             html $"""
@@ -1150,7 +1139,6 @@ module View =
                         data-chat-stretch-end="{stretchEndLabel stretch.End}"
                         data-terminal-id="{TerminalId.value stretch.TerminalId}"
                         @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (StretchTab stretch)); actions.FocusPane ())}>
-                  <span class="{Style.chatChipWho}">{authorName model stretch.Holder}</span>
                   <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
                   <span class="shrink-0">{stretchEnding model stretch.End}</span>
                 </button>"""
@@ -1188,7 +1176,6 @@ module View =
             html $"""
                 <details class="{Style.chatToolRun}" data-chat-tool-run="{AgentTurnId.value turn}">
                   <summary class="{Style.chatToolSummary}">
-                    <span class="{Style.chatChipWho}">{Dom.Text.agent}</span>
                     <span class="{Style.chatChipText}">used {summary}</span>
                   </summary>
                   {uses |> List.map toolCall}
@@ -1220,29 +1207,42 @@ module View =
             html $"""
                 <details class="{Style.chatTaskCard}" data-chat-task-card="{AgentTurnId.value turn}">
                   <summary class="{Style.chatTaskSummary}">
-                    <span class="{Style.chatChipWho}">{Dom.Text.agent}</span>
                     <span class="{Style.chatChipText}">ran {commands}</span>
                     {counts}
                   </summary>
-                  {lines |> List.map (fun ((terminalId, block), _) -> blockChipBy false terminalId block.BlockId)}
+                  {lines |> List.map (fun ((terminalId, block), _) -> blockChip terminalId block)}
                 </details>"""
         let rows = TimelineProjection.rows model.Conversation model.Timeline
-        let items =
+        // Every row resolved to (whose act it is, its rendering) BEFORE grouping, so a row
+        // whose backing state a page boundary withheld contributes no entry — never an empty
+        // element, and never an author line standing over nothing. An act note's actor is
+        // `None`: its sentence carries its own name, so it neither takes an author line nor
+        // joins a run under one.
+        let entries : (ActorRef option * TemplateResult) list =
             rows
-            |> List.map (function
-                | RowItem (TimelineMessage item) -> message item
-                | RowItem (TimelineBlock (_, terminalId, blockId)) -> blockChip terminalId blockId
-                | RowItem (TimelineStretch stretch) -> stretchItem stretch
+            |> List.choose (function
+                | RowItem (TimelineMessage item) ->
+                    match item.Kind with
+                    | ConversationItemKind.ActNote -> Some (None, actNoteItem item)
+                    | ConversationItemKind.Message -> Some (Some item.Author, messageItem item)
+                | RowItem (TimelineBlock (_, terminalId, blockId)) ->
+                    // Both folds read the same page, so a chip without its block is a page
+                    // boundary, not a bug: the next page brings it.
+                    blockOf terminalId blockId
+                    |> Option.map (fun block ->
+                        Some (Authority.author block.Authority), blockChip terminalId block)
+                | RowItem (TimelineStretch stretch) -> Some (Some stretch.Holder, stretchItem stretch)
                 // `rows` never puts a tool use in a bare row, and never a run of anything
                 // else — but both are `TimelineItem`s, so the types cannot say so.
-                | RowItem (TimelineToolUse _) -> Lit.nothing
+                | RowItem (TimelineToolUse _) -> None
                 | RowToolRun (turn, calls) ->
                     let uses =
                         calls
                         |> List.choose (function
                             | TimelineToolUse (_, id) -> TimelineProjection.toolUse id model.Timeline
                             | _ -> None)
-                    if List.isEmpty uses then Lit.nothing else toolRun turn uses
+                    if List.isEmpty uses then None
+                    else Some (Some ActorRef.Agent, toolRun turn uses)
                 | RowTaskCard (turn, items) ->
                     let blocks =
                         items
@@ -1254,9 +1254,37 @@ module View =
                     // can be missing: the next page brings it. Below two it is no longer a
                     // burst, so it draws as the chips it is — never as a card of one.
                     match blocks with
-                    | [] -> Lit.nothing
-                    | [ (terminalId, block) ] -> blockChip terminalId block.BlockId
-                    | many -> taskCard turn many)
+                    | [] -> None
+                    | [ (terminalId, block) ] ->
+                        Some (Some (Authority.author block.Authority), blockChip terminalId block)
+                    | many -> Some (Some ActorRef.Agent, taskCard turn many))
+        // Consecutive acts by ONE actor fold under one author line — the avatar and name a
+        // message used to repeat per turn, said once where the speaker changes. The line is
+        // sticky (`Style.messageGroupHead`), so a run longer than the screen keeps saying
+        // whose it is; and it is what makes a lone tool run or command wear the same
+        // attribution a message does, instead of a private caps label of its own.
+        let group (actor: ActorRef) (members: TemplateResult list) =
+            let whoClass = if actor = ActorRef.Agent then Style.whoAgent else Style.who
+            html $"""
+                <section class="{Style.messageGroup}" data-message-author="{authorLabel actor}">
+                  <header class="{Style.messageGroupHead}">
+                    <span class="{Style.cls [ Style.avatar; authorAvatar actor ]}"></span>
+                    <span class="{whoClass}">{authorName model actor}</span>
+                  </header>
+                  {members}
+                </section>"""
+        let items =
+            let flush acc = function
+                | None -> acc
+                | Some (actor, members) -> group actor (List.rev members) :: acc
+            let step (acc, current) (actor, rendered) =
+                match actor, current with
+                | Some actor, Some (actor', members) when actor = actor' ->
+                    acc, Some (actor', rendered :: members)
+                | Some actor, current -> flush acc current, Some (actor, [ rendered ])
+                | None, current -> rendered :: flush acc current, None
+            let acc, current = entries |> List.fold step ([], None)
+            List.rev (flush acc current)
         // A session with nothing in it yet opens on an empty column, and an empty column says
         // nothing about where the conversation starts or that the near-black composer below it
         // is where you type. So the chat carries its OWN idle symbol — a caret standing where
@@ -1515,9 +1543,9 @@ module View =
             | None -> Lit.nothing
             | Some _ ->
                 html $"""
-                    <button type="button" class="{Style.btnIcon}" aria-label="Move {what} up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.up}</button>
-                    <button type="button" class="{Style.btnIcon}" aria-label="Move {what} down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.down}</button>
-                    <button type="button" class="{Style.btnIconDanger}" aria-label="Delete {what}" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>"""
+                    <button type="button" class="{Style.btnIconBare}" aria-label="Move {what} up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                    <button type="button" class="{Style.btnIconBare}" aria-label="Move {what} down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                    <button type="button" class="{Style.btnIconBareDanger}" aria-label="Delete {what}" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>"""
         html $"""
             <article class="{if awaiting then Style.terminalQueuedAwaiting else Style.terminalQueuedReady}"
                      data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">
@@ -1971,7 +1999,7 @@ module View =
                 if not affords.CanRewind then Lit.nothing
                 else
                     html $"""
-                        <button type="button" class="{Style.btnIcon}" data-terminal-list-rewind="{id}"
+                        <button type="button" class="{Style.btnIconBare}" data-terminal-list-rewind="{id}"
                                 aria-label="Rewind {view.Title}"
                                 @click={Ev(fun _ ->
                                               dispatch (RewindTerminalMsg view.TerminalId)
@@ -1981,14 +2009,14 @@ module View =
                 if not affords.CanReattach then Lit.nothing
                 else
                     html $"""
-                        <button type="button" class="{Style.btnIcon}" data-terminal-reattach="{id}"
+                        <button type="button" class="{Style.btnIconBare}" data-terminal-reattach="{id}"
                                 aria-label="Attach {view.Title} again"
                                 @click={Ev(fun _ -> actions.ReattachTerminal view.TerminalId)}>{Icon.attach}</button>"""
             let kill =
                 if not affords.CanKill then Lit.nothing
                 else
                     html $"""
-                        <button type="button" class="{Style.btnIconDanger}" data-terminal-close="{id}"
+                        <button type="button" class="{Style.btnIconBareDanger}" data-terminal-close="{id}"
                                 aria-label="Kill {view.Title}"
                                 @click={Ev(fun _ -> actions.CloseTerminal view.TerminalId)}>{Icon.stop}</button>"""
             let nameClass = if view.IsOpen then Style.terminalListName else Style.terminalListNameClosed
