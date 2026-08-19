@@ -415,22 +415,12 @@ and RepoAdded =
       /// Who brought it in — the panel's human or the agent. Carried on the payload
       /// because the projection reads events, not envelopes, and "who added this repo"
       /// is the fact the shared-trust disclosure hangs off.
-      Actor : ActorRef
-      /// Who approved it, when the subject's gate required an approval (Plan 15, stage 3).
-      /// `None` is the ordinary case and means nobody had to — exactly as it does on
-      /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
-      /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option }
+      Actor : ActorRef }
 
 and RepoRemoved =
     { MessageId : MessageId
       Repo : RepoRef
-      Actor : ActorRef
-      /// Who approved it, when the subject's gate required an approval (Plan 15, stage 3).
-      /// `None` is the ordinary case and means nobody had to — exactly as it does on
-      /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
-      /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option }
+      Actor : ActorRef }
 
 and RepoBranchSwitched =
     { MessageId : MessageId
@@ -439,12 +429,7 @@ and RepoBranchSwitched =
       /// True when the switch created the branch (`-b`), false when it checked out an
       /// existing one — one event, because it is one act at the panel and one verb.
       Created : bool
-      Actor : ActorRef
-      /// Who approved it, when the subject's gate required an approval (Plan 15, stage 3).
-      /// `None` is the ordinary case and means nobody had to — exactly as it does on
-      /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
-      /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option }
+      Actor : ActorRef }
 
 and WorkSandboxStarted =
     { MessageId : MessageId
@@ -462,31 +447,17 @@ and WorkSandboxStarted =
       /// turn human's (Plan 08 — no borrowing, and the agent has no scope of its own).
       /// `None` when nothing was forwarded, because then nobody's were.
       CredentialOwner : ActorRef option
-      Actor : ActorRef
-      /// Who approved it, when the subject's gate required an approval (Plan 15, stage 3).
-      /// `None` is the ordinary case and means nobody had to — exactly as it does on
-      /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
-      /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option }
+      Actor : ActorRef }
 
 and WorkSandboxStopped =
     { MessageId : MessageId
       Sandbox : SandboxName
-      Actor : ActorRef
-      /// Who approved it, when the subject's gate required an approval (Plan 15, stage 3).
-      /// `None` is the ordinary case and means nobody had to — exactly as it does on
-      /// `TerminalBlockStarted`, which is the same field for the same reason: the approver
-      /// belongs on the thing approved, not on an event beside it.
-      ApprovedBy : ActorRef option }
+      Actor : ActorRef }
 
-/// A command a human refused at its gate (Plan 15, stage 3). The mirror of
-/// `TerminalCommandRejected`, and it exists for that event's reason: a refusal that simply
-/// vanishes is indistinguishable from a bug — to the person who pressed the button and to
-/// the model, which will otherwise try the same thing another way.
-///
-/// There is no `CommandApproved` beside it. An approval rides the event the command itself
-/// appends (`ApprovedBy`), where it stays attached to the act it released; a separate event
-/// would spend two records on one act and detach the approver from what they approved.
+/// A command refused at its gate (Plan 15, stage 3; Plan 23: the gate is the classifier).
+/// The mirror of `TerminalCommandRejected`, and it exists for that event's reason: a refusal
+/// that simply vanishes is indistinguishable from a bug — to anyone reading the record and
+/// to the model, which will otherwise try the same thing another way.
 and CommandRefused =
     { MessageId : MessageId
       /// The pending act's id — the handle the agent was given, so the refusal it reads

@@ -344,7 +344,6 @@ type TerminalBlockDigest =
       BlockId : BlockId
       /// Who wrote the command — the agent's own, or someone else's it should know ran.
       Author : ActorRef
-      ApprovedBy : ActorRef option
       Command : string
       Status : TerminalBlockStatus
       /// The tail of what the block printed, capped. All of it stays in the transcript;
@@ -401,7 +400,6 @@ module TerminalDigest =
                       Title = terminal.Title
                       BlockId = block.BlockId
                       Author = Authority.author block.Authority
-                      ApprovedBy = Authority.approver block.Authority
                       Command = block.Command
                       Status = block.Status
                       OutputTail = (if elided > 0 then output.Substring elided else output)

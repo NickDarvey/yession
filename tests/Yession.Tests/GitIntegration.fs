@@ -175,7 +175,7 @@ let private freshLog () =
     InMemoryEventLog.create (SessionId.create "git-suite" |> expect) (fun () -> DateTimeOffset.UtcNow)
 
 let private ada = PeerId.create "ada" |> expect
-let private caller : Repos.RepoCaller = { Actor = ActorRef.Agent; Credential = PeerRef ada; ApprovedBy = None }
+let private caller : Repos.RepoCaller = { Actor = ActorRef.Agent; Credential = PeerRef ada }
 
 let private eventsOf (log: EventLog<SessionEvent>) : Async<SessionEvent list> =
     async {
@@ -374,7 +374,7 @@ let private srtTests =
             let service = serviceIn root log
             let repo = RepoRef.create "octo/hello" |> expect
             let! _ = service.AddRepo caller repo
-            let human : Repos.RepoCaller = { Actor = PeerRef ada; Credential = PeerRef ada; ApprovedBy = None }
+            let human : Repos.RepoCaller = { Actor = PeerRef ada; Credential = PeerRef ada }
             let! removed = service.RemoveRepo human repo
             expect removed
             Expect.isFalse (exists nodeFs (sprintf "%s/repos/octo/hello" root)) "checkout gone"

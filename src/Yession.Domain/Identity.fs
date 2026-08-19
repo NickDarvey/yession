@@ -271,28 +271,19 @@ module ActorRef =
 type Authority =
     private
         { AuthAuthor : ActorRef
-          AuthOnBehalfOf : ActorRef option
-          AuthApprovedBy : ActorRef option }
+          AuthOnBehalfOf : ActorRef option }
 
 module Authority =
 
     /// A party acting for themselves. There is no authority to borrow, so there is none to
     /// state — which is why a person's act cannot accidentally carry somebody else's.
     let ofAuthor (actor: ActorRef) : Authority =
-        { AuthAuthor = actor; AuthOnBehalfOf = None; AuthApprovedBy = None }
+        { AuthAuthor = actor; AuthOnBehalfOf = None }
 
     /// The agent, acting on a turn human's authority (Plan 08). The rule that was missing from
     /// one call site, as the ONLY way to build an agent-authored act.
     let agentFor (turnActor: ActorRef) : Authority =
-        { AuthAuthor = ActorRef.Agent; AuthOnBehalfOf = Some turnActor; AuthApprovedBy = None }
-
-    /// Released by a peer, when the subject's mode demanded one. Takes the option every call
-    /// site actually holds — the approval is a register on a queue entry, and `None` there
-    /// means nobody had to, which is identity here rather than a decision to re-spell.
-    let approvedBy (peer: PeerId option) (authority: Authority) : Authority =
-        match peer with
-        | Some p -> { authority with AuthApprovedBy = Some (PeerRef p) }
-        | None -> authority
+        { AuthAuthor = ActorRef.Agent; AuthOnBehalfOf = Some turnActor }
 
     /// Recover what somebody else already wrote — a doc entry, a stored event. NOT an
     /// authoring path: it can express states the constructors above refuse, because it is
@@ -303,14 +294,13 @@ module Authority =
     /// `effective` answers safely — the act runs on NOTHING rather than on somebody else's
     /// credential — and refusing to represent it here would turn a corrupt field into a
     /// missing act.
-    let rehydrate (author: ActorRef) (onBehalfOf: ActorRef option) (approvedBy: ActorRef option) : Authority =
-        { AuthAuthor = author; AuthOnBehalfOf = onBehalfOf; AuthApprovedBy = approvedBy }
+    let rehydrate (author: ActorRef) (onBehalfOf: ActorRef option) : Authority =
+        { AuthAuthor = author; AuthOnBehalfOf = onBehalfOf }
 
     let author (authority: Authority) : ActorRef = authority.AuthAuthor
     /// Whose authority this runs on, when that is not the author's own. `None` on a person's
     /// act means there is nothing borrowed; `None` on the agent's means the owner was lost.
     let onBehalfOf (authority: Authority) : ActorRef option = authority.AuthOnBehalfOf
-    let approver (authority: Authority) : ActorRef option = authority.AuthApprovedBy
 
     /// Whose credentials this resolves to — the borrowed authority when there is one, the
     /// author otherwise. The question every dispatch actually asks, answered once instead of
