@@ -113,7 +113,7 @@ module Dom =
         /// The model picker (settings): the section, and the control itself. The control's
         /// VALUE is the session's current choice — a model id, or `default` where the
         /// provider is left to choose — so a test reads the state off the same attribute it
-        /// clicks, exactly as `terminalMode` does for a gate.
+        /// clicks.
         let modelPanel = "data-model-panel"
         let modelSelect = "data-model-select"
         let agentPresence = "data-agent-presence"
@@ -135,7 +135,6 @@ module Dom =
         let terminalNew = "data-terminal-new"
         let terminalClose = "data-terminal-close"
         let terminalId = "data-terminal-id"
-        let terminalMode = "data-terminal-mode"
         /// The scrolling block history — the surface that stays pinned to its newest line.
         let terminalScrollback = "data-terminal-scrollback"
         let terminalBlock = "data-terminal-block"
@@ -150,9 +149,6 @@ module Dom =
         let terminalDraftEditor = "data-terminal-draft-editor"
         let terminalQueued = "data-terminal-queued"
         let terminalQueuedStatus = "data-terminal-queued-status"
-        let terminalApprove = "data-terminal-approve"
-        let terminalUnapprove = "data-terminal-unapprove"
-        let terminalReject = "data-terminal-reject"
         let terminalQueueDelete = "data-terminal-queue-delete"
         /// The lease bar shown instead of the composer in live mode (Plan 13, stage 2e); its
         /// value is the holder's label, so a test can assert WHO without scraping prose.
@@ -371,20 +367,17 @@ module Dom =
         let stretchStolen = "stolen"
         let stretchGone = "holder-gone"
         let stretchIdle = "idle"
-        /// A queued command whose terminal's mode demands an approval it has not got.
         /// What the pin mark is called, for anything that cannot see a blue glyph.
         let pinned = "pinned"
         /// What a second activation of the tab you are on will do. A gesture has no control
         /// of its own to be labelled, so it says so from the tab it acts on.
         let pinHint = "Select again to keep this tab"
         let unpinHint = "Select again to release this tab"
-        let queuedAwaitingApproval = "awaiting-approval"
         /// A queued command that will run as soon as the terminal is free.
         let queuedReady = "ready"
         /// A queued command held because a peer is typing in its terminal (Plan 13, stage
-        /// 2e). Distinct from `queuedAwaitingApproval` on purpose: one resolves when a person
-        /// makes a decision, the other when a person finishes a task, and a queue that said
-        /// only *pending* would leave both looking like a stall.
+        /// 2e) — it resolves when the person finishes their task, and a queue that said
+        /// only *pending* would leave that looking like a stall.
         let queuedAwaitingTerminal = "awaiting-terminal"
         /// A queued command held because its terminal's shell stopped marking (Plan 13, stage
         /// 2f). Apart from `queuedAwaitingTerminal` because it resolves differently: one ends

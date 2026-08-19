@@ -567,24 +567,10 @@ type ClientMsg =
     | SendTerminalDraftMsg of TerminalId * PeerId
     /// Drop a composer slot without sending it.
     | DiscardTerminalDraftMsg of TerminalId * PeerId
-    /// Approve a queued command, by the peer approving it. The drain runs it on the next
-    /// pass; until then it is still editable, which is the point.
-    | ApprovePendingMsg of QueueId * PeerId
-    /// Withdraw an approval — the mirror of granting one, so a mis-click is undoable for
-    /// as long as the command has not been consumed.
-    | UnapprovePendingMsg of QueueId
-    /// Refuse a queued command, by the peer refusing it. Not a deletion: the drain observes
-    /// the refusal, records who said no and why, and only then removes the entry — so the
-    /// log that captures every yes captures the noes too.
-    | RejectPendingMsg of QueueId * PeerId * reason: string option
     /// Delete a queued command. Until consumed, deletion wins.
     | DeletePendingMsg of QueueId
     /// Reorder a queued command within its terminal: one fractional-index register write.
     | ReorderPendingMsg of QueueId * order: float
-    /// Set a terminal's approval mode.
-    /// Set a SUBJECT's approval mode (Plan 15, stage 3c) — a terminal's, or a command's.
-    /// One message, because it is one register.
-    | SetGateMsg of GateSubject * ApprovalMode
 
 module ClientModel =
 
@@ -1054,21 +1040,9 @@ module ClientModel =
         |> List.map (fun ((_, author), _) -> author)
         |> List.sortBy PeerId.value
 
-    /// Whether a pending act is waiting on an approval it has not got — the one question
-    /// the card asks, answered by the same function the drain and the command gate ask
-    /// (`ApprovalMode.requiresApproval`), so a badge can never disagree with what
-    /// the Session Process will actually do. Keyed by SUBJECT, so it answers for a command
-    /// act exactly as it does for a terminal's (Plan 15, stage 3).
-    let awaitsApproval (entry: PendingAct) (model: ClientModel) : bool =
-        ApprovalMode.requiresApproval
-            (SyncedSessionState.gateOf entry.Subject model.Synced)
-            (Authority.author entry.Authority)
-        && Option.isNone entry.ApprovedBy
-
     /// Whether a queued command is held because a peer is typing in its terminal (Plan 13,
-    /// stage 2e) rather than because it needs an approval. Reported apart because they resolve
-    /// differently — one when a person makes a decision, the other when a person finishes a
-    /// task — and a queue that said only *pending* would leave both looking like a stall.
+    /// stage 2e). Named because it resolves when a person finishes a task, and a queue that
+    /// said only *pending* would leave that looking like a stall.
     let awaitsTerminal (entry: PendingAct) (model: ClientModel) : bool =
         PendingAct.terminal entry
         |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals)
@@ -1516,9 +1490,6 @@ module ClientModel =
                       // shell line in a sandbox, not a call against somebody's credential —
                       // and a person's act cannot accidentally carry one.
                       Authority = Authority.ofAuthor (PeerRef author)
-                      ApprovedBy = None
-                      RejectedBy = None
-                      RejectedReason = None
                       // A person's composer never waits on a command, so there is nothing
                       // for a background flag to spare them (Plan 20, stage 2).
                       Background = false }
@@ -1532,35 +1503,6 @@ module ClientModel =
             model
             |> withSynced
                 { model.Synced with TerminalDrafts = Map.remove (terminal, author) model.Synced.TerminalDrafts }
-        | ApprovePendingMsg (queueId, approver) ->
-            match Map.tryFind queueId model.Synced.Pending with
-            | Some entry ->
-                model
-                |> withSynced
-                    { model.Synced with
-                        Pending =
-                            Map.add queueId { entry with ApprovedBy = Some approver } model.Synced.Pending }
-            | None -> model
-        | UnapprovePendingMsg queueId ->
-            match Map.tryFind queueId model.Synced.Pending with
-            | Some entry ->
-                model
-                |> withSynced
-                    { model.Synced with
-                        Pending = Map.add queueId { entry with ApprovedBy = None } model.Synced.Pending }
-            | None -> model
-        | RejectPendingMsg (queueId, rejector, reason) ->
-            match Map.tryFind queueId model.Synced.Pending with
-            | Some entry ->
-                model
-                |> withSynced
-                    { model.Synced with
-                        Pending =
-                            Map.add
-                                queueId
-                                { entry with RejectedBy = Some rejector; RejectedReason = reason }
-                                model.Synced.Pending }
-            | None -> model
         | DeletePendingMsg queueId ->
             model |> withSynced { model.Synced with Pending = Map.remove queueId model.Synced.Pending }
         | ReorderPendingMsg (queueId, order) ->
@@ -1571,7 +1513,5 @@ module ClientModel =
                     { model.Synced with
                         Pending = Map.add queueId { entry with Order = order } model.Synced.Pending }
             | None -> model
-        | SetGateMsg (subject, mode) ->
-            model |> withSynced { model.Synced with Gates = Map.add subject mode model.Synced.Gates }
         | ModelCatalogueMsg catalogue -> { model with Models = catalogue }
         | SetModelMsg choice -> model |> withSynced { model.Synced with Model = choice }

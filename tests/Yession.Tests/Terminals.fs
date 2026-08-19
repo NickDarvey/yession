@@ -51,94 +51,20 @@ let private eventsOf (log: EventLog<SessionEvent>) =
     }
 
 // --- Writing the doc as a remote peer would -------------------------------------------------
-// Approving a command is a CLIENT-side CRDT write (`ApprovePendingMsg` through the
-// Ylmish binding), so a test driving the Session Process's own doc has to make that write
-// the way a peer's merged update would arrive. These are the only Yjs calls in this file,
-// and they exist so no production API has to grow a setter that only a test would call.
+// A test driving the Session Process's own doc makes writes the way a peer's merged update
+// would arrive. These are the only Yjs calls in this file, and they exist so no production
+// API has to grow a setter that only a test would call.
 
 [<Fable.Core.Emit("(() => { const e = $0.getMap('pending').get($1); if (e) e.set($2, $3) })()")>]
 let private setQueuedField (doc: Y.Doc) (id: string) (field: string) (value: obj) : unit = Fable.Core.Util.jsNative
-
-[<Fable.Core.Emit("(() => { const m = $0.getMap('gates'); const e = new $2.Map(); m.set($1, e); e.set('mode', $3) })()")>]
-let private setModeRaw (doc: Y.Doc) (id: string) (yjs: obj) (mode: string) : unit = Fable.Core.Util.jsNative
-
-[<Fable.Core.Import("*", "yjs")>]
-let private yjsModule : obj = Fable.Core.Util.jsNative
-
-// A doc as it was written before Plan 15 stage 3: the old roots, the old field names. There
-// is no production writer for this shape any more — that is the point — so the only way to
-// test the migration is to write it the way the build that is being migrated FROM did.
-
-[<Fable.Core.Emit("(() => { const q = $0.getMap('terminalQueue'); const e = new $1.Map(); q.set($2, e); e.set('terminal', $3); e.set('author', $4); e.set('order', $5); e.set('approvedBy', '') })()")>]
-let private legacyEnqueueInDoc (doc: Y.Doc) (yjs: obj) (id: string) (terminal: string) (author: string) (order: float) : unit = Fable.Core.Util.jsNative
-
-[<Fable.Core.Emit("(() => { const m = $0.getMap('terminalModes'); const e = new $1.Map(); m.set($2, e); e.set('mode', $3) })()")>]
-let private legacyModeInDoc (doc: Y.Doc) (yjs: obj) (terminal: string) (mode: string) : unit = Fable.Core.Util.jsNative
-
-/// A peer's approval, landing in this doc.
-let private approveInDoc (doc: Y.Doc) (id: QueueId) (approver: PeerId) : unit =
-    setQueuedField doc (QueueId.value id) "approvedBy" (box (PeerId.value approver))
 
 /// A queue entry field, set to whatever a peer we do not control might have written.
 let private setQueuedFieldInDoc (doc: Y.Doc) (id: QueueId) (field: string) (value: string) : unit =
     setQueuedField doc (QueueId.value id) field (box value)
 
-/// A terminal's mode register, set to a raw string.
-let private setModeInDoc (doc: Y.Doc) (terminal: TerminalId) (mode: string) : unit =
-    setModeRaw doc (GateSubject.describe (ForTerminal terminal)) yjsModule mode
 
-// --- The approval policy -----------------------------------------------------------------
-
-let private approvalTests =
-    testList "Approval policy" [
-        testCase "the default mode gates the agent and nobody else" <| fun () ->
-            Expect.isTrue (ApprovalMode.requiresApproval ApproveAgent ActorRef.Agent) "the agent is gated"
-            Expect.isFalse (ApprovalMode.requiresApproval ApproveAgent (PeerRef ada)) "a peer is not"
-            Expect.isFalse
-                (ApprovalMode.requiresApproval ApproveAgent ActorRef.SessionProcess)
-                "the Process's own commands are not gated — a gate there deadlocks on housekeeping"
-
-        testCase "approve-all gates everyone; auto gates nobody" <| fun () ->
-            for author in [ ActorRef.Agent; PeerRef ada; ActorRef.SessionProcess ] do
-                Expect.isTrue (ApprovalMode.requiresApproval ApproveAll author) "approve-all gates everything"
-                Expect.isFalse (ApprovalMode.requiresApproval AutoRun author) "auto gates nothing"
-
-        testCase "an absent mode register reads as the default, never as no gate" <| fun () ->
-            // The safe direction: a terminal nobody configured must still hold the agent.
-            let mode = SyncedSessionState.modeOf terminalA SyncedSessionState.empty
-            Expect.equal mode ApproveAgent "an unconfigured terminal is approve-agent"
-
-        // --- The subject the mode is keyed by (Plan 15, stage 3) ---------------------------
-
-        testCase "the default is per subject KIND, which is how both sides keep today's behaviour" <| fun () ->
-            Expect.equal
-                (GateSubject.defaultMode (ForTerminal terminalA))
-                ApproveAgent
-                "a terminal is reviewed unless somebody says otherwise"
-            Expect.equal
-                (GateSubject.defaultMode (ForCommand "add_repo"))
-                AutoRun
-                "a command is not reviewed until somebody says so"
-            Expect.equal
-                (SyncedSessionState.gateOf (ForCommand "add_repo") SyncedSessionState.empty)
-                AutoRun
-                "and an unconfigured session reads that default rather than a stored register"
-
-        testCase "a configured gate outranks the default, for either kind" <| fun () ->
-            let state =
-                { SyncedSessionState.empty with
-                    Gates =
-                        Map.ofList [ ForTerminal terminalA, AutoRun; ForCommand "add_repo", ApproveAgent ] }
-            Expect.equal (SyncedSessionState.gateOf (ForTerminal terminalA) state) AutoRun "the terminal was opened out"
-            Expect.equal
-                (SyncedSessionState.gateOf (ForCommand "add_repo") state)
-                ApproveAgent
-                "and the command was gated in"
-            Expect.equal
-                (SyncedSessionState.gateOf (ForCommand "start_work_sandbox") state)
-                AutoRun
-                "a sibling command is untouched — a gate is per subject, never per kind"
-
+let private subjectTests =
+    testList "Gate subjects" [
         testCase "a subject round-trips through its wire form, and a junk one is refused" <| fun () ->
             for subject in [ ForTerminal terminalA; ForCommand "add_repo" ] do
                 Expect.equal
@@ -152,22 +78,13 @@ let private approvalTests =
 
 // --- The drain's decision ------------------------------------------------------------------
 
-let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order: float) (approved: PeerId option) =
+let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order: float) =
     { QueueId = queue id
       Subject = ForTerminal terminal
       Authority = Authority.ofAuthor author
       Order = order
       Payload = CommandLine
-      ApprovedBy = approved
-      RejectedBy = None
-      RejectedReason = None
       Background = false }
-
-/// The same entry, refused. Kept beside `entry` so a test says which of the two verdicts
-/// it is exercising rather than threading a `None` through every call that is not about
-/// rejection.
-let private rejected (e: PendingAct) (by: PeerId) (reason: string option) =
-    { e with RejectedBy = Some by; RejectedReason = reason }
 
 let private queueOf entries =
     entries |> List.map (fun (e: PendingAct) -> e.QueueId, e) |> Map.ofList
@@ -175,25 +92,25 @@ let private queueOf entries =
 let private allOpen (_: TerminalId) = true
 /// No lane cap in play. These cases are about the drain's other holds; the cap has its own.
 let private noLaneCap (_: TerminalId) = false
-let private planWith consumed busy isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed busy Set.empty Set.empty isOpen modeOf (queueOf entries)
+let private planWith consumed busy isOpen entries =
+    TerminalQueueDrain.plan consumed busy Set.empty Set.empty isOpen (queueOf entries)
 
 /// The same plan with a lease in play (Plan 13, stage 2e).
-let private planLeased consumed busy leased isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed busy leased Set.empty isOpen modeOf (queueOf entries)
+let private planLeased consumed busy leased isOpen entries =
+    TerminalQueueDrain.plan consumed busy leased Set.empty isOpen (queueOf entries)
 
 /// ...and with the shell's marks gone (Plan 13, stage 2f).
-let private planLost consumed lost isOpen modeOf entries =
-    TerminalQueueDrain.plan consumed Set.empty Set.empty lost isOpen modeOf (queueOf entries)
+let private planLost consumed lost isOpen entries =
+    TerminalQueueDrain.plan consumed Set.empty Set.empty lost isOpen (queueOf entries)
 
 let private drainTests =
     testList "Terminal drain plan" [
         testCase "one command per terminal, and terminals do not block each other" <| fun () ->
             let plan =
-                planWith Set.empty Set.empty allOpen (fun _ -> AutoRun)
-                    [ entry "a1" terminalA (PeerRef ada) 1.0 None
-                      entry "a2" terminalA (PeerRef ada) 2.0 None
-                      entry "b1" terminalB (PeerRef bob) 1.0 None ]
+                planWith Set.empty Set.empty allOpen
+                    [ entry "a1" terminalA (PeerRef ada) 1.0
+                      entry "a2" terminalA (PeerRef ada) 2.0
+                      entry "b1" terminalB (PeerRef bob) 1.0 ]
             Expect.equal
                 (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId))
                 [ "q-a1"; "q-b1" ]
@@ -201,41 +118,26 @@ let private drainTests =
 
         testCase "a terminal with a block already running is skipped" <| fun () ->
             let plan =
-                planWith Set.empty (Set.singleton (TerminalId.value terminalA)) allOpen (fun _ -> AutoRun)
-                    [ entry "a1" terminalA (PeerRef ada) 1.0 None
-                      entry "b1" terminalB (PeerRef bob) 1.0 None ]
+                planWith Set.empty (Set.singleton (TerminalId.value terminalA)) allOpen
+                    [ entry "a1" terminalA (PeerRef ada) 1.0
+                      entry "b1" terminalB (PeerRef bob) 1.0 ]
             Expect.equal
                 (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId))
                 [ "q-b1" ]
                 "a busy terminal runs nothing more; its sibling is unaffected"
 
-        testCase "an unapproved head holds the queue rather than being skipped over" <| fun () ->
-            // The property that matters: approval must not silently REORDER execution. In a
-            // shell, running the approved second command first is a different program.
-            let plan =
-                planWith Set.empty Set.empty allOpen (fun _ -> ApproveAgent)
-                    [ entry "a1" terminalA ActorRef.Agent 1.0 None
-                      entry "a2" terminalA (PeerRef ada) 2.0 None ]
-            Expect.isEmpty plan.Ready "the terminal waits at its unapproved head"
-
-        testCase "an approved head runs" <| fun () ->
-            let plan =
-                planWith Set.empty Set.empty allOpen (fun _ -> ApproveAgent)
-                    [ entry "a1" terminalA ActorRef.Agent 1.0 (Some ada) ]
-            Expect.equal (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId)) [ "q-a1" ] "the approval releases it"
-
         testCase "a closed terminal runs nothing" <| fun () ->
             let plan =
-                planWith Set.empty Set.empty (fun _ -> false) (fun _ -> AutoRun)
-                    [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
+                planWith Set.empty Set.empty (fun _ -> false)
+                    [ entry "a1" terminalA (PeerRef ada) 1.0 ]
             Expect.isEmpty plan.Ready "nothing runs in a terminal that is not open"
 
         testCase "an entry already named by a started block is repaired away, never re-run" <| fun () ->
             // The crash window: the block event was appended and the doc removal was not.
             let plan =
-                planWith (Set.singleton "q-a1") Set.empty allOpen (fun _ -> AutoRun)
-                    [ entry "a1" terminalA (PeerRef ada) 1.0 None
-                      entry "a2" terminalA (PeerRef ada) 2.0 None ]
+                planWith (Set.singleton "q-a1") Set.empty allOpen
+                    [ entry "a1" terminalA (PeerRef ada) 1.0
+                      entry "a2" terminalA (PeerRef ada) 2.0 ]
             Expect.equal (plan.Removals |> List.map QueueId.value) [ "q-a1" ] "the consumed entry is removed"
             Expect.equal
                 (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId))
@@ -524,78 +426,21 @@ let private rejectedEvent (id: TerminalId) (q: string) (b: string) (by: PeerId) 
 
 let private rejectionTests =
     testList "Terminal rejection" [
-        testCase "a refused entry never runs, under ANY mode — AutoRun included" <| fun () ->
-            // The whole point of the gate order: a refusal outranks a policy that would
-            // otherwise have run the command without asking anyone.
-            for mode in [ AutoRun; ApproveAgent; ApproveAll ] do
-                let plan =
-                    planWith Set.empty Set.empty allOpen (fun _ -> mode)
-                        [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 (Some ada)) bob (Some "no") ]
-                Expect.isEmpty plan.Ready (sprintf "nothing runs under %A" mode)
-                Expect.equal
-                    (plan.Rejections |> List.map (fun (_, e) -> QueueId.value e.QueueId))
-                    [ "q-a1" ]
-                    (sprintf "and the refusal is planned under %A" mode)
-
-        testCase "an approval already granted does not override a later refusal" <| fun () ->
-            let plan =
-                planWith Set.empty Set.empty allOpen (fun _ -> ApproveAll)
-                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 (Some ada)) bob None ]
-            Expect.isEmpty plan.Ready "approved and then refused is refused"
-
-        testCase "a refused head holds its queue rather than being skipped over" <| fun () ->
-            // Same property the approval gate has: a verdict must not silently REORDER
-            // execution. The entry behind it waits until the refusal is drained away.
-            let plan =
-                planWith Set.empty Set.empty allOpen (fun _ -> AutoRun)
-                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None
-                      entry "a2" terminalA (PeerRef ada) 2.0 None ]
-            Expect.isEmpty plan.Ready "the terminal waits at its refused head"
-
-        testCase "a refusal is planned for a terminal that is busy or closed" <| fun () ->
-            // Refusing touches no process, so it does not queue behind one. Someone can
-            // clear a bad queue while a colleague's command is still running.
-            let plan =
-                planWith Set.empty (Set.singleton (TerminalId.value terminalA)) (fun _ -> false) (fun _ -> AutoRun)
-                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None ]
-            Expect.equal (List.length plan.Rejections) 1 "the refusal is recorded regardless"
-            Expect.isEmpty plan.Ready "and nothing runs"
+        // The verdict itself comes from the classifier now (Plan 23), inside the run —
+        // what these pin is the RECORD: the event anchors exactly-once, folds legibly,
+        // and survives its wire form, whoever the rejecter was.
 
         testCase "a rejected QueueId folds into the consumed set, so it can never run after" <| fun () ->
             let consumed = rejectedEvent terminalA "a1" "1" bob None |> TerminalQueueDrain.consumedOf
             Expect.equal consumed (Some "q-a1") "the rejection is the exactly-once anchor"
             let plan =
-                planWith (Set.singleton "q-a1") Set.empty allOpen (fun _ -> AutoRun)
-                    [ entry "a1" terminalA ActorRef.Agent 1.0 None ]
+                planWith (Set.singleton "q-a1") Set.empty allOpen
+                    [ entry "a1" terminalA ActorRef.Agent 1.0 ]
             Expect.isEmpty plan.Ready "an entry already refused in the log never runs"
-            Expect.isEmpty plan.Rejections "nor is it refused a second time"
             Expect.equal
                 (plan.Removals |> List.map QueueId.value)
                 [ "q-a1" ]
                 "it is simply swept out of the doc"
-
-        testCase "the reject/drain race leaves exactly one outcome, either way round" <| fun () ->
-            // Under AutoRun a human can press reject in the same tick the drain takes the
-            // entry. Whichever event reaches the log first wins; the loser is dropped as
-            // already consumed. Neither side needs a lock.
-            let started =
-                SessionEvent.TerminalBlockStarted
-                    { TerminalId = terminalA
-                      BlockId = block "1"
-                      QueueId = Some (queue "a1")
-                      Authority = Authority.agentFor (PeerRef ada)
-                      Command = "make"
-                      FromSeq = 0
-                      Background = false }
-            let rejection = rejectedEvent terminalA "a1" "2" bob None
-            for winner in [ started; rejection ] do
-                let consumed =
-                    [ winner ] |> List.choose TerminalQueueDrain.consumedOf |> Set.ofList
-                let plan =
-                    planWith consumed Set.empty allOpen (fun _ -> AutoRun)
-                        [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None ]
-                Expect.isEmpty plan.Ready "the loser does not run it"
-                Expect.isEmpty plan.Rejections "and does not record a second verdict"
 
         testCase "the projection shows the refusal in line, with who and why" <| fun () ->
             let proj =
@@ -609,10 +454,6 @@ let private rejectionTests =
             let refusal = view.Blocks |> List.last
             Expect.equal refusal.Status (BlockRejected (PeerRef bob, Some "not on prod")) "named, with the reason"
             Expect.equal (Authority.author refusal.Authority) ActorRef.Agent "and whose command it was"
-            Expect.equal
-                (Authority.approver refusal.Authority)
-                None
-                "nobody approved it — someone did the opposite"
             Expect.equal (refusal.FromSeq, refusal.ToSeq) (0, Some 0) "an empty range, because it produced nothing"
 
         testCase "the rejection fold is idempotent, so overlapping pages are safe" <| fun () ->
@@ -785,37 +626,27 @@ let private integrationTests =
         testCase "a terminal that stopped marking holds its queue" <| fun () ->
             // Draining into an unmarked shell would produce blocks that never close: the
             // Process would not know when the command started or finished. Holding says so.
-            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
+            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 ]
             let lost = Set.singleton (TerminalId.value terminalA)
-            Expect.isEmpty (planLost Set.empty lost allOpen (fun _ -> AutoRun) entries).Ready "nothing runs"
+            Expect.isEmpty (planLost Set.empty lost allOpen entries).Ready "nothing runs"
             Expect.equal
-                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty lost allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty lost allOpen (queueOf entries) terminalA)
                 (Some TerminalQueueDrain.AwaitingIntegration)
                 "and the hold names the repair, not a person"
 
         testCase "re-arming yields the entry Ready, unchanged" <| fun () ->
-            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
+            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 ]
             Expect.equal
-                ((planLost Set.empty Set.empty allOpen (fun _ -> AutoRun) entries).Ready
+                ((planLost Set.empty Set.empty allOpen entries).Ready
                  |> List.map (fun (_, e) -> QueueId.value e.QueueId))
                 [ "q-a1" ]
                 "the command that was held runs once marking is back"
 
-        testCase "a refusal is planned even while the terminal is not marking" <| fun () ->
-            // Refusing touches no pty, so it outranks this exactly as it outranks the lease
-            // and the mode: a bad queue can be cleared on a terminal nobody can run in.
-            let plan =
-                planLost Set.empty (Set.singleton (TerminalId.value terminalA)) allOpen (fun _ -> AutoRun)
-                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None ]
-            Expect.equal (List.length plan.Rejections) 1 "the refusal is recorded"
-            Expect.isEmpty plan.Ready "and still nothing runs"
-
         testCase "the agent is told the terminal is not free, and does not wait on it" <| fun () ->
-            // Only a person re-arming brings marking back, so this is an unbounded wait like
-            // an approval — it returns at once rather than burning a deadline.
+            // Only a person re-arming brings marking back — an unbounded wait, so it
+            // returns at once rather than burning a deadline.
             Expect.equal
                 (TerminalCommandWait.step
-                    false
                     false
                     { TerminalCommandWait.Observation.Block = None
                       TerminalCommandWait.Observation.InQueue = true
@@ -858,7 +689,7 @@ let private idleLeaseTests =
             // they stopped typing whether or not anything was waiting — a worse behaviour than
             // the starvation it prevents. It also dissolves the question a bare timer forces:
             // whether to reclaim from a peer reading a man page in `less` for ten minutes.
-            for hold in [ None; Some TerminalQueueDrain.NotWaiting; Some TerminalQueueDrain.AwaitingApproval ] do
+            for hold in [ None; Some TerminalQueueDrain.NotWaiting ] do
                 Expect.isFalse
                     (TerminalLeaseIdle.shouldReclaim (idle 600.0) false hold)
                     "nothing is waiting on this terminal, so there is nothing to buy"
@@ -947,45 +778,31 @@ let private leaseGateTests =
         testCase "an approved entry in a leased terminal with NO block running is held" <| fun () ->
             // The case `busy` does not cover: someone pressed "take terminal" and is typing at
             // the shell. Nothing is running, the terminal is open, the entry is approved.
-            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
+            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 ]
             let leased = Set.singleton (TerminalId.value terminalA)
-            let plan = planLeased Set.empty Set.empty leased allOpen (fun _ -> AutoRun) entries
+            let plan = planLeased Set.empty Set.empty leased allOpen entries
             Expect.isEmpty plan.Ready "the queue waits for the terminal"
             Expect.equal
-                (TerminalQueueDrain.holdOf Set.empty Set.empty leased Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (TerminalQueueDrain.holdOf Set.empty Set.empty leased Set.empty allOpen (queueOf entries) terminalA)
                 (Some TerminalQueueDrain.AwaitingTerminal)
                 "and the hold names the terminal, not an approval"
 
         testCase "releasing the lease yields the entry Ready, unchanged" <| fun () ->
-            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 None ]
-            let plan = planLeased Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) entries
+            let entries = [ entry "a1" terminalA (PeerRef ada) 1.0 ]
+            let plan = planLeased Set.empty Set.empty Set.empty allOpen entries
             Expect.equal (plan.Ready |> List.map (fun (_, e) -> QueueId.value e.QueueId)) [ "q-a1" ] "it runs on release"
             Expect.equal
-                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty Set.empty allOpen (fun _ -> AutoRun) (queueOf entries) terminalA)
+                (TerminalQueueDrain.holdOf Set.empty Set.empty Set.empty Set.empty allOpen (queueOf entries) terminalA)
                 None
                 "nothing is holding it"
 
-        testCase "the three holds are told apart" <| fun () ->
-            let entries = [ entry "a1" terminalA ActorRef.Agent 1.0 None ]
-            let hold busy leased mode =
-                TerminalQueueDrain.holdOf Set.empty busy leased Set.empty allOpen (fun _ -> mode) (queueOf entries) terminalA
+        testCase "the holds are told apart" <| fun () ->
+            let entries = [ entry "a1" terminalA ActorRef.Agent 1.0 ]
+            let hold busy leased =
+                TerminalQueueDrain.holdOf Set.empty busy leased Set.empty allOpen (queueOf entries) terminalA
             let busyA = Set.singleton (TerminalId.value terminalA)
-            Expect.equal (hold busyA Set.empty AutoRun) (Some TerminalQueueDrain.AwaitingBlock) "a block is running"
-            Expect.equal (hold Set.empty busyA AutoRun) (Some TerminalQueueDrain.AwaitingTerminal) "a peer is typing"
-            Expect.equal
-                (hold Set.empty Set.empty ApproveAgent)
-                (Some TerminalQueueDrain.AwaitingApproval)
-                "the agent needs a yes"
-
-        testCase "a refusal is planned even while a peer holds the terminal" <| fun () ->
-            // Refusing touches no pty, so it outranks the lease exactly as it outranks the
-            // mode: someone can clear a bad queue while a colleague is inside vim.
-            let leased = Set.singleton (TerminalId.value terminalA)
-            let plan =
-                planLeased Set.empty Set.empty leased allOpen (fun _ -> AutoRun)
-                    [ rejected (entry "a1" terminalA ActorRef.Agent 1.0 None) bob None ]
-            Expect.equal (List.length plan.Rejections) 1 "the refusal is recorded"
-            Expect.isEmpty plan.Ready "and still nothing runs"
+            Expect.equal (hold busyA Set.empty) (Some TerminalQueueDrain.AwaitingBlock) "a block is running"
+            Expect.equal (hold Set.empty busyA) (Some TerminalQueueDrain.AwaitingTerminal) "a peer is typing"
     ]
 
 // --- The two waits (Plan 13, stage 3b) ---------------------------------------------------
@@ -1011,46 +828,29 @@ let private observing (status: TerminalBlockStatus) (interactive: bool) : Termin
 
 let private waitTests =
     testList "The command wait" [
-        testCase "an approval gets the GRACE, and yields a handle when it runs out" <| fun () ->
-            // Waiting on a person is unbounded in principle — they may be asleep — so the
-            // grace exists only so that a supervised session still chains.
-            let awaiting = waitingOn (Some TerminalQueueDrain.AwaitingApproval)
+        testCase "a held terminal returns at once rather than burning a deadline" <| fun () ->
+            // A peer with a terminal open is mid-task and will not be done soon.
             Expect.equal
-                (TerminalCommandWait.step false false awaiting)
-                TerminalCommandWait.KeepWaiting
-                "inside the grace it keeps waiting, so an approval in seconds still chains"
-            Expect.equal
-                (TerminalCommandWait.step true false awaiting)
-                (TerminalCommandWait.Return TerminalCommandAwaitingApproval)
-                "past it, the turn is handed back rather than held"
-
-        testCase "a held terminal does NOT get the grace — it returns at once" <| fun () ->
-            // A peer with a terminal open is mid-task and will not be done in five seconds.
-            // Burning the grace on that wait only makes the turn slower.
-            Expect.equal
-                (TerminalCommandWait.step false false (waitingOn (Some TerminalQueueDrain.AwaitingTerminal)))
+                (TerminalCommandWait.step false (waitingOn (Some TerminalQueueDrain.AwaitingTerminal)))
                 (TerminalCommandWait.Return TerminalCommandAwaitingTerminal)
                 "no waiting at all"
 
-        testCase "waiting on a PROCESS gets the process deadline, not the grace" <| fun () ->
+        testCase "waiting on a PROCESS gets the process deadline" <| fun () ->
             // A command running ahead of ours in the same terminal, and our own command once
             // it starts: both are waits on a process, so a quick one still chains.
             for observation in
                 [ waitingOn (Some TerminalQueueDrain.AwaitingBlock)
                   observing BlockRunning false ] do
                 Expect.equal
-                    (TerminalCommandWait.step true false observation)
+                    (TerminalCommandWait.step false observation)
                     TerminalCommandWait.KeepWaiting
-                    "an elapsed approval grace does not end a wait on a process"
+                    "inside the deadline it keeps waiting"
             Expect.equal
-                (TerminalCommandWait.step true true (waitingOn (Some TerminalQueueDrain.AwaitingBlock)))
+                (TerminalCommandWait.step true (waitingOn (Some TerminalQueueDrain.AwaitingBlock)))
                 (TerminalCommandWait.Return TerminalCommandAwaitingTerminal)
                 "the terminal was never free"
             Expect.equal
-                (TerminalCommandWait.step
-                    true
-                    true
-                    (observing BlockRunning false))
+                (TerminalCommandWait.step true (observing BlockRunning false))
                 (TerminalCommandWait.Return TerminalCommandRunning)
                 "and a running block yields — the deadline is a yield, not a cancellation"
 
@@ -1059,28 +859,27 @@ let private waitTests =
             // caller. Burning two minutes and then saying "still running" would spend the
             // deadline telling the only party who can end it to be patient.
             Expect.equal
-                (TerminalCommandWait.step false false (observing BlockRunning true))
+                (TerminalCommandWait.step false (observing BlockRunning true))
                 (TerminalCommandWait.Return TerminalCommandInteractive)
                 "no waiting at all"
 
         testCase "an entry BEHIND another waits for the queue, whatever the head waits for" <| fun () ->
-            // Reporting the head's reason as ours would tell the agent its own command needs
-            // an approval when somebody else's does.
+            // Reporting the head's reason as ours would misattribute somebody else's wait.
             let behind : TerminalCommandWait.Observation =
-                { Block = None; InQueue = true; IsHead = false; Hold = Some TerminalQueueDrain.AwaitingApproval; Interactive = false }
-            Expect.equal (TerminalCommandWait.step true false behind) TerminalCommandWait.KeepWaiting "still queued"
+                { Block = None; InQueue = true; IsHead = false; Hold = Some TerminalQueueDrain.AwaitingBlock; Interactive = false }
+            Expect.equal (TerminalCommandWait.step false behind) TerminalCommandWait.KeepWaiting "still queued"
             Expect.equal
-                (TerminalCommandWait.step true true behind)
+                (TerminalCommandWait.step true behind)
                 (TerminalCommandWait.Return TerminalCommandAwaitingTerminal)
-                "and it names the queue, not an approval it does not need"
+                "and it names the queue"
 
-        testCase "an outcome ends the wait, whichever deadline is still running" <| fun () ->
+        testCase "an outcome ends the wait, deadline or no" <| fun () ->
             for status, expected in
                 [ BlockFinished (CommandSucceeded 0), TerminalCommandRan (CommandSucceeded 0)
                   BlockFinished (CommandFailed 3), TerminalCommandRan (CommandFailed 3)
                   BlockRejected (PeerRef bob, Some "not on prod"), TerminalCommandRefused (PeerRef bob, Some "not on prod") ] do
                 Expect.equal
-                    (TerminalCommandWait.step false false (observing status false))
+                    (TerminalCommandWait.step false (observing status false))
                     (TerminalCommandWait.Return expected)
                     "an answer is returned the moment it exists"
 
@@ -1090,21 +889,20 @@ let private waitTests =
             let withdrawn : TerminalCommandWait.Observation =
                 { Block = None; InQueue = false; IsHead = false; Hold = None; Interactive = false }
             Expect.equal
-                (TerminalCommandWait.step false false withdrawn)
+                (TerminalCommandWait.step false withdrawn)
                 TerminalCommandWait.Gone
                 "the caller is told the request is gone"
 
         testCase "every status the agent can be handed says which state it is in" <| fun () ->
             // The wording is the mechanism, not decoration: told "queued" when it is blocked
-            // on a person, a model concludes after a silent pause that the command failed and
-            // tries something else — which is how a review gate becomes a thing to route
-            // around. Every case must be distinguishable, so none may collapse into another.
+            // on something else, a model concludes after a silent pause that the command
+            // failed and tries something else. Every case must be distinguishable, so none
+            // may collapse into another.
             let statuses =
                 [ TerminalCommandRan (CommandSucceeded 0)
                   TerminalCommandRan (CommandFailed 1)
                   TerminalCommandRunning
                   TerminalCommandInteractive
-                  TerminalCommandAwaitingApproval
                   TerminalCommandAwaitingTerminal
                   TerminalCommandRefused (PeerRef bob, None) ]
             Expect.equal (List.distinct statuses |> List.length) (List.length statuses) "no two are the same value"
@@ -1599,9 +1397,9 @@ let private orderTests =
         testCase "ordering is per terminal" <| fun () ->
             let q =
                 queueOf
-                    [ entry "a1" terminalA (PeerRef ada) 2.0 None
-                      entry "a2" terminalA (PeerRef ada) 1.0 None
-                      entry "b1" terminalB (PeerRef bob) 5.0 None ]
+                    [ entry "a1" terminalA (PeerRef ada) 2.0
+                      entry "a2" terminalA (PeerRef ada) 1.0
+                      entry "b1" terminalB (PeerRef bob) 5.0 ]
             Expect.equal
                 (TerminalQueueOrder.sortedFor terminalA q |> List.map (fun e -> QueueId.value e.QueueId))
                 [ "q-a2"; "q-a1" ]
@@ -1611,9 +1409,9 @@ let private orderTests =
         testCase "moving an entry never leaves its terminal" <| fun () ->
             let q =
                 queueOf
-                    [ entry "a1" terminalA (PeerRef ada) 1.0 None
-                      entry "a2" terminalA (PeerRef ada) 2.0 None
-                      entry "b1" terminalB (PeerRef bob) 1.0 None ]
+                    [ entry "a1" terminalA (PeerRef ada) 1.0
+                      entry "a2" terminalA (PeerRef ada) 2.0
+                      entry "b1" terminalB (PeerRef bob) 1.0 ]
             let moved = TerminalQueueOrder.moveUp q (queue "a2") |> Option.get
             Expect.isTrue (moved < 1.0) "it moves ahead of A's head"
             Expect.equal (TerminalQueueOrder.moveUp q (queue "a1")) None "the head of a terminal cannot move up"
@@ -1729,7 +1527,7 @@ let private mintFrom (ids: string list) =
         if remaining.Count > 1 then remaining.RemoveAt 0
         next
 
-let private makeTerminalsGated attach setAutoRun (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
+let private makeTerminalsGated attach classifier (log: EventLog<SessionEvent>) environment openTranscript readTranscript openAtBoot =
     let mintTerminal = mintFrom [ "term-a"; "term-b"; "term-c"; "term-d"; "term-e"; "term-f" ]
     let mintBlock = mintFrom [ "b-1"; "b-2"; "b-3" ]
     let records = ResizeArray<TerminalId * int * TranscriptRecord> ()
@@ -1758,14 +1556,14 @@ let private makeTerminalsGated attach setAutoRun (log: EventLog<SessionEvent>) e
             // while making every manager assertion depend on it.
             ignore
             attach
-            setAutoRun
+            classifier
             openAtBoot
     terminals, records
 
-/// No doc in these fixtures, so nowhere to write a gate. A case that cares about WHICH
-/// terminals the manager asks to run unapproved passes a recorder instead.
+/// The bypass classifier, which is what ships (Plan 23). A case about the classifier's
+/// verdict passes its own.
 let private makeTerminalsWith attach log environment openTranscript readTranscript openAtBoot =
-    makeTerminalsGated attach ignore log environment openTranscript readTranscript openAtBoot
+    makeTerminalsGated attach Classifier.approveAll log environment openTranscript readTranscript openAtBoot
 
 let private makeTerminals log environment openTranscript readTranscript openAtBoot =
     makeTerminalsWith AttachTerminal.unavailable log environment openTranscript readTranscript openAtBoot
@@ -1798,7 +1596,7 @@ let private managerTests =
                 let terminals, records = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
-                let entry = entry "a1" id (PeerRef ada) 1.0 None
+                let entry = entry "a1" id (PeerRef ada) 1.0
                 let mutable startedCalled = 0
                 do! terminals.RunBlock id entry "echo hello" (fun () -> startedCalled <- startedCalled + 1)
 
@@ -1848,7 +1646,7 @@ let private managerTests =
                 let terminals, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
-                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "cat missing" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "cat missing" ignore
                 let! events = eventsOf log
                 let completedEvent =
                     events |> List.pick (function SessionEvent.TerminalBlockCompleted e -> Some e | _ -> None)
@@ -1867,8 +1665,8 @@ let private managerTests =
                 let terminals, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
-                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "first" ignore
-                do! terminals.RunBlock id (entry "a2" id (PeerRef ada) 2.0 None) "second" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "first" ignore
+                do! terminals.RunBlock id (entry "a2" id (PeerRef ada) 2.0) "second" ignore
                 // Both blocks have run; wait for both keyframes to be WRITTEN before reading
                 // them, since the Process deliberately does not hold a block up for one.
                 do! awaitKeyframes id 2
@@ -1889,7 +1687,7 @@ let private managerTests =
                     "each one carries the geometry the range actually ran under"
             }
 
-        testCaseAsync "an approval is recorded on the block, so the audit says who let it run" <|
+        testCaseAsync "the block records who wrote the command" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
@@ -1897,18 +1695,14 @@ let private managerTests =
                 let terminals, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
-                do! terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0 (Some bob)) "rm -rf build" ignore
+                do! terminals.RunBlock id (entry "a1" id ActorRef.Agent 1.0) "rm -rf build" ignore
                 let! events = eventsOf log
                 let startedEvent =
                     events |> List.pick (function SessionEvent.TerminalBlockStarted e -> Some e | _ -> None)
                 Expect.equal
                     (Authority.author startedEvent.Authority)
                     ActorRef.Agent
-                    "the agent wrote it"
-                Expect.equal
-                    (Authority.approver startedEvent.Authority)
-                    (Some (PeerRef bob))
-                    "and bob approved it"
+                    "the agent wrote it, and the audit says so"
             }
 
         testCaseAsync "runaway output is capped, and the gap is stated rather than hidden" <|
@@ -1921,7 +1715,7 @@ let private managerTests =
                 let terminals, _ = makeTerminals log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
-                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "yes" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "yes" ignore
                 let! events = eventsOf log
                 let truncation =
                     events |> List.tryPick (function SessionEvent.TerminalTranscriptTruncated e -> Some e | _ -> None)
@@ -1956,7 +1750,7 @@ let private managerTests =
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
                 let! _ = terminals.Close id "closed by a peer"
-                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "make" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "make" ignore
                 Expect.isEmpty (List.ofSeq spawned) "nothing is spawned"
                 let! events = eventsOf log
                 Expect.isEmpty
@@ -1992,8 +1786,10 @@ let private schedulerTests =
                 Expect.isTrue (Map.isEmpty synced.Pending) "and its entry left the doc once consumed"
             }
 
-        testCaseAsync "the agent's command waits for a human under the default mode" <|
+        testCaseAsync "the agent's command runs the moment it drains — nothing parks" <|
             async {
+                // Under the bypass classifier the agent's entry is exactly a person's: the
+                // doc write is the whole latency (Plan 23).
                 let log = newLog ()
                 let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
@@ -2002,27 +1798,81 @@ let private schedulerTests =
                 let id = opened |> expect
                 let doc = Y.Doc.Create ()
                 let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.agentFor (PeerRef ada)) 1.0 "echo hi" false
+                scheduler.Drain ()
+                do! Async.Sleep 20
+                Expect.equal (List.length (List.ofSeq spawned)) 1 "it ran, with nobody asked"
+                Expect.isTrue (Map.isEmpty (syncedOf doc).Pending) "and nothing is left parked"
+            }
+
+        testCaseAsync "a rejecting classifier records the refusal and the queue advances" <|
+            async {
+                let log = newLog ()
+                let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                // Reject exactly one command, by its text — the entry behind it must run.
+                let refuseFirst : Classifier =
+                    fun _ act ->
+                        async {
+                            match act with
+                            | TerminalAct (_, "rm -rf /") -> return Rejected "not in this session"
+                            | _ -> return Approved
+                        }
+                let terminals, _ =
+                    makeTerminalsGated AttachTerminal.unavailable refuseFirst log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                let doc = Y.Doc.Create ()
+                let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
                 SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.agentFor (PeerRef ada)) 1.0 "rm -rf /" false
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a2") id (Authority.ofAuthor (PeerRef ada)) 2.0 "echo ok" false
+                scheduler.Drain ()
+                do! Async.Sleep 50
+                let! events = eventsOf log
+                let refusal =
+                    events |> List.pick (function SessionEvent.TerminalCommandRejected e -> Some e | _ -> None)
+                Expect.equal refusal.RejectedBy ActorRef.System "attributed to the session, not a person"
+                Expect.equal refusal.Command "rm -rf /" "with the command snapshotted"
+                Expect.equal refusal.Reason (Some "not in this session") "and the classifier's reason"
+                Expect.equal (List.length (List.ofSeq spawned)) 1 "the refused command never spawned"
+                let started =
+                    events |> List.pick (function SessionEvent.TerminalBlockStarted e -> Some e | _ -> None)
+                Expect.equal started.Command "echo ok" "and the entry behind it ran"
+                Expect.isTrue (Map.isEmpty (syncedOf doc).Pending) "nothing is left parked"
+            }
+
+        testCaseAsync "the classifier reads the text as it stands at the drain, and who wrote it" <|
+            async {
+                // The queue stays editable until the drain takes it, so the classifier must
+                // be shown what will RUN — never what was proposed.
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let asked = ResizeArray<ActorRef * ProposedAct> ()
+                let recording : Classifier =
+                    fun author act ->
+                        async {
+                            asked.Add (author, act)
+                            return Approved
+                        }
+                let terminals, _ =
+                    makeTerminalsGated AttachTerminal.unavailable recording log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
+                let id = opened |> expect
+                let doc = Y.Doc.Create ()
+                let scheduler = TerminalScheduler.create doc terminals ignore Set.empty
+                SyncedStateSync.enqueueTerminalCommand doc (queue "a1") id (Authority.agentFor (PeerRef ada)) 1.0 "echo draft" false
+                // Edited after the enqueue, before the drain — a peer fixing the command.
+                (doc.getText (BodyKey.terminalQueued (queue "a1"))).delete (0, 10)
+                (doc.getText (BodyKey.terminalQueued (queue "a1"))).insert (0, "echo final")
                 scheduler.Drain ()
                 do! Async.Sleep 20
-                Expect.isEmpty (List.ofSeq spawned) "nothing ran"
-                let synced = syncedOf doc
-                Expect.equal (Map.count synced.Pending) 1 "the command is still queued, visible and editable"
-
-                // A peer approves it — a plain CRDT write, which is the entire mechanism.
-                let entry = synced.Pending |> Map.toList |> List.head |> snd
-                let approved =
-                    ClientModel.update
-                        (ApprovePendingMsg (entry.QueueId, bob))
-                        { ClientModel.init { PeerId = bob; DisplayName = "Bob" } with Synced = synced }
-                let approvedEntry = approved.Synced.Pending |> Map.find entry.QueueId
-                Expect.equal approvedEntry.ApprovedBy (Some bob) "the approval is a register on the entry"
-
-                // Reflect the approval into the doc the scheduler reads, and drain again.
-                approveInDoc doc entry.QueueId bob
-                scheduler.Drain ()
-                do! Async.Sleep 20
-                Expect.equal (List.length (List.ofSeq spawned)) 1 "and now it runs"
+                match List.ofSeq asked with
+                | [ author, TerminalAct (terminal, command) ] ->
+                    Expect.equal command "echo final" "the text as it stood when the drain took it"
+                    Expect.equal terminal id "about this terminal"
+                    Expect.equal author ActorRef.Agent "and the author, not the credential it borrows"
+                | other -> failwithf "expected one TerminalAct question, got %A" other
             }
 
         testCaseAsync "an entry the log already consumed is repaired away, never run twice" <|
@@ -2061,61 +1911,23 @@ let private syncTests =
                 ActorRef.Agent
                 "the author, as an actor rather than a peer"
             Expect.equal entry.Order 3.0 "the order"
-            Expect.equal entry.ApprovedBy None "and never pre-approved"
             Expect.equal (SyncedStateSync.terminalQueuedText doc (queue "a1")) "git status" "with its command text"
 
-        testCase "an unreadable approval reads as NOT approved" <| fun () ->
-            // Fail closed: a value we cannot read must never release an agent's command.
+        testCase "a verdict register written by an old peer is ignored, never fatal" <| fun () ->
+            // Docs written before Plan 23 carry `approvedBy`/`rejectedBy` registers, and an
+            // old browser tab may still write them. Thoth-style structural reads ignore
+            // fields nobody asks for — pinned, because replay depends on it.
             let doc = Y.Doc.Create ()
             SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 1.0 "x" false
-            setQueuedFieldInDoc doc (queue "a1") "approvedBy" "   "
+            setQueuedFieldInDoc doc (queue "a1") "approvedBy" "bob"
+            setQueuedFieldInDoc doc (queue "a1") "rejectedBy" "bob"
             let synced = syncedOf doc
-            Expect.equal (synced.Pending |> Map.find (queue "a1")).ApprovedBy None "blank is not an approval"
-
-        testCase "an unreadable mode reads as the default, not as no gate" <| fun () ->
-            let doc = Y.Doc.Create ()
-            setModeInDoc doc terminalA "nonsense-mode"
-            let synced = syncedOf doc
-            Expect.equal (SyncedSessionState.modeOf terminalA synced) ApproveAgent "it falls back to the gate"
+            Expect.isTrue (Map.containsKey (queue "a1") synced.Pending) "the entry still decodes"
 
         testCase "the composer slot key round-trips both ids" <| fun () ->
             let key = SyncedStateSync.TerminalDraftKey.make terminalA ada
             Expect.equal (SyncedStateSync.TerminalDraftKey.parse key) (Some (terminalA, ada)) "both come back"
             Expect.equal (SyncedStateSync.TerminalDraftKey.parse "no-separator") None "and a malformed key is skipped"
-
-        // --- The widened roots, and the docs written before them (Plan 15, stage 3) --------
-
-        testCase "a gate is stored per subject, for either kind" <| fun () ->
-            let doc = Y.Doc.Create ()
-            SyncedStateSync.setGate doc (ForTerminal terminalA) AutoRun
-            SyncedStateSync.setGate doc (ForCommand "add_repo") ApproveAgent
-            let synced = syncedOf doc
-            Expect.equal (SyncedSessionState.gateOf (ForTerminal terminalA) synced) AutoRun "the terminal's"
-            Expect.equal (SyncedSessionState.gateOf (ForCommand "add_repo") synced) ApproveAgent "and the command's"
-
-        testCase "a doc written before the widening keeps its pending commands and its modes" <| fun () ->
-            // The regression this exists to stop is silent and one-directional: a bare
-            // rename drops a terminal somebody set to `ApproveAll` back to the default,
-            // which is LESS gated than what they asked for.
-            let doc = Y.Doc.Create ()
-            legacyEnqueueInDoc doc yjsModule (QueueId.value (queue "a1")) (TerminalId.value terminalA) "agent" 3.0
-            legacyModeInDoc doc yjsModule (TerminalId.value terminalA) "approve-all"
-            Expect.equal (SyncedStateSync.migrateGateRoots doc) (1, 1) "one act and one gate moved"
-            let synced = syncedOf doc
-            let entry = synced.Pending |> Map.find (queue "a1")
-            Expect.equal entry.Subject (ForTerminal terminalA) "the entry names the terminal it named before"
-            Expect.equal entry.Payload CommandLine "as the only payload kind that existed then"
-            Expect.equal (Authority.author entry.Authority) ActorRef.Agent "with its author"
-            Expect.equal entry.Order 3.0 "and its place in the queue"
-            Expect.equal (SyncedSessionState.modeOf terminalA synced) ApproveAll "the stricter mode survives"
-            // Exactly one live location afterwards, never two that can disagree.
-            Expect.equal (SyncedStateSync.migrateGateRoots doc) (0, 0) "and a migrated doc has nothing left to move"
-
-        testCase "migrating a doc that was never legacy does nothing" <| fun () ->
-            let doc = Y.Doc.Create ()
-            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 1.0 "git status" false
-            Expect.equal (SyncedStateSync.migrateGateRoots doc) (0, 0) "no legacy roots, no work"
-            Expect.equal (Map.count (syncedOf doc).Pending) 1 "and the entry it did have is untouched"
     ]
 
 
@@ -2197,7 +2009,7 @@ let private sourceTests =
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
-                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0 None) "make" ignore
+                do! terminals.RunBlock id (entry "a1" id (PeerRef ada) 1.0) "make" ignore
                 let! events = eventsOf log
                 let completed =
                     events
@@ -2451,27 +2263,6 @@ let private agentTerminalTests =
                 Expect.notEqual next first "a fresh terminal, because the old one has no process"
             }
 
-        testCaseAsync "it runs its queue unapproved, and a terminal a person opened does not" <|
-            async {
-                // Plan 15's autonomy line. If the agent's terminal inherited the
-                // `ApproveAgent` default, the agent's one execution path would silently become
-                // an approval prompt for every command.
-                let log = newLog ()
-                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
-                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let unapproved = ResizeArray<TerminalId> ()
-                let terminals, _ =
-                    makeTerminalsGated
-                        AttachTerminal.unavailable unapproved.Add log environment openTranscript readTranscript []
-                let! peers = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
-                let peerTerminal = peers |> expect
-                let! agents = terminals.AgentTerminal SandboxName.defaultName "npm test"
-                let agentTerminal = agents |> expect
-                Expect.equal (List.ofSeq unapproved) [ agentTerminal ] "only the agent's own runs unapproved"
-                Expect.isFalse
-                    (unapproved.Contains peerTerminal)
-                    "a terminal a person opened keeps the approval default, which is what gives the gate teeth"
-            }
     ]
 
 // The agent's own terminal verbs (Plan 20, stage 3): the same ones a person has, over the
@@ -2553,7 +2344,7 @@ let tests =
     testList "Terminals (Plan 13)" [
         affordanceTests
         sourceTests
-        approvalTests
+        subjectTests
         drainTests
         projectionTests
         markTests

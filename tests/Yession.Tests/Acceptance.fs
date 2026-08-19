@@ -60,9 +60,7 @@ let private representativeModel : ClientModel =
           Queue = Map.ofList [ queueId, { QueueId = queueId; Author = ada; Order = 1.0 } ]
           Title = Ylmish.Text.ofString "planning the launch"
           SharedBrief = None
-          // A terminal composer slot, and one queued command the AGENT wrote — which under
-          // the default mode is the interesting case: it is the entry the approval gate
-          // holds, so the panel must render it as waiting rather than as ready.
+          // A terminal composer slot, and one queued command the AGENT wrote.
           TerminalDrafts =
             Map.ofList [ (terminalId, ada), { Terminal = terminalId; Author = ada; QueueId = terminalDraftQueueId } ]
           Pending =
@@ -76,12 +74,8 @@ let private representativeModel : ClientModel =
                     Authority = Authority.agentFor (PeerRef ada)
                     Order = 1.0
                     Payload = CommandLine
-                    ApprovedBy = None
-                    RejectedBy = None
-                    RejectedReason = None
                     Background = false } ]
           Model = Some pickedModel
-          Gates = Map.empty
           TerminalSizes = Map.empty }
       Conversation =
         { Items =
@@ -244,8 +238,7 @@ let private heldTerminalModel : ClientModel =
                 |> List.map (fun t -> { t with Lease = Some (PeerRef ada) }) } }
 
 /// The same session with the terminal's shell no longer marking (Plan 13, stage 2f). The
-/// queued command is a PEER's, so it needs no approval — otherwise the approval hold would
-/// be the one reported, which is the correct precedence and not what this case is about.
+/// queued command is a PEER's.
 let private lostIntegrationModel : ClientModel =
     { representativeModel with
         Synced =
@@ -372,8 +365,7 @@ let private uiChecklistTests =
                   "queue delete", Dom.attr Dom.Hooks.queueDelete "queue-ui"
                   // Terminals (Plan 13): the panel, the terminal it is showing, the block
                   // that ran with its exit status, and the composer that queues the next
-                  // command. The queued entry is the AGENT's, so it must render as waiting
-                  // for an approval — that state is the whole point of the surface.
+                  // command.
                   "terminals panel", Dom.Hooks.terminalPanel
                   "terminal tab", Dom.attr Dom.Hooks.terminalTab "term-ui"
                   "new terminal", Dom.Hooks.terminalNew
@@ -386,10 +378,7 @@ let private uiChecklistTests =
                   "terminal output colour is a theme token", "text-term-green"
                   "terminal output text", "total 0"
                   "queued terminal command", Dom.attr Dom.Hooks.terminalQueued "queue-ui-term"
-                  "queued command awaits approval", Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingApproval
-                  "approve button", Dom.attr Dom.Hooks.terminalApprove "queue-ui-term"
                   "terminal composer input", Dom.attr Dom.Hooks.terminalInput "term-draft:term-ui:ada"
-                  "terminal approval mode", Dom.attr Dom.Hooks.terminalMode "approve-agent"
                   // Terminal work in the CHAT (Plan 14): the block that ran has a chip where
                   // it ran, carrying who ran it and how it went — and no output, which is the
                   // whole reason it is a chip.
@@ -475,9 +464,8 @@ let private uiChecklistTests =
                 "the composer's own command line gives way to the bar"
 
         testCase "a queued command in a leased terminal says it waits for the TERMINAL" <| fun () ->
-            // Not "waiting for approval": one resolves when a person makes a decision, the
-            // other when a person finishes a task, and a queue that said only *pending* would
-            // leave both looking like a stall.
+            // A queue that said only *pending* would leave the hold looking like a stall;
+            // this one resolves when a person finishes a task, and says so.
             let model =
                 { leasedTerminalModel with
                     Synced =
@@ -489,9 +477,6 @@ let private uiChecklistTests =
             Expect.isTrue
                 (html.Contains (Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingTerminal))
                 "the hold names the terminal"
-            Expect.isFalse
-                (html.Contains (Dom.attr Dom.Hooks.terminalQueuedStatus Dom.Text.queuedAwaitingApproval))
-                "and not an approval it does not need"
 
         testCase "a terminal that stopped marking says so, and offers the repair" <| fun () ->
             // Named, not shown as a stall. The queue really is held, and a surface that only
@@ -783,13 +768,6 @@ let private uiChecklistTests =
             // under the default mode — the case the gate exists for.
             Expect.isTrue (list.Contains "data-terminal-queued") "with the terminal's own queued command in it"
             Expect.isTrue (list.Contains "data-pending-subject") "and a chip saying what it is about"
-
-        // The a11y floor for a list of near-identical controls: "Approve" eleven times tells
-        // a screen-reader user nothing about which one they are on.
-        testCase "every verdict control is named for the act it decides" <| fun () ->
-            let html = Support.render representativeModel
-            Expect.isTrue (html.Contains "aria-label=\"Approve ") "approve names its act"
-            Expect.isTrue (html.Contains "aria-label=\"Reject ") "reject names its act"
 
         // The structure a table owes a screen reader (CLAUDE.md, UI baseline). Held in the
         // renderer, so it is held for every query — the reason the surface is generated.

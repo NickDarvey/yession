@@ -143,16 +143,6 @@ let startFull
             eprintfn "[session %s] dropped %d empty draft slot(s) at boot"
                 (SessionId.value sessionId) (List.length dropped)
 
-        // A doc written before Plan 15 stage 3 keeps its pending commands and terminal modes
-        // under the old roots. Move them onto the widened ones here, for the same reason the
-        // sweep above runs here: no peer is connected yet. Skipping it would silently drop a
-        // terminal somebody set to `ApproveAll` back to the default — LESS gated than what
-        // they asked for, which is the one direction this must not fail in.
-        match SyncedStateSync.migrateGateRoots doc with
-        | 0, 0 -> ()
-        | acts, gates ->
-            eprintfn "[session %s] migrated %d pending act(s) and %d gate(s) at boot"
-                (SessionId.value sessionId) acts gates
 
         // Connected peers' channels, for state relay; keyed per connection.
         let mutable connections : Map<int, FrameChannel<string>> = Map.empty
@@ -315,15 +305,14 @@ let startFull
                 // a configurable one: the wire is part of the seam's contract, so a second
                 // way to attach would be a second contract nobody wrote down.
                 AttachWs.attach
-                // The gate register lives in the doc, which is this root's; WHICH terminals
-                // run unapproved is the manager's rule, and it decides that for itself.
-                (fun id -> SyncedStateSync.setGate doc (ForTerminal id) AutoRun)
+                // The gate on every block (Plan 23). The bypass until an AI-driven
+                // classifier exists; this root supplies it and computes nothing.
+                Classifier.approveAll
                 (replayedTerminals |> TerminalProjection.openTerminals |> List.map (fun t -> t.TerminalId))
 
         // The agent's ONE execution path (Plan 13, stage 3b). It queues a command where
-        // people can see it and then WAITS — bounded twice over, once for a person and once
-        // for a process — so the agent gets its answer back without a turn ever hanging on
-        // somebody pressing Approve.
+        // people can see it and then WAITS — bounded by the command timeout — so the agent
+        // gets its answer back without a turn ever hanging.
         let terminalCommands =
             TerminalCommands.create
                 doc

@@ -315,7 +315,6 @@ do
             FocusPane = PaneShell.toPane
             FocusChat = PaneShell.toChatItem
             FocusDvr = fun id -> PaneShell.toDvrControl (TerminalId.value id)
-            FocusAfterVerdict = ignore
             TypeIntoTerminal = recordTyped }
     // The app's own player sync, so a block tab in the harness really plays its recording —
     // which is the point of driving this in a browser rather than asserting a string. The

@@ -110,10 +110,6 @@ module AgentTools =
             sprintf
                 "WAITING FOR A KEYSTROKE in %s. It opened a full-screen program, so it will not finish on its own — and the terminal is now YOURS to type into. Use write_terminal to answer it and read_terminal to see the screen; leaving the program hands the terminal back and finishes the command. Call check_pending with handle '%s' for the outcome.%s"
                 where handle output
-        | TerminalCommandAwaitingApproval ->
-            sprintf
-                "WAITING FOR A HUMAN TO APPROVE IT in %s. It has not run. Do not wait for output — say what you queued and why. Call check_pending with handle '%s' once they have had a chance to look."
-                where handle
         | TerminalCommandAwaitingTerminal ->
             sprintf
                 "WAITING FOR %s TO BE FREE — somebody is using it, or another command is running there. It has not run. Call check_pending with handle '%s' later."
@@ -360,7 +356,7 @@ module AgentTools =
                 }
         [ tool
             "execute_command"
-            "Run a shell command in one of this session's terminals, where the people in the session can see it, edit it, and — depending on the terminal — approve it before it runs. This is the only way to run anything. Pass `sandbox` to run in a named work sandbox (start_work_sandbox creates one); omit it for the default sandbox, which is where everything runs unless you say otherwise. It waits for the result and returns the exit code and output; if it is waiting on a person, or the terminal is busy, or the command is still going, it says so and returns a handle for check_pending instead of hanging. Read what it returns: every answer states which of those happened."
+            "Run a shell command in one of this session's terminals, where the people in the session can see it and edit it while it queues, and every run is on the record. This is the only way to run anything. Pass `sandbox` to run in a named work sandbox (start_work_sandbox creates one); omit it for the default sandbox, which is where everything runs unless you say otherwise. It waits for the result and returns the exit code and output; if the terminal is busy, or the command is still going, it says so and returns a handle for check_pending instead of hanging. Read what it returns: every answer states which of those happened."
             [ ToolField.required "command" "string" "the shell command line to run, e.g. \"npm test -- --watch=false\""
               ToolField.optional "sandbox" "string" "the work sandbox to run in, e.g. \"test\"; omit for the default one"
               ToolField.optional
@@ -456,7 +452,7 @@ module AgentTools =
 
           tool
               "write_terminal"
-              "Type into a terminal you hold the keyboard for: one streaming something live — a device, a console, anything whose bytes come from outside this session — or one where a command of yours opened a full-screen program and is waiting for a keystroke. Send exactly the bytes you mean, including \"\\r\" if the thing on the other end expects a newline. On a live stream, typing takes the terminal, which everyone here can see and take back, so type what you meant to and hand it over. On a shell terminal it works only while you already hold it — otherwise use execute_command, where people can approve what you run."
+              "Type into a terminal you hold the keyboard for: one streaming something live — a device, a console, anything whose bytes come from outside this session — or one where a command of yours opened a full-screen program and is waiting for a keystroke. Send exactly the bytes you mean, including \"\\r\" if the thing on the other end expects a newline. On a live stream, typing takes the terminal, which everyone here can see and take back, so type what you meant to and hand it over. On a shell terminal it works only while you already hold it — otherwise use execute_command, where what you run is classified and on the record."
               [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream"
                 ToolField.required "data" "string" "the bytes to type, e.g. \"AT\\r\"" ]
               (fun args ->

@@ -109,22 +109,21 @@ module Transcript =
 ///     command while its first is still going would make the queue's order meaningless.
 ///     Terminals are independent of each other, though — a slow build in one does not
 ///     hold up another.
-///   * **Approval gates the HEAD, and the head alone.** If the entry at the front needs an
-///     approval it has not got, the terminal waits — it does not skip ahead to an approved
-///     entry behind it. Reordering the queue is a CRDT write anyone can make; silently
-///     reordering EXECUTION because of an approval state is not something a person asked
-///     for, and in a shell it is the difference between `cd build` then `rm -rf *` and
-///     those two commands the other way round.
+///   * **The HEAD runs, and the head alone.** Reordering the queue is a CRDT write anyone
+///     can make; silently reordering EXECUTION is not something a person asked for, and in
+///     a shell it is the difference between `cd build` then `rm -rf *` and those two
+///     commands the other way round. The classifier's verdict (Plan 23) is asked inside
+///     the run itself, after the terminal is marked busy, for exactly this reason: an
+///     async decision taken before the busy mark would open a window for the entry behind
+///     the head to start first.
 module TerminalQueueDrain =
 
     /// Why a terminal's head entry is not running (Plan 13, stage 2e). Distinguished because
     /// they resolve differently and a queue that says only *pending* leaves both looking like
-    /// a stall: "waiting for approval" ends when a person makes a decision, "nick is using
-    /// this terminal" ends when a person finishes a task. The agent's tool reports them
-    /// apart, and so does the composer.
+    /// a stall: "nick is using this terminal" ends when a person finishes a task, "the marks
+    /// are gone" when somebody re-arms them. The agent's tool reports them apart, and so
+    /// does the composer.
     type TerminalHold =
-        /// The head needs an approval it has not got.
-        | AwaitingApproval
         /// A peer holds the terminal's stdin. Resolves on release, and any peer may steal.
         | AwaitingTerminal
         /// A block is already running here. One at a time, per terminal.
@@ -143,11 +142,6 @@ module TerminalQueueDrain =
           /// `GateSubject`, and re-asking which terminal downstream would mean answering,
           /// with a default or a `failwith`, a question this plan already settled.
           Ready : (TerminalId * PendingAct) list
-          /// Entries a peer has refused: appended as `TerminalCommandRejected`, then
-          /// removed. Separate from `Removals` because they are opposite facts — a removal
-          /// is repair for something that already happened, a rejection is a decision that
-          /// has not been recorded yet.
-          Rejections : (TerminalId * PendingAct) list
           /// Doc keys to remove without running: entries a `TerminalBlockStarted` already
           /// names (a crash between the append and the removal), repaired rather than run
           /// a second time.
@@ -157,28 +151,19 @@ module TerminalQueueDrain =
     /// The gate for ONE terminal, shared by `plan` and `holdOf` so what runs and what the
     /// queue says about why it is not running cannot drift apart.
     ///
-    /// The order is the design: a refusal outranks every policy (it touches no pty, so a busy
-    /// or leased terminal is irrelevant to it, and someone can clear a bad queue while a
-    /// colleague is inside vim); then one block at a time; then the lease; then approval.
+    /// The order is the design: one block at a time; then the lease; then the marks.
     let private gate
         (alreadyConsumed: PendingAct -> bool)
-        (rejected: Set<string>)
         (busy: Set<string>)
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
-        (modeOf: ApprovalMode)
         (queue: Map<QueueId, PendingAct>)
         (terminal: TerminalId)
         : Choice<TerminalId * PendingAct, TerminalHold> =
-        // The head is the first entry this drain has not already consumed. A refused entry is
-        // not skipped over: it is still the head and it stops the queue exactly as an
-        // unapproved one does, until the drain removes it. Running the entry behind it first
-        // would reorder execution because of a verdict, which is the thing the approval gate
-        // promises not to do.
+        // The head is the first entry this drain has not already consumed.
         match TerminalQueueOrder.sortedFor terminal queue |> List.filter (alreadyConsumed >> not) |> List.tryHead with
         | None -> Choice2Of2 NotWaiting
-        | Some entry when Set.contains (QueueId.value entry.QueueId) rejected -> Choice2Of2 NotWaiting
         | Some entry ->
             if not (isOpen terminal) then Choice2Of2 NotWaiting
             elif Set.contains (TerminalId.value terminal) busy then Choice2Of2 AwaitingBlock
@@ -191,9 +176,6 @@ module TerminalQueueDrain =
             // know when it started or finished. Holding is the honest answer — draining into
             // an unmarked shell would produce blocks that never close.
             elif Set.contains (TerminalId.value terminal) lost then Choice2Of2 AwaitingIntegration
-            elif ApprovalMode.requiresApproval modeOf (Authority.author entry.Authority)
-                 && Option.isNone entry.ApprovedBy then
-                Choice2Of2 AwaitingApproval
             else Choice1Of2 (terminal, entry)
 
     /// Why a terminal's head is not running — `None` when it IS about to run. Pure, and asked
@@ -204,41 +186,32 @@ module TerminalQueueDrain =
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
-        (modeOf: TerminalId -> ApprovalMode)
         (queue: Map<QueueId, PendingAct>)
         (terminal: TerminalId)
         : TerminalHold option =
         let alreadyConsumed (entry: PendingAct) = Set.contains (QueueId.value entry.QueueId) consumed
-        let rejected =
-            queue
-            |> Map.toList
-            |> List.map snd
-            |> List.filter (fun entry -> Option.isSome entry.RejectedBy && not (alreadyConsumed entry))
-            |> List.map (fun entry -> QueueId.value entry.QueueId)
-            |> Set.ofList
-        match gate alreadyConsumed rejected busy leased lost isOpen (modeOf terminal) queue terminal with
+        match gate alreadyConsumed busy leased lost isOpen queue terminal with
         | Choice1Of2 _ -> None
         | Choice2Of2 hold -> Some hold
 
     /// `consumed` is the log-anchored exactly-once set; `busy` names terminals with a
-    /// block already running; `leased` those a peer is typing into; `isOpen` and `modeOf`
-    /// answer for the terminal an entry names. Nothing here reads the clock or the doc — it
-    /// is given a snapshot and returns a decision.
+    /// block already running; `leased` those a peer is typing into; `isOpen` answers for
+    /// the terminal an entry names. Nothing here reads the clock or the doc — it is given
+    /// a snapshot and returns a decision.
     let plan
         (consumed: Set<string>)
         (busy: Set<string>)
         (leased: Set<string>)
         (lost: Set<string>)
         (isOpen: TerminalId -> bool)
-        (modeOf: TerminalId -> ApprovalMode)
         (queue: Map<QueueId, PendingAct>)
         : TerminalDrainPlan =
 
         let alreadyConsumed (entry: PendingAct) = Set.contains (QueueId.value entry.QueueId) consumed
 
-        // Only the acts that name a terminal. A command act waits in the same map (Plan 15,
-        // stage 3) and is nothing to do with this drain: it has no shell, no order to hold,
-        // and its own gate resolves it.
+        // Only the acts that name a terminal. A command act in the same map is a leftover
+        // from before Plan 23 (nothing writes one any more) and is nothing to do with this
+        // drain: it has no shell and no order to hold.
         let terminals =
             queue
             |> Map.toList
@@ -246,30 +219,14 @@ module TerminalQueueDrain =
             |> List.distinct
             |> List.sortBy TerminalId.value
 
-        // A refusal outranks every other gate. It touches no terminal, so it does not wait
-        // on `busy` or on the terminal being open, and it is checked before the mode gate
-        // because a policy that would have auto-run the command must not beat a person who
-        // said no. Under `AutoRun` that is the whole difference between the two.
-        let rejections =
-            queue
-            |> Map.toList
-            |> List.map snd
-            |> List.filter (fun entry -> Option.isSome entry.RejectedBy && not (alreadyConsumed entry))
-            |> List.choose (fun entry -> PendingAct.terminal entry |> Option.map (fun t -> t, entry))
-            |> List.sortBy (fun (_, entry) -> QueueId.value entry.QueueId)
-
-        let rejected =
-            rejections |> List.map (fun (_, entry) -> QueueId.value entry.QueueId) |> Set.ofList
-
         let ready =
             terminals
             |> List.choose (fun terminal ->
-                match gate alreadyConsumed rejected busy leased lost isOpen (modeOf terminal) queue terminal with
+                match gate alreadyConsumed busy leased lost isOpen queue terminal with
                 | Choice1Of2 resolved -> Some resolved
                 | Choice2Of2 _ -> None)
 
         { Ready = ready
-          Rejections = rejections
           Removals =
             queue
             |> Map.toList
@@ -280,13 +237,11 @@ module TerminalQueueDrain =
     /// The consumed-set contribution of one event: a terminal drain dedups against every
     /// `TerminalBlockStarted` that names a queue entry — anchored in the log, never in the
     /// doc, so a replica that never saw the removal cannot re-run the command.
-    /// A rejection joins the same set, and that is what settles the reject/drain race with
-    /// no lock anywhere. Under `AutoRun` a human can press reject in the very tick the
-    /// drain takes the entry; whichever event reaches the append-only log first wins and
-    /// the second is dropped as already consumed. The Session Process is the log's only
-    /// writer, so check-and-append is serial there by construction. A rejected `QueueId`
-    /// can therefore never run afterwards, and a started one can never be retro-rejected —
-    /// stopping something already running is `kill`, a different verb.
+    /// A rejection joins the same set: the classifier's refusal (Plan 23) ends an entry
+    /// exactly as a start does, and a log written when people could reject still seeds the
+    /// set on replay. A rejected `QueueId` can therefore never run afterwards, and a
+    /// started one can never be retro-rejected — stopping something already running is
+    /// `kill`, a different verb.
     let consumedOf (event: SessionEvent) : string option =
         match event with
         | SessionEvent.TerminalBlockStarted b -> b.QueueId |> Option.map QueueId.value
@@ -295,20 +250,15 @@ module TerminalQueueDrain =
 
 /// How long `execute_command` waits, and for what (Plan 13, stage 3b).
 ///
-/// The reason "queue and return" looked forced is that it answered one question — how do we
-/// avoid blocking a turn on a human? — by giving up a different thing: waiting for a PROCESS,
-/// which was never the problem. They are separate waits with separate bounds, and separating
-/// them is the whole design:
+/// Two kinds of wait, with different bounds. Waiting on a PROCESS is bounded by the command
+/// timeout — a deadline that YIELDS a handle rather than cancelling anything. Waiting on a
+/// PERSON — a held terminal, lost marks — is unbounded in principle (they may be asleep), so
+/// those return at once with a handle instead of burning a deadline on a wait that was never
+/// going to resolve inside one.
 ///
-///   * **Waiting for a person is unbounded in principle.** They may be asleep. So an approval
-///     gets a short grace — enough that a supervised session, where approvals come in seconds,
-///     still chains normally — and then the tool returns a handle. The turn continues.
-///   * **Waiting for a process is already bounded**, by the same command timeout the old
-///     `execute_command` used. Keeping it is not a new risk, it is the existing one.
-///
-/// Under `AutoRun` the first wait does not exist: the drain subscribes to the doc, the agent's
-/// write is local to the Session Process, and the entry drains on the update. `AutoRun` is
-/// therefore synchronous — met by having no network hop in the path rather than by hiding one.
+/// The path is synchronous end to end: the drain subscribes to the doc, the agent's write is
+/// local to the Session Process, and the entry drains on the update — no network hop hides
+/// in it.
 module TerminalCommandWait =
 
     /// What the Process can see about one queued command right now.
@@ -320,8 +270,8 @@ module TerminalCommandWait =
           InQueue : bool
           /// Whether it is the terminal's HEAD — the only entry a drain can start. An entry
           /// behind another is waiting for the queue, whatever the head happens to be waiting
-          /// for, and reporting the head's reason as ours would tell the agent its own command
-          /// needs an approval when somebody else's does.
+          /// for, and reporting the head's reason as ours would misattribute somebody else's
+          /// wait.
           IsHead : bool
           /// Why the terminal's head is held, from `TerminalQueueDrain.holdOf`. `None` = it is
           /// about to run.
@@ -340,12 +290,10 @@ module TerminalCommandWait =
         /// and reporting it as any outcome would be inventing one.
         | Gone
 
-    /// The decision, given what has been observed and which deadlines have passed.
-    ///
-    /// `graceElapsed` bounds waiting on a PERSON; `deadlineElapsed` bounds waiting on a
-    /// PROCESS. Which one applies is decided by what is actually being waited for, and that is
-    /// the only interesting thing here.
-    let step (graceElapsed: bool) (deadlineElapsed: bool) (observation: Observation) : Step =
+    /// The decision, given what has been observed and whether the process deadline has
+    /// passed. What is being waited for decides whether the deadline applies at all, and
+    /// that is the only interesting thing here.
+    let step (deadlineElapsed: bool) (observation: Observation) : Step =
         match observation.Block with
         | Some block ->
             match block.Status with
@@ -366,16 +314,13 @@ module TerminalCommandWait =
             if deadlineElapsed then Return TerminalCommandAwaitingTerminal else KeepWaiting
         | None ->
             match observation.Hold with
-            // A peer holding the terminal is mid-task and will not be done in five seconds, so
-            // the grace does not apply — burning it on a wait that was never going to resolve
-            // only makes the turn slower. Return at once.
+            // A peer holding the terminal is mid-task and will not be done soon — an
+            // unbounded wait, so it returns at once rather than burning a deadline.
             | Some TerminalQueueDrain.AwaitingTerminal -> Return TerminalCommandAwaitingTerminal
-            | Some TerminalQueueDrain.AwaitingApproval ->
-                if graceElapsed then Return TerminalCommandAwaitingApproval else KeepWaiting
             // Another block is running here: a wait on a PROCESS, so it gets the process
-            // deadline rather than the approval grace — a quick command ahead of ours still
-            // chains. Reported as `AwaitingTerminal` because from the caller's side both holds
-            // say the same thing: the terminal is not free.
+            // deadline — a quick command ahead of ours still chains. Reported as
+            // `AwaitingTerminal` because from the caller's side both holds say the same
+            // thing: the terminal is not free.
             | Some TerminalQueueDrain.AwaitingBlock ->
                 if deadlineElapsed then Return TerminalCommandAwaitingTerminal else KeepWaiting
             // Marks are gone here and only a person re-arming brings them back — an unbounded
@@ -691,15 +636,6 @@ module SessionTerminals =
           /// and its doc key may be removed, which is why it is a callback and not
           /// something the caller can do before or after the whole run.
           RunBlock : TerminalId -> PendingAct -> string -> (unit -> unit) -> Async<unit>
-          /// Record a peer's refusal of a queued command, minting the `BlockId` that names
-          /// it. `onRecorded` fires once the event is durable — the moment the entry has
-          /// been consumed and its doc key may go, exactly as `RunBlock`'s `onStarted`
-          /// marks that moment for a command which ran.
-          ///
-          /// Needs no terminal: refusing a command touches no process, so it works on a
-          /// terminal that is busy, leased (stage 2e) or closed. Someone can clear a bad
-          /// queue while a colleague is inside vim.
-          Reject : TerminalId -> PendingAct -> string -> (unit -> unit) -> Async<unit>
           /// Take the terminal's stdin (Plan 13, stage 2e), stealing it from whoever holds it.
           /// Refused only when there is nothing to hold: a terminal that is not open, or a
           /// degraded one with no persistent shell to type into.
@@ -784,7 +720,6 @@ module SessionTerminals =
           OpenedByAgent = fun _ -> false
           Close = fun _ _ -> async { return Error "this session has no terminals" }
           RunBlock = fun _ _ _ _ -> async { return () }
-          Reject = fun _ _ _ _ -> async { return () }
           Take = fun _ _ -> async { return Error "this session has no terminals" }
           Release = fun _ _ -> async { return Error "this session has no terminals" }
           PeerGone = fun _ -> async { return () }
@@ -843,11 +778,12 @@ module SessionTerminals =
         // capability, so a session given no provider simply cannot attach one — rather than
         // carrying a client for a thing it will never talk to.
         (attach: AttachTerminal)
-        // How a terminal is set to run its queue unapproved (Plan 15, stage 2). The RULE —
-        // that the agent's own terminal is one — lives here with the terminals it governs;
-        // the gate register lives in the doc, which is the composition root's. So the
-        // decision is here and the write is injected, exactly like `onRecord`.
-        (setAutoRun: TerminalId -> unit)
+        // The gate on every block (Plan 23): asked inside `RunBlock`, after the terminal is
+        // marked busy and before anything durable is written. Down here with the state it
+        // governs rather than in the drain driver, because an actor that could start a
+        // block without classification would be the second door the classifier exists to
+        // close — and an async decision taken before the busy mark could reorder the queue.
+        (classifier: Classifier)
         (openAtBoot: TerminalId list)
         : SessionTerminals =
 
@@ -1323,144 +1259,165 @@ module SessionTerminals =
                     // The flip policy's input: if this command takes the alternate screen, its
                     // author is the person who now needs the keyboard.
                     runningAuthor.[key] <- Authority.author entry.Authority
-                    let blockId = mintBlockId ()
-                    // Taken BEFORE the command is written, which is forced by the anchor
-                    // ordering below and is the honest reading anyway: on a pty the shell
-                    // echoes the command itself, and that echo is part of what this block put
-                    // on the screen. The alternative — starting the range at the `C` mark —
-                    // cannot be reconciled with appending the anchor first, because `C` does
-                    // not exist until after the write.
-                    let fromSeq = markKeyframe terminalId
-                    // Durable BEFORE the process starts: the block event is the
-                    // exactly-once anchor, so a crash between here and the spawn leaves a
-                    // block that never completed — visible and explicable — rather than a
-                    // command that silently runs twice.
-                    do!
-                        appendAs
-                            (Authority.author entry.Authority)
-                            (SessionEvent.TerminalBlockStarted
-                                { TerminalId = terminalId
-                                  BlockId = blockId
-                                  QueueId = Some entry.QueueId
-                                  // Carried from the queue entry onto the block, which is
-                                  // what lets the wake decide from the LOG alone: the entry
-                                  // is removed the moment this lands. The approval joins it
-                                  // HERE — a verdict register on the entry while people can
-                                  // still change it, part of the authority once it is what
-                                  // let the command run.
-                                  Authority =
-                                    entry.Authority |> Authority.approvedBy entry.ApprovedBy
-                                  Command = command
-                                  FromSeq = fromSeq
-                                  Background = entry.Background })
-                    // Consumed: the durable fact exists, so the doc key can go. Between
-                    // the append and this call the entry is in both places, which the
-                    // drain answers by planning against the log-anchored `consumed` set
-                    // rather than against the doc.
-                    onStarted ()
-                    // The command line is echoed into the transcript as INPUT, so a replay
-                    // shows what was typed as well as what came back — the same reason
-                    // asciinema records `"i"` events at all.
-                    emit terminalId terminal TranscriptInput (command + "\n")
+                    // The classifier's verdict (Plan 23), asked AFTER the busy mark and
+                    // BEFORE anything durable: an async decision taken while the terminal
+                    // still looked free would let a re-entrant drain start the entry behind
+                    // this one first, reordering execution — the thing the drain module's
+                    // header promises never to do. On the text as it stands at the drain,
+                    // because the queue is editable until this moment.
+                    match! classifier (Authority.author entry.Authority) (TerminalAct (terminalId, command)) with
+                    | Rejected reason ->
+                        // The refusal is the durable fact that consumes the entry —
+                        // `consumedOf` reads `TerminalCommandRejected` exactly as it reads a
+                        // start — attributed to the session, with the command snapshotted
+                        // because the doc entry goes the moment this lands.
+                        do!
+                            appendAs
+                                ActorRef.System
+                                (SessionEvent.TerminalCommandRejected
+                                    { TerminalId = terminalId
+                                      QueueId = entry.QueueId
+                                      BlockId = mintBlockId ()
+                                      Author = Authority.author entry.Authority
+                                      RejectedBy = ActorRef.System
+                                      Command = command
+                                      Reason = Some reason })
+                        onStarted ()
+                        busy <- Set.remove key busy
+                        runningAuthor.Remove key |> ignore
+                        return ()
+                    | Approved ->
+                        let blockId = mintBlockId ()
+                        // Taken BEFORE the command is written, which is forced by the anchor
+                        // ordering below and is the honest reading anyway: on a pty the shell
+                        // echoes the command itself, and that echo is part of what this block put
+                        // on the screen. The alternative — starting the range at the `C` mark —
+                        // cannot be reconciled with appending the anchor first, because `C` does
+                        // not exist until after the write.
+                        let fromSeq = markKeyframe terminalId
+                        // Durable BEFORE the process starts: the block event is the
+                        // exactly-once anchor, so a crash between here and the spawn leaves a
+                        // block that never completed — visible and explicable — rather than a
+                        // command that silently runs twice.
+                        do!
+                            appendAs
+                                (Authority.author entry.Authority)
+                                (SessionEvent.TerminalBlockStarted
+                                    { TerminalId = terminalId
+                                      BlockId = blockId
+                                      QueueId = Some entry.QueueId
+                                      Authority = entry.Authority
+                                      Command = command
+                                      FromSeq = fromSeq
+                                      Background = entry.Background })
+                        // Consumed: the durable fact exists, so the doc key can go. Between
+                        // the append and this call the entry is in both places, which the
+                        // drain answers by planning against the log-anchored `consumed` set
+                        // rather than against the doc.
+                        onStarted ()
+                        // The command line is echoed into the transcript as INPUT, so a replay
+                        // shows what was typed as well as what came back — the same reason
+                        // asciinema records `"i"` events at all.
+                        emit terminalId terminal TranscriptInput (command + "\n")
 
-                    let mutable written = 0
-                    let mutable dropped = 0
+                        let mutable written = 0
+                        let mutable dropped = 0
 
-                    let! result =
-                        match terminal.Shell with
-                        // A LIVE-ONLY source (Plan 16, part D): bytes both ways, no prompt,
-                        // no marks — so nothing here could ever report that a command ended.
-                        // Refused as a value rather than left open forever, and refused
-                        // BEFORE the write, because writing a shell command line at a serial
-                        // device is not a no-op.
-                        | Some _ when not (canInstrument key) ->
-                            async {
-                                return
-                                    CommandExecutionFailed
-                                        "this terminal is live-only: its source cannot report a command's outcome"
-                            }
-                        | Some pty ->
-                            // TYPED into the terminal's one shell, which is what makes `cd`
-                            // in this block move the next one — the property a per-block
-                            // spawn structurally cannot have.
-                            async {
-                                // THIS block's own state, not the terminal's: `pending` is
-                                // per-terminal and a later block repopulates it, so a detector
-                                // keyed on it would be asking about the wrong command.
-                                let mutable settled = false
-                                let complete = Async.FromContinuations (fun (cont, _, _) ->
-                                    pending.[key] <-
-                                        ((fun code ->
-                                             settled <- true
-                                             cont code),
-                                         (fun () -> written),
-                                         (fun extra ->
-                                             dropped <- dropped + extra
-                                             written <- written + extra)))
-                                sawCommandStart.Remove key |> ignore
-                                pty.Write (writeFor command)
-                                // The integration detector (Plan 13, stage 2f), armed beside
-                                // the block rather than awaited: a lost shell must not make
-                                // this block wait, because the block is precisely what can no
-                                // longer be bounded. It stays open, which is the honest
-                                // rendering of "we no longer know when this finished".
-                                Async.StartImmediate (
-                                    async {
-                                        do! Async.Sleep integrationWindowMs
-                                        if not (sawCommandStart.Contains key)
-                                           && not settled
-                                           && not (Set.contains key lost) then
-                                            lost <- Set.add key lost
-                                            do!
-                                                append
-                                                    (SessionEvent.TerminalIntegrationLost
-                                                        { TerminalId = terminalId; BlockId = Some blockId })
-                                            reDrain ()
-                                    })
-                                let! code = complete
-                                return (if code = 0 then CommandSucceeded 0 else CommandFailed code)
-                            }
-                        | None ->
-                            // The degraded terminal: stage 1's path, unchanged.
-                            async {
-                                let onChunk (stream: OutputStream, text: string) =
-                                    if written >= blockOutputCap then dropped <- dropped + text.Length
-                                    else
-                                        let room = blockOutputCap - written
-                                        let kept = if text.Length <= room then text else text.Substring (0, room)
-                                        dropped <- dropped + (text.Length - kept.Length)
-                                        written <- written + kept.Length
-                                        let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
-                                        emit terminalId terminal kind kept
-                                let! spawned =
-                                    (environmentOf terminalId).Spawn
-                                        { Executable = shell.Executable
-                                          Arguments = shell.Arguments @ [ command ]
-                                          Env = Map.empty
-                                          WorkingDirectory = None }
-                                        onChunk
-                                match spawned with
-                                | Error reason -> return CommandExecutionFailed reason
-                                | Ok handle ->
-                                    match! handle.Exited with
-                                    | SandboxExited 0 -> return CommandSucceeded 0
-                                    | SandboxExited code -> return CommandFailed code
-                                    | SandboxRunFailed reason -> return CommandExecutionFailed reason
-                            }
-                    if dropped > 0 then
+                        let! result =
+                            match terminal.Shell with
+                            // A LIVE-ONLY source (Plan 16, part D): bytes both ways, no prompt,
+                            // no marks — so nothing here could ever report that a command ended.
+                            // Refused as a value rather than left open forever, and refused
+                            // BEFORE the write, because writing a shell command line at a serial
+                            // device is not a no-op.
+                            | Some _ when not (canInstrument key) ->
+                                async {
+                                    return
+                                        CommandExecutionFailed
+                                            "this terminal is live-only: its source cannot report a command's outcome"
+                                }
+                            | Some pty ->
+                                // TYPED into the terminal's one shell, which is what makes `cd`
+                                // in this block move the next one — the property a per-block
+                                // spawn structurally cannot have.
+                                async {
+                                    // THIS block's own state, not the terminal's: `pending` is
+                                    // per-terminal and a later block repopulates it, so a detector
+                                    // keyed on it would be asking about the wrong command.
+                                    let mutable settled = false
+                                    let complete = Async.FromContinuations (fun (cont, _, _) ->
+                                        pending.[key] <-
+                                            ((fun code ->
+                                                 settled <- true
+                                                 cont code),
+                                             (fun () -> written),
+                                             (fun extra ->
+                                                 dropped <- dropped + extra
+                                                 written <- written + extra)))
+                                    sawCommandStart.Remove key |> ignore
+                                    pty.Write (writeFor command)
+                                    // The integration detector (Plan 13, stage 2f), armed beside
+                                    // the block rather than awaited: a lost shell must not make
+                                    // this block wait, because the block is precisely what can no
+                                    // longer be bounded. It stays open, which is the honest
+                                    // rendering of "we no longer know when this finished".
+                                    Async.StartImmediate (
+                                        async {
+                                            do! Async.Sleep integrationWindowMs
+                                            if not (sawCommandStart.Contains key)
+                                               && not settled
+                                               && not (Set.contains key lost) then
+                                                lost <- Set.add key lost
+                                                do!
+                                                    append
+                                                        (SessionEvent.TerminalIntegrationLost
+                                                            { TerminalId = terminalId; BlockId = Some blockId })
+                                                reDrain ()
+                                        })
+                                    let! code = complete
+                                    return (if code = 0 then CommandSucceeded 0 else CommandFailed code)
+                                }
+                            | None ->
+                                // The degraded terminal: stage 1's path, unchanged.
+                                async {
+                                    let onChunk (stream: OutputStream, text: string) =
+                                        if written >= blockOutputCap then dropped <- dropped + text.Length
+                                        else
+                                            let room = blockOutputCap - written
+                                            let kept = if text.Length <= room then text else text.Substring (0, room)
+                                            dropped <- dropped + (text.Length - kept.Length)
+                                            written <- written + kept.Length
+                                            let kind = match stream with Stdout -> TranscriptOutput | Stderr -> TranscriptStderr
+                                            emit terminalId terminal kind kept
+                                    let! spawned =
+                                        (environmentOf terminalId).Spawn
+                                            { Executable = shell.Executable
+                                              Arguments = shell.Arguments @ [ command ]
+                                              Env = Map.empty
+                                              WorkingDirectory = None }
+                                            onChunk
+                                    match spawned with
+                                    | Error reason -> return CommandExecutionFailed reason
+                                    | Ok handle ->
+                                        match! handle.Exited with
+                                        | SandboxExited 0 -> return CommandSucceeded 0
+                                        | SandboxExited code -> return CommandFailed code
+                                        | SandboxRunFailed reason -> return CommandExecutionFailed reason
+                                }
+                        if dropped > 0 then
+                            do!
+                                append
+                                    (SessionEvent.TerminalTranscriptTruncated
+                                        { TerminalId = terminalId; BlockId = Some blockId; DroppedBytes = dropped })
                         do!
                             append
-                                (SessionEvent.TerminalTranscriptTruncated
-                                    { TerminalId = terminalId; BlockId = Some blockId; DroppedBytes = dropped })
-                    do!
-                        append
-                            (SessionEvent.TerminalBlockCompleted
-                                { TerminalId = terminalId
-                                  BlockId = blockId
-                                  Result = result
-                                  ToSeq = transcript.NextSeq () })
-                    runningAuthor.Remove key |> ignore
-                    busy <- Set.remove key busy
+                                (SessionEvent.TerminalBlockCompleted
+                                    { TerminalId = terminalId
+                                      BlockId = blockId
+                                      Result = result
+                                      ToSeq = transcript.NextSeq () })
+                        runningAuthor.Remove key |> ignore
+                        busy <- Set.remove key busy
             }
 
         let reclaimIdle (holdOf: TerminalId -> TerminalQueueDrain.TerminalHold option) : Async<unit> =
@@ -1556,7 +1513,8 @@ module SessionTerminals =
         /// that whoever was typing can see it happened and take it straight back.
         ///
         /// Refused on an instrumented terminal: there, a command is a block, blocks are what
-        /// people approve, and typing raw bytes into one would be the door around that gate.
+        /// the classifier reads and the record keeps, and typing raw bytes into one would be
+        /// the door around that gate.
         let write (id: TerminalId) (by: ActorRef) (data: string) : Async<Result<unit, string>> =
             async {
                 let key = TerminalId.value id
@@ -1564,16 +1522,16 @@ module SessionTerminals =
                 elif canInstrument key then
                     // The refusal stops exactly where the lease starts (Plan 20, stage 6). It
                     // exists because raw bytes into a shell would be the door around the
-                    // approval gate — and an actor already HOLDING an instrumented terminal is
-                    // one detection handed it to, over a block somebody already approved, whose
-                    // keystrokes are that block's. So no taking here, only using what the flip
-                    // gave you: an actor that could take this lease itself would be back
-                    // through the door it was refused at.
+                    // classifier — and an actor already HOLDING an instrumented terminal is
+                    // one detection handed it to, over a block already classified and on the
+                    // record, whose keystrokes are that block's. So no taking here, only
+                    // using what the flip gave you: an actor that could take this lease
+                    // itself would be back through the door it was refused at.
                     match TerminalLeases.holderOf id leases with
                     | Some holder when holder = by ->
                         return (if input id by data then Ok () else Error "this terminal has nothing to type into")
                     | _ ->
-                        return Error "this terminal runs commands as blocks — run it with execute_command, where people can approve it"
+                        return Error "this terminal runs commands as blocks — run it with execute_command, where they are classified and on the record"
                 else
                     match! take id by with
                     | Error reason -> return Error reason
@@ -1654,27 +1612,6 @@ module SessionTerminals =
                     appliedSize.[key] <- size
                 | _ -> ()
 
-        let reject (terminalId: TerminalId) (entry: PendingAct) (command: string) (onRecorded: unit -> unit) : Async<unit> =
-            async {
-                match entry.RejectedBy with
-                | None -> return ()
-                | Some by ->
-                    // Attributed to the peer who refused, exactly as an approval is: the
-                    // doc holds the connection fact and the event carries the actor.
-                    do!
-                        appendAs
-                            (PeerRef by)
-                            (SessionEvent.TerminalCommandRejected
-                                { TerminalId = terminalId
-                                  QueueId = entry.QueueId
-                                  BlockId = mintBlockId ()
-                                  Author = Authority.author entry.Authority
-                                  RejectedBy = PeerRef by
-                                  Command = command
-                                  Reason = entry.RejectedReason })
-                    onRecorded ()
-            }
-
         let reconcileAtBoot () : Async<unit> =
             async {
                 // Every terminal the log still calls open belongs to a process that is
@@ -1693,11 +1630,6 @@ module SessionTerminals =
         /// shared cell would quietly run a command meant for `test` in whichever sandbox
         /// happened to be first.
         ///
-        /// It opens in `AutoRun`, NOT the `ApproveAgent` default every other terminal has. If
-        /// it inherited that, the agent's one execution path would silently become an approval
-        /// prompt — a large change to autonomy smuggled in under a refactor. What the gate
-        /// gains instead is teeth: setting `ApproveAgent` on a terminal a human opened now
-        /// stops the agent, because there is no second door.
         /// How many NAMED terminals the agent may hold open in one sandbox (Plan 20, stage 3).
         /// Enough that independent work genuinely runs alongside itself; small enough that a
         /// sandbox is not asked to hold an unbounded number of shells because a model asked.
@@ -1732,7 +1664,6 @@ module SessionTerminals =
                     | Error reason -> return Error reason
                     | Ok id ->
                         agentOpened.Add (TerminalId.value id) |> ignore
-                        setAutoRun id
                         return Ok id
             }
 
@@ -1752,7 +1683,6 @@ module SessionTerminals =
                     | Error reason -> return Error reason
                     | Ok id ->
                         agentTerminals.[key] <- id
-                        setAutoRun id
                         return Ok id
             }
 
@@ -1763,7 +1693,6 @@ module SessionTerminals =
           OpenedByAgent = fun id -> agentOpened.Contains (TerminalId.value id)
           Close = closeTerminal
           RunBlock = runBlock
-          Reject = reject
           Take = take
           Release = release
           PeerGone = peerGone
@@ -1865,28 +1794,10 @@ module TerminalScheduler =
                         (terminals.Leased ())
                         (terminals.Lost ())
                         terminals.IsOpen
-                        (fun terminal -> SyncedSessionState.modeOf terminal synced)
                         synced.Pending
                 // Leftovers first: a crash between the start append and the doc removal
                 // leaves an entry that is already a block, and repairing it is free.
                 SyncedStateSync.removePending doc plan.Removals
-                // Refusals next, and before anything runs: they are what a person decided,
-                // and they free the head of a queue that a `Ready` entry may be sitting
-                // behind. Same snapshot-then-consume shape as a command that runs.
-                for terminal, entry in plan.Rejections do
-                    let command = SyncedStateSync.terminalQueuedText doc entry.QueueId
-                    consumed <- Set.add (QueueId.value entry.QueueId) consumed
-                    Async.StartImmediate (
-                        async {
-                            do!
-                                terminals.Reject
-                                    terminal
-                                    entry
-                                    command
-                                    (fun () -> SyncedStateSync.removePending doc [ entry.QueueId ])
-                            // The head may now be a different entry, and it may be ready.
-                            drain ()
-                        })
                 for terminal, entry in plan.Ready do
                     // Snapshot the command from THIS replica at the instant it is
                     // consumed, exactly as the message drain snapshots a body: what runs
@@ -1923,7 +1834,6 @@ module TerminalScheduler =
                         (terminals.Leased ())
                         (terminals.Lost ())
                         terminals.IsOpen
-                        (fun t -> SyncedSessionState.modeOf t synced)
                         synced.Pending
                         terminal
                 Async.StartImmediate (terminals.ReclaimIdle holdOf)
@@ -1936,15 +1846,11 @@ module TerminalScheduler =
 /// PR 1 shipped the terminal tool BESIDE `execute_command` rather than instead of it, and that
 /// split was worse than either end of it: the gated path returned before anything happened
 /// while the ungated one returned an answer, so a model that needed an answer took the path
-/// that gave one. The consequence was not a nudge being ignored — it was that `ApproveAgent`
-/// was UNENFORCEABLE, because the agent had a second door with no gate on it. The gate only
-/// becomes real when there is one door, which is this.
+/// that gave one. The consequence was not a nudge being ignored — it was that the gate was
+/// UNENFORCEABLE, because the agent had a second door with no gate on it. A gate only becomes
+/// real when there is one door, which is this — and the classifier (Plan 23) inherits exactly
+/// that property: it reads every command because every command comes through here.
 module TerminalCommands =
-
-    /// How long an approval is waited for. Short, because the point is only that a SUPERVISED
-    /// session — where someone is watching and approvals come in seconds — still chains
-    /// normally. Beyond it the tool yields a handle rather than holding the turn.
-    let approvalGrace = TimeSpan.FromSeconds 5.0
 
     /// How long a RUNNING command is waited for: the same bound the retired `execute_command`
     /// used. Keeping it is not a new risk, it is the existing one.
@@ -2051,7 +1957,6 @@ module TerminalCommands =
                         (terminals.Leased ())
                         (terminals.Lost ())
                         terminals.IsOpen
-                        (fun t -> SyncedSessionState.modeOf t synced)
                         synced.Pending
                         terminal
                   Interactive = terminals.Interactive terminal }
@@ -2070,19 +1975,16 @@ module TerminalCommands =
               OutputTail = (if elided > 0 then output.Substring elided else output)
               Elided = elided }
 
-        /// Wait out both phases, then answer. Both deadlines are measured from `startedAt`
-        /// rather than from entry into a phase, so a command that spends its grace waiting for
-        /// an approval and then runs still gets the full command timeout it would have had.
+        /// Wait the work out, then answer. The deadline is measured from the moment the block
+        /// STARTED, when one has, so a command that spent time queued behind another still
+        /// gets the full command timeout it would have had.
         let rec awaitOutcome (terminal: TerminalId) (handle: QueueId) (startedAt: DateTimeOffset) (runningSince: DateTimeOffset option) =
             async {
                 let elapsedSince (from: DateTimeOffset) = now () - from
                 let observation = observe terminal handle
-                // The process deadline runs from the moment the block STARTED, when one has;
-                // before that there is no process to time.
                 let deadlineFrom = runningSince |> Option.defaultValue startedAt
-                let graceElapsed = elapsedSince startedAt >= approvalGrace
                 let deadlineElapsed = elapsedSince deadlineFrom >= commandTimeout
-                match TerminalCommandWait.step graceElapsed deadlineElapsed observation with
+                match TerminalCommandWait.step deadlineElapsed observation with
                 | TerminalCommandWait.Return status -> return Ok (outcomeOf terminal handle status)
                 | TerminalCommandWait.Gone ->
                     return Error "that command was removed from the queue before it ran"
@@ -2125,7 +2027,7 @@ module TerminalCommands =
                         let handle = mintQueueId ()
                         // Visible to every peer the instant this lands — before any waiting —
                         // because the point of the one door is that what the agent is about to
-                        // run is something people can read, edit and refuse.
+                        // run is something people can read, edit and withdraw.
                         SyncedStateSync.enqueueTerminalCommand
                             doc
                             handle
@@ -2139,13 +2041,13 @@ module TerminalCommands =
                             // Answer with what is true NOW rather than waiting: the caller
                             // said it is not waiting, and the outcome reaches it as a wake
                             // and the digest that turn reads. Not "queued" as a fixed word,
-                            // because the honest answer differs — a refusal or a hold has
-                            // already happened by the time an `AutoRun` terminal drains, and
+                            // because the honest answer differs — a refusal or a hold may
+                            // already have happened by the time the terminal drains, and
                             // reporting those as "queued" is how a model concludes, after a
                             // silence, that its command failed and tries something else.
                             let observation = observe terminal handle
                             let status =
-                                match TerminalCommandWait.step false false observation with
+                                match TerminalCommandWait.step false observation with
                                 | TerminalCommandWait.Return status -> status
                                 | TerminalCommandWait.Gone | TerminalCommandWait.KeepWaiting ->
                                     TerminalCommandRunning
