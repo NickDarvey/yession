@@ -470,6 +470,44 @@ resumes the queue. The one place the chat acts, and it trails everything else.
 *Tests:* cheap tier for the flip-policy revision and lease bounds; `Browser` for the
 handoff card's focus contract; `Ports Native` for wedge → handoff → release → drain.
 
+**Shipped in two, because the lease is what the handoff hands over.** 6a is the flip's third
+rule and the hands that make an answer to it worth having; 6b is the chat surface that offers
+the terminal to a person when the agent does not resolve it.
+
+**As built (6a).**
+
+- **The wedge was real, and worse than the plan said.** Rule 3 read "an agent-authored block
+  does not flip — live mode is human-only", and what it left behind was not a lease the agent
+  went without. It was a block that never finishes: a full-screen program waits for a keystroke
+  nobody was allowed to send, so the terminal stays `busy` for ever and every command queued
+  behind it stalls with it. The only exit was killing the terminal. The comment even named the
+  answer it did not have — "the alt-screen unwedge on block completion" — for a block whose
+  completion is the thing being waited on.
+- **The rule follows the AUTHOR, and that is the whole revision.** Rule 1 already said it: the
+  person whose command started the program is the person who now needs to type into it. Rule 3
+  was an exception to rule 1, and it was true of a session where the agent had no hands — live
+  mode was a browser surface, so handing it a terminal would have handed it to nobody. Plan 19
+  gave it `write_terminal`/`read_terminal`, and the exception outlived its reason. What still
+  does not flip is `SessionProcess` and `System`, which is not policy either: no surface
+  anywhere sends keystrokes as either of them.
+- **The refusal narrows to the lease; it does not go away.** `write_terminal` refuses an
+  instrumented terminal because raw bytes into a shell would be the door around the approval
+  gate — and that reason stops exactly where the lease starts, since a terminal detection
+  handed over is one where a block somebody already approved has taken the screen and the
+  keystrokes it waits for are that block's. So on an instrumented terminal `write_terminal`
+  does not TAKE, it uses what the flip gave it; an actor that could take this lease itself
+  would be back through the door it was refused at. `read_terminal` is admitted on the same
+  terminals but gated on DETECTION rather than on the reader, because a reader is not a second
+  writer: it takes nothing and blocks nobody, so who is asking does not change the answer.
+- **A new status, because the deadline was answering the wrong question.**
+  `TerminalCommandInteractive`. A wedged block is the one running block that will never finish
+  on its own — it is waiting for the caller — so burning the 120s process deadline and then
+  reporting `TerminalCommandRunning` spends two minutes telling the only party who could end it
+  to be patient. Returned the moment detection hands the terminal over, deadline or no.
+- **The handoff's control was already there.** A lease held by the agent renders in the lease
+  bar exactly as a peer's does — the agent's presence colour, its name, and "Take over" — so
+  what 6b adds is the chat's own surface for it, not the ability to take it.
+
 ## Protocol and versioning
 
 Session events change (`Background` on `TerminalBlockStarted`, `Woke` on

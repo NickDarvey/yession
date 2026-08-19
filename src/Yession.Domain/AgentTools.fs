@@ -106,6 +106,10 @@ module AgentTools =
             sprintf
                 "STILL RUNNING in %s. It has NOT finished; nothing was cancelled. Call check_pending with handle '%s' to pick it up.%s"
                 where handle output
+        | TerminalCommandInteractive ->
+            sprintf
+                "WAITING FOR A KEYSTROKE in %s. It opened a full-screen program, so it will not finish on its own — and the terminal is now YOURS to type into. Use write_terminal to answer it and read_terminal to see the screen; leaving the program hands the terminal back and finishes the command. Call check_pending with handle '%s' for the outcome.%s"
+                where handle output
         | TerminalCommandAwaitingApproval ->
             sprintf
                 "WAITING FOR A HUMAN TO APPROVE IT in %s. It has not run. Do not wait for output — say what you queued and why. Call check_pending with handle '%s' once they have had a chance to look."
@@ -460,7 +464,7 @@ module AgentTools =
 
           tool
               "write_terminal"
-              "Type into a terminal that is streaming something live — a device, a console, anything whose bytes come from outside this session — where execute_command does not apply because there are no commands to run. Send exactly the bytes you mean, including \"\\r\" if the thing on the other end expects a newline. Taking it makes you the terminal's holder, which everyone here can see and take back, so type what you meant to and hand it over. Refused on an ordinary shell terminal: use execute_command there."
+              "Type into a terminal you hold the keyboard for: one streaming something live — a device, a console, anything whose bytes come from outside this session — or one where a command of yours opened a full-screen program and is waiting for a keystroke. Send exactly the bytes you mean, including \"\\r\" if the thing on the other end expects a newline. On a live stream, typing takes the terminal, which everyone here can see and take back, so type what you meant to and hand it over. On a shell terminal it works only while you already hold it — otherwise use execute_command, where people can approve what you run."
               [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream"
                 ToolField.required "data" "string" "the bytes to type, e.g. \"AT\\r\"" ]
               (fun args ->
@@ -475,7 +479,7 @@ module AgentTools =
 
           tool
               "read_terminal"
-              "Read what a terminal that is streaming something live has said — a device, a console, anything whose bytes come from outside this session. This is how you see the answer to what write_terminal typed. Returns the tail of it, saying how much it left out. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on an ordinary shell terminal, where what a command printed comes back from execute_command instead."
+              "Read what a terminal has said, when its answer does not come back as a command's output — one streaming something live, or a shell terminal where a command has opened a full-screen program and is waiting for a keystroke. Returns the tail of it, saying how much it left out. Reading takes nothing from anybody: whoever is typing keeps the terminal. Refused on a shell terminal running ordinary commands, where what one printed comes back from execute_command instead."
               [ ToolField.required "terminal" "string" "the terminal id, from the terminal that was opened for the stream" ]
               (fun args ->
                   async {

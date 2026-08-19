@@ -569,17 +569,22 @@ Items are roughly ordered by how much they matter.
   `examples/jumpstarter`). Its stream is a drain loop over a `pexpect` handle rather than
   ownership of the fd, so a person typing sees their own echo up to ~200ms late. Inherent to
   teeing a handle the SDK owns: the serial provider, which owns its fd, has no such floor.
-- **An agent holds a lease only where there are no blocks to hold instead.** This used to
-  read "agent commands cannot hold a live-mode lease — until there is a reason to change
-  that", and [Plan 19](plans/19-provider-streams.md) step 3 was the reason: a live-only
-  source has no blocks, so `execute_command` has nothing to do there and the alternative was
-  the provider's own write tool, past the lease entirely. `write_terminal` takes the lease
-  exactly as a peer does — visible in the holder field, stealable back mid-sentence, every
-  byte in the transcript. What has NOT changed is the shell case: on an instrumented
-  terminal the agent still runs blocks, which is what the approval gate is attached to, and
-  `write_terminal` is refused there. The drain gate that accompanies live mode (Plan 13,
-  stage 2e) is unchanged — a leased terminal holds its queue rather than typing into a
-  session someone else owns.
+- **An agent holds a lease where its own block has taken the screen, and nowhere else it
+  could have run a block instead.** Closed in two steps, and what is left is a boundary
+  rather than a shortfall. [Plan 19](plans/19-provider-streams.md) step 3 was the first: a
+  live-only source has no blocks, so `execute_command` has nothing to do there and the
+  alternative was the provider's own write tool, past the lease entirely. `write_terminal`
+  takes the lease exactly as a peer does — visible in the holder field, stealable back
+  mid-sentence, every byte in the transcript. [Plan 20](plans/20-collaborative-terminals.md)
+  stage 6a was the second, and it was a bug rather than a policy: the alt-screen flip refused
+  to hand an agent-authored block its terminal, so a full-screen program waited for a
+  keystroke nobody was allowed to send, its block never finished, and every command queued
+  behind it stalled for ever. The flip now follows the AUTHOR, agent included. The boundary
+  that remains is that the agent cannot TAKE an instrumented terminal — it may only use the
+  one detection hands it, over a block somebody already approved — because taking it would be
+  the door around the approval gate that `execute_command` is the one door for. The drain gate
+  that accompanies live mode (Plan 13, stage 2e) is unchanged — a leased terminal holds its
+  queue rather than typing into a session someone else owns.
 - **The live viewport is proven host-free, never against a real pty end to end**
   ([Plan 14](plans/14-terminal-replay-in-chat.md), stage 6 — which closed the older
   "no browser viewport" gap: the panel renders a live screen, the holder's copy takes
