@@ -1,9 +1,26 @@
 # Plan 24 — Scoping a sandbox's reads to a directory
 
-> **Status: investigation. Nothing implemented.** Every claim below was produced by RUNNING
+> **Status: Option A landed.** Every claim below was produced by RUNNING
 > `@anthropic-ai/sandbox-runtime` 0.0.67 (the pinned version) against real bubblewrap, or by
 > reading the shipped implementation where this box cannot run it (macOS). Where a claim is
 > code-read rather than executed, it says so.
+>
+> Three things changed against the suggested shape at the bottom, all of them removals:
+>
+> - **No `ReadScope` on `SandboxPolicy`.** The distinction the type would have carried —
+>   confined or not — is the one `FilesystemConfinement` already carries, and a second
+>   spelling of it would have been two ways to say one thing. `configFor` denies `/` and the
+>   `Unconfined` clone spawn keeps turning srt's filesystem rules off wholesale.
+> - **The runtime allow-back rides `SrtTools`, not the policy.** It is a property of the
+>   BOX — where this host keeps its interpreter — not of what a sandbox may touch, and it is
+>   the same list for both sandboxes. Putting it on the policy would have meant both policy
+>   builders remembering to add it, which is the shape of an invariant a caller can break.
+> - **One environment variable, not two.** `YESSION_SANDBOX_READ_PATHS` for both sandboxes,
+>   for the same reason: the host's runtime does not differ between them.
+>
+> `toolsFrom` is impure now (it reads `process.execPath` and resolves srt's own package).
+> That is the trade for the point above — the decisions under it, `installPrefix` and
+> `runtimeReadPaths`, stay pure and are where the cheap tier pins this.
 
 ## The gap
 
@@ -182,21 +199,29 @@ the srt backend.
   deny lands as `--ro-bind path path`). The fix is the Session Process's `HOME`, which is a
   separate one-line change and worth doing whichever option lands.
 
-## Suggested shape, if this is taken up
+## What landed
 
-1. `SandboxPolicy` grows the read scope as data — a `ReadScope` of `ScopedTo of string list`
-   / `UnrestrictedRead`, rather than a bare bool, so the docker and host backends can keep
-   ignoring it without a second meaning for `[]`.
-2. `Sandboxes.runtimeReadPaths : Map<string,string> -> string list` — platform default +
-   `process.execPath` prefix + srt package dir + operator override. Pure, cheap-tier tested.
-3. `configFor` maps a scoped policy to `DenyRead = ["/"]`, `AllowRead = read @ write @
-   runtime`. One place, both sandboxes.
-4. `SrtIntegration` gains the denial cases the probes above already are: a checkout outside
-   the policy is unreadable, a sibling session's `agent-home` is unreadable, `/etc/shadow`
-   is unreadable, and a plain command still runs. They are denial assertions, which is what
-   that suite is for.
-5. GAPS: replace "reads and writes only its scratch HOME of the operator's files" with what
-   is actually true, and record `/proc`, `/sys` and the clone sandbox as the residue.
-
-The whole of step 3 is two lines; steps 1, 2 and 4 are where the work is, and step 2 is the
-only one with a judgement call in it.
+1. **`SrtTools.Runtime`** — what stays readable on this box once everything else is denied,
+   beside the tool paths and the nesting, because it is the same kind of fact: how this HOST
+   has to be driven to confine. Assembled by `runtimeReadPaths` from the platform list
+   (`linuxRuntimePaths` / `darwinRuntimePaths`), the install prefix of what is already
+   running (`installPrefix` over `process.execPath`, srt's own package, `YESSION_CLAUDE_PATH`)
+   and `YESSION_SANDBOX_READ_PATHS`. `toolsFrom` refuses the boot when srt's own files cannot
+   be located, which is the difference between one legible error and every command exiting
+   127.
+2. **`configFor` denies `/`** and allows back the policy's read paths, its write paths and
+   `tools.Runtime`. One place; both sandboxes go through it. The `home` parameter is gone
+   from `configFor`, `create` and `wrapperFor` — a root deny covers the home by
+   construction, and a second mechanism for it would be one nobody re-checks.
+3. **Cheap tier** (`Phase2`) pins the decisions: the deny is `/`; the holes are exactly the
+   three; an install prefix is the tree a runtime was installed as and never a region above
+   it; the operator's paths add to the platform's rather than replacing them; `/etc` is
+   named a file at a time so the carve never re-allows `/etc/shadow`.
+4. **`Srt` tier** pins the behaviour, by running it: a read outside the policy's paths is
+   refused, the host runtime stays readable (a real interpreter runs), and the AgentSandbox
+   — the narrowest scope in the product — can still start the CLI's interpreter. The first
+   of those was confirmed to go red by regressing `DenyRead` back to the home, rather than
+   trusted for passing.
+5. **GAPS** records the scope, the runtime list it depends on, the unverified darwin half,
+   and the three things it does not close (`/proc`/`/sys`, the clone spawn, srt's own
+   default write paths).

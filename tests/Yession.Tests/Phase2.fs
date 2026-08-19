@@ -142,6 +142,15 @@ let private promiseAwaitTests =
             }
     ]
 
+/// The confinement tools, with the read scope's allow-back as the field a case varies. The
+/// tool paths are what a darwin host has (none): nothing below turns on them.
+let private toolsWithRuntime (runtime: string list) : Sandboxes.SrtTools =
+    { Bwrap = None
+      Socat = None
+      Ripgrep = None
+      Nesting = Sandboxes.StrictNesting
+      Runtime = runtime }
+
 let private sandboxPolicyTests =
     testList "Sandbox policy (pure)" [
         testCase "backend parsing accepts exactly host, srt, and docker — and fails closed" <| fun () ->
@@ -202,48 +211,117 @@ let private sandboxPolicyTests =
                 (Some [])
                 "and none where none were configured — srt has no unrestricted mode, so it fails closed"
 
-        testCase "the srt config: the home is denied, the policy's paths are the holes in it" <| fun () ->
+        testCase "the srt config denies every read, and the policy's paths are the holes in it" <| fun () ->
+            // Denying only the operator's home left everything nobody thought to name —
+            // another session's data directory, a checkout this session was never given —
+            // readable by every command the agent issues.
             let policy =
                 { Support.emptyPolicy with
                     ReadPaths = [ "/opt/tools" ]
-                    WritePaths = [ "/data/workspace" ]
-                    AllowedDomains = Some [ "api.example.com" ] }
+                    WritePaths = [ "/data/workspace" ] }
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime [ "/usr" ]) policy
+            Expect.equal config.DenyRead [ "/" ] "the denied region is the whole filesystem"
+            Expect.equal
+                config.AllowRead
+                [ "/opt/tools"; "/data/workspace"; "/usr" ]
+                "read paths, everything writable (a workspace that cannot be read is no workspace), and the host runtime"
+
+        testCase "the srt config carries the tools, the egress and the temp dir through" <| fun () ->
+            let policy = { Support.emptyPolicy with WritePaths = [ "/data/workspace" ]; AllowedDomains = Some [ "api.example.com" ] }
             let config =
                 Sandboxes.SrtSandbox.configFor
-                    { Bwrap = Some "/usr/bin/bwrap"
-                      Socat = Some "/usr/bin/socat"
-                      Ripgrep = Some "/usr/bin/rg"
-                      Nesting = Sandboxes.StrictNesting }
-                    (Some "/home/operator")
+                    { toolsWithRuntime [] with
+                        Bwrap = Some "/usr/bin/bwrap"
+                        Socat = Some "/usr/bin/socat"
+                        Ripgrep = Some "/usr/bin/rg" }
                     policy
-            Expect.equal config.DenyRead [ "/home/operator" ] "the operator's home is the denied region"
-            Expect.equal config.AllowRead [ "/opt/tools"; "/data/workspace" ] "read paths, and everything writable"
             Expect.isTrue (List.contains "/data/workspace" config.AllowWrite) "the policy's write paths"
             Expect.isTrue (List.contains Sandboxes.SrtSandbox.tmpDir config.AllowWrite) "and the temp dir srt redirects TMPDIR to"
             Expect.equal config.AllowedDomains [ "api.example.com" ] "the egress allowlist rides through"
             Expect.equal config.Bwrap (Some "/usr/bin/bwrap") "the named confinement tool rides through"
             Expect.equal config.Ripgrep (Some "/usr/bin/rg") "and so does the scanner srt will not start without"
             Expect.isFalse config.WeakNesting "the strict profile is what a configured host gets"
-            let unrestricted =
-                Sandboxes.SrtSandbox.configFor
-                    { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
-                    None
-                    Support.emptyPolicy
-            Expect.equal unrestricted.AllowedDomains [] "a policy naming no domains gets no egress, never all of it"
+
+        testCase "a policy naming no domains gets no egress, never all of it" <| fun () ->
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) Support.emptyPolicy
+            Expect.equal config.AllowedDomains [] "srt has no unrestricted mode, so nothing configured means nothing reachable"
+
+        testCase "an install prefix is the tree a runtime was installed AS, never a region above it" <| fun () ->
+            // What has to stay readable when reads are scoped: the interpreter, srt's own
+            // vendored helper. Nix gives every dependency its own store path, so the store
+            // is the unit; an npm install shares one node_modules, so the tree that owns it
+            // is; a one-segment answer is a region far larger than what was installed in it.
+            Expect.equal
+                (Sandboxes.SrtSandbox.installPrefix "/nix/store/abc-nodejs-24/bin/node")
+                (Some "/nix/store")
+                "under Nix the dependencies are siblings in the store, not children of the prefix"
+            Expect.equal
+                (Sandboxes.SrtSandbox.installPrefix "/srv/app/node_modules/@anthropic-ai/sandbox-runtime/package.json")
+                (Some "/srv/app")
+                "an npm install is the tree that owns the node_modules"
+            Expect.equal
+                (Sandboxes.SrtSandbox.installPrefix "/opt/node22/bin/node")
+                (Some "/opt/node22")
+                "anywhere else it is the prefix above bin"
+            Expect.equal
+                (Sandboxes.SrtSandbox.installPrefix "/usr/bin/node")
+                None
+                "and a one-segment prefix is dropped: /usr is the platform's to name, not an install's"
+
+        testCase "the read scope's allow-back adds the operator's paths, it does not replace the platform's" <| fun () ->
+            // The opposite of YESSION_*_DOMAINS, and deliberately: a deployment naming its
+            // unusual toolchain still needs libc.
+            let paths =
+                Sandboxes.SrtSandbox.runtimeReadPaths
+                    "linux"
+                    [ "/opt/node22/bin/node" ]
+                    (Map.ofList [ "YESSION_SANDBOX_READ_PATHS", "/srv/toolchain, /srv/sdk" ])
+            Expect.isTrue (List.contains "/usr" paths) "the platform's runtime is still there"
+            Expect.isTrue (List.contains "/opt/node22" paths) "so is what is already running"
+            Expect.isTrue (List.contains "/srv/toolchain" paths) "and the operator's additions"
+            Expect.isTrue (List.contains "/srv/sdk" paths) "all of them"
+
+        testCase "the read scope allows /etc by the file, never the directory that holds the secrets" <| fun () ->
+            // /etc is the one region in the runtime list that also holds an operator's
+            // credentials, so it is named a file at a time. `/etc` itself would re-allow
+            // shadow, and every private key a distribution keeps under it.
+            Expect.isTrue (List.contains "/etc/ssl" Sandboxes.SrtSandbox.linuxRuntimePaths) "the trust store is named"
+            Expect.isFalse (List.contains "/etc" Sandboxes.SrtSandbox.linuxRuntimePaths) "the directory itself is not"
+
+        testCase "an install prefix that is the operator's home is not an allow-back" <| fun () ->
+            // `npm i yession` run in a home directory puts the tree at ~/node_modules, whose
+            // owning prefix is the home itself — so allowing it back would hand over the
+            // whole region this scope exists to deny, and silently.
+            let ambient = Map.ofList [ "HOME", "/home/operator" ]
+            Expect.isFalse
+                (List.contains
+                    "/home/operator"
+                    (Sandboxes.SrtSandbox.runtimeReadPaths "linux" [ "/home/operator/node_modules/x/package.json" ] ambient))
+                "a discovered prefix that is the home is dropped"
+            Expect.isTrue
+                (List.contains
+                    "/home/operator"
+                    (Sandboxes.SrtSandbox.runtimeReadPaths
+                        "linux"
+                        []
+                        (Map.add "YESSION_SANDBOX_READ_PATHS" "/home/operator" ambient)))
+                "an operator naming it explicitly means it"
+
+        testCase "the read scope's platform list is the platform's, not this box's" <| fun () ->
+            Expect.isTrue
+                (List.contains "/System" (Sandboxes.SrtSandbox.runtimeReadPaths "darwin" [] Map.empty))
+                "a darwin host gets darwin's runtime locations"
+            Expect.isFalse
+                (List.contains "/System" (Sandboxes.SrtSandbox.runtimeReadPaths "linux" [] Map.empty))
+                "and a Linux host does not"
 
         testCase "the srt config opens .git/config, which a clone cannot avoid writing" <| fun () ->
-            let config =
-                Sandboxes.SrtSandbox.configFor
-                    { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
-                    None
-                    Support.emptyPolicy
+            let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) Support.emptyPolicy
             Expect.isTrue config.AllowGitConfig "srt's default denies the write every `git clone` makes"
 
         testCase "an unconfined policy turns srt's filesystem rules off, and only that policy does" <| fun () ->
-            let tools : Sandboxes.SrtTools =
-                { Bwrap = None; Socat = None; Ripgrep = None; Nesting = Sandboxes.StrictNesting }
             let configFor filesystem =
-                Sandboxes.SrtSandbox.configFor tools None { Support.emptyPolicy with Filesystem = filesystem }
+                Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) { Support.emptyPolicy with Filesystem = filesystem }
             Expect.isFalse (configFor Confined).FilesystemDisabled "every ordinary sandbox is confined"
             Expect.isTrue
                 (configFor Unconfined).FilesystemDisabled
@@ -261,6 +339,9 @@ let private sandboxPolicyTests =
             Expect.equal tools.Ripgrep (Some "/nix/store/x/bin/rg") "every dependency is named, not left to PATH"
             Expect.equal tools.Socat None "a blank one is absent (darwin sets neither), not a path of empty string"
             Expect.equal tools.Nesting Sandboxes.StrictNesting "unconfigured means the strict profile"
+            Expect.isTrue
+                (List.contains "/usr" tools.Runtime)
+                "and the host's own runtime is discovered, not left to a caller to remember"
             Expect.equal
                 (Sandboxes.SrtSandbox.toolsFrom (Map.ofList [ "YESSION_SANDBOX_NESTED", "weak" ])
                  |> expect

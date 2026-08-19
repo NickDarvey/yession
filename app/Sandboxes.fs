@@ -228,6 +228,26 @@ module private Children =
             live |> List.iter (fun (_, kill) -> kill ())
             live <- []
 
+// --- Resolving packages by name at runtime -----------------------------------------------
+//
+// `createRequire`, not a bare `require`. Fable emits ESM and the test bundle runs as ESM,
+// where `require` is simply not defined — so a bare one throws ReferenceError, which the
+// tries below would swallow into "the thing is absent" on a box that has it. That is exactly
+// what happened: the standalone node-pty probe passed (`node -e` runs as CJS) while every pty
+// test reported no pty support.
+//
+// A static `import` is the other option and is worse here: node-pty is CJS-only and a missing
+// package would fail the whole module's load rather than this one lookup, which would turn "no
+// addon" from an answer into a crash.
+//
+// Typed `obj`, not `string -> (string -> obj)`: Fable sees a curried arrow and wraps the
+// import in `uncurry2`, which rewrites the call into `createRequire(url, name)` — one call
+// where two were meant. It fails, the try catches it, and the addon reports absent on a box
+// that has it. Opaque here, applied in the emits that use it — the pty's lookup below, and
+// srt's own installation further down.
+[<Import("createRequire", "node:module")>]
+let private createRequire : obj = jsNative
+
 // --- Pseudo-terminals: the one place this module opens a pty -----------------------------
 //
 // `node-pty`, built from source into the Nix `nodeModules` derivation (nix/node-pty.nix).
@@ -235,22 +255,6 @@ module private Children =
 // than a failure: off Nix the addon may not be there, and a backend that cannot open a pty
 // reports `SpawnPty = None` instead of throwing when someone runs `vim`.
 module private Pty =
-
-    // `createRequire`, not a bare `require`. Fable emits ESM and the test bundle runs as
-    // ESM, where `require` is simply not defined — so a bare one throws ReferenceError,
-    // which the try below would swallow into "the addon is absent" on a box that has it.
-    // That is exactly what happened: the standalone probe passed (`node -e` runs as CJS)
-    // while every pty test reported no pty support.
-    //
-    // A static `import` is the other option and is worse here: node-pty is CJS-only and a
-    // missing package would fail the whole module's load rather than this one lookup, which
-    // would turn "no addon" from an answer into a crash.
-    // Typed `obj`, not `string -> (string -> obj)`: Fable sees a curried arrow and wraps the
-    // import in `uncurry2`, which rewrites the call into `createRequire(url, name)` — one
-    // call where two were meant. It fails, the try below catches it, and the addon reports
-    // absent on a box that has it. Opaque here, applied in the emit.
-    [<Import("createRequire", "node:module")>]
-    let private createRequire : obj = jsNative
 
     [<Emit("(() => { try { return $0(import.meta.url)('node-pty') } catch { return null } })()")>]
     let private tryRequireWith (mk: obj) : obj = jsNative
@@ -626,8 +630,9 @@ type SandboxNesting =
 
 /// How this host must be driven to confine: the tools srt shells out to, named rather
 /// than looked up on PATH (srt treats a named path as a directive and reports it missing;
-/// a PATH lookup would silently take someone else's build), and how far the nesting can
-/// go. Both paths are `None` on macOS, where Seatbelt ships with the OS and needs neither.
+/// a PATH lookup would silently take someone else's build), how far the nesting can go,
+/// and what stays readable once everything else is denied. Both tool paths are `None` on
+/// macOS, where Seatbelt ships with the OS and needs neither.
 type SrtTools =
     { Bwrap : string option
       Socat : string option
@@ -636,7 +641,13 @@ type SrtTools =
       /// without one — and naming it is what stops a host's incidental `rg` from deciding
       /// how a session confines.
       Ripgrep : string option
-      Nesting : SandboxNesting }
+      Nesting : SandboxNesting
+      /// The host files every sandbox on this box may read whatever its policy says: the
+      /// interpreter its commands run, the libraries that interpreter links, the trust
+      /// store a TLS client opens, and srt's own vendored helper. A property of the HOST,
+      /// not of a policy — which is why it sits beside the tool paths rather than on
+      /// `SandboxPolicy`, and why both sandboxes take the same list.
+      Runtime : string list }
 
 /// The srt runtime configuration a policy becomes. Assembled as data so the mapping is
 /// checkable without a sandbox: what is denied, what is re-allowed, and where egress may
@@ -677,6 +688,112 @@ module SrtSandbox =
     /// env once, not per sandbox — one path for the process is the honest shape.)
     let tmpDir = "/tmp/claude"
 
+    // --- What stays readable once everything else is denied -----------------------------
+    //
+    // A sandbox that denies every read denies the interpreter its own commands run on, so
+    // the deny is only half of a read scope: the other half is the host runtime, named
+    // here. It is deployment-specific by nature — the interpreter can be anywhere — so it
+    // is assembled from three sources rather than guessed at: the platform's ordinary
+    // locations, the prefix whatever is ALREADY running was installed under, and an
+    // operator's override for a toolchain neither of those finds.
+
+    /// The ordinary locations a Linux host keeps its runtime in. Coarse for executables and
+    /// their libraries — those are the files every PATH lookup already reaches — and fine
+    /// for `/etc`, which is the one region here that also holds an operator's secrets
+    /// (`/etc/shadow` stays denied). srt skips an allow path that does not exist, so this
+    /// is the union across distributions rather than a guess at which one is underneath.
+    let linuxRuntimePaths : string list =
+        [ "/usr"; "/bin"; "/sbin"; "/lib"; "/lib32"; "/lib64"; "/libx32"
+          // Certificates: a command that cannot verify TLS cannot use the egress it was
+          // granted. `/etc/static` is where NixOS keeps the real files /etc points at.
+          "/etc/ssl"; "/etc/pki"; "/etc/ca-certificates"; "/etc/ca-certificates.conf"
+          "/etc/static"
+          // Users, hosts, resolution, time: what libc reads before `main`.
+          "/etc/passwd"; "/etc/group"; "/etc/hosts"; "/etc/hostname"; "/etc/resolv.conf"
+          "/etc/nsswitch.conf"; "/etc/localtime"
+          // The loader, and the symlink farm a distribution's binaries resolve through.
+          "/etc/ld.so.cache"; "/etc/ld.so.conf"; "/etc/ld.so.conf.d"; "/etc/alternatives"
+          // A terminal's capabilities, a shell's startup files, git's system config.
+          "/etc/terminfo"; "/etc/inputrc"; "/etc/profile"; "/etc/profile.d"
+          "/etc/bash.bashrc"; "/etc/shells"; "/etc/gitconfig" ]
+
+    /// The same for macOS. UNVERIFIED by any run here: no job in this repository executes a
+    /// suite on darwin (pr.yaml's macos job builds the package and enters the dev shell),
+    /// and the box that verified the Linux list is Linux. It is what a Seatbelt profile
+    /// conventionally allows back; if it is short, the failure is loud and local — a
+    /// command cannot find its interpreter — and `YESSION_SANDBOX_READ_PATHS` is the answer.
+    let darwinRuntimePaths : string list =
+        [ "/usr"; "/bin"; "/sbin"; "/System"; "/Library"; "/opt/homebrew"; "/nix"
+          "/private/etc"; "/private/var/db"; "/private/var/select" ]
+
+    /// Where a runtime installed at `path` has to be readable FROM.
+    ///
+    /// Nix gives every dependency its own store path, so the executable's own prefix is not
+    /// enough — the store is the unit. An npm install puts a package's siblings beside it
+    /// under one `node_modules`, so the tree that owns it is. Anywhere else it is the prefix
+    /// above `bin`.
+    ///
+    /// A one-segment answer (`/usr`, `/opt`, `/home`) is dropped rather than returned:
+    /// either the platform list already names it, or it is a region vastly larger than the
+    /// thing installed in it — which is how an allow-back quietly hands back the filesystem
+    /// the deny just took.
+    let installPrefix (path: string) : string option =
+        let store = "/nix/store/"
+        let modules = "/node_modules/"
+        let candidate =
+            if path.StartsWith store then Some "/nix/store"
+            elif path.Contains modules then Some (path.Substring (0, path.IndexOf modules))
+            else
+                match path.LastIndexOf '/' with
+                | -1 -> None
+                | last ->
+                    let dir = path.Substring (0, last)
+                    match dir.LastIndexOf '/' with
+                    | -1 -> None
+                    | up -> Some (dir.Substring (0, up))
+        candidate
+        |> Option.filter (fun prefix ->
+            prefix.Split '/' |> Array.filter (fun segment -> segment <> "") |> Array.length >= 2)
+
+    /// The operator's extra read paths, comma- or space-separated. It ADDS to the platform
+    /// list rather than replacing it — unlike `YESSION_*_DOMAINS`, which replaces — because
+    /// a deployment naming its unusual toolchain still needs libc.
+    let configuredReadPaths (ambient: Map<string, string>) : string list =
+        ambient
+        |> Map.tryFind "YESSION_SANDBOX_READ_PATHS"
+        |> Option.defaultValue ""
+        |> fun raw -> raw.Split ([| ','; ' '; '\t'; '\n' |])
+        |> Array.map (fun path -> path.Trim ())
+        |> Array.filter (fun path -> path <> "")
+        |> List.ofArray
+
+    /// What a confined sandbox may read beyond the paths its own policy names. `installed`
+    /// is what is already running on this host — the interpreter, srt's own files — read
+    /// back through `installPrefix`.
+    ///
+    /// An install prefix that IS the operator's home is dropped, and this is the one place
+    /// the home is still named. `npm i yession` run in a home directory puts the tree at
+    /// `~/node_modules`, whose owning prefix is the home itself — so the allow-back would
+    /// hand back the entire region this scope exists to deny, and it would do it silently.
+    /// Refusing it fails the other way instead: that layout cannot start a command until an
+    /// operator names a narrower path in `YESSION_SANDBOX_READ_PATHS`. An explicitly
+    /// configured path is never dropped — an operator naming their home means it.
+    let runtimeReadPaths (platform: string) (installed: string list) (ambient: Map<string, string>) : string list =
+        let platformPaths =
+            match platform with
+            | "darwin" -> darwinRuntimePaths
+            | _ -> linuxRuntimePaths
+        let home =
+            ambient
+            |> Map.tryFind "HOME"
+            |> Option.map (fun path -> path.TrimEnd '/')
+            |> Option.filter (fun path -> path <> "")
+        let prefixes =
+            installed
+            |> List.choose installPrefix
+            |> List.filter (fun prefix -> Some prefix <> home)
+        platformPaths @ prefixes @ configuredReadPaths ambient |> List.distinct
+
     /// Quote one argument for the shell srt wraps the command in. srt's Linux and macOS
     /// wrappers take a COMMAND STRING (the profile ends in `<shell> -c <wrapped>`), so an
     /// argv has to survive a shell round-trip: single-quote everything, and close/escape/
@@ -689,19 +806,27 @@ module SrtSandbox =
 
     /// A policy as an srt configuration.
     ///
-    /// Reads are deny-then-allow: srt starts readable everywhere (the sandbox still needs
-    /// its interpreter, its libraries, the store they live in), so confinement means
-    /// denying the region that holds the operator's secrets — the invoking user's home —
-    /// and re-allowing what the policy names. Anything the sandbox may WRITE it may also
-    /// read; a workspace under the denied home would otherwise be write-only.
+    /// Reads are deny-then-allow, and what is denied is EVERYTHING. srt starts readable
+    /// everywhere, so anything short of a root deny leaves whatever nobody thought to name
+    /// — another session's data directory, a checkout this session was never given, `/etc`
+    /// — readable by every command the agent issues. Denying only the invoking user's home
+    /// was exactly that, and measurably so. srt expands a root deny into the children of
+    /// `/` at each spawn, so a region that appears after this session started is denied
+    /// too, without anything here being re-configured.
     ///
-    /// Writes are allow-only: exactly the policy's paths, plus the temp directory srt
-    /// points the sandbox at and the standard streams a process expects to be able to
-    /// write.
-    let configFor (tools: SrtTools) (home: string option) (policy: SandboxPolicy) : SrtConfig =
+    /// The holes in it are three, and each is a thing without which the sandbox is not a
+    /// place to work: what the policy names, everything the policy may WRITE (a workspace
+    /// that could be written but not read is no workspace), and the host runtime — the
+    /// interpreter, its libraries, srt's own vendored helper — which is a property of the
+    /// box rather than of the policy, and so arrives on `SrtTools`.
+    ///
+    /// Writes are unchanged: allow-only, exactly the policy's paths, plus the temp
+    /// directory srt points the sandbox at and the standard streams a process expects to
+    /// be able to write.
+    let configFor (tools: SrtTools) (policy: SandboxPolicy) : SrtConfig =
         let distinct (paths: string list) = paths |> List.distinct
-        { DenyRead = home |> Option.toList
-          AllowRead = distinct (policy.ReadPaths @ policy.WritePaths)
+        { DenyRead = [ "/" ]
+          AllowRead = distinct (policy.ReadPaths @ policy.WritePaths @ tools.Runtime)
           AllowWrite = distinct (policy.WritePaths @ [ tmpDir; "/dev/stdout"; "/dev/stderr"; "/dev/null" ])
           AllowedDomains = policy.AllowedDomains |> Option.defaultValue []
           Bwrap = tools.Bwrap
@@ -711,10 +836,30 @@ module SrtSandbox =
           AllowGitConfig = true
           FilesystemDisabled = (policy.Filesystem = Unconfined) }
 
+    [<Emit("process.platform")>]
+    let private platform () : string = jsNative
+
+    [<Emit("process.execPath")>]
+    let private execPath () : string = jsNative
+
+    /// Where srt itself is installed. The wrapped argv execs a vendored helper
+    /// (`vendor/seccomp/<arch>/apply-seccomp`) from INSIDE the sandbox, so a profile that
+    /// hides srt's own files fails every command with exit 127 before the command runs.
+    /// Empty when it cannot be resolved, which `toolsFrom` turns into a refused boot: a
+    /// session that cannot find it would confine nothing, because nothing would run.
+    [<Emit("(() => { try { return $0(import.meta.url).resolve('@anthropic-ai/sandbox-runtime/package.json') } catch { return '' } })()")>]
+    let private resolveSrtWith (mk: obj) : string = jsNative
+
     /// How this host confines, as configured. A blank tool path is an absent one: the dev
     /// shell and the installable set these per platform, and on macOS they are empty.
     /// The nesting is parsed fail-closed — an unrecognised value is a loud error rather
     /// than a guess at which way the operator meant to err.
+    ///
+    /// Not pure, unlike the rest of this module: the read scope's allow-back has to know
+    /// what is already running on this box (`process.execPath`, srt's own installation),
+    /// and a caller that had to look those up first is a caller that can forget to. The
+    /// DECISIONS underneath it — `installPrefix`, `runtimeReadPaths` — stay pure and are
+    /// where the cheap tier pins this.
     let toolsFrom (ambient: Map<string, string>) : Result<SrtTools, string> =
         let named name =
             ambient
@@ -731,11 +876,24 @@ module SrtSandbox =
                 | other ->
                     Error (sprintf "unknown sandbox nesting '%s' (expected strict, or weak for an unprivileged container)" other)
         nesting
-        |> Result.map (fun nesting ->
-            { Bwrap = named "YESSION_BWRAP_PATH"
-              Socat = named "YESSION_SOCAT_PATH"
-              Ripgrep = named "YESSION_RIPGREP_PATH"
-              Nesting = nesting })
+        |> Result.bind (fun nesting ->
+            match resolveSrtWith createRequire with
+            | "" ->
+                Error
+                    "cannot locate @anthropic-ai/sandbox-runtime's own files, which every confined command execs"
+            | srtPackage ->
+                Ok
+                    { Bwrap = named "YESSION_BWRAP_PATH"
+                      Socat = named "YESSION_SOCAT_PATH"
+                      Ripgrep = named "YESSION_RIPGREP_PATH"
+                      Nesting = nesting
+                      // `YESSION_CLAUDE_PATH` names a claude install outside the SDK's own,
+                      // and the AgentSandbox has to be able to read the CLI it spawns.
+                      Runtime =
+                        runtimeReadPaths
+                            (platform ())
+                            ([ execPath (); srtPackage ] @ (named "YESSION_CLAUDE_PATH" |> Option.toList))
+                            ambient })
 
     [<Emit("({ network: { allowedDomains: $0, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: $1, allowRead: $2, allowWrite: $3, denyWrite: [], allowGitConfig: $8, disabled: $9 }, ...($4 ? { bwrapPath: $4 } : {}), ...($5 ? { socatPath: $5 } : {}), ...($6 ? { ripgrep: { command: $6 } } : {}), ...($7 ? { enableWeakerNestedSandbox: true } : {}) })")>]
     let private configObject
@@ -840,13 +998,13 @@ module SrtSandbox =
             starting <- Some promise
             Interop.awaitPromise promise
 
-    let create (tools: SrtTools) (home: string option) : CreateSandbox =
+    let create (tools: SrtTools) : CreateSandbox =
         fun policy ->
             async {
                 try
                     policy.WorkingDirectory |> Option.iter Fs.ensureDir
                     Fs.ensureDir tmpDir
-                    let config = configFor tools home policy
+                    let config = configFor tools policy
                     let! srt = managerFor config
                     let children = Children.Registry ()
                     let spawn (exec: SandboxExec) (onChunk: OutputStream * string -> unit) =
@@ -908,8 +1066,8 @@ module SrtSandbox =
     /// Wrap one command under a policy, yielding the argv that runs it confined. The
     /// agent CLI's spawner needs exactly this and nothing else around it: it is handed a
     /// command by the SDK and has to produce a confined process from it.
-    let wrapperFor (tools: SrtTools) (home: string option) (policy: SandboxPolicy) : string -> string list -> string -> Async<string list> =
-        let config = configFor tools home policy
+    let wrapperFor (tools: SrtTools) (policy: SandboxPolicy) : string -> string list -> string -> Async<string list> =
+        let config = configFor tools policy
         fun executable arguments cwd ->
             async {
                 let! srt = managerFor config
@@ -1079,7 +1237,7 @@ module AgentSandbox =
             | Error reason -> failwithf "agent sandbox: %s" reason
             | Ok tools ->
                 let policy = policyFor ambient home env
-                srtClaudeSpawner (SrtSandbox.wrapperFor tools (Map.tryFind "HOME" ambient) policy)
+                srtClaudeSpawner (SrtSandbox.wrapperFor tools policy)
         | HostBackend
         | DockerBackend -> hostClaudeSpawner ()
 
@@ -1093,5 +1251,4 @@ let forBackend (backend: SandboxBackend) (name: string) (spec: EnvironmentSpec) 
     | HostBackend -> Ok (HostSandbox.create ())
     | DockerBackend -> Ok (DockerSandbox.create name spec)
     | SrtBackend ->
-        SrtSandbox.toolsFrom ambient
-        |> Result.map (fun tools -> SrtSandbox.create tools (Map.tryFind "HOME" ambient))
+        SrtSandbox.toolsFrom ambient |> Result.map SrtSandbox.create
