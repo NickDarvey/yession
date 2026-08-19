@@ -80,15 +80,15 @@ module ProseMirror =
     [<Emit("$0.marks")>]
     let nodeMarks (node: Node) : obj[] = jsNative
     /// A heading's level (1–6), defaulting to 1.
-    [<Emit("($0.attrs && $0.attrs.level) || 1")>]
+    [<Emit("(function (node) { return (node.attrs && node.attrs.level) || 1 })($0)")>]
     let headingLevel (node: Node) : int = jsNative
     /// An ordered list's first number, defaulting to 1.
-    [<Emit("($0.attrs && $0.attrs.order) || 1")>]
+    [<Emit("(function (node) { return (node.attrs && node.attrs.order) || 1 })($0)")>]
     let listStart (node: Node) : int = jsNative
     [<Emit("$0.type.name")>]
     let markTypeName (mark: obj) : string = jsNative
     /// A link mark's target (empty when absent).
-    [<Emit("($0.attrs && $0.attrs.href) || ''")>]
+    [<Emit("(function (mark) { return (mark.attrs && mark.attrs.href) || '' })($0)")>]
     let markHref (mark: obj) : string = jsNative
 
     // --- prosemirror-state / -view ---------------------------------------------------------

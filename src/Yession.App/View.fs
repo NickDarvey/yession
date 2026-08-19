@@ -777,7 +777,7 @@ module View =
     /// The `(selectionStart, selectionEnd)` of the event's target input, or `None`. Read live
     /// from the DOM; only ever invoked in the browser (SSR drops event bindings), so the `.NET`
     /// type-check sees a signature it never runs. (A Fable tuple is a 2-array at runtime.)
-    [<Fable.Core.Emit("($0 && $0.target && typeof $0.target.selectionStart === 'number') ? [$0.target.selectionStart, $0.target.selectionEnd] : null")>]
+    [<Fable.Core.Emit("(function (e) { return (e && e.target && typeof e.target.selectionStart === 'number') ? [e.target.selectionStart, e.target.selectionEnd] : null })($0)")>]
     let private selectionOf (e: obj) : (int * int) option = Fable.Core.Util.jsNative
 
     /// The bytes a keydown means to a pty (Plan 14, stage 6).
@@ -790,8 +790,8 @@ module View =
     ///
     /// `preventDefault` on everything that IS sent, because otherwise the browser also acts
     /// on it: Tab would leave the terminal mid-session, and Backspace used to navigate.
-    [<Fable.Core.Emit("""(() => {
-  const ev = $0
+    [<Fable.Core.Emit("""(function (e) {
+  const ev = e
   if (ev.metaKey || ev.altKey) return null
   const k = ev.key
   const send = d => { ev.preventDefault(); return d }
@@ -818,7 +818,7 @@ module View =
     case 'Delete': return send('\x1b[3~')
   }
   return k.length === 1 ? send(k) : null
-})()""")>]
+})($0)""")>]
     let private keystrokeOf (e: obj) : string option = Fable.Core.Util.jsNative
 
     /// One collaborator's title caret+selection marker: a selection highlight span and a caret
@@ -1757,10 +1757,10 @@ module View =
     /// Moves FOCUS only; selection follows the Enter/Space the button already handles. That
     /// is ARIA's "manual activation" variant, and it is the right one here: walking the
     /// strip must not mount and unmount a player under the reader on every keypress.
-    [<Fable.Core.Emit("""(() => {
-  const key = $0.key
+    [<Fable.Core.Emit("""(function (e) {
+  const key = e.key
   if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return
-  const tabs = Array.from($0.currentTarget.querySelectorAll('[role="tab"]'))
+  const tabs = Array.from(e.currentTarget.querySelectorAll('[role="tab"]'))
   if (tabs.length === 0) return
   const here = tabs.indexOf(document.activeElement)
   const next =
@@ -1769,20 +1769,20 @@ module View =
     : here < 0 ? 0
     : (here + (key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length
   tabs[next].focus()
-  $0.preventDefault()
-})()""")>]
+  e.preventDefault()
+})($0)""")>]
     let private moveTabFocus (e: obj) : unit = Fable.Core.Util.jsNative
 
     /// Delete/Backspace on a focused tab — the keyboard's unpin (Plan 20, stage 1). Returns
     /// the tab's key, or `""` when this keypress is not that: the strip's other keys are the
     /// arrow walk above, and typing must not unpin anything.
-    [<Fable.Core.Emit("""(() => {
-  if ($0.key !== 'Delete' && $0.key !== 'Backspace') return ''
+    [<Fable.Core.Emit("""(function (e) {
+  if (e.key !== 'Delete' && e.key !== 'Backspace') return ''
   const tab = document.activeElement?.closest('[data-pane-tab]')
   if (!tab) return ''
-  $0.preventDefault()
+  e.preventDefault()
   return tab.getAttribute('data-pane-tab')
-})()""")>]
+})($0)""")>]
     let private unpinKeyOn (e: obj) : string = Fable.Core.Util.jsNative
 
     /// Move focus to the tab that will take the released one's place — BEFORE the release,
@@ -1794,12 +1794,12 @@ module View =
     /// moved it to `body`; on `requestAnimationFrame`, a headless browser that paints no
     /// frames never ran the callback at all. Going first has neither problem: the neighbour
     /// exists right now, and a node that keeps focus keeps it across the patch.
-    [<Fable.Core.Emit("""(() => {
-  const tabs = Array.from($0.currentTarget.querySelectorAll('[role="tab"]'))
+    [<Fable.Core.Emit("""(function (e) {
+  const tabs = Array.from(e.currentTarget.querySelectorAll('[role="tab"]'))
   const here = tabs.indexOf(document.activeElement?.closest('[role="tab"]'))
   if (here < 0 || tabs.length < 2) return
   tabs[Math.min(here, tabs.length - 2)].focus()
-})()""")>]
+})($0)""")>]
     let private focusNeighbourTab (e: obj) : unit = Fable.Core.Util.jsNative
 
     /// One block's read-only view, as a tab opened from its chip shows it: the command, and

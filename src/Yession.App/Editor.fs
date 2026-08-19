@@ -35,7 +35,7 @@ module Editor =
     [<Emit("(m => ({ level: m[1].length }))")>]
     let private headingAttrs : obj = jsNative
     /// `event.clipboardData.getData(fmt)` (empty when absent).
-    [<Emit("$0.clipboardData ? $0.clipboardData.getData($1) : ''")>]
+    [<Emit("(function (event, fmt) { return event.clipboardData ? event.clipboardData.getData(fmt) : '' })($0, $1)")>]
     let private clipboard (event: obj) (fmt: string) : string = jsNative
 
     /// Inline mark rule: when `**b**` / `*i*` / `` `c` `` is completed at the cursor, replace

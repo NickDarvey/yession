@@ -34,7 +34,7 @@ type private Stack =
 /// `uv run --project` rather than a bare `jumpstarter-provider`: the example is a uv project,
 /// its dependencies are locked, and resolving them through uv is exactly how the deployment
 /// runs it.
-[<Emit("""(async () => {
+[<Emit("""(async function (timeoutMs) {
   const { spawn } = await import('node:child_process')
   const net = await import('node:net')
 
@@ -60,7 +60,7 @@ type private Stack =
   // with its own words rather than as a timeout.
   const awaitLine = (child, pattern, what) => new Promise((resolve, reject) => {
     let seen = ''
-    const timer = setTimeout(() => reject(new Error(what + ' never printed ' + pattern + '; saw:\n' + seen)), $0)
+    const timer = setTimeout(() => reject(new Error(what + ' never printed ' + pattern + '; saw:\n' + seen)), timeoutMs)
     const watch = (stream) => stream.on('data', (chunk) => {
       seen += String(chunk)
       const found = seen.match(pattern)
@@ -94,7 +94,7 @@ type private Stack =
       setTimeout(resolve, 200)
     })
   }
-})()""")>]
+})($0)""")>]
 let private startStack (timeoutMs: int) : JS.Promise<Stack> = jsNative
 
 /// Start the stack, run the body against it, and stop it either way.

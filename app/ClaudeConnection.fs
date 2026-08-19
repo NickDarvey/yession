@@ -123,15 +123,15 @@ type private ModelsOutcome =
 ///
 /// The page bound is a runaway guard, not a coverage cap: the API's own maximum page is
 /// 1000, so ten pages is ten thousand models and no provider is near it.
-[<Emit("""(async () => {
+[<Emit("""(async function (envVar, value, url) {
   try {
     const headers = { 'anthropic-version': '2023-06-01' }
-    if ($0 === 'ANTHROPIC_API_KEY') headers['x-api-key'] = $1
-    else { headers['authorization'] = 'Bearer ' + $1; headers['anthropic-beta'] = 'oauth-2025-04-20' }
+    if (envVar === 'ANTHROPIC_API_KEY') headers['x-api-key'] = value
+    else { headers['authorization'] = 'Bearer ' + value; headers['anthropic-beta'] = 'oauth-2025-04-20' }
     const models = []
     // Not `url`: Fable names the substituted argument after its F# parameter, so a local of
     // the same name shadows it into a temporal dead zone and every lookup throws.
-    let next = $2 + '?limit=1000'
+    let next = url + '?limit=1000'
     for (let page = 0; page < 10; page++) {
       const r = await fetch(next, { headers })
       if (!r.ok) {
@@ -141,13 +141,13 @@ type private ModelsOutcome =
       const body = await r.json()
       for (const m of (body.data || [])) models.push({ id: String(m.id || ''), name: String(m.display_name || '') })
       if (!body.has_more || !body.last_id) break
-      next = $2 + '?limit=1000&after_id=' + encodeURIComponent(body.last_id)
+      next = url + '?limit=1000&after_id=' + encodeURIComponent(body.last_id)
     }
     return { ok: true, reason: '', models }
   } catch (err) {
     return { ok: false, reason: String((err && err.message) || err), models: [] }
   }
-})()""")>]
+})($0, $1, $2)""")>]
 let private fetchModels (envVar: string) (value: string) (url: string) : JS.Promise<ModelsOutcome> = jsNative
 
 /// The models one credential can see at one endpoint, as the provider-neutral pair the

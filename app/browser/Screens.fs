@@ -117,8 +117,8 @@ let create (dispatch: ClientMsg -> unit) : Screens =
 /// on the other end lays its screen out to whatever it is told. Measured by putting a known
 /// run of characters in the element and reading the box it takes, which is the only way to
 /// get a font's advance width without hard-coding one.
-[<Emit("""(() => {
-  const el = document.querySelector('[data-terminal-screen="' + $0 + '"]')
+[<Emit("""(function (terminalId) {
+  const el = document.querySelector('[data-terminal-screen="' + terminalId + '"]')
   if (!el) return null
   const probe = document.createElement('span')
   probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre'
@@ -132,5 +132,5 @@ let create (dispatch: ClientMsg -> unit) : Screens =
   const cols = Math.max(1, Math.floor((box.width - 24) / cell))
   const rows = Math.max(1, Math.floor((box.height - 16) / line))
   return [cols, rows]
-})()""")>]
+})($0)""")>]
 let measure (terminalId: string) : (int * int) option = jsNative

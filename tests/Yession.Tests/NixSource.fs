@@ -40,7 +40,7 @@ let private readDir (fs: obj) (dir: string) : (string * bool * bool) array = jsN
 [<Emit("$0.spawnSync($1, $2, { encoding: 'utf8', input: $3, maxBuffer: 33554432 })")>]
 let private spawnSync (cp: obj) (command: string) (args: string array) (input: string) : obj = jsNative
 
-[<Emit("($0.status === null ? -1 : $0.status)")>]
+[<Emit("(function (result) { return (result.status === null ? -1 : result.status) })($0)")>]
 let private exitCode (result: obj) : int = jsNative
 
 [<Emit("($0.stdout || '')")>]
