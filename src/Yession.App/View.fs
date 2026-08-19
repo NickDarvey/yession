@@ -1442,9 +1442,6 @@ module View =
             | BlockRunning -> []
         let facts =
             [ fact (sprintf "ran by %s" (authorName model (Authority.author block.Authority)))
-              match Authority.approver block.Authority with
-              | Some by -> fact (sprintf "approved by %s" (authorName model by))
-              | None -> ()
               yield! exitFact ]
         html $"""
             <article class="{Style.terminalBlock}" data-terminal-block="{BlockId.value block.BlockId}"

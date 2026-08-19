@@ -333,7 +333,6 @@ module SyncedStateSync =
                         Authority.rehydrate
                             author
                             (if f.OnBehalfOf = "" then None else ActorRef.ofToken f.OnBehalfOf)
-                            None
                       // Absent reads as foreground, which is what every entry a person
                       // writes is and what every entry written before Plan 20 was.
                       Background = (f.Background = "true") }

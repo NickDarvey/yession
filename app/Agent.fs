@@ -230,21 +230,16 @@ let private promptOf (context: AgentContextPack) : string =
                     // reasonably tries again.
                     | BlockRejected (by, Some why) -> sprintf "refused by %s: %s" (label by) why
                     | BlockRejected (by, None) -> sprintf "refused by %s" (label by)
-                let approved =
-                    match block.ApprovedBy with
-                    | Some actor -> sprintf ", approved by %s" (label actor)
-                    | None -> ""
                 let elided =
                     if block.Elided > 0 then
                         sprintf "[%d earlier characters omitted — the whole output is in the transcript]\n" block.Elided
                     else ""
                 sprintf
-                    "[%s] %s ran: %s (%s%s)\n%s%s"
+                    "[%s] %s ran: %s (%s)\n%s%s"
                     block.Title
                     (label block.Author)
                     block.Command
                     outcome
-                    approved
                     elided
                     block.OutputTail
             sprintf

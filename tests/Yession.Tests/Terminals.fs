@@ -1001,7 +1001,7 @@ let private digestTests =
             let digest = digestOf events
             Expect.equal digest.Head.Status BlockRunning "the agent is told it has not finished"
 
-        testCase "the digest carries who wrote the command and who approved it" <| fun () ->
+        testCase "the digest carries who wrote the command" <| fun () ->
             let events =
                 [ opened terminalA "build"
                   turnStarted "1"
@@ -1009,14 +1009,13 @@ let private digestTests =
                       { TerminalId = terminalA
                         BlockId = block "1"
                         QueueId = None
-                        Authority = Authority.agentFor (PeerRef ada) |> Authority.approvedBy (Some bob)
+                        Authority = Authority.agentFor (PeerRef ada)
                         Command = "rm -rf build"
                         FromSeq = 0
                         Background = false }
                   completed terminalA "1" (CommandSucceeded 0) 3 ]
             let entry = (digestOf events).Head
             Expect.equal entry.Author ActorRef.Agent "the agent's own command"
-            Expect.equal entry.ApprovedBy (Some (PeerRef bob)) "and the human who let it run"
             Expect.equal entry.Title "build" "named by its terminal, not an opaque id"
 
         testCase "output is capped from the FRONT, and the loss is stated" <| fun () ->
@@ -1281,7 +1280,7 @@ let private codecTests =
                       { TerminalId = terminalA
                         BlockId = block "1"
                         QueueId = Some (queue "a1")
-                        Authority = Authority.agentFor (PeerRef bob) |> Authority.approvedBy (Some ada)
+                        Authority = Authority.agentFor (PeerRef bob)
                         Command = "ls -la"
                         FromSeq = 3
                         Background = false }
@@ -1316,12 +1315,12 @@ let private codecTests =
                     { TerminalId = terminalA
                       BlockId = block "1"
                       QueueId = Some (queue "a1")
-                      Authority = Authority.agentFor (PeerRef bob) |> Authority.approvedBy (Some ada)
+                      Authority = Authority.agentFor (PeerRef bob)
                       Command = "ls -la"
                       FromSeq = 3
                       Background = false }
                 |> Codec.toString Codec.sessionEvent
-            for key in [ "\"author\""; "\"approvedBy\""; "\"onBehalfOf\"" ] do
+            for key in [ "\"author\""; "\"onBehalfOf\"" ] do
                 Expect.isTrue (encoded.Contains key) (sprintf "%s is still written: %s" key encoded)
             Expect.isFalse (encoded.Contains "\"authority\"") "and the F# shape did not reach the wire"
 
@@ -1340,6 +1339,33 @@ let private codecTests =
                     None
                     "and it borrowed nobody's authority, which is what that absence means"
             | other -> failwithf "a pre-Plan-20 block must still read back, got %A" other
+
+        testCase "a block somebody approved before Plan 23 still decodes" <| fun () ->
+            // The replay-safety claim the whole hard cut leans on: `approvedBy` keys in old
+            // logs are ignored, never fatal — a decode failure in the event store is a
+            // session that will not open. Pinned as literal JSON, so a future codec change
+            // that breaks old-log replay goes red here rather than at somebody's boot.
+            let approved =
+                """{"type":"terminalBlockStarted","payload":{"terminalId":"term-a","blockId":"blk-1","""
+                + """"queueId":"q-a1","author":{"kind":"agent"},"onBehalfOf":{"kind":"peer","peerId":"ada"},"""
+                + """"approvedBy":{"kind":"peer","peerId":"bob"},"command":"ls","fromSeq":0}}"""
+            match Codec.fromString Codec.sessionEvent approved with
+            | Ok (SessionEvent.TerminalBlockStarted decoded) ->
+                Expect.equal (Authority.author decoded.Authority) ActorRef.Agent "the author survives"
+                Expect.equal
+                    (Authority.onBehalfOf decoded.Authority)
+                    (Some (PeerRef ada))
+                    "and whose authority it ran on"
+            | other -> failwithf "an approved pre-Plan-23 block must still read back, got %A" other
+
+        testCase "a repo event somebody approved before Plan 23 still decodes" <| fun () ->
+            let approved =
+                """{"type":"repoAdded","payload":{"messageId":"msg-1","repo":"octo/hello","""
+                + """"branch":"main","actor":{"kind":"agent"},"approvedBy":{"kind":"peer","peerId":"bob"}}}"""
+            match Codec.fromString Codec.sessionEvent approved with
+            | Ok (SessionEvent.RepoAdded decoded) ->
+                Expect.equal decoded.Actor ActorRef.Agent "the actor survives the retired key beside it"
+            | other -> failwithf "an approved pre-Plan-23 repo event must still read back, got %A" other
 
         testCase "terminal frames round-trip over the session transport" <| fun () ->
             let codec = Codec.sessionFrame Codec.string

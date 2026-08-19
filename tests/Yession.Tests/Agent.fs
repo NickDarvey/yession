@@ -434,7 +434,7 @@ let private blockStarted (n: string) (background: bool) (owner: ActorRef option)
         { TerminalId = TerminalId.create "term-a" |> expect
           BlockId = BlockId.create n |> expect
           QueueId = None
-          Authority = Authority.rehydrate ActorRef.Agent owner None
+          Authority = Authority.rehydrate ActorRef.Agent owner
           Command = "make"
           FromSeq = 0
           Background = background }
@@ -531,7 +531,7 @@ let private blockStartedIn (id: TerminalId) (n: string) (background: bool) (owne
         { TerminalId = id
           BlockId = BlockId.create n |> expect
           QueueId = None
-          Authority = Authority.rehydrate ActorRef.Agent owner None
+          Authority = Authority.rehydrate ActorRef.Agent owner
           Command = "make"
           FromSeq = 0
           Background = background }

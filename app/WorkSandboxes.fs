@@ -41,10 +41,7 @@ type CredentialSource =
 /// turn human, because the agent has no scope of its own.
 type SandboxCaller =
     { Actor : ActorRef
-      Credential : ActorRef
-      /// Who approved this act at its gate, when a gate required one (Plan 15, stage 3).
-      /// `None` is the ordinary case: almost nothing is gated, and nobody had to.
-      ApprovedBy : ActorRef option }
+      Credential : ActorRef }
 
 /// One sandbox the session has. Present in the registry does NOT mean started — the
 /// environment underneath is lazy, and `default` exists from boot without a sandbox
@@ -217,7 +214,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                                           Backend = config.Backend
                                           Forwarded = wanted
                                           CredentialOwner = (if List.isEmpty wanted then None else Some caller.Credential)
-                                          Actor = caller.Actor; ApprovedBy = caller.ApprovedBy })
+                                          Actor = caller.Actor })
                             return Ok entry
         }
 
@@ -246,7 +243,7 @@ let create (config: WorkSandboxesConfig) : Result<WorkSandboxes, string> =
                     append
                         caller.Actor
                         (SessionEvent.WorkSandboxStopped
-                            { MessageId = mintMessageId (); Sandbox = name; Actor = caller.Actor; ApprovedBy = caller.ApprovedBy })
+                            { MessageId = mintMessageId (); Sandbox = name; Actor = caller.Actor })
                 return Ok ()
         }
 

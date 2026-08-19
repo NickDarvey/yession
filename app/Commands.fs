@@ -71,11 +71,10 @@ let dispatch (services: CommandServices) : CommandDispatch =
     // as the fallback — which was right only because the agent is what authored every one of
     // these, a coincidence each site had to keep re-establishing.
     let repoCaller (invocation: GatedInvocation) =
-        Repos.agentCaller (Authority.effective invocation.Authority) (Authority.approver invocation.Authority)
+        Repos.agentCaller (Authority.effective invocation.Authority)
     let sandboxCaller (invocation: GatedInvocation) : WorkSandboxes.SandboxCaller =
         { Actor = Authority.author invocation.Authority
-          Credential = Authority.effective invocation.Authority
-          ApprovedBy = Authority.approver invocation.Authority }
+          Credential = Authority.effective invocation.Authority }
     Map.ofList
         [ addRepoTool,
           fun (invocation: GatedInvocation) ->
@@ -196,7 +195,7 @@ let private repoCapabilitiesFor
                 gated switchBranchTool [ RepoRef.value repo; branch; (if create then "true" else "false") ] summary
             // The READS take no gate and no approver: they change nothing, so there is
             // nothing to approve and nothing to resume.
-            FetchRepo = service.FetchRepo (Repos.agentCaller turnActor None)
+            FetchRepo = service.FetchRepo (Repos.agentCaller turnActor)
             RepoStatus = service.RepoStatus
             RepoLog = service.RepoLog
             RepoDiff = service.RepoDiff }
