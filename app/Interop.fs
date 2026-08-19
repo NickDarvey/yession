@@ -134,7 +134,7 @@ let createServer (handler: IncomingMessage -> ServerResponse -> unit) : HttpServ
     createServerRaw (System.Func<_, _, _>(handler))
 
 /// Decode a Node Buffer (or string) chunk to a UTF-8 string.
-[<Emit("typeof $0 === 'string' ? $0 : $0.toString('utf8')")>]
+[<Emit("(function (chunk) { return typeof chunk === 'string' ? chunk : chunk.toString('utf8') })($0)")>]
 let bufferToString (chunk: obj) : string = jsNative
 
 /// Read a request header (Node lowercases header names); None when absent.
@@ -177,7 +177,7 @@ let contentDigest (content: string option) : string =
 
 /// Constant-time string equality (client secrets); length mismatch short-circuits,
 /// which leaks only the length.
-[<Emit("(() => { const left = Buffer.from($1, 'utf8'), right = Buffer.from($2, 'utf8'); return left.length === right.length && $0.timingSafeEqual(left, right) })()")>]
+[<Emit("(function (cryptoModule, a, b) { const left = Buffer.from(a, 'utf8'), right = Buffer.from(b, 'utf8'); return left.length === right.length && cryptoModule.timingSafeEqual(left, right) })($0, $1, $2)")>]
 let private timingSafeEq (cryptoModule: obj) (a: string) (b: string) : bool = jsNative
 
 let timingSafeEqualStr (a: string) (b: string) : bool = timingSafeEq nodeCrypto a b

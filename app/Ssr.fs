@@ -17,7 +17,7 @@ open Lit
 
 // --- lit-html TemplateResult shape (read-only) ------------------------------------------
 
-[<Emit("$0 != null && $0._$litType$ !== undefined")>]
+[<Emit("(function (v) { return v != null && v._$litType$ !== undefined })($0)")>]
 let private isTemplateResult (v: obj) : bool = jsNative
 
 [<Emit("$0.strings")>]
@@ -28,7 +28,7 @@ let private trValues (v: obj) : obj[] = jsNative
 
 /// Any iterable that isn't a string (JS arrays AND Fable's F# lists, which lit-html renders
 /// as a sequence of child parts). Excludes strings, which are handled as text.
-[<Emit("$0 != null && typeof $0 !== 'string' && typeof $0[Symbol.iterator] === 'function'")>]
+[<Emit("(function (v) { return v != null && typeof v !== 'string' && typeof v[Symbol.iterator] === 'function' })($0)")>]
 let private isIterable (v: obj) : bool = jsNative
 
 [<Emit("Array.from($0)")>]

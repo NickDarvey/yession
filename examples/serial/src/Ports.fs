@@ -103,27 +103,27 @@ type private RawOpen =
 /// master hangs up. Armed only when the path exists as a file at open time, which keeps it
 /// off Windows, where `COM3` is not a filesystem entry and the check would report every
 /// port as instantly gone.
-[<Emit("""(async () => {
+[<Emit("""(async function (path, baud, dataBits, stopBits, parity, onData, onClose) {
   try {
     const fs = await import('node:fs')
     const { SerialPort } = await import('serialport')
     const port = await new Promise((resolve, reject) => {
       const p = new SerialPort(
-        { path: $0, baudRate: $1, dataBits: $2, stopBits: $3, parity: $4, autoOpen: true },
+        { path: path, baudRate: baud, dataBits: dataBits, stopBits: stopBits, parity: parity, autoOpen: true },
         (err) => { if (err) reject(err); else resolve(p) })
     })
     let closed = false
     let watchdog = null
     const finish = (why) => {
       if (watchdog) { clearInterval(watchdog); watchdog = null }
-      if (!closed) { closed = true; $6(why) }
+      if (!closed) { closed = true; onClose(why) }
     }
-    port.on('data', (chunk) => $5(chunk.toString('utf8')))
+    port.on('data', (chunk) => onData(chunk.toString('utf8')))
     port.on('close', () => finish('the port closed'))
     port.on('error', (err) => finish(String((err && err.message) || err)))
-    if (fs.existsSync($0)) {
+    if (fs.existsSync(path)) {
       watchdog = setInterval(() => {
-        if (fs.existsSync($0)) return
+        if (fs.existsSync(path)) return
         // Release the fd as well as reporting it: the device is gone, so the handle is
         // never becoming useful again, and `close` on a dead node can itself throw.
         try { port.close(() => {}) } catch (e) {}
@@ -141,7 +141,7 @@ type private RawOpen =
   } catch (err) {
     return { ok: false, reason: String((err && err.message) || err), write: () => {}, close: () => {} }
   }
-})()""")>]
+})($0, $1, $2, $3, $4, $5, $6)""")>]
 let private openRaw
     (path: string)
     (baud: int)

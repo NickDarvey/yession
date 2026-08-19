@@ -24,7 +24,7 @@ let private renameSyncImpl (fs: obj) (from: string) (dest: string) : unit = jsNa
 
 // Write + fsync the temp file before the rename, so the rename can never expose
 // un-flushed content.
-[<Emit("(() => { const fd = $0.openSync($1, 'w'); $0.writeSync(fd, $2); $0.fsyncSync(fd); $0.closeSync(fd) })()")>]
+[<Emit("(function (fs, path, text) { const fd = fs.openSync(path, 'w'); fs.writeSync(fd, text); fs.fsyncSync(fd); fs.closeSync(fd) })($0, $1, $2)")>]
 let private writeSyncedImpl (fs: obj) (path: string) (text: string) : unit = jsNative
 
 let exists (path: string) : bool = existsSyncImpl fs path

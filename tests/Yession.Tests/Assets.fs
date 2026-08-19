@@ -36,7 +36,7 @@ type private Reply =
       mutable Headers: obj
       mutable Body: string }
 
-[<Emit("({ writeHead: (status, headers) => { $0.Status = status; $0.Headers = headers; return null }, write: () => true, end: (body) => { $0.Body = body == null ? '' : String(body) } })")>]
+[<Emit("(function (reply) { return ({ writeHead: (status, headers) => { reply.Status = status; reply.Headers = headers; return null }, write: () => true, end: (body) => { reply.Body = body == null ? '' : String(body) } }) })($0)")>]
 let private responseInto (reply: Reply) : Interop.ServerResponse = jsNative
 
 [<Emit("($0 ?? {})[$1] ?? ''")>]

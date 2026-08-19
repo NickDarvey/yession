@@ -35,15 +35,14 @@ type WsPeer =
 /// refuses the upgrade (the socket is closed with a 404 handshake), `Some` receives the peer
 /// and returns the two callbacks the provider wants — what to do with an inbound data frame,
 /// and what to do when the socket goes away.
-[<Emit("""(() => {
+[<Emit("""(function (server, route, crypto) {
   // NEVER name these after the F# parameters they are substituted from: Fable inlines the
-  // caller's own identifier for `$0`, so `const server = $0` becomes `const server = server`
+  // caller's own identifier for `server`, so `const server = server` becomes `const server = server`
   // and dies in the temporal dead zone. (The same trap cost `AttachWs.fs` a debugging round.)
-  const httpServer = $0
-  const dispatch = $1
+  const httpServer = server
+  const dispatch = route
   // Imported rather than `require`d: this file is ESM both bundled and unbundled, and the
   // bundle's createRequire banner does not exist in a plain Fable run.
-  const crypto = $2
   const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
   const frame = (opcode, payload) => {
     const body = Buffer.from(payload, 'utf8')
@@ -112,7 +111,7 @@ type WsPeer =
     })
     socket.on('close', finish)
   })
-})()""")>]
+})($0, $1, $2)""")>]
 let private accept (server: HttpServer) (route: string -> obj) (crypto: obj) : unit = jsNative
 
 /// What a route does with a connection it took.

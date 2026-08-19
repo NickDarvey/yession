@@ -26,16 +26,16 @@ let private spawnWithEnv (spawn: obj) (command: string) (args: string array) (en
 [<Emit("$0.stdout.on('data', $1)")>]
 let private onStdout (child: Child) (handler: obj -> unit) : unit = jsNative
 
-[<Emit("typeof $0 === 'string' ? $0 : $0.toString('utf8')")>]
+[<Emit("(function (chunk) { return typeof chunk === 'string' ? chunk : chunk.toString('utf8') })($0)")>]
 let private chunkToString (chunk: obj) : string = jsNative
 
-[<Emit("(() => { try { const p = JSON.parse($0); return (p && p.yession === 'ready' && typeof p.port === 'number') ? p.port : null } catch { return null } })()")>]
+[<Emit("(function (line) { try { const p = JSON.parse(line); return (p && p.yession === 'ready' && typeof p.port === 'number') ? p.port : null } catch { return null } })($0)")>]
 let private parseReadyLine (line: string) : int option = jsNative
 
 /// The child's build, off the same readiness line. Absent from a session bundle older than the
 /// field, which must still launch — so this is an option, never a launch precondition. Public
 /// only so that back-compat can be asserted directly.
-[<Emit("(() => { try { const p = JSON.parse($0); return (p && typeof p.version === 'string') ? p.version : null } catch { return null } })()")>]
+[<Emit("(function (line) { try { const p = JSON.parse(line); return (p && typeof p.version === 'string') ? p.version : null } catch { return null } })($0)")>]
 let parseReadyVersion (line: string) : string option = jsNative
 
 /// Refuse a session from a different MAJOR version — the one difference that says their

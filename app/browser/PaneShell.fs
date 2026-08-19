@@ -26,8 +26,9 @@ let toPane () : unit = jsNative
 /// Return focus to the chat item that opened a tab, given that tab's key — the only thing the
 /// chip and the tab share. Falls back to the strip's first tab when the item has scrolled out
 /// of the rendered chat, because focus has to land somewhere real.
-[<Emit("""requestAnimationFrame(() => {
-  const parts = $0.split(':')
+[<Emit("""(function (tabKey) { return (
+requestAnimationFrame(() => {
+  const parts = tabKey.split(':')
   const selector =
     parts[0] === 'block' ? '[data-chat-block="' + parts[2] + '"]'
     : parts[0] === 'stretch' ? '[data-chat-stretch="' + parts.slice(1).join(':') + '"]'
@@ -35,7 +36,8 @@ let toPane () : unit = jsNative
   const back = selector && document.querySelector(selector)
   const next = back || document.querySelector('[role="tablist"] [role="tab"]')
   if (next) next.focus()
-})""")>]
+})
+) })($0)""")>]
 let toChatItem (tabKey: string) : unit = jsNative
 
 /// Hand focus to whichever replay control is on screen for this terminal (Plan 14, stage 7).
@@ -46,15 +48,17 @@ let toChatItem (tabKey: string) : unit = jsNative
 /// exactly one of them at a time. Guarded on focus actually being stranded (on `body`, or
 /// inside the player that is being unmounted): the automatic catch-up must never yank focus
 /// out of a composer somebody is typing in.
-[<Emit("""requestAnimationFrame(() => {
+[<Emit("""(function (terminalId) { return (
+requestAnimationFrame(() => {
   const active = document.activeElement
   const stranded = !active || active === document.body || active.closest('[data-pane-replay]')
   if (!stranded) return
   const next = document.querySelector(
-    '[data-terminal-live="' + $0 + '"], [data-terminal-rewind="' + $0 + '"], ' +
-    '[data-terminal-blocks="' + $0 + '"], [data-terminal-play="' + $0 + '"]')
+    '[data-terminal-live="' + terminalId + '"], [data-terminal-rewind="' + terminalId + '"], ' +
+    '[data-terminal-blocks="' + terminalId + '"], [data-terminal-play="' + terminalId + '"]')
   if (next) next.focus()
-})""")>]
+})
+) })($0)""")>]
 let toDvrControl (terminalId: string) : unit = jsNative
 
 /// The pane's open state, as a class on the shell root — the same mechanism the sidebar uses,

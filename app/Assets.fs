@@ -40,20 +40,20 @@ let private packagedAssets : obj = jsNative
 /// rather than a crash at boot.
 ///
 /// Bytes, not text: a set holds woff2 as readily as CSS, and `utf8` would mangle it.
-[<Emit("""(() => {
-  for (const root of [$1, $2]) { try { return $0.readFileSync(root + '/' + $3) } catch {} }
+[<Emit("""(function (fs, packaged, fallback, path) {
+  for (const root of [packaged, fallback]) { try { return fs.readFileSync(root + '/' + path) } catch {} }
   return null
-})()""")>]
+})($0, $1, $2, $3)""")>]
 let private readFile (fs: obj) (packaged: string) (fallback: string) (path: string) : obj option = jsNative
 
 /// One digest over the whole set: every path and every byte, in the map's own (sorted) order,
 /// so the same set always addresses the same. Twelve base64url characters, the same content
 /// address `Interop.contentDigest` gives a document.
-[<Emit("""(() => {
-  const hash = $0.createHash('sha256')
-  for (const [path, bytes] of $1) { hash.update(path); hash.update(bytes) }
+[<Emit("""(function (cryptoModule, entries) {
+  const hash = cryptoModule.createHash('sha256')
+  for (const [path, bytes] of entries) { hash.update(path); hash.update(bytes) }
   return hash.digest('base64url').slice(0, 12)
-})()""")>]
+})($0, $1)""")>]
 let private digestEntries (cryptoModule: obj) (entries: (string * obj) array) : string = jsNative
 
 /// What a build ships, and the one address it all sits under.

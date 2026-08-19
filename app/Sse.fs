@@ -81,14 +81,14 @@ let stream (req: IncomingMessage) (res: ServerResponse) (encode: Encode<'a>) (su
 // the semicolon on the line above it, JS's automatic semicolon insertion glues the two together
 // and calls the previous expression's result — which fails at runtime, inside a catch, as a stream
 // that silently delivers nothing.
-[<Emit("""(() => {
+[<Emit("""(function (url, headers, onEvent, retry) {
   const controller = new AbortController();
   let cancelled = false;
   const run = async () => {
     while (!cancelled) {
       try {
-        const res = await fetch($0, { method: 'GET', headers: { ...Object.fromEntries($1), 'accept': 'text/event-stream' }, signal: controller.signal });
-        if (!res.ok) { if (!$3(res.status)) return; throw new Error('sse subscribe failed: ' + res.status); }
+        const res = await fetch(url, { method: 'GET', headers: { ...Object.fromEntries(headers), 'accept': 'text/event-stream' }, signal: controller.signal });
+        if (!res.ok) { if (!retry(res.status)) return; throw new Error('sse subscribe failed: ' + res.status); }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -100,7 +100,7 @@ let stream (req: IncomingMessage) (res: ServerResponse) (encode: Encode<'a>) (su
           while ((idx = buffer.indexOf('\n\n')) >= 0) {
             const event = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
-            $2(event);
+            onEvent(event);
           }
         }
       } catch (e) { if (cancelled) return; }
@@ -110,7 +110,7 @@ let stream (req: IncomingMessage) (res: ServerResponse) (encode: Encode<'a>) (su
   };
   run();
   return () => { cancelled = true; controller.abort(); };
-})()""")>]
+})($0, $1, $2, $3)""")>]
 let private openStream
     (url: string)
     (headers: (string * string)[])

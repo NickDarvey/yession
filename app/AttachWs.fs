@@ -40,9 +40,10 @@ and private Ending =
     abstract code : int
     abstract reason : string
 
-[<Emit("""(() => new Promise((resolve) => {
-  const target = $0
-  const sink = $1
+[<Emit("""(function (url, onData) { return (
+(() => new Promise((resolve) => {
+  const target = url
+  const sink = onData
   let settled = false
   let finish = null
   const exited = new Promise((r) => { finish = r })
@@ -92,7 +93,8 @@ and private Ending =
     else if (exitCode !== null) end({ code: exitCode, reason: '' })
     else end({ code: -1, reason: 'the stream closed without saying why' })
   })
-}))()""")>]
+}))()
+) })($0, $1)""")>]
 let private connect (url: string) (onData: string -> unit) : JS.Promise<Connection> = jsNative
 
 [<Emit("JSON.stringify($0)")>]

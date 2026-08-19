@@ -25,7 +25,8 @@ open Lit
 //
 // `timeoutMs` bounds the whole handshake (offer, gathering, answer, channel open); it is the
 // difference between "not connected, the session did not answer" and an eternal wait.
-[<Emit("""new Promise((resolve) => {
+[<Emit("""(function (signalUrl, timeoutMs) { return (
+new Promise((resolve) => {
   const t0 = performance.now()
   const took = () => Math.round(performance.now() - t0)
   const pc = new RTCPeerConnection({ iceServers: [] })
@@ -43,7 +44,7 @@ open Lit
     if (sent || settled) return
     sent = true
     try {
-      const reply = await fetch($0, {
+      const reply = await fetch(signalUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ type: pc.localDescription.type, sdp: pc.localDescription.sdp })
@@ -57,10 +58,11 @@ open Lit
   pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') send() }
   pc.onicecandidate = (e) => { if (e.candidate === null) send() }
   setTimeout(send, 1500)
-  setTimeout(() => fail(true, ''), $1)
+  setTimeout(() => fail(true, ''), timeoutMs)
   dc.onopen = succeed
   pc.createOffer().then(o => pc.setLocalDescription(o), e => fail(false, e))
-})""")>]
+})
+) })($0, $1)""")>]
 let private openDataChannel (signalUrl: string) (timeoutMs: int) : JS.Promise<{| ok: bool; channel: obj; connection: obj; timedOut: bool; detail: string; tookMs: int |}> = jsNative
 
 /// How long a whole handshake gets before it counts as "the session did not answer". Long
@@ -74,7 +76,7 @@ let private onMessage (dc: obj) (handler: string -> unit) : unit = jsNative
 [<Emit("$0.onclose = $1")>]
 let private onClose (dc: obj) (handler: unit -> unit) : unit = jsNative
 
-[<Emit("$0.readyState === 'open' && ($0.send($1), true)")>]
+[<Emit("(function (dc, text) { return dc.readyState === 'open' && (dc.send(text), true) })($0, $1)")>]
 let private sendMessage (dc: obj) (text: string) : bool = jsNative
 
 /// Both of the peer connection's state machines, as one "this transport is finished" signal.
@@ -91,8 +93,8 @@ let private sendMessage (dc: obj) (text: string) : bool = jsNative
 // The local names here are deliberately NOT `pc`/`dc`: `$0` is substituted TEXTUALLY with the
 // caller's identifier, so `const pc = $0` at a call site whose argument is itself named `pc`
 // emits `const pc = pc` — a temporal dead zone error that takes the whole shell down at load.
-[<Emit("""(() => {
-  const peer = $0, onDead = $1
+[<Emit("""(function (pc, handler) {
+  const peer = pc, onDead = handler
   const finished = () =>
     peer.connectionState === 'failed' || peer.connectionState === 'closed' ||
     peer.iceConnectionState === 'failed' || peer.iceConnectionState === 'closed'
@@ -100,7 +102,7 @@ let private sendMessage (dc: obj) (text: string) : bool = jsNative
   peer.addEventListener('connectionstatechange', check)
   peer.addEventListener('iceconnectionstatechange', check)
   check()
-})()""")>]
+})($0, $1)""")>]
 let private onPeerFinished (pc: obj) (handler: unit -> unit) : unit = jsNative
 
 /// Look again the moment the page comes back — a phone returning from the background, a
@@ -109,8 +111,8 @@ let private onPeerFinished (pc: obj) (handler: unit -> unit) : unit = jsNative
 /// Not a second mechanism: it asks exactly the question `onPeerFinished` answers, at the one
 /// moment a browser is most likely to have torn the transport down while no script was running
 /// to hear about it. That moment is where the reported bug lived.
-[<Emit("""(() => {
-  const peer = $0, chan = $1, onDead = $2
+[<Emit("""(function (pc, dc, handler) {
+  const peer = pc, chan = dc, onDead = handler
   const look = () => {
     if (document.visibilityState === 'hidden') return
     if (peer.connectionState === 'failed' || peer.connectionState === 'closed' ||
@@ -125,7 +127,7 @@ let private onPeerFinished (pc: obj) (handler: unit -> unit) : unit = jsNative
     window.removeEventListener('online', look)
     document.removeEventListener('visibilitychange', look)
   }
-})()""")>]
+})($0, $1, $2)""")>]
 let private onResume (pc: obj) (dc: obj) (handler: unit -> unit) : (unit -> unit) = jsNative
 
 [<Emit("$0.close()")>]
@@ -221,14 +223,14 @@ let [<Literal>] private PinnedSurfaces = "[data-conversation],[data-terminal-scr
 // Keyed by what the surface IS, never by its position in the list: a terminal that took its
 // lease between two renders removes its scrollback from the document, and an index would
 // then put its scroll position into the chat.
-[<Emit("""(() => {
+[<Emit("""(function (selector) {
   const key = el => el.getAttribute('data-terminal-id') || 'chat'
   const taken = {}
-  for (const el of document.querySelectorAll($0)) {
+  for (const el of document.querySelectorAll(selector)) {
     taken[key(el)] = el.scrollTop + el.clientHeight >= el.scrollHeight - 4 ? -1 : el.scrollTop
   }
   return taken
-})()""")>]
+})($0)""")>]
 let private surfaceScroll (selector: string) : obj = jsNative
 
 // A surface that was NOT on screen before this render starts at its end, which is the other
@@ -237,13 +239,13 @@ let private surfaceScroll (selector: string) : obj = jsNative
 // oldest. It used to fall through to `scrollTop = 0` — invisible while the stream hugged the
 // bottom of a short box with `mt-auto`, and plainly wrong the moment the history was longer
 // than the box, which is exactly when the anchoring stopped applying.
-[<Emit("""(() => {
+[<Emit("""(function (selector, positions) {
   const key = el => el.getAttribute('data-terminal-id') || 'chat'
-  for (const el of document.querySelectorAll($0)) {
-    const position = $1[key(el)]
+  for (const el of document.querySelectorAll(selector)) {
+    const position = positions[key(el)]
     el.scrollTop = position === undefined || position < 0 ? el.scrollHeight : position
   }
-})()""")>]
+})($0, $1)""")>]
 let private restoreSurfaceScroll (selector: string) (positions: obj) : unit = jsNative
 
 // A RENDER is not the only thing that moves the end of one of those surfaces away from the
@@ -256,8 +258,8 @@ let private restoreSurfaceScroll (selector: string) (positions: obj) : unit = js
 // Whether they were at the end has to be sampled BEFORE the box changes (by the time the
 // resize handler runs the measurement would always say "no"), so it rides the scroll event —
 // captured, because scroll does not bubble, and the element is Lit's to replace.
-[<Emit("""(() => {
-  const sel = $0
+[<Emit("""(function (selector) {
+  const sel = selector
   const atEnd = el => el.scrollTop + el.clientHeight >= el.scrollHeight - 4
   const pinned = new WeakMap()
   document.addEventListener('scroll', e => {
@@ -269,7 +271,7 @@ let private restoreSurfaceScroll (selector: string) (positions: obj) : unit = js
       if (pinned.get(el) !== false) el.scrollTop = el.scrollHeight
     }
   })
-})()""")>]
+})($0)""")>]
 let private keepSurfacesPinned (selector: string) : unit = jsNative
 
 // A native <input> has no per-character DOM geometry, so we measure the pixel offset of a
@@ -453,8 +455,8 @@ let private inputValue (el: obj) : string = jsNative
 // against an F# value also called `el` emits `let el = el` — a temporal-dead-zone
 // self-reference that throws at the first call. Names that no F# binding will ever have
 // make the substitution safe whatever the call site is called.
-[<Emit("""(() => {
-  const __yInput = $0, __yNext = $1;
+[<Emit("""(function (el, value) {
+  const __yInput = el, __yNext = value;
   if (__yInput.value === __yNext) return;
   const __yFocused = document.activeElement === __yInput;
   const __yStart = __yFocused ? __yInput.selectionStart : null;
@@ -464,7 +466,7 @@ let private inputValue (el: obj) : string = jsNative
     const __yLimit = __yNext.length;
     __yInput.setSelectionRange(Math.min(__yStart, __yLimit), Math.min(__yEnd, __yLimit));
   }
-})()""")>]
+})($0, $1)""")>]
 let private setInputValue (el: obj) (value: string) : unit = jsNative
 
 /// Attach a listener once. The flag lives on the element, so a Lit re-render that reuses the
@@ -479,21 +481,21 @@ let private setInputValue (el: obj) (value: string) : unit = jsNative
 /// A command line is one line, so there is no new line for Alt-Enter to insert and none is
 /// bound. `isComposing` guards the IME: mid-composition Enter commits the candidate word, and
 /// running a half-typed command because someone accepted a suggestion is not a thing to do.
-[<Emit("""(() => {
-  const __yBind = $0;
+[<Emit("""(function (el, onInput, onSelect, onBlur, onEnter) {
+  const __yBind = el;
   if (__yBind.__yessionBound) return false;
   __yBind.__yessionBound = true;
-  __yBind.addEventListener('input', $1);
-  __yBind.addEventListener('keyup', $2);
-  __yBind.addEventListener('click', $2);
-  __yBind.addEventListener('select', $2);
-  __yBind.addEventListener('focus', $2);
-  __yBind.addEventListener('blur', $3);
+  __yBind.addEventListener('input', onInput);
+  __yBind.addEventListener('keyup', onSelect);
+  __yBind.addEventListener('click', onSelect);
+  __yBind.addEventListener('select', onSelect);
+  __yBind.addEventListener('focus', onSelect);
+  __yBind.addEventListener('blur', onBlur);
   __yBind.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); $4() }
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); onEnter() }
   });
   return true;
-})()""")>]
+})($0, $1, $2, $3, $4)""")>]
 let private bindTerminalInput
     (el: obj)
     (onInput: unit -> unit)
@@ -502,7 +504,7 @@ let private bindTerminalInput
     (onEnter: unit -> unit)
     : bool = jsNative
 
-[<Emit("($0 && typeof $0.selectionStart === 'number') ? [$0.selectionStart, $0.selectionEnd] : null")>]
+[<Emit("(function (el) { return (el && typeof el.selectionStart === 'number') ? [el.selectionStart, el.selectionEnd] : null })($0)")>]
 let private inputSelection (el: obj) : (int * int) option = jsNative
 
 // --- Client-side doc persistence (Step 20): IndexedDB via y-indexeddb ------------------
@@ -654,12 +656,14 @@ let private transcriptWrite (cache: obj) (url: string) (firstSeq: int) (body: st
 
 // `null` for an entry that is gone, and for one written without the header — which no build
 // that shipped this ever wrote, but a store outlives the build that filled it.
-[<Emit("""$0.match($1).then(async r => {
+[<Emit("""(function (cache, url) { return (
+cache.match(url).then(async r => {
   if (!r) return null
   const first = r.headers.get('x-yession-first-seq')
   if (first === null) return null
   return [parseInt(first, 10), await r.text()]
-})""")>]
+})
+) })($0, $1)""")>]
 let private transcriptRead (cache: obj) (url: string) : JS.Promise<(int * string) option> = jsNative
 
 /// Every terminal's store for this session, or the one that keeps nothing.
@@ -718,7 +722,8 @@ let private openTranscriptCaches () : Async<App.TranscriptCaches> =
 /// Cut the current wait short, if one is running. Replaced each time a wait begins.
 let mutable private pokeRetry : unit -> unit = ignore
 
-[<Emit("""new Promise(resolve => {
+[<Emit("""(function (ms, register) { return (
+new Promise(resolve => {
   let settled = false
   const finish = () => {
     if (settled) return
@@ -727,10 +732,11 @@ let mutable private pokeRetry : unit -> unit = ignore
     if (timer !== null) clearTimeout(timer)
     resolve(true)
   }
-  const timer = $0 >= 0 ? setTimeout(finish, $0) : null
+  const timer = ms >= 0 ? setTimeout(finish, ms) : null
   window.addEventListener('online', finish)
-  $1(finish)
-})""")>]
+  register(finish)
+})
+) })($0, $1)""")>]
 let private waitOrPoke (ms: float) (register: (unit -> unit) -> unit) : JS.Promise<bool> = jsNative
 
 let private waitBeforeRetry (delay: System.TimeSpan option) : Async<bool> =
@@ -761,8 +767,7 @@ let private mintId (prefix: string) =
 // returned id rode the login bounce and was witnessed; the stored id — the one every
 // later load reads — was not, so every peer-scoped call (the whole connections surface)
 // was denied for the life of the launch.
-[<Emit("""(() => {
-  const minted = $0
+[<Emit("""(function (minted) {
   try {
     const key = 'yession/peer-id'
     const existing = window.localStorage.getItem(key)
@@ -770,7 +775,7 @@ let private mintId (prefix: string) =
     window.localStorage.setItem(key, minted)
     return minted
   } catch { return minted }
-})()""")>]
+})($0)""")>]
 let private persistentPeerId (minted: string) : string = jsNative
 
 [<Emit("encodeURIComponent($0)")>]
@@ -822,10 +827,10 @@ let private fetchGitHubStatus () =
 [<Emit("JSON.stringify({ scope: $0, token: $1 || undefined })")>]
 let private githubBody (scope: string) (token: string) : string = jsNative
 
-[<Emit("(() => { try { const o = JSON.parse($0); return { userCode: o.userCode || '', verificationUri: o.verificationUri || '', interval: o.interval || 5 } } catch { return { userCode: '', verificationUri: '', interval: 5 } } })()")>]
+[<Emit("(function (body) { try { const o = JSON.parse(body); return { userCode: o.userCode || '', verificationUri: o.verificationUri || '', interval: o.interval || 5 } } catch { return { userCode: '', verificationUri: '', interval: 5 } } })($0)")>]
 let private parseDeviceBegin (body: string) : {| userCode: string; verificationUri: string; interval: int |} = jsNative
 
-[<Emit("(() => { try { const o = JSON.parse($0); return { status: o.status || '', interval: o.interval || 0 } } catch { return { status: '', interval: 0 } } })()")>]
+[<Emit("(function (body) { try { const o = JSON.parse(body); return { status: o.status || '', interval: o.interval || 0 } } catch { return { status: '', interval: 0 } } })($0)")>]
 let private parseDevicePoll (body: string) : {| status: string; interval: int |} = jsNative
 
 // --- The model catalogue (the picker's supply) -------------------------------------------
@@ -847,7 +852,7 @@ let private fetchModelsAt (url: string) : JS.Promise<{| ok: bool; body: string |
 // is nothing to re-probe on, because a value arrives when it changes rather than when
 // somebody looks.
 
-[<Emit("(() => { const es = new EventSource($0); es.onmessage = e => $1(e.data); return es })()")>]
+[<Emit("(function (url, onFrame) { const es = new EventSource(url); es.onmessage = e => onFrame(e.data); return es })($0, $1)")>]
 let private openQueryStream (url: string) (onFrame: string -> unit) : obj = jsNative
 
 // --- Entry -----------------------------------------------------------------------------

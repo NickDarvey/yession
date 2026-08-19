@@ -57,7 +57,7 @@ let private revoke (url: string) : unit = jsNative
 ///
 /// Idempotent, and a no-op where no such link exists: a page may mount a replay without being
 /// the shell (the editor harness does).
-[<Emit("(() => { const link = document.querySelector('[' + $0 + ']'); if (link) link.media = 'all' })()")>]
+[<Emit("(function (hook) { const link = document.querySelector('[' + hook + ']'); if (link) link.media = 'all' })($0)")>]
 let private enableStylesheet (hook: string) : unit = jsNative
 
 /// One mounted replay, and how to take it down.

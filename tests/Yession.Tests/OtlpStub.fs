@@ -30,14 +30,14 @@ type ReceivedLog =
 [<Emit("$0[$1]")>]
 let private prop (o: obj) (key: string) : obj = jsNative
 
-[<Emit("Array.isArray($0) ? $0 : []")>]
+[<Emit("(function (o) { return Array.isArray(o) ? o : [] })($0)")>]
 let private asArray (o: obj) : obj array = jsNative
 
 [<Emit("$0 == null")>]
 let private isNullish (o: obj) : bool = jsNative
 
 // OTLP JSON encodes int64 as a string; the JS exporter emits a bare number for small ints.
-[<Emit("typeof $0 === 'number' ? ($0 | 0) : (parseInt($0, 10) || 0)")>]
+[<Emit("(function (o) { return typeof o === 'number' ? (o | 0) : (parseInt(o, 10) || 0) })($0)")>]
 let private asInt (o: obj) : int = jsNative
 
 [<Emit("(() => { try { return JSON.parse($0) } catch (e) { return null } })()")>]

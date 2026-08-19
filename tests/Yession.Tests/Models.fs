@@ -32,8 +32,10 @@ let private expect result =
 
 type private HttpReply = { status: int; body: string }
 
-[<Emit("""fetch($0, { headers: $1 ? { cookie: $1 } : {}, cache: 'no-store' })
-  .then(async r => ({ status: r.status, body: await r.text() }))""")>]
+[<Emit("""(function (url, cookie) { return (
+fetch(url, { headers: cookie ? { cookie: cookie } : {}, cache: 'no-store' })
+  .then(async r => ({ status: r.status, body: await r.text() }))
+) })($0, $1)""")>]
 let private get (url: string) (cookie: string) : JS.Promise<HttpReply> = Util.jsNative
 
 /// Start a server on a free port and answer with `reply`, which sees the request.
