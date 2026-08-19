@@ -107,6 +107,34 @@ let private driveSpawner
 let tests =
     Tag.needs "Srt integration" [ Tag.Srt ] (fun () ->
         testList "Srt integration" [
+            // FIRST in the suite, on purpose: it needs srt still uninitialized in this
+            // process (srt's manager is a process-wide singleton whose second initialize
+            // returns early), and this is the first suite in the run that touches srt
+            // in-process. What it pins is the recovery half of a real incident: a fork of
+            // the loaded test process once took 1.2s, srt's `which`-based dependency probe
+            // timed out and reported ripgrep "not found" about a file that existed, and the
+            // memoized manager start turned that one transient fault into a whole process
+            // with no sandbox. A failed start must FAIL — with its reason — and must not
+            // decide anything for the next one.
+            testCaseAsync "a failed manager start does not poison the next sandbox" (async {
+                Sandboxes.SrtSandbox.forgetManager ()
+                let workspace = mkdtemp nodeFs nodeOs
+                let ambient = Sandboxes.ambientEnv ()
+                let broken = { srtTools () with Ripgrep = Some "/nowhere/does-not-exist/rg" }
+                let createBroken = Sandboxes.SrtSandbox.create broken (Map.tryFind "HOME" ambient)
+                match! createBroken (policyIn workspace []) with
+                | Ok _ -> failwith "a manager start with a missing dependency must fail"
+                | Error reason -> Expect.stringContains reason "ripgrep" "and say which dependency"
+                let createGood = Sandboxes.SrtSandbox.create (srtTools ()) (Map.tryFind "HOME" ambient)
+                match! createGood (policyIn workspace []) with
+                | Error reason -> failwithf "the next start must get its own honest attempt: %s" reason
+                | Ok sandbox ->
+                    let! run, out, _ = shell sandbox "echo recovered"
+                    Expect.equal (exitCode run) 0 "and its sandbox really runs"
+                    Expect.stringContains out "recovered" "for real"
+                    do! sandbox.Dispose ()
+            })
+
 
             testCaseAsync "a command runs confined, writes its workspace, and streams its output" (async {
                 let workspace = mkdtemp nodeFs nodeOs

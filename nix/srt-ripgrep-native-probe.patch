@@ -1,0 +1,33 @@
+srt's Linux dependency check resolves ripgrep by SPAWNING `which` with a one-second
+timeout, even when the config names an explicit path — and whichSync folds every spawn
+failure (ETIMEDOUT, EAGAIN, ENOENT) into the same null, which the check then reports as
+"ripgrep (<path>) not found" about a file that exists. Measured here: a fork from a large,
+busy Node process took 1276ms mid test-tier, one timeout, and the whole process lost its
+sandboxing (tests/Yession.Tests/SrtIntegration.fs pins the recovery half).
+
+This applies the convention checkLinuxDependencies already uses for bwrapPath and
+socatPath — "an explicit override is a directive, not a hint" — to the ripgrep override:
+a command that names a path is checked natively with fs.accessSync, so nothing is spawned
+and nothing can time out. Bare names still go through `which`, unchanged.
+
+Upstream (@anthropic-ai/sandbox-runtime) carries the same code as of 0.0.73, so an
+upgrade does not retire this patch; re-check when bumping the dependency.
+
+--- a/dist/sandbox/sandbox-manager.js
++++ b/dist/sandbox/sandbox-manager.js
+@@ -630,7 +630,14 @@
+         // expand glob deny-patterns to concrete paths for bwrap. macOS seatbelt
+         // profiles take regex patterns directly, so rg is never invoked there.
+         const rgToCheck = ripgrepConfig ?? config?.ripgrep ?? { command: 'rg' };
+-        if (whichSync(rgToCheck.command) === null) {
++        // An explicit path is a directive, not a hint — the rule checkLinuxDependencies
++        // already applies to bwrapPath and socatPath. Checked natively, because probing a
++        // path by SPAWNING `which` converts a slow fork on a loaded host (ETIMEDOUT at
++        // whichSync's one-second budget) into "not found" about a file that exists.
++        const rgResolvable = rgToCheck.command.includes('/')
++            ? (() => { try { fs.accessSync(rgToCheck.command, fs.constants.X_OK); return true; } catch { return false; } })()
++            : whichSync(rgToCheck.command) !== null;
++        if (!rgResolvable) {
+             errors.push(`ripgrep (${rgToCheck.command}) not found`);
+         }
+         const linuxDeps = checkLinuxDependencies({

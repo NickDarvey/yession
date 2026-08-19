@@ -173,6 +173,13 @@ let
     dontBuild = true;
     installPhase = ''
       runHook preInstall
+      # srt resolves an EXPLICIT ripgrep path by spawning `which` with a one-second timeout,
+      # so a slow fork on a loaded host reads as "ripgrep not found" about a file that
+      # exists. The patch checks a path natively instead — the same rule srt already applies
+      # to its bwrap and socat overrides. See the patch header; upstream still has the
+      # defect as of 0.0.73, so re-check it on every version bump.
+      chmod -R u+w node_modules/@anthropic-ai/sandbox-runtime
+      patch -p1 -d node_modules/@anthropic-ai/sandbox-runtime < ${./srt-ripgrep-native-probe.patch}
       # npmConfigHook populated ./node_modules from the FOD (scripts ignored, so node-datachannel
       # has its JS but no compiled addon); drop the Nix-built .node into place.
       mkdir -p node_modules/node-datachannel/build/Release

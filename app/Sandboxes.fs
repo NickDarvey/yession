@@ -817,25 +817,36 @@ module SrtSandbox =
             }
         | None ->
             allowed <- Set.ofList config.AllowedDomains
-            // Started once, here, and memoized as its promise — including a start that
-            // FAILED, so every later sandbox reports the same reason instead of retrying
-            // an initialization the host cannot support.
+            // Started once, here, and memoized as its promise — but only a start that
+            // SUCCEEDED stays memoized. A failed start clears the memo before it reports,
+            // because "this host cannot support srt" and "this host was too loaded to
+            // answer just then" arrive as the same error, and caching the second bricked
+            // every later sandbox in the process over one transient fault (a fork of this
+            // busy process once took 1.2s, past a one-second probe timeout inside srt —
+            // the reason the dependency probe is also patched to be native,
+            // nix/srt-ripgrep-native-probe.patch). srt clears its own initialization
+            // state on failure for the same reason; a host that genuinely cannot support
+            // it fails again in microseconds with the same message, so nothing is lost.
             let promise =
                 Async.StartAsPromise (
                     async {
-                        let! srt = Interop.awaitPromise (importSrt ())
-                        if not (supportedPlatform srt) then
-                            return failwith "this platform has no srt sandbox"
-                        // Always CONFINED, whichever sandbox got here first: srt reads
-                        // the session config for anything a spawn does not name, so an
-                        // exempt one initializing the manager would hand its exemption
-                        // to the session. The exemption rides `customConfig` per spawn,
-                        // which wins outright over this.
-                        do! Interop.awaitPromise (initialize srt (toJs { config with FilesystemDisabled = false }))
-                        let! check = Interop.awaitPromise (checkDependencies srt)
-                        match dependencyErrors check with
-                        | "" -> return srt
-                        | errors -> return failwith errors
+                        try
+                            let! srt = Interop.awaitPromise (importSrt ())
+                            if not (supportedPlatform srt) then
+                                return failwith "this platform has no srt sandbox"
+                            // Always CONFINED, whichever sandbox got here first: srt reads
+                            // the session config for anything a spawn does not name, so an
+                            // exempt one initializing the manager would hand its exemption
+                            // to the session. The exemption rides `customConfig` per spawn,
+                            // which wins outright over this.
+                            do! Interop.awaitPromise (initialize srt (toJs { config with FilesystemDisabled = false }))
+                            let! check = Interop.awaitPromise (checkDependencies srt)
+                            match dependencyErrors check with
+                            | "" -> return srt
+                            | errors -> return failwith errors
+                        with e ->
+                            starting <- None
+                            return raise e
                     })
             starting <- Some promise
             Interop.awaitPromise promise
