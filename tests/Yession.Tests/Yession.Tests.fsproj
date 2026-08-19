@@ -71,6 +71,7 @@
     <Compile Include="Cli.fs" />
     <Compile Include="NixSource.fs" />
     <Compile Include="TestSources.fs" />
+    <Compile Include="EmitSources.fs" />
     <Compile Include="Main.fs" />
   </ItemGroup>
 

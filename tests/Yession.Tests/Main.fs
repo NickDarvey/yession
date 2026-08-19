@@ -97,6 +97,7 @@ let all =
         // after it in the same process. Cheap tier deliberately — the mutation happens there,
         // and only its consequence needs a live tier.
         Tag.needs "Test sources" [] (fun () -> TestSources.tests)
+        Tag.needs "Emit bodies" [] (fun () -> EmitSources.tests)
         // The rich editor rendering E2E stands alone: it needs a browser but NOT the native
         // WebRTC host, so it runs wherever Chromium exists ([Browser]). The full two-peer
         // convergence/persistence E2E spawns the real Session Process, so it also needs Native.
