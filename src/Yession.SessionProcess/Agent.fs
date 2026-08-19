@@ -73,6 +73,12 @@ module AgentTurn =
         // caller from the same log page the conversation came from, so the two describe
         // the same instant.
         (terminals: TerminalBlockDigest list)
+        // Which model this turn runs on, read from the session's collaborative register at
+        // the same instant the page above it was (`None` = the provider's own default). A
+        // value rather than a thunk, so the whole context pack describes ONE moment: a turn
+        // that read its conversation now and its model later could run the answer to one
+        // question on the model somebody picked for the next.
+        (model: ModelId option)
         (trigger: TurnTrigger)
         : Async<unit> =
         async {
@@ -121,6 +127,7 @@ module AgentTurn =
                       TurnActor = turnActor
                       CurrentMessage = currentMessage
                       Terminals = terminals
+                      Model = model
                       SystemPrompt = systemPrompt }
                 do! append (AgentContextBuilt { AgentTurnId = turnId; MessageCount = List.length conversation })
 

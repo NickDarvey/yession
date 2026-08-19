@@ -26,6 +26,10 @@
     <Compile Include="Support.fs" />
     <Compile Include="Connections.fs" />
     <Compile Include="Queries.fs" />
+    <!-- The model catalogue: the provider lookup and the route over it. Beside Queries.fs
+         because it is the same shape of thing — a gated session surface with a stub
+         provider behind it — and it reuses that suite's identity stub idiom. -->
+    <Compile Include="Models.fs" />
     <Compile Include="WorkSandboxes.fs" />
     <Compile Include="CommandGates.fs" />
     <Compile Include="Tools.fs" />

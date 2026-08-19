@@ -472,6 +472,61 @@ module View =
               {controls}
             </section>"""
 
+    /// The model picker, beside the account that pays for it: which model this session's
+    /// turns run on, chosen from whatever the session's provider offers.
+    ///
+    /// It always offers the provider's own default, and it always offers whatever the
+    /// session has CHOSEN — even a model the catalogue no longer lists, because a control
+    /// that silently displays something other than the setting behind it is worse than one
+    /// showing an id nobody recognises. Everything else is the catalogue, in a person's
+    /// order rather than the provider's.
+    ///
+    /// Nothing here knows which provider answered. The section says "model", the options
+    /// carry ids and names a provider gave, and a second provider would change neither.
+    let private modelSection (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
+        let chosen = model.Synced.Model
+        let offered =
+            match model.Models with
+            | ModelsLoaded models -> ModelCatalogue.ordered models
+            | ModelsUnknown
+            | ModelsUnavailable _ -> []
+        // The chosen model, when the catalogue does not carry it: shown by its id, which is
+        // the only name anything here has for it.
+        let orphan =
+            match chosen with
+            | Some id when offered |> List.forall (fun m -> m.Id <> id) -> [ AgentModel.create id "" ]
+            | _ -> []
+        let options =
+            (orphan @ offered)
+            |> List.map (fun offer ->
+                let id = ModelId.value offer.Id
+                html $"""<option value="{id}" ?selected={chosen = Some offer.Id}>{offer.Name}</option>""")
+        // What the picker cannot yet offer, said rather than left as a short list nobody can
+        // explain. A lookup that failed is almost always "no account connected here yet",
+        // and the panel above this one is the way out of that.
+        let note =
+            match model.Models with
+            | ModelsUnknown -> html $"""<span class="{Style.small}" data-model-note="pending">…</span>"""
+            | ModelsLoaded [] ->
+                html $"""<span class="{Style.small}" data-model-note="empty">this provider offered no models to choose from</span>"""
+            | ModelsLoaded _ -> Lit.nothing
+            | ModelsUnavailable reason ->
+                html $"""<span class="{Style.small}" data-model-note="unavailable">{reason}</span>"""
+        html $"""
+            <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-model-panel>
+              <label class="{Style.label}" for="agent-model">model</label>
+              <div class="{Style.fieldSelectWrap}">
+                <select id="agent-model" class="{Style.fieldSelect}"
+                        data-model-select="{chosen |> Option.map ModelId.value |> Option.defaultValue Dom.Text.modelDefault}"
+                        @change={EvVal(fun v -> dispatch (SetModelMsg (match ModelId.create v with Ok id -> Some id | Error _ -> None)))}>
+                  <option value="" ?selected={chosen.IsNone}>{Dom.Text.modelDefaultLabel}</option>
+                  {options}
+                </select>
+                <span class="{Style.fieldSelectMark}">{Icon.down}</span>
+              </div>
+              {note}
+            </section>"""
+
     /// The GitHub connection panel (Plan 14), beside the Claude one: status per sign-in
     /// scope, the device flow (show the code → approve on github.com → the poll lands
     /// the grant), and the paste-a-token fallback.
@@ -617,6 +672,7 @@ module View =
                 <button type="button" class="{Style.navChevronBack}" aria-label="Collapse sidebar" data-nav-toggle="hide" @click={Ev(fun _ -> actions.ToggleNav ())}>{Icon.left}</button>
               </div>
               {claudeSection actions dispatch model.Claude}
+              {modelSection dispatch model}
               {githubSection actions dispatch model.GitHub}
               {queriesSection model.Queries}
               {historyStoreNote model}

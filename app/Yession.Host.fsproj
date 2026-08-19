@@ -58,6 +58,9 @@
          parser) and after Version.fs (its clientInfo says which build is asking). -->
     <Compile Include="McpClient.fs" />
     <Compile Include="ClaudeConnection.fs" />
+    <!-- The provider-neutral `/models` route. After ClaudeConnection.fs only by
+         convention — it references nothing in it, which is the property worth keeping. -->
+    <Compile Include="ModelRoutes.fs" />
     <Compile Include="GitHubConnection.fs" />
     <Compile Include="Spawn.fs" />
     <Compile Include="ProcessManager.fs" />

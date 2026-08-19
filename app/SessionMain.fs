@@ -290,8 +290,20 @@ let private usageProbeAgent : RunAgent =
 
 // Ambient credentials (the documented last resort, and how CI's LiveAgent tier feeds
 // the agent): inherited from the Manager's shell, shared by every session and actor.
-let private envCreds =
-    Interop.envOr "ANTHROPIC_API_KEY" (Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "") <> ""
+//
+// Read as the same `(envVar, value)` PAIR a connected credential resolves to, because two
+// things need it now: the agent gate, which only asks whether there is one, and the models
+// lookup, which has to present it. A second reading of the same two variables somewhere
+// else is how the two would come to disagree about what "ambient" means.
+let private ambientCredential () : (string * string) option =
+    match Interop.envOr "ANTHROPIC_API_KEY" "" with
+    | "" ->
+        match Interop.envOr "CLAUDE_CODE_OAUTH_TOKEN" "" with
+        | "" -> None
+        | token -> Some ("CLAUDE_CODE_OAUTH_TOKEN", token)
+    | key -> Some ("ANTHROPIC_API_KEY", key)
+
+let private envCreds = (ambientCredential ()).IsSome
 
 // The session's live view of connected credentials (Plan 08): fed by the Manager's
 // connection-status stream, metadata only. Availability is DYNAMIC — a sign-in
@@ -365,10 +377,56 @@ let private commandServices : Commands.CommandServices =
       Sandboxes = fun () -> workSandboxes
       Invalidate = fun name -> queryRegistry.Invalidate name }
 
-/// Per-turn credential dispatch (Plan 08): resolve the credential the TURN ACTOR runs
-/// on — the session's own explicit credential first, then the actor's — fresh from the
-/// Manager (which lazily refreshes a due OAuth grant). Ambient env is the last resort;
-/// with neither, the turn fails gracefully with a pointer at the Connections panel.
+/// The credential a party's calls on the provider run on (Plan 08): the session's own
+/// explicit credential first, then the actor's — fresh from the Manager, which lazily
+/// refreshes a due OAuth grant. `Ok None` is the ambient env, the documented last resort;
+/// `Error` is the message a person can act on, which always points at the Connections
+/// panel because that is where the fix is.
+///
+/// One resolution, two callers: the turn dispatcher below and the models lookup. They ask
+/// the same question — whose credential does this party get — and a second copy of the
+/// precedence would be a second answer waiting to drift.
+let private resolveCredential (actor: ActorRef) : Async<Result<(string * string) option, string>> =
+    async {
+        let targets =
+            ClaudeConnection.turnTargets sessionId actor
+            |> List.filter (fun target -> Map.containsKey target connectionStatus)
+        match connectionsClient, targets with
+        | Some client, target :: _ ->
+            match! client.Resolve target with
+            | Ok (kind, value) -> return Ok (Some (ClaudeConnection.envVarFor kind value))
+            | Error e ->
+                if envCreds then return Ok None
+                else return Error (sprintf "could not use the connected Claude account: %s" e)
+        | _ ->
+            if envCreds then return Ok None
+            else
+                return
+                    Error (
+                        sprintf
+                            "no Claude account connected for %s — open Connections to sign in"
+                            (ClaudeConnection.actorLabel actor))
+    }
+
+/// The models this session can run a turn on, looked up ONCE and kept for as long as the
+/// session lives (`ModelCatalogue.cached`). The picker's whole supply, and the only place
+/// the provider is asked what exists.
+let private listModels : ListModels =
+    ModelCatalogue.cached (fun actor ->
+        async {
+            match! resolveCredential actor with
+            | Error reason -> return Error reason
+            | Ok (Some credential) -> return! ClaudeConnection.models credential
+            | Ok None ->
+                match ambientCredential () with
+                | Some credential -> return! ClaudeConnection.models credential
+                // Unreachable: `Ok None` means the ambient credential is what a turn would
+                // run on, and that is exactly what `ambientCredential` has just answered.
+                | None -> return Error "no credential to ask the provider with"
+        })
+
+/// Per-turn credential dispatch (Plan 08): the turn runs on `resolveCredential`'s answer
+/// for its actor. With no credential at all the turn fails gracefully, saying so.
 let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent =
     fun context capabilities signal onChunk ->
         async {
@@ -388,25 +446,9 @@ let private dispatching (inner: (string * string) option -> RunAgent) : RunAgent
             let fail (reason: string) =
                 onChunk { Text = reason }
                 AgentFailed reason
-            let targets =
-                ClaudeConnection.turnTargets sessionId context.TurnActor
-                |> List.filter (fun target -> Map.containsKey target connectionStatus)
-            match connectionsClient, targets with
-            | Some client, target :: _ ->
-                match! client.Resolve target with
-                | Ok (kind, value) ->
-                    return! inner (Some (ClaudeConnection.envVarFor kind value)) context capabilities signal onChunk
-                | Error e ->
-                    if envCreds then return! inner None context capabilities signal onChunk
-                    else return fail (sprintf "could not use the connected Claude account: %s" e)
-            | _ ->
-                if envCreds then return! inner None context capabilities signal onChunk
-                else
-                    return
-                        fail (
-                            sprintf
-                                "no Claude account connected for %s — open Connections to sign in"
-                                (ClaudeConnection.actorLabel context.TurnActor))
+            match! resolveCredential context.TurnActor with
+            | Ok credential -> return! inner credential context capabilities signal onChunk
+            | Error reason -> return fail reason
         }
 
 /// A built-in probe (`YESSION_AGENT=credential-probe`): completes immediately, naming
@@ -540,7 +582,14 @@ Async.StartImmediate (
                 match auth with
                 | Some a -> Some (Queries.routes a queryRegistry sessionMount)
                 | None -> None
-            [ claudeRoutes; githubRoutes; queryRoutes ]
+            // The model catalogue: gated by the same cookie identity, and — unlike the two
+            // connection panels — needing no control channel of its own, because the
+            // credential it asks with is resolved through the one they already use.
+            let modelRoutes =
+                match auth with
+                | Some a -> Some (ModelRoutes.routes a listModels sessionMount)
+                | None -> None
+            [ claudeRoutes; githubRoutes; queryRoutes; modelRoutes ]
             |> List.choose id
             |> function
                | [] -> None

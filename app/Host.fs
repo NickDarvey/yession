@@ -667,7 +667,13 @@ let startFull
             endWaiters <- []
             waiters |> List.iter (fun w -> w ())
 
-        let onConnection (channel: FrameChannel<string>) =
+        let onConnection (carrier: FrameChannel<string>) =
+            // Supervised from the moment it arrives, before anything else can hold it: a peer
+            // whose transport dies silently must reach the cleanup below — releasing its
+            // terminal leases and clearing its cursor — rather than holding both for ever.
+            // Wrapping here, not deeper, is what makes the relay map and the pump agree about
+            // which channel this peer IS.
+            let channel = Link.supervise Link.LinkPolicy.shipped carrier
             let connectionId = nextConnectionId
             nextConnectionId <- nextConnectionId + 1
             let handlers : PeerSession.PeerHandlers<string> =

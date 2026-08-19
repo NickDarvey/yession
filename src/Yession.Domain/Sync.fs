@@ -22,6 +22,7 @@ type AdaptiveSyncedState =
       SharedBrief : cval<SharedBrief option>
       TerminalDrafts : cmap<string, TerminalDraft>
       Pending : cmap<string, PendingAct>
+      Model : cval<ModelId option>
       Gates : cmap<string, ApprovalMode>
       TerminalSizes : cmap<string, TerminalSize> }
 
@@ -73,6 +74,7 @@ module SyncedStateSync =
           SharedBrief = cval m.SharedBrief
           TerminalDrafts = cmap (terminalDraftsByKey m)
           Pending = cmap (pendingByKey m)
+          Model = cval m.Model
           Gates = cmap (gatesByKey m)
           TerminalSizes = cmap (terminalSizesByKey m) }
 
@@ -85,6 +87,7 @@ module SyncedStateSync =
         a.SharedBrief.Value <- m.SharedBrief
         a.TerminalDrafts.Value <- terminalDraftsByKey m
         a.Pending.Value <- pendingByKey m
+        a.Model.Value <- m.Model
         a.Gates.Value <- gatesByKey m
         a.TerminalSizes.Value <- terminalSizesByKey m
 
@@ -163,6 +166,15 @@ module SyncedStateSync =
             [ "cols", Encode.int (AVal.constant s.Cols)
               "rows", Encode.int (AVal.constant s.Rows) ]
 
+    /// The session's model choice: one optional top-level REGISTER, which Ylmish lays out as
+    /// a key in the argless root map rather than as a named root type (`Binding.attach`'s
+    /// LAYOUT note — only structural containers get named roots). A plain string rather than
+    /// a nested object for exactly that reason: the flat register is the shape whose
+    /// presence and absence are both a single key, so unpicking is a delete and there is no
+    /// half-written slot to read back.
+    let private encodeModel (m: aval<ModelId>) : Encoded =
+        Encode.string (m |> AVal.map ModelId.value)
+
     let private encodeGate (m: ApprovalMode) : Encoded =
         Encode.object [ "mode", Encode.string (AVal.constant (ApprovalMode.describe m)) ]
 
@@ -184,6 +196,7 @@ module SyncedStateSync =
               // old `terminalQueue`/`terminalModes` roots; `migrateGateRoots` moves them at
               // boot, so there is exactly one live location, never two.
               "pending", Encode.map encodePendingAct (a.Pending :> amap<_, _>)
+              "model", Encode.option encodeModel a.Model
               "gates", Encode.map encodeGate (a.Gates :> amap<_, _>)
               "terminalSizes", Encode.map encodeTerminalSize (a.TerminalSizes :> amap<_, _>) ]
 
@@ -278,6 +291,16 @@ module SyncedStateSync =
             let! rows = Decode.object.optional "rows" Decode.int
             return { Cols = defaultArg cols 0; Rows = defaultArg rows 0 }
         }
+
+    /// A model register the smart constructor refuses reads back as ABSENT — the provider's
+    /// default — rather than as a model nothing can run. Same direction as an unreadable
+    /// gate mode: the fallback is always something a turn can actually do.
+    let private modelToDomain (raw: string option) : ModelId option =
+        raw
+        |> Option.bind (fun id ->
+            match ModelId.create id with
+            | Ok model -> Some model
+            | Error _ -> None)
 
     let private decodeGate<'m> : Decoder<'m, string> =
         Decode.object {
@@ -407,6 +430,7 @@ module SyncedStateSync =
             let! brief = Decode.object.optional "sharedBrief" decodeBrief
             let! terminalDrafts = Decode.object.optional "terminalDrafts" (Decode.map decodeTerminalDraft)
             let! pending = Decode.object.optional "pending" (Decode.map decodePendingAct)
+            let! model = Decode.object.optional "model" Decode.string
             let! gates = Decode.object.optional "gates" (Decode.map decodeGate)
             let! terminalSizes = Decode.object.optional "terminalSizes" (Decode.map decodeTerminalSize)
             return
@@ -417,6 +441,7 @@ module SyncedStateSync =
                   TerminalDrafts =
                     terminalDrafts |> Option.map terminalDraftsToDomain |> Option.defaultValue Map.empty
                   Pending = pending |> Option.map pendingToDomain |> Option.defaultValue Map.empty
+                  Model = modelToDomain model
                   Gates = gates |> Option.map gatesToDomain |> Option.defaultValue Map.empty
                   TerminalSizes =
                     terminalSizes |> Option.map terminalSizesToDomain |> Option.defaultValue Map.empty }
@@ -521,6 +546,13 @@ module SyncedStateSync =
                   RejectedBy = entryString entry "rejectedBy"
                   RejectedReason = entryString entry "rejectedReason"
                   Background = entryString entry "background" })
+        // Off the ARGLESS root map, not off a named root: a top-level register lives there
+        // (see `encodeModel`), so `doc.getMap "model"` would silently mint an empty map and
+        // read back as "nobody has chosen" for ever.
+        let model =
+            match (doc.getMap () : Yjs.Y.Map<obj>).get "model" with
+            | Some id when not (isNull id) -> Some (unbox<string> id)
+            | _ -> None
         let gatesH = foldRoot doc "gates" (fun entry -> entryString entry "mode")
         let terminalSizesH =
             foldRoot doc "terminalSizes" (fun entry ->
@@ -533,6 +565,7 @@ module SyncedStateSync =
               SharedBrief = brief
               TerminalDrafts = terminalDraftsToDomain terminalDraftsH
               Pending = pendingToDomain pendingH
+              Model = modelToDomain model
               Gates = gatesToDomain gatesH
               TerminalSizes = terminalSizesToDomain terminalSizesH }
 

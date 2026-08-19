@@ -482,9 +482,13 @@ let connectInMemoryClientVia
     (name: string)
     : Async<Client> =
     async {
-        let clientEnd, serverEnd = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+        let carrier, serverEnd = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
         // The Host drives the server end exactly as it would a WebRTC connection.
         host.Connect serverEnd
+        // ...and this end is supervised exactly as the browser supervises its own. Not
+        // decoration: the Host now holds every peer to a heartbeat, so a client that did not
+        // answer one would be evicted three seconds into any test that sat still.
+        let clientEnd = Link.supervise Link.LinkPolicy.shipped carrier
         let doc = Y.Doc.Create ()
         let local = peer id name
         let registry = BodyRegistry doc
