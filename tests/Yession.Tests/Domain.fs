@@ -389,9 +389,74 @@ let private authorityTests =
                 "so it resolves to the agent, which has no scope of its own — not to a person"
     ]
 
+/// The model vocabulary: the id's invariant, and the one rule the session's catalogue has
+/// — look once, keep the answer, and never keep a failure.
+let private modelTests =
+    testList "Models" [
+        testCase "a model id is trimmed, and refuses what no provider could have named" <| fun () ->
+            // This value is handed to a spawned process as an option and arrives from a
+            // register any peer may write, so the refusals are the point rather than tidiness.
+            Expect.equal
+                (ModelId.value (ModelId.create "  a-model  " |> expect))
+                "a-model"
+                "surrounding whitespace is trimmed"
+            Expect.isError (ModelId.create "  ") "blank is not a model"
+            Expect.isError (ModelId.create "two words") "inner whitespace is not a model id"
+            Expect.isError (ModelId.create "a\nmodel") "nor is a control character"
+            Expect.isError (ModelId.create (String.replicate 300 "x")) "nor is a document"
+
+        testCase "a model without a label is offered by its id, never blank" <| fun () ->
+            // A picker row with nothing in it reads as a control that failed to load.
+            let id = ModelId.create "a-model" |> expect
+            Expect.equal (AgentModel.create id "").Name "a-model" "the id stands in for a name"
+
+        testCase "the catalogue is ordered for a person, not for the provider" <| fun () ->
+            let of' id name = AgentModel.create (ModelId.create id |> expect) name
+            let ordered = ModelCatalogue.ordered [ of' "z" "Beta"; of' "a" "alpha" ]
+            Expect.equal
+                (ordered |> List.map (fun m -> m.Name))
+                [ "alpha"; "Beta" ]
+                "by name, case-insensitively"
+
+        testCaseAsync "a successful lookup happens once and is kept for the session" <|
+            async {
+                let mutable asked = 0
+                let cached =
+                    ModelCatalogue.cached (fun _ ->
+                        async {
+                            asked <- asked + 1
+                            return Ok [ AgentModel.create (ModelId.create "a-model" |> expect) "A" ]
+                        })
+                let! first = cached ActorRef.Agent
+                let! second = cached ActorRef.Agent
+                Expect.equal asked 1 "the provider is asked once"
+                Expect.equal second first "and every later reader gets the same answer"
+            }
+
+        testCaseAsync "a failed lookup is not kept, so signing in later fills the picker" <|
+            async {
+                // The failure a session actually hits is "nothing is connected yet", and the
+                // remedy happens in the panel above the picker. Caching that would leave the
+                // picker permanently empty for a session that fixes it a minute later.
+                let mutable asked = 0
+                let cached =
+                    ModelCatalogue.cached (fun _ ->
+                        async {
+                            asked <- asked + 1
+                            if asked = 1 then return Error "not connected"
+                            else return Ok [ AgentModel.create (ModelId.create "a-model" |> expect) "A" ]
+                        })
+                let! failed = cached ActorRef.Agent
+                Expect.isError failed "the first ask reports why it could not"
+                let! second = cached ActorRef.Agent
+                Expect.isOk second "and the next ask tries again"
+            }
+    ]
+
 let tests =
     testList "Domain" [
         identityTests
+        modelTests
         authorityTests
         envelopeSerializationTests
         conversationProjectionTests

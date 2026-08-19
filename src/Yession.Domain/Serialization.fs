@@ -1727,6 +1727,29 @@ module Codec =
                         (Decode.field "value" queryValue.Decode)
                 | other -> Decode.fail (sprintf "Unknown query frame: %s" other)) }
 
+    let modelId : Codec<ModelId> =
+        { Encode = ModelId.value >> Encode.string
+          Decode = viaSmartCtor ModelId.create Decode.string }
+
+    let agentModel : Codec<AgentModel> =
+        { Encode =
+            (fun (model: AgentModel) ->
+                Encode.object
+                    [ "id", modelId.Encode model.Id
+                      "name", Encode.string model.Name ])
+          Decode =
+            Decode.object (fun get ->
+                AgentModel.create
+                    (get.Required.Field "id" modelId.Decode)
+                    (get.Optional.Field "name" Decode.string |> Option.defaultValue "")) }
+
+    /// The catalogue as the session serves it to a picker. An OBJECT around the list rather
+    /// than a bare array, so the reply has somewhere to grow — a provider's default, a
+    /// deprecation note — without every reader needing a new shape on the same day.
+    let modelCatalogue : Codec<AgentModel list> =
+        { Encode = (fun models -> Encode.object [ "models", Encode.list (models |> List.map agentModel.Encode) ])
+          Decode = Decode.field "models" (Decode.list agentModel.Decode) }
+
     /// Serialize a value to a compact JSON string.
     let toString (codec: Codec<'a>) (value: 'a) : string =
         codec.Encode value |> Encode.toString 0

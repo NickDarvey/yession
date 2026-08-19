@@ -50,6 +50,26 @@ let private codecTests =
             Expect.equal decoded (p.Model ()).Synced "the doc decodes back to exactly the model's synced state"
             Expect.equal (Body.draft registry ada) (Some "hello world") "the body fragment holds the composed markdown"
 
+        // The model choice is collaborative state, so it has to survive the boundary in BOTH
+        // directions — including back to nothing. An optional register that can be set but
+        // not cleared is the failure mode worth pinning: it would leave a session unable to
+        // hand the choice back to its provider.
+        testCase "the model choice crosses the sync boundary" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            let chosen = ModelId.create "a-model" |> expect
+            p.Dispatch (user (SetModelMsg (Some chosen)))
+            let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+            Expect.equal decoded.Model (Some chosen) "the doc carries what was picked"
+
+        testCase "unpicking a model hands the choice back to the provider" <| fun () ->
+            let doc = Y.Doc.Create ()
+            let p = Harness.run (App.makeProgram doc (ClientModel.init (peer "ada" "Ada")))
+            p.Dispatch (user (SetModelMsg (Some (ModelId.create "a-model" |> expect))))
+            p.Dispatch (user (SetModelMsg None))
+            let decoded = SyncedStateSync.ofDoc doc |> Result.mapError (sprintf "%A") |> expect
+            Expect.equal decoded.Model None "the register is gone, which IS the default"
+
         testCase "an empty doc decodes to the empty synced state (decode-empty = init)" <| fun () ->
             let decoded = SyncedStateSync.ofDoc (Y.Doc.Create ()) |> Result.mapError (sprintf "%A") |> expect
             Expect.equal decoded SyncedSessionState.empty "no drafts, no shared brief"

@@ -23,6 +23,13 @@ let private terminalId = TerminalId.create "term-ui" |> expect
 let private blockId = BlockId.create "block-ui" |> expect
 let private terminalDraftQueueId = QueueId.create "queue-ui-term-draft" |> expect
 let private terminalQueueId = QueueId.create "queue-ui-term" |> expect
+/// The model this representative session has picked, and the catalogue it picked from.
+/// Ids and labels a provider would give, so the picker renders the case that matters —
+/// something is chosen, and the list it came from is on screen with it.
+let private pickedModel = ModelId.create "example-model-large" |> expect
+let private offeredModels =
+    [ AgentModel.create pickedModel "Example Large"
+      AgentModel.create (ModelId.create "example-model-small" |> expect) "Example Small" ]
 
 /// A model exercising every UI element at once: connected, mid catch-up, one draft
 /// (sendable), one queued message (editable/reorderable/deletable), a completed human
@@ -73,6 +80,7 @@ let private representativeModel : ClientModel =
                     RejectedBy = None
                     RejectedReason = None
                     Background = false } ]
+          Model = Some pickedModel
           Gates = Map.empty
           TerminalSizes = Map.empty }
       Conversation =
@@ -162,6 +170,7 @@ let private representativeModel : ClientModel =
       GitHub =
         { Status = { SessionCredential = None; MineCredential = None }
           Flow = GitHubIdle }
+      Models = ModelsLoaded offeredModels
       // The generated read surface (Plan 15), with all three shapes declared at once, so
       // the acceptance render exercises the ONE renderer every future query goes through
       // rather than the one shape today's queries happen to use.
@@ -392,6 +401,10 @@ let private uiChecklistTests =
                   "settings drawer toggle", Dom.Hooks.settingsToggle
                   "settings drawer panel", Dom.Hooks.settingsPanel
                   "claude panel in settings", Dom.Hooks.claudePanel
+                  // The model picker, showing the session's choice: the CONTROL's own
+                  // attribute, so what a person reads and what the register holds are one
+                  // thing rather than two that could disagree.
+                  "model picker", Dom.attr Dom.Hooks.modelSelect (ModelId.value pickedModel)
                   "agent presence row (absent)", Dom.attr Dom.Hooks.agentPresence "absent"
                   "no-agent prompt strip", Dom.Hooks.noAgent
                   "no-agent connect call-to-action", Dom.Hooks.noAgentConnect ]

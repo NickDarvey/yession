@@ -55,6 +55,7 @@ let private every =
       Claude ClaudeAction.Complete
       Claude ClaudeAction.Token
       Claude ClaudeAction.Disconnect
+      Models
       Queries ]
 
 let private methodOf (route: SessionRoute) =

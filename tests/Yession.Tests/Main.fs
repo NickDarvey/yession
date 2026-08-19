@@ -37,6 +37,10 @@ let all =
         // stand-in, and what it must prove (the door, and one connection carrying the
         // burst and every later change) is exactly what crosses the wire.
         Tag.needs "Query stream routes" [ Tag.Ports ] (fun () -> Queries.portsTests)
+        // The model catalogue is an HTTP conversation on both sides — a provider's paged
+        // reply, and the session's own gated route — and neither has an in-memory
+        // stand-in that would exercise what the cases turn on.
+        Tag.needs "Model catalogue" [ Tag.Ports ] (fun () -> Models.portsTests)
         Tag.needs "Tools" [] (fun () -> Tools.tests)
         // The layers above join here: what a model calls, and what it is told back.
         Tag.needs "Tool calls" [] (fun () -> ToolCalls.tests)

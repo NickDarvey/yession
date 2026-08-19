@@ -86,6 +86,10 @@ type private JsToolAnswer =
       prompt: $0.prompt,
       options: {
         systemPrompt: $0.system,
+        // The session's model choice, and ONLY when it has made one: an absent option is
+        // what leaves the pick to the SDK, and passing an empty string instead would be
+        // this session inventing a model id of "".
+        ...($0.model ? { model: $0.model } : {}),
         maxTurns: $9,
         settingSources: [],
         includePartialMessages: true,
@@ -143,7 +147,7 @@ type private JsToolAnswer =
   }
 })()""")>]
 let private runQuery
-    (prompts: {| system: string; prompt: string |})
+    (prompts: {| system: string; prompt: string; model: string |})
     (agentEnv: obj)
     (claudePath: string)
     /// The registry's descriptors, flattened for JS. Where eighteen positional callbacks
@@ -336,7 +340,12 @@ let runWith (credential: (string * string) option) : RunAgent =
             let registry = registryFor capabilities
             let! outcome =
                 runQuery
-                    {| system = context.SystemPrompt; prompt = promptOf context |}
+                    {| system = context.SystemPrompt
+                       prompt = promptOf context
+                       // "" = no choice, which is the provider's own default. The turn
+                       // carries the choice rather than the runner holding one, so a
+                       // person changing it changes the next turn and nothing else.
+                       model = context.Model |> Option.map ModelId.value |> Option.defaultValue "" |}
                     (toEnvObj (Map.toArray env))
                     (claudePath ())
                     (descriptorsOf registry)

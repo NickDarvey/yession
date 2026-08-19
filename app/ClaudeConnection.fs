@@ -1,12 +1,14 @@
 module Yession.Host.ClaudeConnection
 
-// Everything Claude-specific about signing in (Plan 08) lives HERE, in the session —
-// the Manager's broker is standards-only and never learns which service it brokered.
-// This module owns: the Anthropic OAuth endpoints and Claude Code's public client id
-// (sent to the broker as data), the reserved storage name, pasted-token
-// classification, the credential→env-var mapping the Agent SDK consumes, and the
-// browser-facing /claude* routes the client panel drives.
+// Everything Claude-specific lives HERE, in the session — the Manager's broker is
+// standards-only and never learns which service it brokered, and nothing above this file
+// knows which provider answered. This module owns: the Anthropic OAuth endpoints and
+// Claude Code's public client id (sent to the broker as data), the reserved storage name,
+// pasted-token classification, the credential→env-var mapping the Agent SDK consumes, the
+// models lookup behind the session's provider-neutral catalogue, and the browser-facing
+// /claude* routes the client panel drives.
 
+open Fable.Core
 open Fable.Core.JsInterop
 open Yession.Domain
 open Yession.Manager
@@ -97,6 +99,86 @@ let turnTargets (sessionId: SessionId) (actor: ActorRef) : SecretId list =
       Some { SecretId.Scope = LocalScope; Name = secretName } ]
     |> List.choose id
 
+// --- the models lookup ------------------------------------------------------------------
+// The one Claude-shaped thing behind the session's provider-neutral catalogue: an endpoint,
+// two header dialects, and a paged reply. `AgentModel` is what comes out, so the route, the
+// synced register and the picker never learn any of it.
+
+/// Anthropic's model listing. Overridable for the same reason the OAuth endpoints are: a
+/// test needs somewhere to point it that is not the live provider.
+let private modelsUrl = "https://api.anthropic.com/v1/models"
+
+type private ModelsOutcome =
+    abstract ok : bool
+    abstract reason : string
+    abstract models : {| id: string; name: string |} array
+
+/// GET the catalogue on one credential, following the API's paging.
+///
+/// The credential PAIR decides the dialect, which is why this takes the same
+/// `(envVar, value)` `envVarFor` produces rather than a bare string: a Console API key
+/// authenticates with `x-api-key`, and an OAuth access token with a bearer header plus the
+/// beta opt-in Claude Code's own client sends. One value, one rule, no guessing at the
+/// shape of a secret.
+///
+/// The page bound is a runaway guard, not a coverage cap: the API's own maximum page is
+/// 1000, so ten pages is ten thousand models and no provider is near it.
+[<Emit("""(async () => {
+  try {
+    const headers = { 'anthropic-version': '2023-06-01' }
+    if ($0 === 'ANTHROPIC_API_KEY') headers['x-api-key'] = $1
+    else { headers['authorization'] = 'Bearer ' + $1; headers['anthropic-beta'] = 'oauth-2025-04-20' }
+    const models = []
+    // Not `url`: Fable names the substituted argument after its F# parameter, so a local of
+    // the same name shadows it into a temporal dead zone and every lookup throws.
+    let next = $2 + '?limit=1000'
+    for (let page = 0; page < 10; page++) {
+      const r = await fetch(next, { headers })
+      if (!r.ok) {
+        const detail = (await r.text()).slice(0, 200)
+        return { ok: false, reason: 'the provider answered ' + r.status + ': ' + detail, models: [] }
+      }
+      const body = await r.json()
+      for (const m of (body.data || [])) models.push({ id: String(m.id || ''), name: String(m.display_name || '') })
+      if (!body.has_more || !body.last_id) break
+      next = $2 + '?limit=1000&after_id=' + encodeURIComponent(body.last_id)
+    }
+    return { ok: true, reason: '', models }
+  } catch (err) {
+    return { ok: false, reason: String((err && err.message) || err), models: [] }
+  }
+})()""")>]
+let private fetchModels (envVar: string) (value: string) (url: string) : JS.Promise<ModelsOutcome> = jsNative
+
+/// The models one credential can see at one endpoint, as the provider-neutral pair the
+/// rest of the session speaks. An id the smart constructor refuses is DROPPED rather than
+/// failing the whole lookup: one malformed row in a provider's reply is not a reason to
+/// leave somebody without a picker.
+///
+/// The endpoint is a parameter so a test can point it at a provider it wrote — which is
+/// the only way the paging and the header dialects get exercised without a live account,
+/// and the only way to do it without a suite writing the process environment.
+let modelsAt (url: string) (credential: string * string) : Async<Result<AgentModel list, string>> =
+    async {
+        let envVar, value = credential
+        let! outcome = fetchModels envVar value url |> Interop.awaitPromise
+        if not outcome.ok then return Error outcome.reason
+        else
+            return
+                outcome.models
+                |> Array.toList
+                |> List.choose (fun row ->
+                    match ModelId.create row.id with
+                    | Ok id -> Some (AgentModel.create id row.name)
+                    | Error _ -> None)
+                |> Ok
+    }
+
+/// The lookup as the session composes it: this provider's endpoint, overridable the way
+/// its OAuth endpoints are.
+let models (credential: string * string) : Async<Result<AgentModel list, string>> =
+    modelsAt (envOr "YESSION_CLAUDE_MODELS_URL" modelsUrl) credential
+
 /// A human label for a turn actor, for the "not connected" failure message.
 let actorLabel (actor: ActorRef) : string =
     match actor with
@@ -104,7 +186,10 @@ let actorLabel (actor: ActorRef) : string =
     | PeerRef p -> sprintf "peer %s" (PeerId.value p)
     | ActorRef.Agent -> "the agent"
     | ActorRef.SessionProcess -> "the session process"
-    | ActorRef.System -> "the system"
+    // What `System` MEANS wherever this label is read: a deployment that attributes nobody,
+    // acting as itself. "the system" is what the actor is called in the log; it is not what
+    // a person reading "no Claude account connected for …" needs to be told.
+    | ActorRef.System -> "this deployment"
 
 // --- the browser-facing /claude* routes -----------------------------------------------
 // Thin proxies over the Manager's broker, gated by the same cookie identity as /me.
