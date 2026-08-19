@@ -62,28 +62,24 @@ let private setQueuedField (doc: Y.Doc) (id: string) (field: string) (value: obj
 let private setQueuedFieldInDoc (doc: Y.Doc) (id: QueueId) (field: string) (value: string) : unit =
     setQueuedField doc (QueueId.value id) field (box value)
 
+/// A raw pending entry, written the way a build we no longer ship would have written one.
+/// No production writer has this shape any more — that is the point — so the only way to
+/// test tolerance of it is to write it as that build did.
+[<Fable.Core.Emit("(() => { const q = $0.getMap('pending'); const e = new $1.Map(); q.set($2, e); e.set('subject', $3); e.set('author', $4); e.set('order', 1) })()")>]
+let private legacyPendingInDoc (doc: Y.Doc) (yjs: obj) (id: string) (subject: string) (author: string) : unit =
+    Fable.Core.Util.jsNative
 
-let private subjectTests =
-    testList "Gate subjects" [
-        testCase "a subject round-trips through its wire form, and a junk one is refused" <| fun () ->
-            for subject in [ ForTerminal terminalA; ForCommand "add_repo" ] do
-                Expect.equal
-                    (GateSubject.parse (GateSubject.describe subject))
-                    (Some subject)
-                    (sprintf "%A survives the doc key it is stored under" subject)
-            Expect.equal (GateSubject.parse "terminal:") None "a terminal with no id is not a subject"
-            Expect.equal (GateSubject.parse "command:") None "nor is a command with no name"
-            Expect.equal (GateSubject.parse "add_repo") None "and an unprefixed key names nothing"
-    ]
+[<Fable.Core.Import("*", "yjs")>]
+let private yjsModule : obj = Fable.Core.Util.jsNative
+
 
 // --- The drain's decision ------------------------------------------------------------------
 
 let private entry (id: string) (terminal: TerminalId) (author: ActorRef) (order: float) =
     { QueueId = queue id
-      Subject = ForTerminal terminal
+      Terminal = terminal
       Authority = Authority.ofAuthor author
       Order = order
-      Payload = CommandLine
       Background = false }
 
 let private queueOf entries =
@@ -1930,14 +1926,25 @@ let private syncTests =
             SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 3.0 "git status" false
             let synced = syncedOf doc
             let entry = synced.Pending |> Map.find (queue "a1")
-            Expect.equal entry.Subject (ForTerminal terminalA) "the subject names its terminal"
-            Expect.equal entry.Payload CommandLine "and its payload is an editable command line"
+            Expect.equal entry.Terminal terminalA "the entry names its terminal"
             Expect.equal
                 (Authority.author entry.Authority)
                 ActorRef.Agent
                 "the author, as an actor rather than a peer"
             Expect.equal entry.Order 3.0 "the order"
             Expect.equal (SyncedStateSync.terminalQueuedText doc (queue "a1")) "git status" "with its command text"
+
+        testCase "a structured command parked by an old build is dropped, never run" <| fun () ->
+            // Docs written before Plan 23 can hold `command:*` acts — structured commands a
+            // person was still deciding on when the manual gate existed. Running one now
+            // would carry out an act nobody released; dropping it at decode is the safe
+            // direction, and the terminal entry beside it is untouched.
+            let doc = Y.Doc.Create ()
+            SyncedStateSync.enqueueTerminalCommand doc (queue "a1") terminalA (Authority.agentFor (PeerRef ada)) 1.0 "ls" false
+            legacyPendingInDoc doc yjsModule "q-cmd" "command:add_repo" "agent"
+            let synced = syncedOf doc
+            Expect.isTrue (Map.containsKey (queue "a1") synced.Pending) "the terminal entry survives"
+            Expect.equal (Map.count synced.Pending) 1 "and the parked command act does not"
 
         testCase "a verdict register written by an old peer is ignored, never fatal" <| fun () ->
             // Docs written before Plan 23 carry `approvedBy`/`rejectedBy` registers, and an
@@ -2370,7 +2377,6 @@ let tests =
     testList "Terminals (Plan 13)" [
         affordanceTests
         sourceTests
-        subjectTests
         drainTests
         projectionTests
         markTests

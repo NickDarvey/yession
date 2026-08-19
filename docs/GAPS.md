@@ -433,9 +433,14 @@ Items are roughly ordered by how much they matter.
     the same stance the timeline already takes, where every member reads every
     attributed act-line. A query that should not be session-wide has nowhere to hide
     yet.
-  - **No command is gated.** Plan 13's approval gate still lives inside
-    `execute_command` and nowhere else; a general `Auto | RequiresHuman` property for
-    every command is Plan 15's last stage and is not built.
+  - **The shipped classifier approves everything.** Every terminal block and every
+    structured command passes the classifier (`Classify.fs`,
+    [Plan 23](plans/23-classifier-gated-acts.md)) on its way to happening, but the only
+    implementation is `Classifier.approveAll` — so until an AI-driven classifier lands,
+    nothing stands between an agent turn and any command except the work sandbox's
+    confinement. Manual approval was removed deliberately, not lost: the queue stays
+    visible and editable, refusals stay recorded and attributed, and the seam is where
+    the real classifier plugs in.
   - **A forwarded credential lives in a sandbox's env for that sandbox's lifetime**
     (Plan 15 stage 2), readable by everyone in the session and by everything running in
     it — the same shared trust boundary Plan 14 states. Revoking at the provider does
@@ -581,8 +586,9 @@ Items are roughly ordered by how much they matter.
   keystroke nobody was allowed to send, its block never finished, and every command queued
   behind it stalled for ever. The flip now follows the AUTHOR, agent included. The boundary
   that remains is that the agent cannot TAKE an instrumented terminal — it may only use the
-  one detection hands it, over a block somebody already approved — because taking it would be
-  the door around the approval gate that `execute_command` is the one door for. The drain gate
+  one detection hands it, over a block already classified and on the record — because taking
+  it would be the door around the classifier that `execute_command` is the one door for
+  ([Plan 23](plans/23-classifier-gated-acts.md)). The drain gate
   that accompanies live mode (Plan 13, stage 2e) is unchanged — a leased terminal holds its
   queue rather than typing into a session someone else owns.
 - **The live viewport is proven host-free, never against a real pty end to end**

@@ -45,7 +45,6 @@
          this declares, so the policy types precede the collaborative state that holds
          them. Before Terminals.fs too, because a terminal's mode is one case of it. -->
     <Compile Include="Classify.fs" />
-    <Compile Include="Gates.fs" />
     <Compile Include="Terminals.fs" />
     <Compile Include="TerminalMarks.fs" />
     <!-- After both projections it merges: the chat as a person reads it, said and run

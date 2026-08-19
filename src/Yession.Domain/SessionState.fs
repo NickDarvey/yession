@@ -51,64 +51,27 @@ type TerminalDraft =
       /// the message queue.
       QueueId  : QueueId }
 
-/// What a pending act IS, which is the one thing that differs between the kinds (Plan 15,
-/// stage 3). Everything else — who proposed it, where it sits in its queue — is the same,
-/// and lives on the entry rather than in here.
-type PendingPayload =
-    /// A shell command LINE, whose text is a `Y.Text` root keyed by
-    /// `BodyKey.terminalQueued`. Editable in place by any peer until the drain takes it:
-    /// the thing about to run is a thing you can fix first.
-    | CommandLine
-    /// A structured call: the MCP tool name, the arguments it was made with, and those
-    /// arguments rendered for a human to read. Nothing writes this any more (Plan 23:
-    /// structured commands classify and dispatch synchronously); the case remains so a doc
-    /// written before the cut still decodes.
-    | CommandCall of tool: string * args: string * summary: string
-
-/// An act queued to run. Collaborative until whatever carries it out consumes it: any peer
-/// may reorder or delete it, and edit its text where it has text — reading what is about
-/// to happen and fixing it in place is the point of the queue being visible.
+/// A command line queued to run in a terminal, whose text is a `Y.Text` root keyed by
+/// `BodyKey.terminalQueued`. Collaborative until the drain consumes it: any peer may
+/// reorder or delete it, and edit its text in place — reading what is about to happen and
+/// fixing it first is the point of the queue being visible. The one kind of act that
+/// queues (Plan 23): a structured command classifies and dispatches synchronously, so
+/// nothing else parks here any more.
 type PendingAct =
     { QueueId  : QueueId
-      /// What the act is about — which terminal, or which command.
-      Subject  : GateSubject
+      /// The terminal this command runs in.
+      Terminal : TerminalId
       /// Who proposed the act, and whose authority it would run on (Plan 20). Neither is
       /// changed by an edit, because "who asked for this" is not editable — and the pair is
       /// one value so that an agent-proposed act without an owner cannot be written.
       Authority : Authority
-      /// A fractional index within its subject's queue — one register write to reorder.
-      /// Meaningful where something drains serially (a terminal has one stdin); harmless
-      /// where nothing does.
+      /// A fractional index within its terminal's queue — one register write to reorder.
       Order    : float
-      /// What is being proposed.
-      Payload  : PendingPayload
       /// Whether the author asked for this to run WITHOUT holding their turn open (Plan 20,
       /// stage 2). Only an agent sets it — a person's composer never waits on anything —
       /// and it rides the queue entry because the drain is what reads the doc and mints the
       /// block that records it.
       Background : bool }
-
-module PendingAct =
-
-    /// The terminal this act runs in, when it runs in one. `None` for a structured
-    /// command, which has no terminal and does not want one.
-    let terminal (act: PendingAct) : TerminalId option =
-        match act.Subject with
-        | ForTerminal id -> Some id
-        | ForCommand _ -> None
-
-    /// The order value for a new act appended at the tail of its subject's queue. One
-    /// function for both kinds: only a terminal drains serially, but an order that is
-    /// unique and ascending within a subject is what keeps the CARD LIST stable for
-    /// everybody, and a list nobody drains still has to stop reshuffling itself.
-    let nextOrder (subject: GateSubject) (pending: Map<QueueId, PendingAct>) : float =
-        pending
-        |> Map.toList
-        |> List.map snd
-        |> List.filter (fun act -> act.Subject = subject)
-        |> function
-            | [] -> 1.0
-            | acts -> (acts |> List.map (fun act -> act.Order) |> List.max) + 1.0
 
 /// The name of the top-level `Y.XmlFragment` root that holds a draft/queue body. Stable across
 /// peers so every replica's `BodyRegistry` and editor bind to the same fragment (root types
@@ -238,17 +201,20 @@ module TerminalQueueOrder =
         queue
         |> Map.toList
         |> List.map snd
-        |> List.filter (fun e -> e.Subject = ForTerminal terminal)
+        |> List.filter (fun e -> e.Terminal = terminal)
         |> List.sortBy (fun e -> e.Order, QueueId.value e.QueueId)
 
-    /// The order value for a new entry appended at the tail of a terminal's queue. The
-    /// `ForTerminal` case of `PendingAct.nextOrder`, named because the composer asks for it.
+    /// The order value for a new entry appended at the tail of a terminal's queue. Unique
+    /// and ascending within a terminal, which is what keeps the CARD LIST stable for
+    /// everybody as well as ordering the drain.
     let nextFor (terminal: TerminalId) (queue: Map<QueueId, PendingAct>) : float =
-        PendingAct.nextOrder (ForTerminal terminal) queue
+        match sortedFor terminal queue with
+        | [] -> 1.0
+        | acts -> (acts |> List.map (fun act -> act.Order) |> List.max) + 1.0
 
     /// The order value that moves `id` one position earlier within its own terminal.
     let moveUp (queue: Map<QueueId, PendingAct>) (id: QueueId) : float option =
-        match Map.tryFind id queue |> Option.bind PendingAct.terminal with
+        match Map.tryFind id queue |> Option.map (fun act -> act.Terminal) with
         | None -> None
         | Some terminal ->
             let entries = sortedFor terminal queue
@@ -261,7 +227,7 @@ module TerminalQueueOrder =
 
     /// The order value that moves `id` one position later within its own terminal.
     let moveDown (queue: Map<QueueId, PendingAct>) (id: QueueId) : float option =
-        match Map.tryFind id queue |> Option.bind PendingAct.terminal with
+        match Map.tryFind id queue |> Option.map (fun act -> act.Terminal) with
         | None -> None
         | Some terminal ->
             let entries = sortedFor terminal queue
