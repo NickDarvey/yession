@@ -137,10 +137,7 @@ module TerminalQueueDrain =
         | NotWaiting
 
     type TerminalDrainPlan =
-        { /// The entries to start now — at most one per terminal, in terminal order. Paired
-          /// with the terminal they resolved to (Plan 15, stage 3): a `PendingAct` names a
-          /// `GateSubject`, and re-asking which terminal downstream would mean answering,
-          /// with a default or a `failwith`, a question this plan already settled.
+        { /// The entries to start now — at most one per terminal, in terminal order.
           Ready : (TerminalId * PendingAct) list
           /// Doc keys to remove without running: entries a `TerminalBlockStarted` already
           /// names (a crash between the append and the removal), repaired rather than run
@@ -209,13 +206,10 @@ module TerminalQueueDrain =
 
         let alreadyConsumed (entry: PendingAct) = Set.contains (QueueId.value entry.QueueId) consumed
 
-        // Only the acts that name a terminal. A command act in the same map is a leftover
-        // from before Plan 23 (nothing writes one any more) and is nothing to do with this
-        // drain: it has no shell and no order to hold.
         let terminals =
             queue
             |> Map.toList
-            |> List.choose (fun (_, entry) -> PendingAct.terminal entry)
+            |> List.map (fun (_, entry) -> entry.Terminal)
             |> List.distinct
             |> List.sortBy TerminalId.value
 
@@ -231,7 +225,7 @@ module TerminalQueueDrain =
             queue
             |> Map.toList
             |> List.map snd
-            |> List.filter (fun e -> Option.isSome (PendingAct.terminal e) && alreadyConsumed e)
+            |> List.filter alreadyConsumed
             |> List.map (fun e -> e.QueueId) }
 
     /// The consumed-set contribution of one event: a terminal drain dedups against every
@@ -2063,7 +2057,7 @@ module TerminalCommands =
                     | Some (terminal, _) -> Some terminal
                     | None ->
                         match syncedOf () with
-                        | Ok synced -> synced.Pending |> Map.tryFind handle |> Option.bind PendingAct.terminal
+                        | Ok synced -> synced.Pending |> Map.tryFind handle |> Option.map (fun act -> act.Terminal)
                         | Error _ -> None
                 match terminal with
                 | None -> return Error "no such command"

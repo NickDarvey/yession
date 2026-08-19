@@ -148,10 +148,9 @@ let private withLiveTerminal
 /// A queue entry for a terminal, as the drain would hand one over.
 let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : PendingAct =
     { QueueId = QueueId.create n |> expect
-      Subject = ForTerminal terminal
+      Terminal = terminal
       Authority = Authority.ofAuthor author
       Order = 1.0
-      Payload = CommandLine
       Background = false }
 
 /// The same, authored by the agent on a peer's credential — the only way an agent-authored

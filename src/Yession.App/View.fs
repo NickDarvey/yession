@@ -1490,50 +1490,27 @@ module View =
         // What this act IS, in words — used both as the chip and as the accessible name on
         // the controls, because a screen reader hearing "Delete" eleven times learns
         // nothing about which one it is on.
-        let subjectLabel =
-            match entry.Subject with
-            | ForTerminal terminal ->
-                TerminalProjection.tryFind terminal model.Terminals
-                |> Option.map (fun view -> view.Title)
-                |> Option.defaultValue (TerminalId.value terminal)
-            | ForCommand tool -> tool
         let what =
-            match entry.Payload with
-            | CommandLine -> subjectLabel
-            | CommandCall (_, _, summary) -> summary
+            TerminalProjection.tryFind entry.Terminal model.Terminals
+            |> Option.map (fun view -> view.Title)
+            |> Option.defaultValue (TerminalId.value entry.Terminal)
         let subject =
             if not showSubject then Lit.nothing
-            else html $"""<span class="{Style.chatChipWho}" data-pending-subject="{GateSubject.describe entry.Subject}">{subjectLabel}</span>"""
-        // The body is the ONE thing that differs between the kinds. A command line is
-        // characters, so it is an input any peer can fix before it runs. A structured
-        // call's arguments are typed, so it is read-only — a leftover from a doc written
-        // before Plan 23, when structured commands parked here.
+            else html $"""<span class="{Style.chatChipWho}" data-pending-subject="terminal:{TerminalId.value entry.Terminal}">{what}</span>"""
+        // The command line is characters, so it is an input any peer can fix before it runs.
         let body =
-            match entry.Payload with
-            | CommandLine ->
-                html $"""
-                    <div class="{Style.terminalQueuedRow}">
-                      <span class="{Style.terminalPrompt}">$</span>
-                      <input type="text" class="{Style.fieldMonoBare}" aria-label="Queued command"
-                             autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
-                             data-terminal-input="{BodyKey.terminalQueued id}">
-                    </div>"""
-            | CommandCall (_, _, summary) ->
-                html $"""
-                    <div class="{Style.terminalQueuedRow}">
-                      <code class="{Style.terminalCommandText}" data-pending-summary>{summary}</code>
-                    </div>"""
-        // Order and withdrawal belong to a queue that DRAINS serially. A command act has no
-        // shell to wait for and no place in a line, so offering to move it up would be a
-        // control over nothing.
+            html $"""
+                <div class="{Style.terminalQueuedRow}">
+                  <span class="{Style.terminalPrompt}">$</span>
+                  <input type="text" class="{Style.fieldMonoBare}" aria-label="Queued command"
+                         autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"
+                         data-terminal-input="{BodyKey.terminalQueued id}">
+                </div>"""
         let ordering =
-            match PendingAct.terminal entry with
-            | None -> Lit.nothing
-            | Some _ ->
-                html $"""
-                    <button type="button" class="{Style.btnIconBare}" aria-label="Move {what} up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.up}</button>
-                    <button type="button" class="{Style.btnIconBare}" aria-label="Move {what} down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.down}</button>
-                    <button type="button" class="{Style.btnIconBareDanger}" aria-label="Delete {what}" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>"""
+            html $"""
+                <button type="button" class="{Style.btnIconBare}" aria-label="Move {what} up" @click={Ev(fun _ -> match TerminalQueueOrder.moveUp model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.up}</button>
+                <button type="button" class="{Style.btnIconBare}" aria-label="Move {what} down" @click={Ev(fun _ -> match TerminalQueueOrder.moveDown model.Synced.Pending id with Some o -> dispatch (ReorderPendingMsg (id, o)) | None -> ())}>{Icon.down}</button>
+                <button type="button" class="{Style.btnIconBareDanger}" aria-label="Delete {what}" data-terminal-queue-delete="{QueueId.value id}" @click={Ev(fun _ -> dispatch (DeletePendingMsg id))}>{Icon.close}</button>"""
         html $"""
             <article class="{Style.terminalQueuedReady}"
                      data-terminal-queued="{QueueId.value id}" data-terminal-queued-status="{statusToken}">

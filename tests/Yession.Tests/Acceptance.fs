@@ -67,13 +67,12 @@ let private representativeModel : ClientModel =
             Map.ofList
                 [ terminalQueueId,
                   { QueueId = terminalQueueId
-                    Subject = ForTerminal terminalId
+                    Terminal = terminalId
                     // What the product actually writes for an agent command: the agent acts,
                     // on the turn human's authority. There is no other agent-shaped way to
                     // build one.
                     Authority = Authority.agentFor (PeerRef ada)
                     Order = 1.0
-                    Payload = CommandLine
                     Background = false } ]
           Model = Some pickedModel
           TerminalSizes = Map.empty }

@@ -1029,7 +1029,7 @@ module ClientModel =
         model.Synced.Pending
         |> Map.toList
         |> List.map snd
-        |> List.sortBy (fun act -> GateSubject.describe act.Subject, act.Order, QueueId.value act.QueueId)
+        |> List.sortBy (fun act -> TerminalId.value act.Terminal, act.Order, QueueId.value act.QueueId)
 
     /// The composer slots published in a terminal, in stable order — every peer mid-command
     /// there, the local peer included.
@@ -1044,8 +1044,7 @@ module ClientModel =
     /// stage 2e). Named because it resolves when a person finishes a task, and a queue that
     /// said only *pending* would leave that looking like a stall.
     let awaitsTerminal (entry: PendingAct) (model: ClientModel) : bool =
-        PendingAct.terminal entry
-        |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals)
+        TerminalProjection.tryFind entry.Terminal model.Terminals
         |> Option.bind (fun view -> view.Lease)
         |> Option.isSome
 
@@ -1054,8 +1053,7 @@ module ClientModel =
     /// same reason: they resolve differently — one when a person finishes, this one when
     /// somebody repairs the terminal.
     let awaitsIntegration (entry: PendingAct) (model: ClientModel) : bool =
-        PendingAct.terminal entry
-        |> Option.bind (fun id -> TerminalProjection.tryFind id model.Terminals)
+        TerminalProjection.tryFind entry.Terminal model.Terminals
         |> Option.map (fun view -> view.IntegrationLost)
         |> Option.defaultValue false
 
@@ -1096,7 +1094,7 @@ module ClientModel =
         match field with
         | TerminalDraftBody (terminal, _) -> Some terminal
         | TerminalQueuedBody queueId ->
-            model.Synced.Pending |> Map.tryFind queueId |> Option.bind PendingAct.terminal
+            model.Synced.Pending |> Map.tryFind queueId |> Option.map (fun act -> act.Terminal)
         | Title | DraftBody _ | QueueBody _ -> None
 
     /// Who is in a given terminal right now — whether writing a new command or editing a
@@ -1479,9 +1477,8 @@ module ClientModel =
             | Some draft when not (Map.containsKey draft.QueueId model.Synced.Pending) ->
                 let entry =
                     { QueueId = draft.QueueId
-                      Subject = ForTerminal terminal
+                      Terminal = terminal
                       Order = TerminalQueueOrder.nextFor terminal model.Synced.Pending
-                      Payload = CommandLine
                       // The author is the PEER who wrote it. Attribution to a verified user
                       // happens at the durable append, where the Session Process knows the
                       // binding — the doc only ever knows connections.

@@ -120,23 +120,15 @@ module SyncedStateSync =
               "queueId", Encode.string (AVal.constant (QueueId.value d.QueueId)) ]
 
     /// A queued act. `author` is an actor TOKEN, not a peer id, because the agent proposes
-    /// acts too and "who asked for this" is part of the record.
+    /// acts too and "who asked for this" is part of the record. Its text is a sibling
+    /// `Y.Text` root (`BodyKey.terminalQueued`), so nothing of the command crosses here.
     ///
-    /// A `CommandLine`'s text is a sibling `Y.Text` root (`BodyKey.terminalQueued`), so the
-    /// payload here carries only which KIND it is; a `CommandCall` has no editable text and
-    /// carries its rendered arguments inline, because nobody is going to merge them.
+    /// The `subject` key keeps the `terminal:<id>` wire form the entry has always had —
+    /// the F# shape simplified to a `TerminalId` (Plan 23), the doc format did not, so a
+    /// persisted doc and a pre-upgrade browser tab both keep reading.
     let private encodePendingAct (q: PendingAct) : Encoded =
-        let tool, args, summary =
-            match q.Payload with
-            | CommandLine -> "", "", ""
-            | CommandCall (tool, args, summary) -> tool, args, summary
         Encode.object
-            [ "subject", Encode.string (AVal.constant (GateSubject.describe q.Subject))
-              "payload",
-              Encode.string (AVal.constant (match q.Payload with CommandLine -> "line" | CommandCall _ -> "call"))
-              "tool", Encode.string (AVal.constant tool)
-              "args", Encode.string (AVal.constant args)
-              "summary", Encode.string (AVal.constant summary)
+            [ "subject", Encode.string (AVal.constant ("terminal:" + TerminalId.value q.Terminal))
               "onBehalfOf",
               Encode.string
                   (AVal.constant
@@ -210,10 +202,6 @@ module SyncedStateSync =
     /// The doc-side pending entry, before validation.
     type private PendingFields =
         { Subject : string
-          Payload : string
-          Tool : string
-          Args : string
-          Summary : string
           OnBehalfOf : string
           Author : string
           Order : float
@@ -233,20 +221,12 @@ module SyncedStateSync =
     let private decodePendingAct<'m> : Decoder<'m, PendingFields> =
         Decode.object {
             let! subject = Decode.object.required "subject" Decode.string
-            let! payload = Decode.object.optional "payload" Decode.string
-            let! tool = Decode.object.optional "tool" Decode.string
-            let! args = Decode.object.optional "args" Decode.string
-            let! summary = Decode.object.optional "summary" Decode.string
             let! onBehalfOf = Decode.object.optional "onBehalfOf" Decode.string
             let! author = Decode.object.required "author" Decode.string
             let! order = Decode.object.optional "order" Decode.float
             let! background = Decode.object.optional "background" Decode.string
             return
                 { Subject = subject
-                  Payload = defaultArg payload ""
-                  Tool = defaultArg tool ""
-                  Args = defaultArg args ""
-                  Summary = defaultArg summary ""
                   OnBehalfOf = defaultArg onBehalfOf ""
                   Author = author
                   Order = defaultArg order 0.0
@@ -304,26 +284,28 @@ module SyncedStateSync =
                 acc |> Map.add (terminal, author) { Terminal = terminal; Author = author; QueueId = queueId }
             | _ -> acc)
 
+    /// The terminal a stored subject key names. `command:*` entries — structured commands
+    /// parked by a build before Plan 23 — parse to `None` and are DROPPED at decode: safer
+    /// than running an act a person was still deciding on, and the one place a leftover of
+    /// that shape can still arrive from.
+    let private subjectTerminal (raw: string) : TerminalId option =
+        if raw.StartsWith "terminal:" then
+            match TerminalId.create (raw.Substring 9) with
+            | Ok id -> Some id
+            | Error _ -> None
+        else None
+
     let private pendingToDomain (h: HashMap<string, PendingFields>) : Map<QueueId, PendingAct> =
         (Map.empty, HashMap.toSeq h)
         ||> Seq.fold (fun acc (key, f) ->
-            match QueueId.create key, GateSubject.parse f.Subject, ActorRef.ofToken f.Author with
-            | Ok id, Some subject, Some author ->
-                // An unreadable payload kind reads as a command LINE, which is what a
-                // pending act has been since Plan 13 and the only kind with an editable
-                // text root. A call whose kind failed to read would otherwise render as a
-                // card with no arguments on it — releasing something you cannot see.
-                let payload =
-                    match f.Payload with
-                    | "call" when f.Tool <> "" -> CommandCall (f.Tool, f.Args, f.Summary)
-                    | _ -> CommandLine
+            match QueueId.create key, subjectTerminal f.Subject, ActorRef.ofToken f.Author with
+            | Ok id, Some terminal, Some author ->
                 acc
                 |> Map.add
                     id
                     { QueueId = id
-                      Subject = subject
+                      Terminal = terminal
                       Order = f.Order
-                      Payload = payload
                       // Recovered rather than authored: an unreadable credential owner reads
                       // as NONE, which makes the act run on nothing rather than on somebody
                       // else's — the safe direction, and the dispatch refuses it with a
@@ -460,10 +442,6 @@ module SyncedStateSync =
         let pendingH =
             foldRoot doc "pending" (fun entry ->
                 { Subject = entryString entry "subject"
-                  Payload = entryString entry "payload"
-                  Tool = entryString entry "tool"
-                  Args = entryString entry "args"
-                  Summary = entryString entry "summary"
                   OnBehalfOf = entryString entry "onBehalfOf"
                   Author = entryString entry "author"
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
@@ -616,8 +594,7 @@ module SyncedStateSync =
                 let queue : Yjs.Y.Map<obj> = doc.getMap "pending"
                 let entry : Yjs.Y.Map<obj> = Yjs.Y.Map.Create ()
                 queue.set (QueueId.value id, box entry) |> ignore
-                entry.set ("subject", box (GateSubject.describe (ForTerminal terminal))) |> ignore
-                entry.set ("payload", box "line") |> ignore
+                entry.set ("subject", box ("terminal:" + TerminalId.value terminal)) |> ignore
                 entry.set ("author", box (ActorRef.token (Authority.author authority))) |> ignore
                 entry.set ("order", box order) |> ignore
                 if background then entry.set ("background", box "true") |> ignore
