@@ -558,31 +558,10 @@ Async.StartImmediate (
         // capabilities and the `work_sandboxes` query read is filled here — before the
         // readiness line, and therefore before any turn or any browser can ask.
         workSandboxes <- host.Sandboxes
-        // How each gated command is carried out, handed to the gate the Host owns. Doing it
-        // here — and not by closing over a turn — is what lets the gate honour an approval
-        // for an act that a previous process parked: it drains the doc, and this is the only
-        // thing it was missing.
+        // How each gated command is carried out, handed to the gate the Host owns. Here —
+        // and not closed over a turn — because the table is built from the services, and the
+        // services are composed here.
         host.SetCommandDispatch (Commands.dispatch commandServices)
-        // The operator's gate configuration (Plan 15, stage 3b), SEEDED into the synced
-        // register rather than consulted at decision time — which is what leaves exactly one
-        // place a mode is ever read from, and lets a human change their mind mid-session
-        // without a restart. Empty by default, so a session nobody configured behaves exactly
-        // as it did before the gate existed. A restart re-asserts the operator's list: the
-        // configuration is what the session BOOTS as, and a mid-session change is a change to
-        // this run.
-        match CommandGates.parseConfiguredGates (Interop.envOr "YESSION_GATED_COMMANDS" "") with
-        // A name that is not a gated command is fatal, not skipped: an operator who believes
-        // a command is gated and finds it silently is not has the blind spot this whole
-        // stage exists to remove.
-        | Error reason ->
-            eprintfn "YESSION_GATED_COMMANDS: %s" reason
-            Interop.exit 1
-        | Ok [] -> ()
-        | Ok commands ->
-            for command in commands do
-                SyncedStateSync.setGate host.Doc (GatedCommands.subject command) ApproveAgent
-            eprintfn "[session %s] these commands need a human to approve them: %s"
-                (SessionId.value sessionId) (commands |> List.map (fun c -> c.Tool) |> String.concat ", ")
         // The reverse leg starts LAST, after the query registry exists and the Host is up:
         // a set frame rebuilds a registry and invalidates a query, and both of those have
         // to be there before the first frame can arrive.

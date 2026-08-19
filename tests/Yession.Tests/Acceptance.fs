@@ -778,32 +778,6 @@ let private uiChecklistTests =
             Expect.isTrue (html.Contains "aria-label=\"Approve ") "approve names its act"
             Expect.isTrue (html.Contains "aria-label=\"Reject ") "reject names its act"
 
-        // The gate control, generalized (Plan 15, stage 3c): the same three options the
-        // terminal header carries, over a command subject. One register, one vocabulary.
-        testCase "every gated command renders a control, configured or not" <| fun () ->
-            let html = Support.render representativeModel
-            // The catalogue is a shared-domain value, so a command nobody has configured
-            // still renders — on its default, rather than being invisible until an operator
-            // names it in an environment variable.
-            for command in GatedCommands.all do
-                Expect.isTrue
-                    (html.Contains (sprintf "data-gate-panel=\"%s\"" command.Tool))
-                    (sprintf "%s has a control" command.Tool)
-                Expect.isTrue (html.Contains command.Title) "labelled with prose rather than its tool name"
-            Expect.isTrue (html.Contains "data-gate-mode=\"auto\"") "an unconfigured command shows its default"
-            // A terminal is not listed here — its control lives on the terminal, where the
-            // thing it is about is.
-            Expect.isFalse (html.Contains "data-gate-panel=\"term") "and a terminal subject is not in this list"
-
-        testCase "a configured gate shows the mode it is on" <| fun () ->
-            let model =
-                { representativeModel with
-                    Synced =
-                        { representativeModel.Synced with
-                            Gates = Map.ofList [ GatedCommands.subject GatedCommands.addRepo, ApproveAgent ] } }
-            let html = Support.render model
-            Expect.isTrue (html.Contains "data-gate-mode=\"approve-agent\"") "the configured one reads back"
-
         // The structure a table owes a screen reader (CLAUDE.md, UI baseline). Held in the
         // renderer, so it is held for every query — the reason the surface is generated.
         testCase "a rows query renders a real table with column headers" <| fun () ->

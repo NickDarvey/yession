@@ -344,14 +344,13 @@ let startFull
         // command proposed before the session is up has nothing to run it.
         let commandDispatch : CommandDispatch ref = ref Map.empty
 
-        // The approval gate for structured commands (Plan 15, stage 3b): the terminal drain
-        // with the serial scheduler taken out. It parks an act in the same `Pending` map the
-        // terminal queue lives in, reads the same `ApprovalMode` register, and hands back the
-        // same `QueueId` — which is what lets ONE `check_pending` serve both.
+        // The gate for structured commands (Plan 15, stage 3b; Plan 23): every command
+        // passes the classifier on its way to the dispatch table, and hands back the same
+        // `QueueId` a terminal command does — which is what lets ONE `check_pending` serve
+        // both. The classifier is the bypass until an AI-driven one exists (GAPS.md).
         let commandGate =
             CommandGates.create
-                doc
-                (fun () -> SyncedStateSync.ofDoc doc)
+                Classifier.approveAll
                 // A getter: the table is assembled in SessionMain, where the repo and
                 // sandbox services are, which is after this Host exists.
                 (fun () -> commandDispatch.Value)
@@ -661,10 +660,6 @@ let startFull
         // crash window — the log-anchored dedup repairs them without re-consuming).
         drain ()
         drainTerminals ()
-        // ...and the command gate's, for the same reason: an act a previous process parked
-        // carries everything needed to run it, so an approval given before the restart is
-        // honoured now rather than refused.
-        commandGate.Drain ()
 
         let mutable endWaiters : (unit -> unit) list = []
         let signalSessionEnded () =
@@ -836,12 +831,7 @@ let startFull
               Environment = environment
               Sandboxes = sandboxes
               Terminals = terminals
-              SetCommandDispatch =
-                fun table ->
-                    commandDispatch.Value <- table
-                    // Anything a previous process parked and a human already approved runs
-                    // the moment there is something to run it with.
-                    commandGate.Drain ()
+              SetCommandDispatch = fun table -> commandDispatch.Value <- table
               TerminalCommands = terminalCommands
               WaitForNextSessionEnd = waitForNextSessionEnd
               Connect = onConnection

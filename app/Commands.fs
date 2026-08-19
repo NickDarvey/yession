@@ -53,15 +53,18 @@ let private andPublish
         return result
     }
 
-/// How each gated command is actually carried out, by tool name. The table the gate reads,
-/// INCLUDING for an act some previous process parked (Plan 15, stage 3b). Everything it needs
-/// arrives in the invocation, off the pending act: the arguments, whose credential to run on,
-/// and who released it. Nothing is closed over from the turn that proposed it, which is
-/// exactly what makes an approval outlive that turn.
+// The gated commands, by MCP tool name. The dispatch table's keys and every call site
+// live in this one file, so the name is agreed where it is used — the settings surface and
+// boot configuration that used to read a shared catalogue are gone (Plan 23).
+let private addRepoTool = "add_repo"
+let private switchBranchTool = "switch_branch"
+let private startWorkSandboxTool = "start_work_sandbox"
+let private stopWorkSandboxTool = "stop_work_sandbox"
+
+/// How each gated command is actually carried out, by tool name (Plan 15, stage 3b).
 ///
-/// A malformed invocation FAILS rather than guessing. These come out of a replicated doc, and
-/// "run something adjacent to what was approved" is the one outcome an approval gate must
-/// never produce.
+/// A malformed invocation FAILS rather than guessing: "run something adjacent to what was
+/// asked for" is the one outcome a gate must never produce.
 let dispatch (services: CommandServices) : CommandDispatch =
     // Whose credential, asked once: the borrowed authority when there is one, the author
     // otherwise. It used to be a `defaultArg` per call site with `ActorRef.Agent` written in
@@ -74,7 +77,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
           Credential = Authority.effective invocation.Authority
           ApprovedBy = Authority.approver invocation.Authority }
     Map.ofList
-        [ GatedCommands.addRepo.Tool,
+        [ addRepoTool,
           fun (invocation: GatedInvocation) ->
             async {
                 match services.Repos (), decodeArgs invocation.Args with
@@ -98,7 +101,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                 | Some _, other -> return Error (sprintf "add_repo takes one repo, got %d arguments" (List.length other))
             }
 
-          GatedCommands.switchBranch.Tool,
+          switchBranchTool,
           fun (invocation: GatedInvocation) ->
             async {
                 match services.Repos (), decodeArgs invocation.Args with
@@ -118,7 +121,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                     return Error (sprintf "switch_branch takes a repo, a branch and a flag, got %d arguments" (List.length other))
             }
 
-          GatedCommands.startWorkSandbox.Tool,
+          startWorkSandboxTool,
           fun (invocation: GatedInvocation) ->
             async {
                 match decodeArgs invocation.Args with
@@ -144,7 +147,7 @@ let dispatch (services: CommandServices) : CommandDispatch =
                 | [] -> return Error "start_work_sandbox takes a sandbox name"
             }
 
-          GatedCommands.stopWorkSandbox.Tool,
+          stopWorkSandboxTool,
           fun (invocation: GatedInvocation) ->
             async {
                 match decodeArgs invocation.Args with
@@ -172,12 +175,9 @@ let private repoCapabilitiesFor
     match services.Repos () with
     | None -> capabilities
     | Some service ->
-        // Takes a CATALOGUE value, not a name. A gated call site therefore cannot name a
-        // command the settings surface does not render, or the boot configuration cannot
-        // accept — the three read one list, so they cannot drift.
-        let gated (command: GatedCommand) (args: string list) (summary: string) =
+        let gated (tool: string) (args: string list) (summary: string) =
             capabilities.RunGated
-                { Command = command
+                { Tool = tool
                   Args = encodeArgs args
                   Summary = summary
                   // The agent acts; the credential is the turn human's (Plan 08). `agentFor`
@@ -187,13 +187,13 @@ let private repoCapabilitiesFor
         { capabilities with
             AddRepo =
               fun repo ->
-                gated GatedCommands.addRepo [ RepoRef.value repo ] (sprintf "add_repo %s" (RepoRef.value repo))
+                gated addRepoTool [ RepoRef.value repo ] (sprintf "add_repo %s" (RepoRef.value repo))
             SwitchRepoBranch =
               fun repo branch create ->
                 let summary =
                     if create then sprintf "switch_branch %s -> new branch %s" (RepoRef.value repo) branch
                     else sprintf "switch_branch %s -> %s" (RepoRef.value repo) branch
-                gated GatedCommands.switchBranch [ RepoRef.value repo; branch; (if create then "true" else "false") ] summary
+                gated switchBranchTool [ RepoRef.value repo; branch; (if create then "true" else "false") ] summary
             // The READS take no gate and no approver: they change nothing, so there is
             // nothing to approve and nothing to resume.
             FetchRepo = service.FetchRepo (Repos.agentCaller turnActor None)
@@ -203,9 +203,9 @@ let private repoCapabilitiesFor
 
 /// The turn's sandbox commands (Plan 15, stage 2), bound to the acting party.
 let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCapabilities) : AgentCapabilities =
-    let gated (command: GatedCommand) (args: string list) (summary: string) =
+    let gated (tool: string) (args: string list) (summary: string) =
         capabilities.RunGated
-            { Command = command
+            { Tool = tool
               Args = encodeArgs args
               Summary = summary
               Authority = Authority.agentFor turnActor }
@@ -217,11 +217,11 @@ let private sandboxCapabilitiesFor (turnActor: ActorRef) (capabilities: AgentCap
                 | [] -> sprintf "start_work_sandbox %s" (SandboxName.value name)
                 | names ->
                     sprintf "start_work_sandbox %s forwarding %s" (SandboxName.value name) (String.concat ", " names)
-            gated GatedCommands.startWorkSandbox (SandboxName.value name :: forward) summary
+            gated startWorkSandboxTool (SandboxName.value name :: forward) summary
         StopWorkSandbox =
           fun name ->
             gated
-                GatedCommands.stopWorkSandbox
+                stopWorkSandboxTool
                 [ SandboxName.value name ]
                 (sprintf "stop_work_sandbox %s" (SandboxName.value name)) }
 

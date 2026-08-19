@@ -675,45 +675,6 @@ module SyncedStateSync =
                 entry.set ("approvedBy", box "") |> ignore),
             processOrigin)
 
-    /// Park a structured command where everyone can see it (Plan 15, stage 3b). The command
-    /// gate's counterpart of `enqueueTerminalCommand`, and it earns the same exception for
-    /// the same reason: the pending list is collaborative state, the agent is a participant
-    /// in it, and an act nobody can see is an act nobody can refuse.
-    ///
-    /// No text root, and that is the payload difference rather than an omission: a call's
-    /// arguments are typed, so what crosses is what a human should READ, and there is
-    /// nothing here for two peers to merge.
-    let enqueueCommandCall
-        (doc: Yjs.Y.Doc)
-        (id: QueueId)
-        (tool: string)
-        (args: string)
-        (summary: string)
-        (authority: Authority)
-        (order: float)
-        : unit =
-        doc.transact (
-            (fun _ ->
-                let pending : Yjs.Y.Map<obj> = doc.getMap "pending"
-                let entry : Yjs.Y.Map<obj> = Yjs.Y.Map.Create ()
-                pending.set (QueueId.value id, box entry) |> ignore
-                entry.set ("subject", box (GateSubject.describe (ForCommand tool))) |> ignore
-                entry.set ("payload", box "call") |> ignore
-                entry.set ("tool", box tool) |> ignore
-                entry.set ("args", box args) |> ignore
-                entry.set ("summary", box summary) |> ignore
-                entry.set
-                    ("onBehalfOf",
-                     box (Authority.onBehalfOf authority |> Option.map ActorRef.token |> Option.defaultValue ""))
-                |> ignore
-                entry.set ("author", box (ActorRef.token (Authority.author authority))) |> ignore
-                entry.set ("order", box order) |> ignore
-                // Never approved on arrival, for `enqueueTerminalCommand`'s reason: whether
-                // an approval is REQUIRED is the mode's question, and pre-answering it here
-                // would let the agent approve itself.
-                entry.set ("approvedBy", box "") |> ignore),
-            processOrigin)
-
     /// Set a subject's approval mode from the Process (Plan 13, stage 3b; Plan 15, stage 3).
     ///
     /// Peers set the mode through the Ylmish binding, from the model; the Process has no

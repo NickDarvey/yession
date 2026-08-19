@@ -152,23 +152,15 @@ module CommandRequest =
 
 type ExecuteCommand = CommandRequest -> Async<Result<TerminalCommandOutcome, string>>
 
-/// Where a COMMAND the agent asked for has got to (Plan 15, stage 3b). The same three shapes
-/// `TerminalCommandStatus` has, minus the two that are about a process: a command has no pty
-/// to be busy and no deadline of its own.
+/// Where a COMMAND the agent asked for has got to (Plan 15, stage 3b; Plan 23). The shapes
+/// `TerminalCommandStatus` has, minus the ones that are about a process: a command has no
+/// pty to be busy and no screen to take.
 type CommandStatus =
-    /// It ran, and this is what it said. The ordinary answer, and the only one an UNGATED
-    /// command can give — which is every command until somebody configures otherwise.
+    /// It ran, and this is what it said. The ordinary answer.
     | CommandRan of string
-    /// A human has to approve it. Unbounded in principle, so the tool yields a handle rather
-    /// than holding the turn — `TerminalCommandAwaitingApproval`'s reasoning, unchanged.
-    | CommandAwaitingApproval
-    /// Released and STILL GOING when the deadline fell. `TerminalCommandRunning`'s
-    /// counterpart, and it is here for the reason that one is: waiting on a PERSON and
-    /// waiting on the WORK are bounded differently and end differently, so a wait that
-    /// cannot tell them apart has to report one of them wrongly. It reported the person —
-    /// which sent an agent to ask for an approval of something already happening, that
-    /// nobody had been asked for and no card showed. A yield, not a cancellation: the
-    /// command runs on and the handle resumes it.
+    /// STILL GOING when the deadline fell. `TerminalCommandRunning`'s counterpart: the
+    /// deadline bounds waiting on the WORK, and an unfinished command is a yield, not a
+    /// cancellation — the command runs on and the handle resumes it.
     | CommandRunning
     /// Somebody said no. Comes back to the model as an error rather than a silence, because
     /// a command that vanishes gets retried another way.
@@ -177,9 +169,7 @@ type CommandStatus =
 /// What one gated command answered with.
 type CommandOutcome =
     { /// The handle that resumes it — the SAME `QueueId` a terminal command yields, which is
-      /// what lets one `check_pending` serve both. `None` when nothing was ever pending: an
-      /// ungated command has no entry to resume, and handing out a handle to something that
-      /// already finished is an invitation to poll it.
+      /// what lets one `check_pending` serve both.
       Handle : QueueId option
       Tool : string
       Summary : string
@@ -187,42 +177,35 @@ type CommandOutcome =
 
 /// One command, as its gate needs to know it.
 type GatedCall =
-    { /// Which command — the catalogue value, not a bare name, so a gated call site cannot
-      /// name something the settings surface does not render.
-      Command : GatedCommand
-      /// The arguments, encoded. What lets a process that did NOT propose the act still
-      /// carry it out after an approval — the doc holds this, so a restart resumes instead
-      /// of refusing. Opaque here: only the command's own dispatch entry reads it.
+    { /// Which command, by its MCP tool name: what the model calls, what the classifier
+      /// reads, and what a refusal records. The dispatch table and every call site live in
+      /// one file (`app/Commands.fs`), so the name is agreed where it is used.
+      Tool : string
+      /// The arguments, encoded. Opaque here: only the command's own dispatch entry reads it.
       Args : string
-      /// The arguments as a human should READ them (`add_repo octo/hello`) — what the card
+      /// The arguments as a human should READ them (`add_repo octo/hello`) — what the audit
       /// shows and what a refusal records, rendered once here rather than three times
       /// downstream.
       Summary : string
       /// Who is asking, and on whose authority (Plan 08: the agent acts, the turn human's
       /// credential is used). One value, so a call cannot be built with an author and no
-      /// authority — and recorded on the act, because a restart has no turn to ask.
+      /// authority.
       Authority : Authority }
 
-/// A command being carried out, as its dispatch entry sees it. Everything comes off the
-/// pending act rather than out of a closure, which is what makes an approval survive the
-/// process that proposed it.
+/// A command being carried out, as its dispatch entry sees it.
 type GatedInvocation =
     { Args : string
-      /// The three parties, including whoever released it when a gate held it — the approval
-      /// joins the authority at the moment of acting, which is here. `Authority.effective`
-      /// is what a dispatch entry asks for whose credential to run on.
+      /// The acting parties. `Authority.effective` is what a dispatch entry asks for whose
+      /// credential to run on.
       Authority : Authority }
 
 /// How a command is actually carried out, by tool name. Built where the capabilities are
-/// composed; read by the gate, including at boot for acts it never proposed.
+/// composed; read by the gate.
 type CommandDispatch = Map<string, GatedInvocation -> Async<Result<string, string>>>
 
-/// Run a command through its approval gate (Plan 15, stage 3b). A capability rather than a
-/// detail of the MCP adapter, so the declarative executor gets the same gate the agent does
-/// instead of a second path around it.
-/// No thunk: the gate looks the command up in the `CommandDispatch` and runs it from the
-/// pending act's own fields. A closure would tie the act to the process that proposed it,
-/// which is precisely the restart that used to lose it.
+/// Run a command through its gate (Plan 15, stage 3b; Plan 23: the gate is the classifier).
+/// A capability rather than a detail of the MCP adapter, so the declarative executor gets
+/// the same gate the agent does instead of a second path around it.
 type RunGatedCommand = GatedCall -> Async<Result<CommandOutcome, string>>
 
 /// What a handle resolved to. One tool, two shapes — the alternative being an agent that has
@@ -232,8 +215,8 @@ type PendingOutcome =
     | PendingCommand of CommandOutcome
 
 /// Resume a handle `ExecuteCommand` or a gated command yielded (Plan 13, stage 3b; Plan 15,
-/// stage 3b): an approval that arrived late, a long build. One verb, because the handle type
-/// is one type.
+/// stage 3b): a long build, a held terminal, a program waiting on a keystroke. One verb,
+/// because the handle type is one type.
 type CheckPending = QueueId -> Async<Result<PendingOutcome, string>>
 
 /// Type into a terminal whose source cannot be instrumented (Plan 19).
@@ -443,14 +426,9 @@ module AgentCapabilities =
           OpenTerminal = fun _ _ -> async { return Error "no terminal capability" }
           CloseTerminal = fun _ -> async { return Error "no terminal capability" }
           ListTerminals = fun () -> async { return Error "no terminal capability" }
-          // A denial that still RUNS the command: the gate is a wrapper, and a session with
-          // no collaborative state to park an act in must not lose the act.
           RunGated =
             fun call ->
-                async {
-                    return
-                        Error (sprintf "no gate to run %s through in this session" call.Command.Tool)
-                }
+                async { return Error (sprintf "no gate to run %s through in this session" call.Tool) }
           SetSecret = fun _ _ -> async { return Error "no secrets capability" }
           ListSecrets = fun () -> async { return Error "no secrets capability" }
           DeleteSecret = fun _ -> async { return Error "no secrets capability" }

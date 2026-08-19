@@ -587,30 +587,6 @@ module View =
                   {queryValueView def.Shape (Map.tryFind name queries.Values)}
                 </section>""")
 
-    /// The command gates a session has: the same three-option control the terminal's header
-    /// carries, over `ForCommand` subjects instead of `ForTerminal` ones. One register, one
-    /// vocabulary, one control.
-    ///
-    /// It lists EVERY gated command, not only the ones somebody has configured — the
-    /// catalogue is a value in the shared domain, so the browser has it at compile time and
-    /// a command nobody has touched renders on its default rather than being invisible until
-    /// an operator names it in an environment variable.
-    let private gatesSection (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult list =
-        GatedCommands.all
-        |> List.map (fun command ->
-            let subject = GatedCommands.subject command
-            let mode = SyncedSessionState.gateOf subject model.Synced
-            html $"""
-                <section class="{Style.cls [ Style.sideSection; Style.settingsLane1 ]}" data-gate-panel="{command.Tool}">
-                  <label class="{Style.label}" for="gate-{command.Tool}">{command.Title}</label>
-                  <select id="gate-{command.Tool}" class="{Style.field} w-auto" data-gate-mode="{ApprovalMode.describe mode}"
-                          @change={EvVal(fun v -> match ApprovalMode.parse v with Some m -> dispatch (SetGateMsg (subject, m)) | None -> ())}>
-                    <option value="auto" ?selected={mode = AutoRun}>happens without asking</option>
-                    <option value="approve-agent" ?selected={mode = ApproveAgent}>the agent asks first</option>
-                    <option value="approve-all" ?selected={mode = ApproveAll}>always ask, whoever proposed it</option>
-                  </select>
-                </section>""")
-
     /// Settings, as the sidebar column's OTHER FACE. Not a drawer over the conversation: you
     /// go there and come back, the timeline never moves under a scrim, and configuration keeps
     /// the section rhythm it already had. Open state is the root element's `settings-open`
@@ -643,7 +619,6 @@ module View =
               {claudeSection actions dispatch model.Claude}
               {githubSection actions dispatch model.GitHub}
               {queriesSection model.Queries}
-              {gatesSection dispatch model}
               {historyStoreNote model}
               <div class="flex-1"></div>
               <button type="button" class="{Style.cls [ Style.navPivot; Style.settingsLane2 ]}" aria-label="Back to session" data-settings-toggle="close" @click={Ev(fun _ -> actions.ToggleSettings ())}><span class="{Style.pivotMarkBack}">{Icon.pivotLeft}</span>back</button>

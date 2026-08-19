@@ -40,6 +40,7 @@
     <!-- Before SessionState: the synced state carries the approval mode and the subject
          this declares, so the policy types precede the collaborative state that holds
          them. Before Terminals.fs too, because a terminal's mode is one case of it. -->
+    <Compile Include="Classify.fs" />
     <Compile Include="Gates.fs" />
     <Compile Include="Terminals.fs" />
     <Compile Include="TerminalMarks.fs" />
