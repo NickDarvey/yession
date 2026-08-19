@@ -591,18 +591,66 @@ let private serveStatic (root: string) (port: int) : HttpListener =
     Async.Start (loop ())
     listener
 
+/// One editor case: a served harness, a browser, a page that is being LISTENED to, and the
+/// teardown — so a case is its body and nothing else.
+///
+/// The listening is the point. `watching`/`reporting` had exactly one call site, in the Native
+/// suites, so every case in THIS suite — the one that runs on every pull request — failed
+/// saying only that a wait had not settled. A shell that died at load reported as eight
+/// anonymous timeouts, and the page had been naming the fault the whole time.
+///
+/// Teardown runs whether the body throws or not, which is a fix rather than tidying: these
+/// cases deliberately re-use ports (`+ 8` and `+ 10` serve two each, and `+ 5`/`+ 7` collide
+/// with the mounted suite's), so a listener left bound by a failing case took the NEXT case
+/// with it — one failure, two red cases, and the second one a lie.
+let private editorCaseOn
+    (viewport: (int * int) option)
+    (name: string)
+    (port: int)
+    (body: IPage -> Async<unit>)
+    =
+    testCaseAsync name <|
+        async {
+            let server = serveStatic harnessRoot port
+            let! pw = await (Playwright.CreateAsync ())
+            let! br =
+                await (pw.Chromium.LaunchAsync (
+                    BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
+            let! page =
+                match viewport with
+                | None -> await (br.NewPageAsync ())
+                | Some (width, height) ->
+                    async {
+                        let! ctx =
+                            await (br.NewContextAsync (
+                                BrowserNewContextOptions (
+                                    ViewportSize = ViewportSize (Width = width, Height = height))))
+                        return! await (ctx.NewPageAsync ())
+                    }
+            page.SetDefaultTimeout 15000.0f
+            let evidence = watching page
+            let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" port))
+            let! outcome = Async.Catch (reporting name page evidence (body page))
+            do! awaitU (br.CloseAsync ())
+            pw.Dispose ()
+            server.Stop ()
+            match outcome with
+            | Choice1Of2 () -> ()
+            | Choice2Of2 e -> raise e
+        }
+
+/// A case at the browser's own window size.
+let private editorCase = editorCaseOn None
+
+/// A case at a stated viewport. `ViewportSize` alone, never `IsMobile`: that additionally asks
+/// Chromium to fit the layout to a device window, which measured here lands at 648px rather
+/// than 390 — the very lie the ui-exploration skill warns about, arriving through another door.
+let private editorCaseIn (width: int) (height: int) = editorCaseOn (Some (width, height))
+
 let editorTests =
     testList "Editor rendering (browser)" [
-        testCaseAsync "Markdown typed in the rich editor renders formatted and round-trips to Markdown" <|
+        editorCase "Markdown typed in the rich editor renders formatted and round-trips to Markdown" EDITOR_PORT <| fun page ->
             async {
-                let server = serveStatic harnessRoot EDITOR_PORT
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync editorBase)
                 let! _ = await (page.WaitForSelectorAsync ".ProseMirror")
 
                 // Type Markdown with REAL key events so the input rules fire: "# " turns the
@@ -625,22 +673,10 @@ let editorTests =
                 Expect.stringContains md "# Heading one" "heading serialized to markdown"
                 Expect.stringContains md "**bold**" "bold serialized to markdown"
                 Expect.stringContains md "* item one" "bullet serialized to markdown"
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
             }
 
-        testCaseAsync "Enter sends, Shift+Enter breaks the line, Alt+Enter opens a paragraph" <|
+        editorCase "Enter sends, Shift+Enter breaks the line, Alt+Enter opens a paragraph" (EDITOR_PORT + 2) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 2)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 2)))
                 let! _ = await (page.WaitForSelectorAsync ".ProseMirror")
 
                 do! awaitU (page.ClickAsync ".ProseMirror")
@@ -680,22 +716,10 @@ let editorTests =
                 Expect.stringContains md "second block" "Alt+Enter opened a second block"
                 let! sends = await (page.EvaluateAsync<int> "() => window.__sends")
                 Expect.equal sends 1 "neither Shift+Enter nor Alt+Enter sent"
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
             }
 
-        testCaseAsync "a remote peer's selection renders as a caret widget, label, and highlight" <|
+        editorCase "a remote peer's selection renders as a caret widget, label, and highlight" (EDITOR_PORT + 1) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 1)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 1)))
                 let! _ = await (page.WaitForSelectorAsync ".ProseMirror")
 
                 // Give the editor some content, then select a RANGE (not a bare caret) so the
@@ -721,10 +745,7 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         "[...document.querySelectorAll('.ProseMirror [style*=\"background-color\"]')].length > 0")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
 
         // The replay (Plan 13, stage 3e). Everything else about it is pinned DOM-free — the
@@ -732,17 +753,8 @@ let editorTests =
         // this: whether `asciinema-player`'s named export resolves through the bundle and
         // actually plays what was recorded. An import that silently failed would leave every
         // other test green and the feature dead in the browser.
-        testCaseAsync "a recorded terminal replays in a real player, and prints what it printed" <|
+        editorCase "a recorded terminal replays in a real player, and prints what it printed" (EDITOR_PORT + 3) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 3)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 3)))
-
                 // The player took the mount and built its own DOM there.
                 let! _ = await (page.WaitForSelectorAsync "#replay .ap-player")
                 // …with the transport controls that ARE the audit-read affordance: a replay
@@ -770,10 +782,7 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         "document.querySelectorAll('#replay .ap-marker').length === 1")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
 
         // Terminal work in the chat, and the pane's tabs (Plan 14, stages 1-2). Host-free,
@@ -783,17 +792,8 @@ let editorTests =
         // Neither is visible to a rendered string, and both are the WCAG floor rather than a
         // nicety: a chip that opens a pane and leaves focus behind, or a close that strands
         // focus on a control it just removed, is exactly the failure the floor names.
-        testCaseAsync "a chat chip opens a pane tab that plays, and the strip walks" <|
+        editorCase "a chat chip opens a pane tab that plays, and the strip walks" (EDITOR_PORT + 4) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 4)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 4)))
-
                 // The chip the harness model's one block puts in the chat.
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-block]")
                 do! awaitU (page.ClickAsync "#shell [data-chat-block]")
@@ -828,10 +828,7 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         """document.querySelector('#shell [data-pane-block]')?.textContent.includes('total 0') === true""")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
         // The phone (Plan 14, stage 5). Headless Chromium clamps its WINDOW to ~500px, which
         // is why a naive narrow screenshot lies; Playwright's viewport is a real CDP device
@@ -839,24 +836,8 @@ let editorTests =
         // plan is about: the pane takes the whole column rather than sitting over the chat
         // as a dismissible overlay, and nothing overflows sideways — an overflow a phone
         // user cannot scroll away is a reachability bug, not a cosmetic one.
-        testCaseAsync "on a phone the pane IS the column, the strip stays, and the chat is one control away" <|
+        editorCaseIn 390 844 "on a phone the pane IS the column, the strip stays, and the chat is one control away" (EDITOR_PORT + 5) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 5)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                // ViewportSize alone. `IsMobile` additionally asks Chromium to fit the
-                // layout to a device window, and measured here that lands at 648px rather
-                // than 390 — the very lie the ui-exploration skill warns about, arriving
-                // through a different door.
-                let! ctx =
-                    await (br.NewContextAsync (
-                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 390, Height = 844))))
-                let! page = await (ctx.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 5)))
-
                 // Ground truth first: the viewport really is the width we asked for.
                 let! width = await (page.EvaluateAsync<int> "() => window.innerWidth")
                 Expect.equal width 390 "a true phone viewport, not a clamped window"
@@ -907,10 +888,7 @@ let editorTests =
                     await (page.WaitForFunctionAsync
                         "document.querySelector('#shell [data-terminal-panel]').getBoundingClientRect().left >= window.innerWidth - 1")
                 let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-chat-block') === true""")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
         // What an agent says does not fit a phone: paths, URLs and fenced commands are all
         // longer than a 326px column and none of them has a space where the break has to go.
@@ -922,19 +900,8 @@ let editorTests =
         // The document-level check the case above makes cannot see this: the timeline's own
         // scrollbox absorbs the overflow, so `documentElement.scrollWidth` stays honest while
         // the conversation is unreadable. What is asserted is the column, and only the column.
-        testCaseAsync "a message no line break fits inside never scrolls the timeline sideways" <|
+        editorCaseIn 390 844 "a message no line break fits inside never scrolls the timeline sideways" (EDITOR_PORT + 10) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 10)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! ctx =
-                    await (br.NewContextAsync (
-                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 390, Height = 844))))
-                let! page = await (ctx.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 10)))
                 let! width = await (page.EvaluateAsync<int> "() => window.innerWidth")
                 Expect.equal width 390 "a true phone viewport, not a clamped window"
 
@@ -948,10 +915,6 @@ let editorTests =
                                  return timeline.scrollWidth > timeline.clientWidth + 1
                                }""")
                 Expect.isFalse sideways "the conversation column does not scroll sideways"
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
             }
         // The split between the two columns is the reader's to set. What is pinned is the
         // PROMISE, not the geometry: that the divider can be moved without a pointer at all.
@@ -961,19 +924,8 @@ let editorTests =
         //
         // Deliberately not asserted: the default width, the step size, the bounds. Those are
         // the design, and the design changing is not a regression.
-        testCaseAsync "the column divider moves from the keyboard, not only from a drag" <|
+        editorCaseIn 1440 900 "the column divider moves from the keyboard, not only from a drag" (EDITOR_PORT + 8) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 8)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! ctx =
-                    await (br.NewContextAsync (
-                        BrowserNewContextOptions (ViewportSize = ViewportSize (Width = 1440, Height = 900))))
-                let! page = await (ctx.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 8)))
                 // Waited for on the CONTROL, never on the panel: a shut pane is `w-0`, which
                 // Playwright reports as hidden, so waiting for the panel to be visible before
                 // opening it waits for something that only happens afterwards.
@@ -1059,27 +1011,15 @@ let editorTests =
                                  const said = Number(h.getAttribute('aria-valuenow'))
                                  return Math.abs(pane.getBoundingClientRect().width - said) <= 1
                                }""")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
         // The live viewport (Plan 14, stage 6). What only a browser can answer here is the
         // KEYSTROKE TRANSLATION: a `KeyboardEvent` is not a byte stream, and turning one
         // into what a pty expects — printable characters as themselves, Ctrl-<key> as the
         // control code, the keys with no character at all as their escape sequences — is the
         // whole of what a terminal front end does with a keyboard.
-        testCaseAsync "the holder types into the live screen, and the keys reach it as a pty expects" <|
+        editorCase "the holder types into the live screen, and the keys reach it as a pty expects" (EDITOR_PORT + 6) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 6)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 6)))
-
                 // The column starts shut, as it does for a fresh client.
                 do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
                 // The terminal the harness holds the lease on renders its screen, and the
@@ -1126,10 +1066,6 @@ let editorTests =
                 do! awaitU (page.Keyboard.PressAsync "Tab")
                 let! after = await (page.EvaluateAsync<string> "() => document.activeElement?.getAttribute('data-terminal-screen')")
                 Expect.equal after before "Tab types a tab; it does not leave the terminal"
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
             }
         // The DVR (Plan 14, stage 7). What only a browser can answer: that rewinding a LIVE
         // terminal really mounts a player over what it has recorded so far — the same player
@@ -1137,17 +1073,8 @@ let editorTests =
         // live TV, through the same mechanism" has to mean — that it lands ON the pinned
         // edge rather than at the recording's start, that focus survives the control swap,
         // and that playing off the pinned end catches the reader back up to live by itself.
-        testCaseAsync "a live terminal rewinds to its pinned edge, and playing off it catches back up" <|
+        editorCase "a live terminal rewinds to its pinned edge, and playing off it catches back up" (EDITOR_PORT + 7) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 7)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 7)))
-
                 do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
                 do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
@@ -1185,10 +1112,7 @@ let editorTests =
                 do! awaitU (page.ClickAsync "#shell [data-terminal-live='term-live']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
 
         // Pins (Plan 20, stage 1). The pin's STATE is a rendered attribute the cheap tier can
@@ -1196,17 +1120,8 @@ let editorTests =
         // removes that tab from the document, and focus has to land on what took its place
         // rather than on `body`. Same floor the DVR's control swap answers, in the surface a
         // keyboard user actually walks.
-        testCaseAsync "a tab is kept by its pin and released from the keyboard, without stranding focus" <|
+        editorCase "a tab is kept by its pin and released from the keyboard, without stranding focus" (EDITOR_PORT + 9) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 9)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 9)))
-
                 // A chip's tab arrives previewed — kept by nothing — and selected, since
                 // tapping the chip is what put it there.
                 do! awaitU (page.ClickAsync "#shell [data-chat-block]")
@@ -1242,10 +1157,7 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         """document.activeElement?.closest('[role="tab"]') !== null""")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
 
         // The terminal list (Plan 20, stage 0). WHICH verbs a row offers is a fold the cheap
@@ -1253,17 +1165,8 @@ let editorTests =
         // replaces the strip and the pane's body at once, so choosing a row removes the
         // control that was pressed, and focus has to land on what replaced it rather than
         // on `body`. That is the WCAG floor, not a nicety.
-        testCaseAsync "the list opens a terminal and hands focus to the pane it replaced itself with" <|
+        editorCase "the list opens a terminal and hands focus to the pane it replaced itself with" (EDITOR_PORT + 8) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 8)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 8)))
-
                 do! awaitU (page.ClickAsync "#shell [data-terminal-toggle='show']")
                 do! awaitU (page.ClickAsync "#shell [data-terminal-list-toggle='list']")
 
@@ -1290,10 +1193,7 @@ let editorTests =
                     await (page.WaitForFunctionAsync
                         """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel') === 'terminal:term-live'""")
                 let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
 
         // Task cards (Plan 20, stage 4). WHICH commands group, in what order, and what the
@@ -1302,17 +1202,8 @@ let editorTests =
         // disclosure now, and a line inside it has to be the same reachable, pressable thing
         // the chip was before it was grouped. Nothing here asserts the card's layout — that
         // is the design, and the design is what a card is FOR.
-        testCaseAsync "a task card's lines stay real controls, reachable and pressable without a pointer" <|
+        editorCase "a task card's lines stay real controls, reachable and pressable without a pointer" (EDITOR_PORT + 10) <| fun page ->
             async {
-                let server = serveStatic harnessRoot (EDITOR_PORT + 10)
-                let! pw = await (Playwright.CreateAsync ())
-                let! br =
-                    await (pw.Chromium.LaunchAsync (
-                        BrowserTypeLaunchOptions (ExecutablePath = chromiumPath ())))
-                let! page = await (br.NewPageAsync ())
-                page.SetDefaultTimeout 15000.0f
-                let! _ = await (page.GotoAsync (sprintf "http://127.0.0.1:%d/" (EDITOR_PORT + 10)))
-
                 // A real `<details>`, so the disclosure is the browser's: keyboard-operable
                 // and announced without a handler or an ARIA role of our own.
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-task-card]")
@@ -1338,10 +1229,7 @@ let editorTests =
                 let! _ =
                     await (page.WaitForFunctionAsync
                         """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel') === 'block:term-harness:block-burst-failed'""")
-
-                do! awaitU (br.CloseAsync ())
-                pw.Dispose ()
-                server.Stop ()
+                return ()
             }
     ]
 
