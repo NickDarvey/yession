@@ -11,14 +11,14 @@ module Yession.Tests.ToolCalls
 //
 // This is that chain: the wire name a model would emit, through the registry the SDK adapter
 // builds (`Agent.registryFor`), through the per-turn bindings a turn is given
-// (`Commands.bindFor`), through the real approval gate, into the real dispatch table
+// (`Commands.bindFor`), through the real command gate, into the real dispatch table
 // (`Commands.dispatch`), and back out as the TEXT the model would read. Only the leaf — the
 // service that touches git — is substituted, because what it does is somebody else's suite.
 //
-// What it caught on the first run is the reason it exists: an ungated `add_repo` whose clone
-// outlives a five-second grace answered "WAITING FOR A HUMAN TO APPROVE IT. It has NOT
-// happened." — while it was happening, and while nobody had been asked anything. Every layer
-// was individually right. The join was not.
+// What it caught on the first run is the reason it exists: an `add_repo` whose clone
+// outlived a deadline meant for people answered "WAITING FOR A HUMAN TO APPROVE IT. It has
+// NOT happened." — while it was happening, and while nobody had been asked anything. Every
+// layer was individually right. The join was not.
 
 open System
 open Fable.Pyxpecto
@@ -44,14 +44,12 @@ type ToolSession =
       /// (no such tool, unreadable arguments) — the distinction the SDK carries as
       /// `isError`, kept here rather than flattened.
       Call : string -> string -> Async<Result<string, string>>
-      /// The collaborative doc, for a test that needs to act as a PERSON — approving or
-      /// refusing what the agent parked there.
+      /// The collaborative doc, for a test that needs to read what a peer would see.
       Doc : Y.Doc
       /// What the session recorded.
       Events : unit -> Async<SessionEvent list>
-      /// Move the session's clock. Every deadline in the gate is measured against this, so
-      /// a test crosses a five-second grace without spending five seconds, and without
-      /// depending on how long anything took.
+      /// Move the session's clock. The gate's deadline is measured against this, so a test
+      /// crosses it without spending it, and without depending on how long anything took.
       Advance : TimeSpan -> unit }
 
 /// Compose a session's tool surface over the services it runs against. The composition is
@@ -83,8 +81,7 @@ let openToolSession (services: Commands.CommandServices) : ToolSession =
 
     let gate =
         CommandGates.create
-            doc
-            (fun () -> SyncedStateSync.ofDoc doc)
+            Classifier.approveAll
             (fun () -> Commands.dispatch services)
             (fun actor event ->
                 async {
@@ -208,26 +205,21 @@ let private tests' =
                 Expect.stringContains (answered answer) "not a repo name" "it says which argument, and why"
             }
 
-        // THE case this file was written for. An ungated command that takes longer than the
-        // approval grace was reported as waiting on a HUMAN — a sentence with two untruths in
-        // it: nobody had been asked, and the thing had not "NOT happened", it was happening.
-        // An agent that reads it stops and tells the person to go and approve something that
-        // is not on their screen. A clone is seconds of work, so this was almost every first
-        // `add_repo`.
-        testCaseAsync "a command that outlives the approval grace waits for the WORK, not for a person" <|
+        // THE case this file was written for, surviving the manual gate it was written
+        // against. A slow command must never be reported as anybody's decision: a clone is
+        // seconds of WORK, and an agent told a person is being waited on goes and asks them
+        // for a decision they were never offered.
+        testCaseAsync "a slow command waits for the WORK, never for a person" <|
             async {
                 let session, finish = slowlyCloning ()
                 let! call = Async.StartChild (addRepo session "octo/hello")
-                // Well past the grace, with the clone still going. The act was released the
-                // moment it was proposed — there is nobody to wait for, so there is nothing
-                // the grace can bound.
                 do! Async.Sleep 50
                 session.Advance (TimeSpan.FromSeconds 30.0)
                 do! Async.Sleep 50
                 finish ()
                 let! answer = call
                 let text = answered answer
-                Expect.stringContains text "added octo/hello" "the call carried the outcome back, as an ungated command does"
+                Expect.stringContains text "added octo/hello" "the call carried the outcome back"
                 Expect.isFalse (text.Contains "APPROVE") "nobody was ever asked to approve it"
             }
 
@@ -248,21 +240,6 @@ let private tests' =
                 finish ()
             }
 
-        // The other half of the same distinction, so neither answer can be produced by a rule
-        // that ignores the question: when a human IS being waited for, the wording that sends
-        // the agent to them is exactly right.
-        testCaseAsync "a gated command that nobody has approved yet says so, and names its handle" <|
-            async {
-                let session = cloningAt "main"
-                SyncedStateSync.setGate session.Doc (GatedCommands.subject GatedCommands.addRepo) ApproveAgent
-                let! call = Async.StartChild (addRepo session "octo/hello")
-                do! Async.Sleep 50
-                session.Advance (TimeSpan.FromSeconds 30.0)
-                let! answer = call
-                let text = answered answer
-                Expect.stringContains text "APPROVE" "a person really is being waited for"
-                Expect.stringContains text "check_pending" "and the handle picks the decision up"
-            }
     ]
 
 let tests = testList "Tool calls" [ tests' ]

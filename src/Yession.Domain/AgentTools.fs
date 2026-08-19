@@ -180,10 +180,10 @@ module AgentTools =
                 | Error reason -> return ToolAnswer.text (sprintf "could not run the command: %s" reason)
         }
 
-    /// The one renderer for every gated command (Plan 15, stage 3b). A gate has three
-    /// answers, so this is where they become the three sentences the model reads — once,
-    /// rather than once per command, which is what stops a new command inventing its own
-    /// vocabulary for "somebody has to approve this".
+    /// The one renderer for every gated command (Plan 15, stage 3b). A gate has few
+    /// answers, so this is where they become the sentences the model reads — once, rather
+    /// than once per command, which is what stops a new command inventing its own
+    /// vocabulary for "this was refused".
     ///
     /// A refusal is phrased as a refusal and not as an error the model should route around:
     /// it names who said no, and their reason when they gave one — a decision that reads as
@@ -191,22 +191,14 @@ module AgentTools =
     let renderCommandOutcome (outcome: CommandOutcome) : string =
         match outcome.Status with
         | CommandRan said -> said
-        | CommandAwaitingApproval ->
-            match outcome.Handle with
-            | Some handle ->
-                sprintf
-                    "WAITING FOR A HUMAN TO APPROVE `%s`. It has NOT happened. Do not wait for it — say what you proposed and why. Call check_pending with handle '%s' once they have had a chance to look."
-                    outcome.Summary
-                    (QueueId.value handle)
-            | None -> sprintf "WAITING FOR A HUMAN TO APPROVE `%s`. It has NOT happened." outcome.Summary
         // Nobody is being waited for here, and saying otherwise is the failure this case
-        // exists to end: an agent told to go and get an approval for something that is
-        // already running asks a person for a decision they were never offered.
+        // exists to end: a slow command is work in progress, not a decision somebody was
+        // never offered.
         | CommandRunning ->
             match outcome.Handle with
             | Some handle ->
                 sprintf
-                    "STILL RUNNING: `%s` was approved or needed no approval, and has not finished. Nothing was cancelled and nobody is waiting on you. Call check_pending with handle '%s' to pick it up."
+                    "STILL RUNNING: `%s` has not finished. Nothing was cancelled and nobody is waiting on you. Call check_pending with handle '%s' to pick it up."
                     outcome.Summary
                     (QueueId.value handle)
             | None -> sprintf "STILL RUNNING: `%s` has not finished. Nothing was cancelled." outcome.Summary
@@ -453,8 +445,8 @@ module AgentTools =
 
           tool
               "check_pending"
-              "Pick anything back up by the handle it returned — a command waiting on somebody to approve it, an approval that arrived late, a long build. Works for execute_command and for any command that said it was waiting for a human. Returns the same thing the original call would have."
-              [ ToolField.required "handle" "string" "the handle from execute_command, or from a command that said it was waiting" ]
+              "Pick anything back up by the handle it returned — a long build, a command queued behind a busy terminal, a program waiting on a keystroke. Works for execute_command and for any command that said it was still going. Returns the same thing the original call would have."
+              [ ToolField.required "handle" "string" "the handle from execute_command, or from a command that said it was still going" ]
               (fun args ->
                   async {
                       match ToolArgs.string "handle" args with
