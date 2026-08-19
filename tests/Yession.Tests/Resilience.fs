@@ -463,6 +463,175 @@ let private channelTests =
                 "and the strip reports the session leg, not the feed"
     ]
 
+// --- The link's heartbeat -----------------------------------------------------------------
+
+/// A clock the test advances by hand: `Sleep` parks until `Tick ()` releases everything
+/// waiting on it. The rule under test counts ticks rather than measuring time, so this counts
+/// them too — and these cases run in zero real time, like every other schedule here.
+type private TestClock () =
+    let waiting = ResizeArray<unit -> unit> ()
+
+    member _.Sleep : TimeSpan -> Async<unit> =
+        fun _ -> Async.FromContinuations (fun (cont, _, _) -> waiting.Add (fun () -> cont ()))
+
+    /// Release everything parked, once. Snapshotted before releasing, because a beat that is
+    /// released parks again immediately — and a tick that swept that up would be two ticks
+    /// wearing one name.
+    member _.Tick () =
+        let due = waiting.ToArray ()
+        waiting.Clear ()
+        due |> Array.iter (fun release -> release ())
+
+/// The shipped cadence on a clock the test owns, reporting what it decided.
+let private linkPolicy (clock: TestClock) (seen: ResizeArray<Link.LinkEvent>) : Link.LinkPolicy =
+    { Tick = TimeSpan.Zero
+      QuietTicksBeforeDeath = Link.LinkPolicy.quietTicksBeforeDeath
+      Sleep = clock.Sleep
+      Observe = seen.Add }
+
+let private died (seen: ResizeArray<Link.LinkEvent>) =
+    seen |> Seq.exists (function Link.LinkDied _ -> true | _ -> false)
+
+let private probes (seen: ResizeArray<Link.LinkEvent>) =
+    seen |> Seq.filter (function Link.LinkProbed _ -> true | _ -> false) |> Seq.length
+
+/// Anything that is not a heartbeat, for cases that only care that a frame is a frame.
+let private traffic (payload: string) : SessionFrame<string> = State (StateSync payload)
+
+let private linkTests =
+    testList "A supervised link" [
+        testCaseAsync "a link carrying traffic is never probed" <|
+            async {
+                let clock = TestClock ()
+                let seen = ResizeArray ()
+                let carrier, remote = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                let _link = Link.supervise (linkPolicy clock seen) carrier
+                // Well past the death threshold, but never quiet for a whole tick.
+                for i in 1 .. Link.LinkPolicy.quietTicksBeforeDeath * 3 do
+                    do! remote.Send (traffic (string i))
+                    clock.Tick ()
+                Expect.equal (probes seen) 0 "a busy link is asked to prove nothing"
+            }
+
+        testCaseAsync "an answered probe keeps the link alive indefinitely" <|
+            async {
+                let clock = TestClock ()
+                let seen = ResizeArray ()
+                let carrier, remote = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                let _link = Link.supervise (linkPolicy clock seen) carrier
+                // The other end supervises too, which is all that answering a probe takes.
+                let _peer = Link.supervise (linkPolicy clock (ResizeArray ())) remote
+                for _ in 1 .. Link.LinkPolicy.quietTicksBeforeDeath * 3 do
+                    clock.Tick ()
+                Expect.isFalse (died seen) "a link that answers is never given up on"
+            }
+
+        testCaseAsync "a link whose peer stops answering ends its own receive" <|
+            async {
+                let clock = TestClock ()
+                let seen = ResizeArray ()
+                let carrier, _remote = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                // `_remote` is never supervised and never speaks: the half-open transport a
+                // backgrounded phone leaves behind — open, and carrying nothing.
+                let link = Link.supervise (linkPolicy clock seen) carrier
+                for _ in 1 .. Link.LinkPolicy.quietTicksBeforeDeath do
+                    clock.Tick ()
+                let! frame = link.Receive ()
+                Expect.isNone frame "the pump is told the link is gone, rather than parked on it for ever"
+            }
+
+        testCaseAsync "a link whose peer stops answering tells the remote it has gone" <|
+            async {
+                let clock = TestClock ()
+                let seen = ResizeArray ()
+                let carrier, remote = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                let _link = Link.supervise (linkPolicy clock seen) carrier
+                for _ in 1 .. Link.LinkPolicy.quietTicksBeforeDeath do
+                    clock.Tick ()
+                // The probes it never answered are still in flight ahead of the close, so what
+                // is asserted is that the stream ENDS — not that the next frame is the end.
+                let rec drain (budget: int) =
+                    async {
+                        if budget = 0 then return false
+                        else
+                            match! remote.Receive () with
+                            | None -> return true
+                            | Some _ -> return! drain (budget - 1)
+                    }
+                let! ended = drain (Link.LinkPolicy.quietTicksBeforeDeath + 1)
+                Expect.isTrue ended "the far end learns too — a lease held by a peer that is gone is nobody's"
+            }
+
+        testCaseAsync "a probe is answered without ever reaching the pump" <|
+            async {
+                let clock = TestClock ()
+                let carrier, remote = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                let link = Link.supervise (linkPolicy clock (ResizeArray ())) carrier
+                do! remote.Send (Control Ping)
+                do! remote.Send (traffic "after the probe")
+                let! frame = link.Receive ()
+                Expect.equal frame (Some (traffic "after the probe"))
+                    "the heartbeat is invisible above this module — the pump sees only the real frame"
+            }
+
+        testCaseAsync "an inbound probe is answered" <|
+            async {
+                let clock = TestClock ()
+                let carrier, remote = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                let _link = Link.supervise (linkPolicy clock (ResizeArray ())) carrier
+                do! remote.Send (Control Ping)
+                let! answer = remote.Receive ()
+                Expect.equal answer (Some (Control Pong)) "a probe is answered by the supervisor itself"
+            }
+
+        testCaseAsync "a probe cannot race ahead of the handshake" <|
+            async {
+                // The fatal case if heartbeats were visible: `PeerSession.run` rejects any
+                // first frame that is not `PeerHello`, and a refused peer PARKS rather than
+                // retrying — so a probe arriving first would end the session for good.
+                let token = "handshake-token"
+                let peerId = PeerId.create "peer-ada" |> expect
+                let clock = TestClock ()
+                let log = Yession.SessionProcess.InMemoryEventLog.create (SessionId.create "handshake" |> expect) (fun () -> DateTimeOffset (2026, 6, 14, 0, 0, 0, TimeSpan.Zero))
+                let clientCarrier, serverCarrier = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                let server = Link.supervise (linkPolicy clock (ResizeArray ())) serverCarrier
+                let client = Link.supervise (linkPolicy clock (ResizeArray ())) clientCarrier
+                Async.StartImmediate (
+                    Yession.SessionProcess.PeerSession.run
+                        (SessionId.create "handshake" |> expect)
+                        (fun t -> if t = token then Some Yession.SessionProcess.UnattributedAccess else None)
+                        log
+                        Yession.SessionProcess.PeerSession.PeerHandlers.none
+                        server)
+                // Both ends probe each other before a word of the protocol is spoken.
+                clock.Tick ()
+                clock.Tick ()
+                do! client.Send (Control (PeerHello { PeerId = peerId; DisplayName = "Ada"; Token = token }))
+                let! response = client.Receive ()
+                match response with
+                | Some (Control (PeerAccepted _)) -> ()
+                | other -> failwithf "expected the peer to be accepted, got %A" other
+            }
+    ]
+
+/// A channel that has stopped carrying anything WITHOUT closing — the half-open transport a
+/// backgrounded phone leaves behind. Once gagged, sends are accepted and discarded and
+/// anything the far end says is swallowed, but no close is ever signalled: nothing above it
+/// can tell the difference between this and a quiet session.
+let private gaggable (channel: FrameChannel<'S>) : FrameChannel<'S> * (unit -> unit) =
+    let silent = ref false
+    let rec receive () =
+        async {
+            match! channel.Receive () with
+            | Some frame when not silent.Value -> return Some frame
+            | Some _ -> return! receive ()
+            | None -> return None
+        }
+    { Send = fun frame -> async { if not silent.Value then do! channel.Send frame }
+      Receive = receive
+      Close = channel.Close },
+    fun () -> silent.Value <- true
+
 // --- The session lifecycle ----------------------------------------------------------------
 
 /// A lifecycle wired to a real Host over in-memory channel pairs — the same rules the browser
@@ -479,6 +648,11 @@ type private Lifecycle =
       Opens : unit -> int
       /// The resume offset each served session was started with, in order.
       Resumes : unit -> EventOffset option list
+      /// Make the CURRENT session's transport go half-open: still open, carrying nothing.
+      /// The failure the heartbeat exists for, and the one a closed channel cannot express.
+      Silence : unit -> unit
+      /// Advance the supervisor's clock by one tick.
+      Tick : unit -> unit
       /// Every message the lifecycle routed, in order — the connection story as it happened.
       /// Asserted instead of the model, because over in-memory channels a whole reconnect can
       /// complete synchronously: a transient state like `Reconnecting` is real but is gone
@@ -497,6 +671,10 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
     let resumes = ref []
     let serverEnd : FrameChannel<string> option ref = ref None
     let live : App.Connection option ref = ref None
+    // The link is supervised here exactly as the browser supervises it, on a clock this test
+    // owns — so a half-open transport is noticed by the production rule, on demand.
+    let clock = TestClock ()
+    let silence : (unit -> unit) ref = ref ignore
     let seen = ResizeArray<ClientMsg> ()
     let record msg =
         seen.Add msg
@@ -515,7 +693,9 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
                         serverEnd.Value <- Some server
                         // The Host drives the server end exactly as it would a WebRTC connection.
                         host.Connect server
-                        return Ok clientEnd
+                        let carrier, gag = gaggable clientEnd
+                        silence.Value <- gag
+                        return Ok (Link.supervise (linkPolicy clock (ResizeArray ())) carrier)
                     }
               Serve =
                 fun resumeAfter dispatch channel ->
@@ -558,6 +738,8 @@ let private startLifecycle (host: Host.SessionHost) (token: string) (id: string)
                 | Some server -> do! server.Close ()
                 | None -> ()
             }
+      Silence = fun () -> silence.Value ()
+      Tick = fun () -> clock.Tick ()
       Opens = fun () -> opens.Value
       Resumes = fun () -> resumes.Value
       Seen = fun () -> List.ofSeq seen }
@@ -603,6 +785,36 @@ let private lifecycleTests =
                         | RejectedMsg _ | ConnectFailedMsg _ -> Some "settled"
                         | _ -> None)
                 Expect.equal lifecycleStory [ "connected"; "dropped"; "connected" ] "one clean round trip"
+                do! host.Stop ()
+            }
+
+        testCaseAsync "a message sent over a half-open transport reaches the session anyway" <|
+            async {
+                // The bug this whole mechanism exists for. A send is a CRDT write, so the queue
+                // row appears whether or not the frame carrying it went anywhere; with the
+                // transport half-open, nothing drained it and nothing said so, and the only
+                // cure was reloading the page. What must happen instead: the link notices, the
+                // lifecycle brings it back, and the queued message lands.
+                let! host = Host.start (SessionId.create "lifecycle-half-open" |> expect) 0
+                let ada = startLifecycle host (host.MintPeerToken ()) "ada" "Ada"
+                do! ada.Runner.WaitFor (fun m -> m.Connection = Connected)
+                do! ada.Say "while the link was honest"
+                do! ada.Runner.WaitFor (fun m -> bodies m = [ "while the link was honest" ])
+
+                // The transport dies without closing: open, and carrying nothing.
+                ada.Silence ()
+                do! ada.Say "into the void"
+
+                // Nothing above the link can tell yet — so let the supervisor look.
+                for _ in 1 .. Link.LinkPolicy.quietTicksBeforeDeath do
+                    ada.Tick ()
+
+                do! ada.Runner.WaitFor (fun m ->
+                        bodies m = [ "while the link was honest"; "into the void" ])
+                Expect.equal (ada.Opens ()) 2 "the link was noticed to be dead, and replaced"
+                Expect.isTrue
+                    (Map.isEmpty (ada.Runner.Model ()).Synced.Queue)
+                    "and the queue that had been stuck on screen is drained"
                 do! host.Stop ()
             }
 
@@ -839,6 +1051,7 @@ let tests =
         classificationTests
         feedFailureTests
         channelTests
+        linkTests
         lifecycleTests
         surfaceTests
     ]

@@ -162,7 +162,9 @@ let connect (signalUrl: string) : Async<FrameChannel<string>> =
         // the connection and WAITS for libdatachannel to report it closed, so a caller
         // that has awaited `Close` may safely reach `Interop.cleanup ()` with no live
         // native objects behind it (deterministic — no sleeps).
-        let channel = frameChannel dc
+        // Supervised like every other end of this transport: a Node peer whose link dies
+        // silently must learn it the same way a browser one does.
+        let channel = Link.supervise Link.LinkPolicy.shipped (frameChannel dc)
         let close () =
             async {
                 do! channel.Close ()

@@ -1550,6 +1550,11 @@ let private start () =
                       Serve =
                         fun resumeAfter dispatch dc ->
                             async {
+                                // Supervised at the transport boundary, exactly as the event
+                                // feed's resilience policy is composed here and nowhere else:
+                                // `App.connect` receives a channel that already knows how to
+                                // notice its own death, and holds no notion of heartbeats.
+                                let channel = Link.supervise Link.LinkPolicy.shipped (frameChannel dc)
                                 let connection =
                                     App.connect
                                         { options with ResumeAfter = resumeAfter }
@@ -1558,7 +1563,7 @@ let private start () =
                                         texts
                                         hello
                                         dispatch
-                                        (frameChannel dc)
+                                        channel
                                 connectionRef <- Some connection
                                 do! connection.Run
                                 connectionRef <- None

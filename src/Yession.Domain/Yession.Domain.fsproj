@@ -58,6 +58,9 @@
     <Compile Include="RichText.fs" />
     <Compile Include="Markdown.fs" />
     <Compile Include="Transport.fs" />
+    <!-- The heartbeat that keeps a link honest: straight after the channel it supervises,
+         and after Resilience, whose Sleep port it takes its clock from. -->
+    <Compile Include="Link.fs" />
     <Compile Include="Launch.fs" />
     <Compile Include="PublicAccess.fs" />
     <Compile Include="Auth.fs" />
