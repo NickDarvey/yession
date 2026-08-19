@@ -187,6 +187,14 @@ type SyncedSessionState =
       /// map is what makes concurrent creation safe (different keys never conflict)
       /// regardless of which surface each peer was looking at.
       Pending : Map<QueueId, PendingAct>
+      /// Which model the agent's turns run on. Collaborative, like the gates beside it and
+      /// for the same reason: it is a property of the SESSION, not of whoever happened to
+      /// open the picker, so everybody sees the same answer and sees it change.
+      ///
+      /// `None` — the absence of the register — is "the provider's own default". The
+      /// default is the absence again, so a session nobody has configured carries nothing
+      /// restating what the provider already decides.
+      Model       : ModelId option
       /// The approval mode per subject. An absent entry is `GateSubject.defaultMode` — the
       /// default is the absence, so a subject nobody has configured carries no register
       /// restating what the default already says.
@@ -208,6 +216,7 @@ module SyncedSessionState =
           SharedBrief = None
           TerminalDrafts = Map.empty
           Pending = Map.empty
+          Model = None
           Gates = Map.empty
           TerminalSizes = Map.empty }
 

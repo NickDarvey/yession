@@ -32,6 +32,10 @@
     <!-- A stream a provider offers becomes a terminal (Plan 19). After Tools and
          TerminalSource, because it is exactly the join between them. -->
     <Compile Include="ToolStreams.fs" />
+    <!-- Which model a turn runs on, as a provider-neutral pair. After Identity.fs (a
+         lookup runs on an actor's authority) and before Agent.fs, which carries the
+         session's choice into a turn. -->
+    <Compile Include="Models.fs" />
     <Compile Include="Conversation.fs" />
     <Compile Include="Repos.fs" />
     <!-- The read half of the imperative session API (Plan 15). Depends on nothing but

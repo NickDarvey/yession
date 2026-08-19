@@ -110,6 +110,12 @@ module Dom =
         let settingsToggle = "data-settings-toggle"
         let settingsPanel = "data-settings-panel"
         let claudePanel = "data-claude-panel"
+        /// The model picker (settings): the section, and the control itself. The control's
+        /// VALUE is the session's current choice — a model id, or `default` where the
+        /// provider is left to choose — so a test reads the state off the same attribute it
+        /// clicks, exactly as `terminalMode` does for a gate.
+        let modelPanel = "data-model-panel"
+        let modelSelect = "data-model-select"
         let agentPresence = "data-agent-presence"
         let noAgent = "data-no-agent"
         let noAgentConnect = "data-no-agent-connect"
@@ -324,6 +330,12 @@ module Dom =
         /// meantime. Everything already sent is safe; it is on the server.
         let localFallbackEphemeral =
             "You can keep writing, but this session reopens at a new address — anything written here while it is away will not come back with it."
+        /// The model picker's state token, and its first option, for when nobody has chosen:
+        /// the provider decides. Named rather than blank because "no model is set" and
+        /// "whatever the provider picks" are the same fact, and only one of them is a
+        /// sentence — a picker showing an empty row reads as a control that failed to load.
+        let modelDefault = "default"
+        let modelDefaultLabel = "Provider's default"
         /// Why this client is keeping no history (Plan 20). The Cache API needs a secure
         /// context; a session reached over plain HTTP at a non-loopback address has none, so
         /// nothing is kept and — without this — nothing says why, which is indistinguishable

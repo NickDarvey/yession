@@ -120,6 +120,18 @@ type GitHubViewState =
     { Status : GitHubStatus
       Flow : GitHubFlowState }
 
+/// What the picker knows about the models it can offer. Three states and no fourth,
+/// because a picker has exactly three honest things to say: I have not looked yet, here is
+/// the list, or here is why there is no list. A single `AgentModel list` could not tell the
+/// first from a provider that genuinely offers nothing, and the difference is what decides
+/// whether a person waits or goes and connects an account.
+type ModelCatalogueState =
+    /// Nothing has been asked for yet, or an answer is in flight.
+    | ModelsUnknown
+    | ModelsLoaded of AgentModel list
+    /// The lookup answered, and what it said was why it could not.
+    | ModelsUnavailable of reason: string
+
 /// The generated read surface's state (Plan 15), folded from the `/queries` stream.
 ///
 /// There is no `Busy` and no `Error` here, and their absence is the design rather than an
@@ -388,6 +400,11 @@ type ClientModel =
       Claude        : ClaudeViewState
       /// The GitHub connection panel's state (Plan 14), driven by the /github routes.
       GitHub        : GitHubViewState
+      /// What the picker has to choose from, fetched from /models. View state and NOT
+      /// synced: the catalogue is the same for everybody, so syncing it would be a second
+      /// copy of a fact the session already holds — the CHOICE is what collaborates, and
+      /// that lives in `Synced.Model`.
+      Models        : ModelCatalogueState
       /// The generated read surface (Plan 15), driven by the /queries stream.
       Queries       : QueriesViewState }
 
@@ -479,6 +496,12 @@ type ClientMsg =
     | GitHubStatusMsg of GitHubStatus
     /// The GitHub sign-in flow moved (begin/awaiting/busy/error/reset).
     | GitHubFlowMsg of GitHubFlowState
+    /// What /models answered: the catalogue, or why there isn't one.
+    | ModelCatalogueMsg of ModelCatalogueState
+    /// Pick the model this session's turns run on — `None` hands the choice back to the
+    /// provider. One register, written like a gate: the reducer sets it and the Ylmish
+    /// binding carries it to every peer.
+    | SetModelMsg of ModelId option
     /// One frame off the multiplexed query stream (Plan 15) — the declarations, or one
     /// query's current value. ONE message for the whole read surface, however many
     /// queries there are: a message per query would be a message per FUTURE query too.
@@ -616,6 +639,7 @@ module ClientModel =
           GitHub =
             { Status = { SessionCredential = None; MineCredential = None }
               Flow = GitHubIdle }
+          Models = ModelsUnknown
           Queries = { Declared = []; Values = Map.empty } }
 
     /// Advance the latest-known offset and recompute the catch-up indicator. "Slow" is a
@@ -1549,3 +1573,5 @@ module ClientModel =
             | None -> model
         | SetGateMsg (subject, mode) ->
             model |> withSynced { model.Synced with Gates = Map.add subject mode model.Synced.Gates }
+        | ModelCatalogueMsg catalogue -> { model with Models = catalogue }
+        | SetModelMsg choice -> model |> withSynced { model.Synced with Model = choice }

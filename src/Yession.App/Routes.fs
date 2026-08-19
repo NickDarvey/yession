@@ -112,6 +112,14 @@ type SessionRoute =
     | ClaudeStatus
     /// One of the Claude panel's write actions.
     | Claude of action: ClaudeAction
+    /// The models this session's provider offers — what the model picker chooses from.
+    /// A plain fetch rather than a stream: a catalogue does not move while a session runs
+    /// (the session looks it up once and keeps the answer), so there is nothing to push.
+    ///
+    /// Deliberately not under `/claude`: which provider answers this is the session's
+    /// business, and a picker that had to know would have made every future provider a
+    /// change to the browser.
+    | Models
     /// The GitHub panel's current credential status (Plan 14).
     | GitHubStatus
     /// One of the GitHub panel's write actions.
@@ -181,6 +189,7 @@ module SessionRoute =
         | TerminalKeyframe (terminal, seq) -> sprintf "terminals/%s/keyframes/%d" terminal seq
         | ClaudeStatus -> "claude"
         | Claude action -> "claude/" + claudeSegment action
+        | Models -> "models"
         | GitHubStatus -> "github"
         | GitHub action -> "github/" + githubSegment action
         | Queries -> "queries"
@@ -260,6 +269,7 @@ module SessionRoute =
         | "POST", [ "claude"; "complete" ] -> Some (Claude ClaudeAction.Complete)
         | "POST", [ "claude"; "token" ] -> Some (Claude ClaudeAction.Token)
         | "POST", [ "claude"; "disconnect" ] -> Some (Claude ClaudeAction.Disconnect)
+        | "GET", [ "models" ] -> Some Models
         | "GET", [ "github" ] -> Some GitHubStatus
         | "POST", [ "github"; "begin" ] -> Some (GitHub GitHubAction.Begin)
         | "POST", [ "github"; "poll" ] -> Some (GitHub GitHubAction.Poll)

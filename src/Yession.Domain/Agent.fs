@@ -29,6 +29,15 @@ type AgentContextPack =
       /// where machine output accumulates. The agent needs both; the conversation stays
       /// a conversation.
       Terminals      : TerminalBlockDigest list
+      /// Which model to run this turn on, when the session has picked one. `None` means
+      /// "whatever the provider would have chosen", which is the honest default: no
+      /// deployment here knows a provider's current pick, and inventing a fixed id would
+      /// pin every session to a model that ages.
+      ///
+      /// It rides the context pack rather than the runner because it is a fact about THIS
+      /// turn, re-read from the collaborative register each time — so a person changing it
+      /// mid-session changes the next turn, with nothing to relaunch.
+      Model          : ModelId option
       SystemPrompt   : string }
 
 type AgentResponseChunk = { Text : string }

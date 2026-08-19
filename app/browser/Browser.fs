@@ -766,6 +766,16 @@ let private parseDeviceBegin (body: string) : {| userCode: string; verificationU
 [<Emit("(() => { try { const o = JSON.parse($0); return { status: o.status || '', interval: o.interval || 0 } } catch { return { status: '', interval: 0 } } })()")>]
 let private parseDevicePoll (body: string) : {| status: string; interval: int |} = jsNative
 
+// --- The model catalogue (the picker's supply) -------------------------------------------
+// One gated fetch, decoded with the shared codec — the reply IS `AgentModel list`, and the
+// browser never learns which provider produced it. A non-2xx carries the reason as text,
+// which is the whole error story: the picker shows it and the provider default still works.
+
+[<Emit("""fetch($0, { cache: 'no-store' })
+  .then(async r => ({ ok: r.ok, body: await r.text() }))
+  .catch(e => ({ ok: false, body: String(e) }))""")>]
+let private fetchModelsAt (url: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
+
 // --- The read surface's stream (Plan 15) --------------------------------------------------
 // `EventSource` rather than the repo's fetch-based SSE reader: it is the browser's own SSE
 // client, it reconnects on its own, and it carries the session cookie same-origin — which
@@ -1164,6 +1174,24 @@ let private start () =
                     })
                 scope
 
+        // The model catalogue. Asked for once per open of the settings face, and answered
+        // from the session's own kept copy after the first time — so this is a local round
+        // trip, not a provider one, however often somebody opens the drawer.
+        //
+        // Re-asked on every open rather than fetched once at start, because the first ask
+        // may well have failed for want of a connected account, and the settings face is
+        // exactly where that gets fixed.
+        let refreshModels () =
+            Async.StartImmediate (
+                async {
+                    let! reply = fetchModelsAt (SessionRoute.relative SessionRoute.Models) |> Async.AwaitPromise
+                    if not reply.ok then dispatchRef (ModelCatalogueMsg (ModelsUnavailable reply.body))
+                    else
+                        match Codec.fromString Codec.modelCatalogue reply.body with
+                        | Ok models -> dispatchRef (ModelCatalogueMsg (ModelsLoaded models))
+                        | Error reason -> dispatchRef (ModelCatalogueMsg (ModelsUnavailable reason))
+                })
+
         // The GitHub panel's round-trips (Plan 14). Device flow: begin puts the user
         // code on screen, then this tab drives the session's poll at GitHub's stated
         // interval until the grant lands (a status probe then flips the flow to idle),
@@ -1243,6 +1271,7 @@ let private start () =
                     toggleSettings ()
                     refreshClaude ()
                     refreshGitHub ()
+                    refreshModels ()
               ReportTitleSelection =
                 fun sel ->
                     // The title lives in the `title` Y.Text root; turn the input's char offsets

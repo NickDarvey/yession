@@ -68,6 +68,15 @@ module Scheduler =
         (initialConsumed: Set<string>)
         : SessionScheduler =
 
+        // Which model the next turn runs on, read from the doc each time a turn starts —
+        // the same register the picker writes, so changing it takes effect on the next turn
+        // with nothing to restart. A doc that will not decode is not a reason to refuse a
+        // turn: it reads as no choice, which is the provider's default.
+        let selectedModel () : ModelId option =
+            match SyncedStateSync.ofDoc doc with
+            | Ok synced -> synced.Model
+            | Error _ -> None
+
         let mutable consumed = initialConsumed
         let mutable generation = 0
         let mutable running : RunningTurn option = None
@@ -148,7 +157,7 @@ module Scheduler =
                                     |> TerminalDigest.build
                                         (fun id fromSeq toSeq -> readTranscript id fromSeq toSeq |> Transcript.printed)
                                         (TerminalDigest.window events)
-                                do! AgentTurn.run log agent (signalFor turn) capabilitiesFor emitUsage (fun () -> turn.TurnId) mintMessageId sessionId projection.Items terminals trigger
+                                do! AgentTurn.run log agent (signalFor turn) capabilitiesFor emitUsage (fun () -> turn.TurnId) mintMessageId sessionId projection.Items terminals (selectedModel ()) trigger
                                 // Release the slot and re-arm — unless an interrupt
                                 // already released it (and possibly started a successor).
                                 match running with
@@ -215,6 +224,7 @@ module Scheduler =
                                     sessionId
                                     projection.Items
                                     terminals
+                                    (selectedModel ())
                                     (AgentTurn.FromWake (reason, turnActor))
                             match running with
                             | Some current when current.Generation = turn.Generation ->
