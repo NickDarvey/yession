@@ -26,15 +26,17 @@ open Lit
 // `timeoutMs` bounds the whole handshake (offer, gathering, answer, channel open); it is the
 // difference between "not connected, the session did not answer" and an eternal wait.
 [<Emit("""new Promise((resolve) => {
+  const t0 = performance.now()
+  const took = () => Math.round(performance.now() - t0)
   const pc = new RTCPeerConnection({ iceServers: [] })
   const dc = pc.createDataChannel('session')
   let settled = false
-  const succeed = () => { if (!settled) { settled = true; resolve({ ok: true, channel: dc, timedOut: false, detail: '' }) } }
+  const succeed = () => { if (!settled) { settled = true; resolve({ ok: true, channel: dc, connection: pc, timedOut: false, detail: '', tookMs: took() }) } }
   const fail = (timedOut, detail) => {
     if (settled) return
     settled = true
     try { pc.close() } catch {}
-    resolve({ ok: false, channel: null, timedOut, detail: String(detail) })
+    resolve({ ok: false, channel: null, connection: null, timedOut, detail: String(detail), tookMs: took() })
   }
   let sent = false
   const send = async () => {
@@ -59,22 +61,12 @@ open Lit
   dc.onopen = succeed
   pc.createOffer().then(o => pc.setLocalDescription(o), e => fail(false, e))
 })""")>]
-let private openDataChannel (signalUrl: string) (timeoutMs: int) : JS.Promise<{| ok: bool; channel: obj; timedOut: bool; detail: string |}> = jsNative
+let private openDataChannel (signalUrl: string) (timeoutMs: int) : JS.Promise<{| ok: bool; channel: obj; connection: obj; timedOut: bool; detail: string; tookMs: int |}> = jsNative
 
 /// How long a whole handshake gets before it counts as "the session did not answer". Long
 /// enough for ICE gathering on a slow machine, short enough that a dead session is reported
 /// rather than waited on.
 let private channelOpenTimeoutMs = 10000
-
-/// One attempt at the transport, shaped as the resilience policy consumes it.
-let private connectChannel (signalUrl: string) : Async<Result<obj, App.ChannelFault>> =
-    async {
-        let! reply = openDataChannel signalUrl channelOpenTimeoutMs |> Async.AwaitPromise
-        return
-            if reply.ok then Ok reply.channel
-            elif reply.timedOut then Error App.ChannelTimedOut
-            else Error (App.ChannelUnreachable reply.detail)
-    }
 
 [<Emit("$0.onmessage = (e) => $1(String(e.data))")>]
 let private onMessage (dc: obj) (handler: string -> unit) : unit = jsNative
@@ -85,25 +77,93 @@ let private onClose (dc: obj) (handler: unit -> unit) : unit = jsNative
 [<Emit("$0.readyState === 'open' && ($0.send($1), true)")>]
 let private sendMessage (dc: obj) (text: string) : bool = jsNative
 
+/// Both of the peer connection's state machines, as one "this transport is finished" signal.
+///
+/// This is why the connection is kept at all. The promise above used to resolve with the data
+/// channel ALONE, so nothing could observe either state, nothing could close a dead connection,
+/// and the only way a client learned its transport had died was `dc.onclose` — an event a
+/// half-open channel never fires.
+///
+/// `disconnected` is deliberately NOT here. It is a maybe, not a verdict, and the honest answer
+/// to a maybe already exists: the heartbeat asks, and gets an answer or does not, inside about
+/// three seconds. A grace timer here would be a second clock measuring the same doubt.
+//
+// The local names here are deliberately NOT `pc`/`dc`: `$0` is substituted TEXTUALLY with the
+// caller's identifier, so `const pc = $0` at a call site whose argument is itself named `pc`
+// emits `const pc = pc` — a temporal dead zone error that takes the whole shell down at load.
+[<Emit("""(() => {
+  const peer = $0, onDead = $1
+  const finished = () =>
+    peer.connectionState === 'failed' || peer.connectionState === 'closed' ||
+    peer.iceConnectionState === 'failed' || peer.iceConnectionState === 'closed'
+  const check = () => { if (finished()) onDead() }
+  peer.addEventListener('connectionstatechange', check)
+  peer.addEventListener('iceconnectionstatechange', check)
+  check()
+})()""")>]
+let private onPeerFinished (pc: obj) (handler: unit -> unit) : unit = jsNative
+
+/// Look again the moment the page comes back — a phone returning from the background, a
+/// network coming back, a tab being switched to. Returns the way to stop looking.
+///
+/// Not a second mechanism: it asks exactly the question `onPeerFinished` answers, at the one
+/// moment a browser is most likely to have torn the transport down while no script was running
+/// to hear about it. That moment is where the reported bug lived.
+[<Emit("""(() => {
+  const peer = $0, chan = $1, onDead = $2
+  const look = () => {
+    if (document.visibilityState === 'hidden') return
+    if (peer.connectionState === 'failed' || peer.connectionState === 'closed' ||
+        peer.iceConnectionState === 'failed' || peer.iceConnectionState === 'closed' ||
+        chan.readyState !== 'open') onDead()
+  }
+  window.addEventListener('pageshow', look)
+  window.addEventListener('online', look)
+  document.addEventListener('visibilitychange', look)
+  return () => {
+    window.removeEventListener('pageshow', look)
+    window.removeEventListener('online', look)
+    document.removeEventListener('visibilitychange', look)
+  }
+})()""")>]
+let private onResume (pc: obj) (dc: obj) (handler: unit -> unit) : (unit -> unit) = jsNative
+
+[<Emit("$0.close()")>]
+let private closePeer (pc: obj) : unit = jsNative
+
 let private frameCodec : Codec<SessionFrame<string>> = Codec.sessionFrame Codec.string
 
-/// Bridge the push-based browser data channel into the pull-based `FrameChannel`.
-let private frameChannel (dc: obj) : FrameChannel<string> =
+/// Bridge the push-based browser data channel into the pull-based `FrameChannel`, and hold the
+/// peer connection that carries it for as long as it lasts.
+///
+/// The channel ends exactly once, however the news arrives — the data channel closing, either
+/// state machine reaching a terminal state, or a resumed page finding the transport already
+/// gone. Three triggers, one mechanism: end of stream. Whoever is pumping learns it the way
+/// they always did.
+///
+/// Closing closes the CONNECTION too. It used to close only the channel, which left a peer
+/// connection (and its ICE agent) alive behind every reconnect for the life of the page.
+let private frameChannel (dc: obj) (pc: obj) : FrameChannel<string> =
     let queue = System.Collections.Generic.Queue<SessionFrame<string> option> ()
     let mutable pending : (SessionFrame<string> option -> unit) option = None
     let mutable closed = false
+    let mutable stopLooking : unit -> unit = ignore
     let deliver item =
         match pending with
         | Some cont -> pending <- None; cont item
         | None -> queue.Enqueue item
+    let finish () =
+        if not closed then
+            closed <- true
+            stopLooking ()
+            deliver None
     onMessage dc (fun text ->
         match Codec.fromString frameCodec text with
         | Ok frame -> deliver (Some frame)
         | Error e -> JS.console.error ("frame decode failed: " + e))
-    onClose dc (fun () ->
-        if not closed then
-            closed <- true
-            deliver None)
+    onClose dc finish
+    onPeerFinished pc finish
+    stopLooking <- onResume pc dc finish
     { Send = fun frame -> async { sendMessage dc (Codec.toString frameCodec frame) |> ignore }
       Receive =
         fun () ->
@@ -111,7 +171,31 @@ let private frameChannel (dc: obj) : FrameChannel<string> =
                 if queue.Count > 0 then cont (queue.Dequeue ())
                 elif closed then cont None
                 else pending <- Some cont)
-      Close = fun () -> async { emitJsExpr dc "$0.close()" } }
+      Close =
+        fun () ->
+            async {
+                finish ()
+                emitJsExpr dc "$0.close()"
+                closePeer pc
+            } }
+
+/// One attempt at the transport, shaped as the resilience policy consumes it. What settles is
+/// a CHANNEL, not the WebRTC objects behind it: the peer connection never leaves this module,
+/// which is what lets everything above hold one idea of a transport.
+let private connectChannel (signalUrl: string) : Async<Result<FrameChannel<string>, App.ChannelFault>> =
+    async {
+        let! reply = openDataChannel signalUrl channelOpenTimeoutMs |> Async.AwaitPromise
+        // How long the handshake took, said out loud. Open latency is a property this repo has
+        // already traded a whole ICE backend to protect (docs/decisions/2026-07-26), and it is
+        // invisible from the outside: a slow session and a slow handshake look identical from
+        // the shell. Free on success, and the one number worth having when they do not.
+        JS.console.debug (
+            sprintf "yession/link: handshake %s in %dms" (if reply.ok then "opened" else "failed") reply.tookMs)
+        return
+            if reply.ok then Ok (frameChannel reply.channel reply.connection)
+            elif reply.timedOut then Error App.ChannelTimedOut
+            else Error (App.ChannelUnreachable reply.detail)
+    }
 
 // --- DOM shell -------------------------------------------------------------------------
 
@@ -1525,13 +1609,13 @@ let private start () =
                     (App.SessionLifecycle.supervision jsRandom)
                     { Open = openChannel
                       Serve =
-                        fun resumeAfter dispatch dc ->
+                        fun resumeAfter dispatch carrier ->
                             async {
                                 // Supervised at the transport boundary, exactly as the event
                                 // feed's resilience policy is composed here and nowhere else:
                                 // `App.connect` receives a channel that already knows how to
                                 // notice its own death, and holds no notion of heartbeats.
-                                let channel = Link.supervise Link.LinkPolicy.shipped (frameChannel dc)
+                                let channel = Link.supervise Link.LinkPolicy.shipped carrier
                                 let connection =
                                     App.connect
                                         { options with ResumeAfter = resumeAfter }
