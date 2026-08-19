@@ -158,6 +158,12 @@ let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : P
       RejectedReason = None
       Background = false }
 
+/// The same, authored by the agent on a peer's credential — the only way an agent-authored
+/// act can be built, and what makes these cases about the agent rather than about a peer
+/// wearing its name.
+let private agentEntry (terminal: TerminalId) (turnActor: ActorRef) (n: string) : PendingAct =
+    { queueEntry terminal turnActor n with Authority = Authority.agentFor turnActor }
+
 /// Poll until `condition` holds or the budget runs out. Bounded rather than a fixed sleep:
 /// a shell's timing is not ours to predict, and a test that sleeps long enough to be safe is
 /// a test that is slow every run.
@@ -424,6 +430,112 @@ let private liveModeTests =
             }
     ]
 
+
+/// The agent's hand on a terminal that runs blocks (Plan 20, stage 6). Live mode used to be
+/// human-only, and what that exception left behind was a wedge: an agent command that takes
+/// the whole screen waits for a keystroke nobody was allowed to send, so its block never
+/// finished, the terminal stayed busy, and the queue behind it never moved again.
+let private agentLeaseTests =
+    testList "The agent lease over a real pty (Plan 20, stage 6)" [
+        testCaseAsync "an agent's block that takes the alternate screen hands the AGENT the terminal" <|
+            withLiveTerminal "agentflip" (fun terminals id _ log _ _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    do!
+                        terminals.RunBlock
+                            id
+                            (agentEntry id ada "1")
+                            "printf '\\033[?1049h'; sleep 0.4; printf '\\033[?1049l'"
+                            ignore
+                    let leaseEvents () =
+                        async {
+                            let! page = log.Read None 1000
+                            return
+                                page.Events
+                                |> List.choose (fun e ->
+                                    match e.Event with
+                                    | SessionEvent.TerminalLeaseTaken t -> Some ("taken", t.By)
+                                    | SessionEvent.TerminalLeaseReleased r -> Some ("released", r.Was)
+                                    | _ -> None)
+                        }
+                    let rec settle remaining =
+                        async {
+                            let! seen = leaseEvents ()
+                            if List.length seen >= 2 || remaining <= 0 then return seen
+                            else
+                                do! Async.Sleep 50
+                                return! settle (remaining - 50)
+                        }
+                    let! seen = settle 5000
+                    Expect.equal
+                        seen
+                        [ "taken", ActorRef.Agent; "released", ActorRef.Agent ]
+                        "the author of the command is who now needs the keyboard, agent or not"
+                })
+
+        testCaseAsync "the agent answers its own wedged block, and the block finishes" <|
+            withLiveTerminal "agenttype" (fun terminals id records _ _ _ ->
+                async {
+                    let ada = PeerRef (PeerId.create "ada" |> expect)
+                    // Enters the alternate screen and waits for a line, exactly as an editor
+                    // or an installer prompt does — without depending on either being present.
+                    let! block =
+                        Async.StartChild (
+                            terminals.RunBlock
+                                id
+                                (agentEntry id ada "1")
+                                "printf '\\033[?1049h'; read -r answer; printf '\\033[?1049l'; echo \"answered $answer\""
+                                ignore,
+                            20000)
+                    let! wedged = until 8000 (fun () -> terminals.Interactive id)
+                    Expect.isTrue wedged "the flip handed the terminal over rather than leaving it wedged"
+                    match! terminals.Write id ActorRef.Agent "yes\r" with
+                    | Error e -> failwithf "the agent holds this terminal, so it may type into it: %s" e
+                    | Ok () ->
+                        do! block
+                        Expect.isTrue
+                            (records |> Seq.exists (fun r -> r.Data.Contains "answered yes"))
+                            "the keystrokes reached the program, which then ran on to its end"
+                })
+
+        testCaseAsync "a shell terminal the agent does NOT hold still refuses raw bytes" <|
+            withLiveTerminal "agentgate" (fun terminals id _ _ _ _ ->
+                async {
+                    // The refusal narrows to the lease; it does not go away. Typing into a
+                    // shell nobody handed over would be the door around the approval gate.
+                    match! terminals.Write id ActorRef.Agent "rm -rf /\r" with
+                    | Ok () -> failwith "raw bytes into an unheld shell would be the door around the approval gate"
+                    | Error reason -> Expect.stringContains reason "execute_command" "and it says where to go instead"
+                })
+
+        testCaseAsync "reading a shell terminal is admitted exactly while a block has the screen" <|
+            withLiveTerminal "agentread" (fun terminals id _ _ _ _ ->
+                async {
+                    // `execute_command` answers with what a command printed — except for the
+                    // one command that has not printed an answer and never will on its own.
+                    match! terminals.Tail id with
+                    | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
+                    | Error reason -> Expect.stringContains reason "execute_command" "so it is refused, and says where the answer is"
+
+                    let! block =
+                        Async.StartChild (
+                            terminals.RunBlock
+                                id
+                                (agentEntry id (PeerRef (PeerId.create "ada" |> expect)) "1")
+                                "printf '\\033[?1049h'; read -r answer; printf '\\033[?1049l'"
+                                ignore,
+                            20000)
+                    let! wedged = until 8000 (fun () -> terminals.Interactive id)
+                    Expect.isTrue wedged "the block took the screen"
+                    match! terminals.Tail id with
+                    | Error e -> failwithf "there is no command answer to read instead, so the screen is the only one: %s" e
+                    | Ok _ ->
+                        match! terminals.Write id ActorRef.Agent "yes\r" with
+                        | Error e -> failwith e
+                        | Ok () -> do! block
+                })
+    ]
+
 let tests =
     testList "Pty (Plan 13)" [
         testCaseAsync "the host backend offers a pty at all" <|
@@ -638,5 +750,6 @@ let tests =
             }
 
         liveModeTests
+        agentLeaseTests
         integrationLostTests
     ]

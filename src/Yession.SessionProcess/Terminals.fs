@@ -325,7 +325,12 @@ module TerminalCommandWait =
           IsHead : bool
           /// Why the terminal's head is held, from `TerminalQueueDrain.holdOf`. `None` = it is
           /// about to run.
-          Hold : TerminalQueueDrain.TerminalHold option }
+          Hold : TerminalQueueDrain.TerminalHold option
+          /// Whether DETECTION holds this terminal's lease right now (Plan 20, stage 6) — the
+          /// alt-screen flip having handed it to the author of whatever is running. Only ever
+          /// true beside a running block, and a terminal runs one block at a time, so beside
+          /// OUR running block it says the thing we are waiting on is waiting on us.
+          Interactive : bool }
 
     type Step =
         | Return of TerminalCommandStatus
@@ -346,6 +351,11 @@ module TerminalCommandWait =
             match block.Status with
             | BlockRejected (by, reason) -> Return (TerminalCommandRefused (by, reason))
             | BlockFinished result -> Return (TerminalCommandRan result)
+            // A block that has taken the screen is waiting for the CALLER, so there is nothing
+            // left to wait out: returned at once, deadline or no. Burning the deadline first
+            // and then saying "still running" would spend two minutes telling the one party
+            // who could end it to be patient.
+            | BlockRunning when observation.Interactive -> Return TerminalCommandInteractive
             // Still running. A deadline here is a YIELD, not a cancellation — the block runs
             // on, its output lands in the transcript, and the handle resumes it.
             | BlockRunning -> if deadlineElapsed then Return TerminalCommandRunning else KeepWaiting
@@ -440,6 +450,13 @@ module TerminalLeases =
 
     let holderOf (id: TerminalId) (leases: Leases) : ActorRef option =
         leases |> Map.tryFind (TerminalId.value id) |> Option.map (fun lease -> lease.Holder)
+
+    /// Whether DETECTION took this lease rather than somebody asking for it. The `Auto`
+    /// register read from outside, because two things ask it: the flip, deciding whether it
+    /// may give back what it took, and the command wait, deciding whether a running block is
+    /// waiting on a keystroke (Plan 20, stage 6).
+    let autoHeld (id: TerminalId) (leases: Leases) : bool =
+        leases |> Map.tryFind (TerminalId.value id) |> Option.map (fun lease -> lease.Auto) |> Option.defaultValue false
 
     /// Stamp a keystroke, so the idle timeout measures from the last one rather than from when
     /// the lease was taken. A no-op for anyone who is not the holder — their keystrokes were
@@ -729,6 +746,11 @@ module SessionTerminals =
           /// `lost` set, which holds the queue rather than draining into a shell that cannot
           /// bound what it runs.
           Lost : unit -> Set<string>
+          /// Whether DETECTION holds this terminal (Plan 20, stage 6): the alt-screen flip
+          /// gave it to the author of whatever is running there, so a block that will not
+          /// finish on its own is waiting on that author's keystrokes. Read by the command
+          /// wait, which is what turns it into the answer `execute_command` gives back.
+          Interactive : TerminalId -> bool
           /// Type the instrumentation into the shell that is there now. Refused when the
           /// terminal is not lost, or has no persistent shell to type into.
           Rearm : TerminalId -> Async<Result<unit, string>>
@@ -774,6 +796,7 @@ module SessionTerminals =
           Busy = fun () -> Set.empty
           Leased = fun () -> Set.empty
           Lost = fun () -> Set.empty
+          Interactive = fun _ -> false
           Rearm = fun _ -> async { return Error "this session has no terminals" }
           ReclaimIdle = fun _ -> async { return () }
           IsOpen = fun _ -> false
@@ -1039,7 +1062,7 @@ module SessionTerminals =
             async {
                 let key = TerminalId.value id
                 let holder = TerminalLeases.holderOf id leases
-                let autoHeld = leases |> Map.tryFind key |> Option.map (fun lease -> lease.Auto) |> Option.defaultValue false
+                let autoHeld = TerminalLeases.autoHeld id leases
                 let author =
                     match runningAuthor.TryGetValue key with
                     | true, actor -> Some actor
@@ -1539,7 +1562,18 @@ module SessionTerminals =
                 let key = TerminalId.value id
                 if not (isOpen id) then return Error "terminal is not open"
                 elif canInstrument key then
-                    return Error "this terminal runs commands as blocks — run it with execute_command, where people can approve it"
+                    // The refusal stops exactly where the lease starts (Plan 20, stage 6). It
+                    // exists because raw bytes into a shell would be the door around the
+                    // approval gate — and an actor already HOLDING an instrumented terminal is
+                    // one detection handed it to, over a block somebody already approved, whose
+                    // keystrokes are that block's. So no taking here, only using what the flip
+                    // gave you: an actor that could take this lease itself would be back
+                    // through the door it was refused at.
+                    match TerminalLeases.holderOf id leases with
+                    | Some holder when holder = by ->
+                        return (if input id by data then Ok () else Error "this terminal has nothing to type into")
+                    | _ ->
+                        return Error "this terminal runs commands as blocks — run it with execute_command, where people can approve it"
                 else
                     match! take id by with
                     | Error reason -> return Error reason
@@ -1556,7 +1590,14 @@ module SessionTerminals =
         let tail (id: TerminalId) : Async<Result<TerminalTail, string>> =
             async {
                 let key = TerminalId.value id
-                if canInstrument key then
+                // Refused where a command's own answer carries what it printed — and that is
+                // every instrumented terminal EXCEPT one whose running block has taken the
+                // screen (Plan 20, stage 6). There `execute_command` has already returned
+                // `Interactive` with nothing to show, so the screen is the only answer there
+                // is. Gated on detection rather than on the reader, because a reader is not a
+                // second writer: it takes nothing and blocks nobody, so who is asking does not
+                // change the answer.
+                if canInstrument key && not (TerminalLeases.autoHeld id leases) then
                     return
                         Error
                             "this terminal's output comes back as blocks — run it with execute_command, whose answer carries what it printed"
@@ -1734,6 +1775,7 @@ module SessionTerminals =
           Busy = fun () -> busy
           Leased = fun () -> TerminalLeases.held leases
           Lost = fun () -> lost
+          Interactive = fun id -> TerminalLeases.autoHeld id leases
           Rearm = rearm
           ReclaimIdle = reclaimIdle
           IsOpen = isOpen
@@ -1992,7 +2034,7 @@ module TerminalCommands =
             | Error _ ->
                 // A doc that will not decode says nothing about this request. Keep waiting on
                 // whatever the log shows rather than declaring the entry gone.
-                { Block = block; InQueue = true; IsHead = false; Hold = None }
+                { Block = block; InQueue = true; IsHead = false; Hold = None; Interactive = terminals.Interactive terminal }
             | Ok synced ->
                 let consumed = consumed ()
                 let head =
@@ -2011,7 +2053,8 @@ module TerminalCommands =
                         terminals.IsOpen
                         (fun t -> SyncedSessionState.modeOf t synced)
                         synced.Pending
-                        terminal }
+                        terminal
+                  Interactive = terminals.Interactive terminal }
 
         let outcomeOf (terminal: TerminalId) (handle: QueueId) (status: TerminalCommandStatus) =
             let block = blockFor handle |> Option.map snd

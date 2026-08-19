@@ -306,9 +306,15 @@ module TerminalFlip =
     ///   * Detection only ever RELEASES what detection took. Otherwise leaving `vim` would
     ///     yank the keyboard from a peer who had taken the terminal explicitly and happened
     ///     to run an editor in it.
-    ///   * An agent-authored block does not flip. Live mode is human-only for now, and an
-    ///     agent that entered a full-screen editor has a wedged block rather than a lease —
-    ///     which the alt-screen unwedge on block completion is what answers.
+    ///   * The flip follows the AUTHOR, and the agent is one (Plan 20, stage 6). This rule
+    ///     used to read "an agent-authored block does not flip — live mode is human-only",
+    ///     which was true of a session where the agent had no hands: live mode was a browser
+    ///     surface, so handing it a terminal would have handed it to nobody. Plan 19 gave it
+    ///     `write_terminal`/`read_terminal`, and what the exception left behind was a wedge —
+    ///     an agent command that takes the screen waits for a keystroke nobody is allowed to
+    ///     send, so its block never finishes and the queue behind it never moves. Nothing
+    ///     flips to `SessionProcess` or `System`, and that is not policy either: nothing in
+    ///     the session can type as either of them.
     let propose
         (altScreen: bool)
         (holder: ActorRef option)
@@ -318,8 +324,8 @@ module TerminalFlip =
         match altScreen, holder with
         | true, None ->
             match runningAuthor with
-            | Some (PeerRef _ as author) | Some (UserRef _ as author) -> FlipToLive author
-            | Some Agent | Some SessionProcess | Some System | None -> FlipNothing
+            | Some (PeerRef _ as author) | Some (UserRef _ as author) | Some (Agent as author) -> FlipToLive author
+            | Some SessionProcess | Some System | None -> FlipNothing
         | true, Some _ -> FlipNothing
         | false, Some _ when autoHeld -> FlipToBlock
         | false, _ -> FlipNothing

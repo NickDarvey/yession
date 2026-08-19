@@ -69,6 +69,12 @@ type TerminalCommandStatus =
     /// Still going when the deadline fell. A yield, not a cancellation: the block runs on and
     /// the handle resumes it.
     | TerminalCommandRunning
+    /// It took the whole screen and is waiting for a keystroke, and the terminal is yours
+    /// (Plan 20, stage 6). Its own case because it is the one running block that will never
+    /// finish on its own: burning the process deadline on it and then reporting
+    /// `TerminalCommandRunning` says "be patient" about a thing that is waiting for the
+    /// caller. Returned the moment detection hands the terminal over, deadline or no.
+    | TerminalCommandInteractive
     /// A human has to approve it. Unbounded in principle — they may be asleep — so the tool
     /// returns rather than waits, and the turn says what it queued and why.
     | TerminalCommandAwaitingApproval
