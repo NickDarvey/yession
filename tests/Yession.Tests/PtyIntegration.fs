@@ -136,8 +136,7 @@ let private withLiveTerminal
                     (fun _ _ _ -> ())
                     (fun () -> reDrains <- reDrains + 1)
                     AttachTerminal.unavailable
-                    // No doc in this fixture, and no gate to write into one.
-                    ignore
+                    Classifier.approveAll
                     []
             match! terminals.Open (PeerRef (PeerId.create "ada" |> expect)) (SandboxShell SandboxName.defaultName) name with
             | Error e -> failwith e
@@ -153,9 +152,6 @@ let private queueEntry (terminal: TerminalId) (author: ActorRef) (n: string) : P
       Authority = Authority.ofAuthor author
       Order = 1.0
       Payload = CommandLine
-      ApprovedBy = None
-      RejectedBy = None
-      RejectedReason = None
       Background = false }
 
 /// The same, authored by the agent on a peer's credential — the only way an agent-authored
@@ -502,9 +498,9 @@ let private agentLeaseTests =
             withLiveTerminal "agentgate" (fun terminals id _ _ _ _ ->
                 async {
                     // The refusal narrows to the lease; it does not go away. Typing into a
-                    // shell nobody handed over would be the door around the approval gate.
+                    // shell nobody handed over would be the door around the classifier.
                     match! terminals.Write id ActorRef.Agent "rm -rf /\r" with
-                    | Ok () -> failwith "raw bytes into an unheld shell would be the door around the approval gate"
+                    | Ok () -> failwith "raw bytes into an unheld shell would be the door around the classifier"
                     | Error reason -> Expect.stringContains reason "execute_command" "and it says where to go instead"
                 })
 

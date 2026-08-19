@@ -289,8 +289,7 @@ let tests =
                     "echo hello"
                     "Bob watches Ada write the command, exactly as he watches her write a message"
 
-                // Sending enqueues it; a human's command needs no approval under the default
-                // mode, so the drain runs it straight away.
+                // Sending enqueues it; the drain runs it straight away.
                 a.Connection.SendTerminalDraft terminal a.Hello.PeerId
                 let ranSuccessfully (m: ClientModel) =
                     match TerminalProjection.tryFind terminal m.Terminals with
@@ -440,12 +439,12 @@ let tests =
                 do! host.Stop ()
             }
 
-        testCaseAsync "ApproveAgent is now ENFORCEABLE: the agent's call yields, and resumes on the approval" <|
+        testCaseAsync "the agent's command runs in the same call, visible to every peer" <|
             async {
-                // The defect stage 3b closes. A session could set every terminal to require
-                // approval and the agent routed around it, because it had a second door with
-                // no gate on it. With one door the gate is real — and the tool still does not
-                // deadlock the turn, because the approval wait is bounded and yields a handle.
+                // Under the bypass classifier (Plan 23) the agent's call answers with the
+                // outcome — never with "queued", and never with a wait on a person. The
+                // queue is still the one door: the command is written where every peer can
+                // read it before it runs, and the block it becomes is on the record.
                 let spawns = ref 0
                 let environment : SessionEnvironment.SessionEnvironment =
                     { Ensure = fun _ _ -> async { return EnvironmentAvailable }
@@ -453,7 +452,7 @@ let tests =
                         fun _ onChunk ->
                             async {
                                 spawns.Value <- spawns.Value + 1
-                                onChunk (Stdout, "approved output")
+                                onChunk (Stdout, "classified output")
                                 return
                                     Ok
                                         { WriteStdin = ignore
@@ -466,91 +465,23 @@ let tests =
                       CurrentRef = fun () -> Some "scripted" }
                 let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
                 let! a = connectInMemoryClient host "ada" "Ada"
-                // A terminal ADA opened keeps its own mode — the asymmetry that makes this
-                // useful: the agent's own scratch terminal is auto, a human's is gated by the
-                // policy that human set.
                 a.Connection.OpenTerminal "build"
                 do! a.Runner.WaitFor (fun m -> not (List.isEmpty (TerminalProjection.openTerminals m.Terminals)))
                 let terminal =
                     (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
-                // ApproveAgent is the default, so this is the out-of-the-box case.
                 let! outcome = host.TerminalCommands.Execute { CommandRequest.ofCommand "rm -rf build" with Target = Some (InTerminal terminal) } agentActing
                 match outcome with
                 | Error reason -> failwith reason
                 | Ok outcome ->
-                    Expect.equal outcome.Status TerminalCommandAwaitingApproval "the gate held it"
-                    Expect.equal spawns.Value 0 "and NOTHING ran — there is no second door"
-                    Expect.isNone outcome.Block "there is no block yet, so the handle is the request"
-
-                    // The approval is a plain CRDT write from the client. Resuming the handle
-                    // picks the same command up: nothing was lost by the deadline.
-                    do! a.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalQueue terminal m)))
-                    let entry = ClientModel.terminalQueue terminal (a.Runner.Model ()) |> List.head
-                    Expect.equal entry.QueueId outcome.Handle "the handle IS the queue entry a human is looking at"
-                    a.Runner.Dispatch (user (ApprovePendingMsg (entry.QueueId, a.Hello.PeerId)))
-                    match! host.TerminalCommands.Read outcome.Handle with
-                    | Error reason -> failwith reason
-                    | Ok resumed ->
-                        Expect.equal resumed.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran on the approval"
-                        Expect.isTrue (resumed.OutputTail.Contains "approved output") "with its output"
-                        Expect.equal spawns.Value 1 "exactly once"
-                do! host.Stop ()
-            }
-
-        testCaseAsync "the agent's queued command waits for a human, and running it is one approval away" <|
-            async {
-                let spawns = ref 0
-                let environment : SessionEnvironment.SessionEnvironment =
-                    { Ensure = fun _ _ -> async { return EnvironmentAvailable }
-                      Spawn =
-                        fun _ _ ->
-                            async {
-                                spawns.Value <- spawns.Value + 1
-                                return
-                                    Ok
-                                        { WriteStdin = ignore
-                                          CloseStdin = ignore
-                                          Kill = ignore
-                                          Exited = async { return SandboxExited 0 } }
-                            }
-                      SpawnPty = fun _ _ _ _ -> async { return Error "no pty in this fixture" }
-                      Stop = fun () -> async { return () }
-                      CurrentRef = fun () -> Some "scripted" }
-                let! host = Host.startWithEnvironment None (Some (fun _ -> WorkSandboxes.singleton "scripted" environment)) None (sid ()) 0
-                let! a = connectInMemoryClient host "ada" "Ada"
-                a.Connection.OpenTerminal "build"
-                do! a.Runner.WaitFor (fun m -> not (List.isEmpty (TerminalProjection.openTerminals m.Terminals)))
-                let terminal =
-                    (TerminalProjection.openTerminals (a.Runner.Model ()).Terminals |> List.head).TerminalId
-
-                // The agent runs through its ONE capability (Plan 13, stage 3b), which writes
-                // the same doc state a person's send writes — so Ada sees it appear in her
-                // queue, awaiting her. Started in the background because it WAITS: that is the
-                // whole change, and the point of this test is that an approval arriving inside
-                // the grace is answered in the same call rather than yielding a handle.
-                let! running = Async.StartChild (host.TerminalCommands.Execute { CommandRequest.ofCommand "rm -rf build" with Target = Some (InTerminal terminal) } agentActing)
-                do! a.Runner.WaitFor (fun m -> not (List.isEmpty (ClientModel.terminalQueue terminal m)))
-                let entry = ClientModel.terminalQueue terminal (a.Runner.Model ()) |> List.head
-                Expect.isTrue (ClientModel.awaitsApproval entry (a.Runner.Model ())) "and Ada sees it waiting"
-                Expect.equal spawns.Value 0 "nothing has run"
-
-                // Approving is a plain CRDT write from the client — no command, no round trip.
-                a.Runner.Dispatch (user (ApprovePendingMsg (entry.QueueId, a.Hello.PeerId)))
+                    Expect.equal outcome.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran, and the call carried the answer"
+                    Expect.isTrue (outcome.OutputTail.Contains "classified output") "with its output"
+                    Expect.equal spawns.Value 1 "exactly once"
+                // The record every peer reads: the block exists, attributed to the agent.
                 let ran (m: ClientModel) =
                     match TerminalProjection.tryFind terminal m.Terminals with
                     | Some view -> view.Blocks |> List.exists (fun b -> b.Command = "rm -rf build")
                     | None -> false
                 do! a.Runner.WaitFor ran
-                Expect.equal spawns.Value 1 "the approval is what let it run"
-                // ...and the agent's own call, still waiting, answers with the outcome — not
-                // with "queued". The old tool returned before anything had happened, which is
-                // why an agent that needed an answer took the ungated path instead.
-                let! outcome = running
-                match outcome with
-                | Error reason -> failwith reason
-                | Ok outcome ->
-                    Expect.equal outcome.Status (TerminalCommandRan (CommandSucceeded 0)) "it ran, and says so"
-                    Expect.isSome outcome.Block "with the block it became"
                 do! host.Stop ()
             }
 

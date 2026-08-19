@@ -23,7 +23,6 @@ type AdaptiveSyncedState =
       TerminalDrafts : cmap<string, TerminalDraft>
       Pending : cmap<string, PendingAct>
       Model : cval<ModelId option>
-      Gates : cmap<string, ApprovalMode>
       TerminalSizes : cmap<string, TerminalSize> }
 
 module SyncedStateSync =
@@ -60,9 +59,6 @@ module SyncedStateSync =
     let private pendingByKey (m: SyncedSessionState) : HashMap<string, PendingAct> =
         m.Pending |> Map.toSeq |> Seq.map (fun (k, v) -> QueueId.value k, v) |> HashMap.ofSeq
 
-    let private gatesByKey (m: SyncedSessionState) : HashMap<string, ApprovalMode> =
-        m.Gates |> Map.toSeq |> Seq.map (fun (k, v) -> GateSubject.describe k, v) |> HashMap.ofSeq
-
     let private terminalSizesByKey (m: SyncedSessionState) : HashMap<string, TerminalSize> =
         m.TerminalSizes |> Map.toSeq |> Seq.map (fun (k, v) -> TerminalId.value k, v) |> HashMap.ofSeq
 
@@ -75,7 +71,6 @@ module SyncedStateSync =
           TerminalDrafts = cmap (terminalDraftsByKey m)
           Pending = cmap (pendingByKey m)
           Model = cval m.Model
-          Gates = cmap (gatesByKey m)
           TerminalSizes = cmap (terminalSizesByKey m) }
 
     /// `Update` for Ylmish's options: fold the next model into the companion. Setting
@@ -88,7 +83,6 @@ module SyncedStateSync =
         a.TerminalDrafts.Value <- terminalDraftsByKey m
         a.Pending.Value <- pendingByKey m
         a.Model.Value <- m.Model
-        a.Gates.Value <- gatesByKey m
         a.TerminalSizes.Value <- terminalSizesByKey m
 
     /// Per-draft encoding: the map key *is* the author (one draft per client), so `author` is
@@ -125,10 +119,8 @@ module SyncedStateSync =
               "author", Encode.string (AVal.constant (PeerId.value d.Author))
               "queueId", Encode.string (AVal.constant (QueueId.value d.QueueId)) ]
 
-    /// An act waiting on a verdict. `author` is an actor TOKEN, not a peer id, because the
-    /// agent proposes acts too and "who asked for this" is what the approval policy reads.
-    /// `approvedBy` is the approval itself — an LWW register, so two peers approving at
-    /// once settle on one of them rather than on a conflict.
+    /// A queued act. `author` is an actor TOKEN, not a peer id, because the agent proposes
+    /// acts too and "who asked for this" is part of the record.
     ///
     /// A `CommandLine`'s text is a sibling `Y.Text` root (`BodyKey.terminalQueued`), so the
     /// payload here carries only which KIND it is; a `CommandCall` has no editable text and
@@ -143,9 +135,6 @@ module SyncedStateSync =
               "payload",
               Encode.string (AVal.constant (match q.Payload with CommandLine -> "line" | CommandCall _ -> "call"))
               "tool", Encode.string (AVal.constant tool)
-              // The arguments the call was made with, so a process that did not propose the
-              // act can still carry it out. Never a credential: `onBehalfOf` names WHOSE,
-              // and what it IS is resolved at execution, never replicated.
               "args", Encode.string (AVal.constant args)
               "summary", Encode.string (AVal.constant summary)
               "onBehalfOf",
@@ -153,13 +142,7 @@ module SyncedStateSync =
                   (AVal.constant
                       (Authority.onBehalfOf q.Authority |> Option.map ActorRef.token |> Option.defaultValue ""))
               "author", Encode.string (AVal.constant (ActorRef.token (Authority.author q.Authority)))
-              "order", Encode.float (AVal.constant q.Order)
-              "approvedBy",
-              Encode.string (AVal.constant (q.ApprovedBy |> Option.map PeerId.value |> Option.defaultValue ""))
-              "rejectedBy",
-              Encode.string (AVal.constant (q.RejectedBy |> Option.map PeerId.value |> Option.defaultValue ""))
-              "rejectedReason",
-              Encode.string (AVal.constant (q.RejectedReason |> Option.defaultValue "")) ]
+              "order", Encode.float (AVal.constant q.Order) ]
 
     let private encodeTerminalSize (s: TerminalSize) : Encoded =
         Encode.object
@@ -175,9 +158,6 @@ module SyncedStateSync =
     let private encodeModel (m: aval<ModelId>) : Encoded =
         Encode.string (m |> AVal.map ModelId.value)
 
-    let private encodeGate (m: ApprovalMode) : Encoded =
-        Encode.object [ "mode", Encode.string (AVal.constant (ApprovalMode.describe m)) ]
-
     /// Which parts of the session sync, and how each merges. Everything else in the
     /// models — the conversation projection above all — is app-only by omission. Rich bodies
     /// are deliberately absent: they live as sibling `Y.XmlFragment` roots the app manages
@@ -192,12 +172,9 @@ module SyncedStateSync =
               "sharedBrief", Encode.option encodeBrief a.SharedBrief
               "terminalDrafts", Encode.map encodeTerminalDraft (a.TerminalDrafts :> amap<_, _>)
               // Named for what they hold rather than for the one subject kind that used to
-              // be the only one (Plan 15, stage 3). A doc written before that carries the
-              // old `terminalQueue`/`terminalModes` roots; `migrateGateRoots` moves them at
-              // boot, so there is exactly one live location, never two.
+              // be the only one (Plan 15, stage 3).
               "pending", Encode.map encodePendingAct (a.Pending :> amap<_, _>)
               "model", Encode.option encodeModel a.Model
-              "gates", Encode.map encodeGate (a.Gates :> amap<_, _>)
               "terminalSizes", Encode.map encodeTerminalSize (a.TerminalSizes :> amap<_, _>) ]
 
     /// The doc-side field shapes, before identifier validation. Bodies are omitted here: they
@@ -240,9 +217,6 @@ module SyncedStateSync =
           OnBehalfOf : string
           Author : string
           Order : float
-          ApprovedBy : string
-          RejectedBy : string
-          RejectedReason : string
           /// Whether the author is waiting on this one (Plan 20, stage 2). A string on the
           /// doc side like every other field here — the doc carries text, and the domain
           /// type is where it becomes a bool.
@@ -266,9 +240,6 @@ module SyncedStateSync =
             let! onBehalfOf = Decode.object.optional "onBehalfOf" Decode.string
             let! author = Decode.object.required "author" Decode.string
             let! order = Decode.object.optional "order" Decode.float
-            let! approvedBy = Decode.object.optional "approvedBy" Decode.string
-            let! rejectedBy = Decode.object.optional "rejectedBy" Decode.string
-            let! rejectedReason = Decode.object.optional "rejectedReason" Decode.string
             let! background = Decode.object.optional "background" Decode.string
             return
                 { Subject = subject
@@ -279,9 +250,6 @@ module SyncedStateSync =
                   OnBehalfOf = defaultArg onBehalfOf ""
                   Author = author
                   Order = defaultArg order 0.0
-                  ApprovedBy = defaultArg approvedBy ""
-                  RejectedBy = defaultArg rejectedBy ""
-                  RejectedReason = defaultArg rejectedReason ""
                   Background = defaultArg background "" }
         }
 
@@ -293,20 +261,14 @@ module SyncedStateSync =
         }
 
     /// A model register the smart constructor refuses reads back as ABSENT — the provider's
-    /// default — rather than as a model nothing can run. Same direction as an unreadable
-    /// gate mode: the fallback is always something a turn can actually do.
+    /// default — rather than as a model nothing can run: the fallback is always something a
+    /// turn can actually do.
     let private modelToDomain (raw: string option) : ModelId option =
         raw
         |> Option.bind (fun id ->
             match ModelId.create id with
             | Ok model -> Some model
             | Error _ -> None)
-
-    let private decodeGate<'m> : Decoder<'m, string> =
-        Decode.object {
-            let! mode = Decode.object.required "mode" Decode.string
-            return mode
-        }
 
     /// Entries whose identifiers fail the smart constructors are skipped rather than
     /// failing the decode: the doc is shared with peers we don't control, and a decode
@@ -347,28 +309,10 @@ module SyncedStateSync =
         ||> Seq.fold (fun acc (key, f) ->
             match QueueId.create key, GateSubject.parse f.Subject, ActorRef.ofToken f.Author with
             | Ok id, Some subject, Some author ->
-                // An empty/invalid approver reads as "not approved". Never as an approval:
-                // failing OPEN on a value we could not read would run an agent's command
-                // that nobody signed off, which is the one direction this must not fail in.
-                let approvedBy =
-                    if f.ApprovedBy = "" then None
-                    else match PeerId.create f.ApprovedBy with Ok p -> Some p | Error _ -> None
-                // A refusal reads the same way, and the direction is worth stating because
-                // it is NOT the same safety argument. An unreadable approver fails safe by
-                // construction — no approval, nothing runs. An unreadable refuser falls
-                // back to the approval gate instead, which under `AutoRun` means the
-                // command runs. That is acceptable only because the value round-trips
-                // through our own encoder (`PeerId.value`), so a non-empty one that will
-                // not parse means a doc somebody corrupted by hand rather than anything a
-                // replica can produce — and in that case the entry has exactly the
-                // protection it had before the refusal was written.
-                let rejectedBy =
-                    if f.RejectedBy = "" then None
-                    else match PeerId.create f.RejectedBy with Ok p -> Some p | Error _ -> None
                 // An unreadable payload kind reads as a command LINE, which is what a
                 // pending act has been since Plan 13 and the only kind with an editable
                 // text root. A call whose kind failed to read would otherwise render as a
-                // card with no arguments on it — approving something you cannot see.
+                // card with no arguments on it — releasing something you cannot see.
                 let payload =
                     match f.Payload with
                     | "call" when f.Tool <> "" -> CommandCall (f.Tool, f.Args, f.Summary)
@@ -389,12 +333,7 @@ module SyncedStateSync =
                         Authority.rehydrate
                             author
                             (if f.OnBehalfOf = "" then None else ActorRef.ofToken f.OnBehalfOf)
-                            // The approval is a verdict register on the entry, below — it
-                            // joins the authority when the drain acts on it, not before.
                             None
-                      ApprovedBy = approvedBy
-                      RejectedBy = rejectedBy
-                      RejectedReason = (if f.RejectedReason = "" then None else Some f.RejectedReason)
                       // Absent reads as foreground, which is what every entry a person
                       // writes is and what every entry written before Plan 20 was.
                       Background = (f.Background = "true") }
@@ -410,16 +349,6 @@ module SyncedStateSync =
             | Ok terminal when TerminalSize.isValid size -> acc |> Map.add terminal size
             | _ -> acc)
 
-    let private gatesToDomain (h: HashMap<string, string>) : Map<GateSubject, ApprovalMode> =
-        (Map.empty, HashMap.toSeq h)
-        ||> Seq.fold (fun acc (key, raw) ->
-            match GateSubject.parse key, ApprovalMode.parse raw with
-            | Some subject, Some mode -> acc |> Map.add subject mode
-            // An unreadable mode is dropped, which reads back as the subject's DEFAULT
-            // rather than as no gate — the safe direction again, and for a terminal the
-            // default is `ApproveAgent`.
-            | _ -> acc)
-
     /// Decode the synced state out of a doc. Total, and decode-empty = init: on an empty
     /// doc every optional comes back `None` and this returns `SyncedSessionState.empty`.
     let decode<'m> : Decoder<'m, SyncedSessionState> =
@@ -431,7 +360,6 @@ module SyncedStateSync =
             let! terminalDrafts = Decode.object.optional "terminalDrafts" (Decode.map decodeTerminalDraft)
             let! pending = Decode.object.optional "pending" (Decode.map decodePendingAct)
             let! model = Decode.object.optional "model" Decode.string
-            let! gates = Decode.object.optional "gates" (Decode.map decodeGate)
             let! terminalSizes = Decode.object.optional "terminalSizes" (Decode.map decodeTerminalSize)
             return
                 { Drafts = drafts |> Option.map draftsToDomain |> Option.defaultValue Map.empty
@@ -442,7 +370,6 @@ module SyncedStateSync =
                     terminalDrafts |> Option.map terminalDraftsToDomain |> Option.defaultValue Map.empty
                   Pending = pending |> Option.map pendingToDomain |> Option.defaultValue Map.empty
                   Model = modelToDomain model
-                  Gates = gates |> Option.map gatesToDomain |> Option.defaultValue Map.empty
                   TerminalSizes =
                     terminalSizes |> Option.map terminalSizesToDomain |> Option.defaultValue Map.empty }
         }
@@ -469,7 +396,6 @@ module SyncedStateSync =
         if shareHas doc "sharedBrief" then (doc.getMap "sharedBrief" : Yjs.Y.Map<obj>) |> ignore
         if shareHas doc "terminalDrafts" then (doc.getMap "terminalDrafts" : Yjs.Y.Map<obj>) |> ignore
         if shareHas doc "pending" then (doc.getMap "pending" : Yjs.Y.Map<obj>) |> ignore
-        if shareHas doc "gates" then (doc.getMap "gates" : Yjs.Y.Map<obj>) |> ignore
 
     /// Read one string field off a keyed-map entry, `""` when absent — the shape every
     /// structural read below repeats.
@@ -542,9 +468,6 @@ module SyncedStateSync =
                   OnBehalfOf = entryString entry "onBehalfOf"
                   Author = entryString entry "author"
                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
-                  ApprovedBy = entryString entry "approvedBy"
-                  RejectedBy = entryString entry "rejectedBy"
-                  RejectedReason = entryString entry "rejectedReason"
                   Background = entryString entry "background" })
         // Off the ARGLESS root map, not off a named root: a top-level register lives there
         // (see `encodeModel`), so `doc.getMap "model"` would silently mint an empty map and
@@ -553,7 +476,6 @@ module SyncedStateSync =
             match (doc.getMap () : Yjs.Y.Map<obj>).get "model" with
             | Some id when not (isNull id) -> Some (unbox<string> id)
             | _ -> None
-        let gatesH = foldRoot doc "gates" (fun entry -> entryString entry "mode")
         let terminalSizesH =
             foldRoot doc "terminalSizes" (fun entry ->
                 { Cols = entry.get "cols" |> Option.map (unbox<int>) |> Option.defaultValue 0
@@ -566,7 +488,6 @@ module SyncedStateSync =
               TerminalDrafts = terminalDraftsToDomain terminalDraftsH
               Pending = pendingToDomain pendingH
               Model = modelToDomain model
-              Gates = gatesToDomain gatesH
               TerminalSizes = terminalSizesToDomain terminalSizesH }
 
     /// The origin tag on the Session Process's own doc writes (the drain's removals),
@@ -665,7 +586,7 @@ module SyncedStateSync =
     /// the drain's removals do: the terminal queue is collaborative state, and the agent is
     /// a participant in it. Writing the command anywhere else would give the agent a private
     /// execution path — the exact thing this design removes, because a command nobody can
-    /// see is a command nobody can approve.
+    /// see is a command nobody can read, edit, or withdraw.
     ///
     /// One transaction for the send's reason: the terminal drain wakes on the entry's
     /// arrival, so an entry that arrived without its text would be snapshotted as an empty
@@ -702,30 +623,11 @@ module SyncedStateSync =
                 entry.set ("order", box order) |> ignore
                 if background then entry.set ("background", box "true") |> ignore
                 Authority.onBehalfOf authority
-                |> Option.iter (fun actor -> entry.set ("onBehalfOf", box (ActorRef.token actor)) |> ignore)
-                // Never approved on arrival: whether an approval is REQUIRED is the mode's
-                // question, and pre-answering it here would let the agent approve itself.
-                entry.set ("approvedBy", box "") |> ignore),
-            processOrigin)
-
-    /// Set a subject's approval mode from the Process (Plan 13, stage 3b; Plan 15, stage 3).
-    ///
-    /// Peers set the mode through the Ylmish binding, from the model; the Process has no
-    /// model, and it needs to write modes it alone knows — the agent terminal's `AutoRun` at
-    /// the moment it opens one, and whatever the operator's boot configuration named. Under
-    /// the process origin, like its other structural writes, so the Process's own change is
-    /// not mistaken for a peer's.
-    let setGate (doc: Yjs.Y.Doc) (subject: GateSubject) (mode: ApprovalMode) : unit =
-        doc.transact (
-            (fun _ ->
-                let modes : Yjs.Y.Map<obj> = doc.getMap "gates"
-                let entry : Yjs.Y.Map<obj> = Yjs.Y.Map.Create ()
-                modes.set (GateSubject.describe subject, box entry) |> ignore
-                entry.set ("mode", box (ApprovalMode.describe mode)) |> ignore),
+                |> Option.iter (fun actor -> entry.set ("onBehalfOf", box (ActorRef.token actor)) |> ignore)),
             processOrigin)
 
     /// Remove consumed pending entries in one transaction under the process origin — the
-    /// terminal drain's counterpart of `removeQueued`, and now also the command gate's.
+    /// terminal drain's counterpart of `removeQueued`.
     let removePending (doc: Yjs.Y.Doc) (ids: QueueId list) : unit =
         if not (List.isEmpty ids) then
             doc.transact (
@@ -733,78 +635,6 @@ module SyncedStateSync =
                     let queue : Yjs.Y.Map<obj> = doc.getMap "pending"
                     ids |> List.iter (fun id -> queue.delete (QueueId.value id))),
                 processOrigin)
-
-    /// Move a doc written before Plan 15 stage 3 onto the widened roots, returning how many
-    /// entries each carried. A boot repair, run where `removeEmptyDrafts` runs and for the
-    /// same reason: no peer is connected yet, so nothing is mid-edit.
-    ///
-    /// It exists to avoid the one thing a bare rename would do quietly — drop a terminal
-    /// whose mode somebody set to `ApproveAll` back to the default, which is LESS gated than
-    /// what they asked for. The old roots are deleted as they are copied, so a doc has the
-    /// entries in exactly one place afterwards rather than in two that can disagree.
-    let migrateGateRoots (doc: Yjs.Y.Doc) : int * int =
-        materializeRoots doc
-        if shareHas doc "terminalQueue" then (doc.getMap "terminalQueue" : Yjs.Y.Map<obj>) |> ignore
-        if shareHas doc "terminalModes" then (doc.getMap "terminalModes" : Yjs.Y.Map<obj>) |> ignore
-
-        /// Every entry of a legacy root, read before the transaction so the copy and the
-        /// delete below iterate a fixed list rather than a map they are mutating.
-        let entriesOf (root: string) (read: Yjs.Y.Map<obj> -> 'a) : (string * 'a) list =
-            if not (shareHas doc root) then []
-            else
-                let m : Yjs.Y.Map<obj> = doc.getMap root
-                mapKeys m
-                |> Array.choose (fun key ->
-                    match m.get key with
-                    | Some entryObj when not (isNull entryObj) -> Some (key, read (unbox<Yjs.Y.Map<obj>> entryObj))
-                    | _ -> None)
-                |> List.ofArray
-
-        // Every legacy entry is a terminal command line — that is the only kind that
-        // existed — so the subject comes from its `terminal` field and the payload is known
-        // without reading anything. Snapshotted as plain values here, so the write below
-        // touches no Y type it did not create.
-        let legacyActs =
-            entriesOf "terminalQueue" (fun entry ->
-                {| Terminal = entryString entry "terminal"
-                   Author = entryString entry "author"
-                   Order = entry.get "order" |> Option.map (unbox<float>) |> Option.defaultValue 0.0
-                   ApprovedBy = entryString entry "approvedBy"
-                   RejectedBy = entryString entry "rejectedBy"
-                   RejectedReason = entryString entry "rejectedReason" |})
-        let legacyGates = entriesOf "terminalModes" (fun entry -> entryString entry "mode")
-
-        if List.isEmpty legacyActs && List.isEmpty legacyGates then (0, 0)
-        else
-            doc.transact (
-                (fun _ ->
-                    if not (List.isEmpty legacyActs) then
-                        let pending : Yjs.Y.Map<obj> = doc.getMap "pending"
-                        let old : Yjs.Y.Map<obj> = doc.getMap "terminalQueue"
-                        for key, act in legacyActs do
-                            if act.Terminal <> "" then
-                                let moved : Yjs.Y.Map<obj> = Yjs.Y.Map.Create ()
-                                pending.set (key, box moved) |> ignore
-                                moved.set ("subject", box ("terminal:" + act.Terminal)) |> ignore
-                                moved.set ("payload", box "line") |> ignore
-                                moved.set ("author", box act.Author) |> ignore
-                                moved.set ("order", box act.Order) |> ignore
-                                moved.set ("approvedBy", box act.ApprovedBy) |> ignore
-                                moved.set ("rejectedBy", box act.RejectedBy) |> ignore
-                                moved.set ("rejectedReason", box act.RejectedReason) |> ignore
-                            old.delete key
-                    if not (List.isEmpty legacyGates) then
-                        let gates : Yjs.Y.Map<obj> = doc.getMap "gates"
-                        let old : Yjs.Y.Map<obj> = doc.getMap "terminalModes"
-                        for key, mode in legacyGates do
-                            if mode <> "" then
-                                let moved : Yjs.Y.Map<obj> = Yjs.Y.Map.Create ()
-                                gates.set ("terminal:" + key, box moved) |> ignore
-                                moved.set ("mode", box mode) |> ignore
-                            old.delete key),
-                processOrigin)
-            (List.length legacyActs, List.length legacyGates)
-
     /// Remove every terminal composer slot whose command line is empty, returning the keys
     /// dropped. The boot-time repair `removeEmptyDrafts` performs for message drafts, for
     /// the same reason and under the same safety argument: at boot no peer is connected, so

@@ -10,9 +10,9 @@ namespace Yession.Domain
 /// (`Transcript.fs`); a block records the transcript range it produced, and a renderer
 /// joins the two. The split is the whole design: facts fold, bytes stream.
 
-// The approval mode a terminal runs under is `ApprovalMode` (Gates.fs) keyed by
-// `ForTerminal`: one policy type, shared with every other gated act, because nothing about
-// waiting for a human to say yes is terminal-shaped.
+// The gate a command passes on its way to running is the classifier (Classify.fs) — one
+// seam, shared with every other gated act, because nothing about deciding whether an act
+// may happen is terminal-shaped.
 
 /// A terminal's screen size in character cells (Plan 13, stage 2b).
 ///
@@ -248,8 +248,8 @@ module TerminalProjection =
                                   QueueId = Some e.QueueId
                                   // A command that never ran was never anybody's wait.
                                   Background = false
-                                  // Nobody approved it; someone did the opposite, and that
-                                  // is on the status rather than smuggled in here.
+                                  // Who refused it is on the status rather than smuggled
+                                  // in here.
                                   Authority = Authority.ofAuthor e.Author
                                   Command = e.Command
                                   // An EMPTY range, not a missing one: a command that never

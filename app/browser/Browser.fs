@@ -271,28 +271,6 @@ let private catchUpQuietMs = 500
 })()""")>]
 let private toggleNav () : unit = jsNative
 
-// After a verdict, the card the button was on is REMOVED — so focus has to be handed on
-// deliberately (CLAUDE.md, UI baseline). The order is the reviewer's: the next proposal's
-// primary control if there is one, else the list, else the timeline, which always exists.
-//
-// One frame, because the removal is a Lit re-render rather than a CSS transition: unlike the
-// settings face there is nothing arriving `visibility: hidden`, so the element is focusable
-// as soon as the diff has flushed.
-[<Emit("""(() => {
-  requestAnimationFrame(() => {
-    if (document.activeElement && document.activeElement !== document.body) return
-    const next =
-      document.querySelector('[data-pending-acts] [data-terminal-approve], [data-pending-acts] [data-terminal-reject]')
-      || document.querySelector('[data-pending-acts]')
-      || document.querySelector('[data-conversation]')
-    if (!next) return
-    if (!next.hasAttribute('tabindex') && !next.matches('a,button,input,select,textarea')) next.setAttribute('tabindex', '-1')
-    next.focus()
-  })
-})()""")>]
-let private focusAfterVerdict () : unit = jsNative
-
-
 // Settings is the sidebar column's other FACE (Style.settingsPane), not a drawer over the
 // conversation — so opening it has to bring that column on screen, and `nav-alt` means the
 // opposite thing on each side of the breakpoint: uncollapse on desktop, slide the drawer in on
@@ -1389,8 +1367,7 @@ let private start () =
                     | _ -> ()
               FocusPane = PaneShell.toPane
               FocusChat = PaneShell.toChatItem
-              FocusDvr = fun id -> PaneShell.toDvrControl (TerminalId.value id)
-              FocusAfterVerdict = focusAfterVerdict }
+              FocusDvr = fun id -> PaneShell.toDvrControl (TerminalId.value id) }
 
         let el = appRoot ()
         // Take over the server-rendered shell (see `clearChildren`): from here Lit owns it.

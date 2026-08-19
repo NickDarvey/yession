@@ -1052,29 +1052,6 @@ module Style =
 
     /// A property of the terminal, stated as a fact and changed by touching the fact.
     ///
-    /// Not a labelled control: the label existed because the VALUES could not stand alone
-    /// ("the agent's commands" is an answer with its question missing). Values that say what
-    /// they are — `approval: agent` — leave a label nothing to add, and the control collapses
-    /// to the readout it always wanted to be.
-    ///
-    /// BARE, in the field vocabulary's second sense (`fieldBare`): it draws no box because the
-    /// bar it sits in carries the structure. Which is the honest reading — this is not a field
-    /// you type into that happens to look quiet, it is a stated fact you can touch, and a
-    /// control that invented its own border would be the third thing the chrome-consistency
-    /// suite exists to rule out.
-    let private terminalPropBase =
-        cls [ caps; "bg-transparent border-0 appearance-none cursor-pointer shrink-0"
-              "pl-1.5 pr-4 py-1 transition-colors"; focusRing ]
-    let terminalProp = cls [ terminalPropBase; "text-ink-faint hover:text-ink" ]
-    /// The same readout wearing the alarm, for the setting that lets commands run unasked. A
-    /// safety property whose most permissive value is the quietest thing on screen is
-    /// backwards; this is the one place in the pane where err is not an error.
-    let terminalPropAlert = cls [ terminalPropBase; "text-err" ]
-    /// The readout is a `<select>`, so it needs the caret `appearance-none` took away — drawn
-    /// beside it, deaf to the pointer so the whole readout still opens the menu.
-    let terminalPropWrap = "relative flex items-center shrink-0"
-    let terminalPropMark = "pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-ink-faint"
-
     /// An act that is about THIS TERMINAL rather than about the command you are writing:
     /// closing it, stepping back through its recording. In the bar's voice — quiet text — not
     /// as another bordered rectangle in a strip already full of them.
@@ -1343,11 +1320,10 @@ module Style =
     // should not have two different verbs at two different weights. Which of the two faces it
     // wears comes from the MODEL (a published slot, the same fact the send path acts on),
     // never from a second measurement of the field.
-    /// A queued command awaiting its turn (or its approval) — a listed row, so its leading
-    /// edge carries its state: green ready, blue waiting on someone.
+    /// A queued command awaiting its turn — a listed row, so its leading edge carries its
+    /// state.
     let private terminalQueued = cls [ "flex-col gap-1 px-3 py-2"; rowBase ]
     let terminalQueuedReady = cls [ terminalQueued; Stroke.green ]
-    let terminalQueuedAwaiting = cls [ terminalQueued; Stroke.blue ]
     let terminalQueuedRow = "flex items-center gap-2"
     /// Someone else's composer slot in this terminal: shown, not editable-by-mistake — it is
     /// the same live text, so it is the terminal's version of watching a draft being written.

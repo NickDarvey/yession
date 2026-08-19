@@ -52,45 +52,29 @@ type TerminalDraft =
       QueueId  : QueueId }
 
 /// What a pending act IS, which is the one thing that differs between the kinds (Plan 15,
-/// stage 3). Everything else about waiting for a human — who proposed it, who said yes,
-/// who said no and why — is the same, and lives on the entry rather than in here.
+/// stage 3). Everything else — who proposed it, where it sits in its queue — is the same,
+/// and lives on the entry rather than in here.
 type PendingPayload =
     /// A shell command LINE, whose text is a `Y.Text` root keyed by
-    /// `BodyKey.terminalQueued`. Editable in place by any peer, which IS the approval UX
-    /// Plan 13 built: the thing you approve is a thing you can fix first.
+    /// `BodyKey.terminalQueued`. Editable in place by any peer until the drain takes it:
+    /// the thing about to run is a thing you can fix first.
     | CommandLine
     /// A structured call: the MCP tool name, the arguments it was made with, and those
-    /// arguments rendered for a human to read.
-    ///
-    /// `args` is what makes an approval survive a restart. Without it the only thing that
-    /// could carry the act out is the continuation of the call that proposed it, so a
-    /// process that died left a card whose approve button could never do anything. With it
-    /// the doc holds everything needed to run the command from cold — which is exactly why
-    /// a terminal command has always survived, its whole payload being the line of text.
-    ///
-    /// Approve-or-reject only, still: `args` is for the machine and `summary` for the
-    /// person, and editing typed arguments needs a form per command (Plan 15, Deferred).
+    /// arguments rendered for a human to read. Nothing writes this any more (Plan 23:
+    /// structured commands classify and dispatch synchronously); the case remains so a doc
+    /// written before the cut still decodes.
     | CommandCall of tool: string * args: string * summary: string
 
-/// An act waiting for a verdict. Collaborative until whatever carries it out consumes it:
-/// any peer may reorder, delete, approve or reject it, and edit its text where it has
-/// text. That IS the approval UX — reading what is about to happen, fixing it in place,
-/// and letting it go.
-///
-/// A terminal command is one case of this, not the thing itself (Plan 15, stage 3): the
-/// only terminal-shaped parts are the serial drain that consumes it and the editable
-/// command line, and neither is stored here.
+/// An act queued to run. Collaborative until whatever carries it out consumes it: any peer
+/// may reorder or delete it, and edit its text where it has text — reading what is about
+/// to happen and fixing it in place is the point of the queue being visible.
 type PendingAct =
     { QueueId  : QueueId
-      /// What the gate is about — which terminal, or which command.
+      /// What the act is about — which terminal, or which command.
       Subject  : GateSubject
       /// Who proposed the act, and whose authority it would run on (Plan 20). Neither is
       /// changed by an edit, because "who asked for this" is not editable — and the pair is
       /// one value so that an agent-proposed act without an owner cannot be written.
-      ///
-      /// No approver on it yet: the verdict registers below are what peers WRITE, and the
-      /// approval becomes part of the authority at the moment of acting, where the drain
-      /// stamps it onto the block it mints.
       Authority : Authority
       /// A fractional index within its subject's queue — one register write to reorder.
       /// Meaningful where something drains serially (a terminal has one stdin); harmless
@@ -98,31 +82,10 @@ type PendingAct =
       Order    : float
       /// What is being proposed.
       Payload  : PendingPayload
-      /// The peer who approved it, if one has. Whether an approval is REQUIRED is not
-      /// stored: it is computed from the subject's mode and `Author` at the moment of
-      /// acting (`ApprovalMode.requiresApproval`), so changing the mode re-decides every
-      /// waiting entry instead of leaving stale verdicts behind.
-      ApprovedBy : PeerId option
-      /// The peer who refused it, if one has. A register beside `ApprovedBy` rather than a
-      /// deletion, so a refusal merges and survives a disconnect exactly as an approval
-      /// does, and every peer sees WHO said no before the entry goes.
-      ///
-      /// Deleting the entry was the old answer and it was the wrong symmetry: a queued
-      /// message is your own text and removing it is a withdrawal, but a queued command is
-      /// frequently the agent's, and refusing it is the review gate doing the one thing it
-      /// exists for. The queue could not even tell the two apart.
-      RejectedBy : PeerId option
-      /// Why it was refused, when the peer said. Optional because "no" is a complete
-      /// answer; the reason is what makes it a useful one.
-      RejectedReason : string option
       /// Whether the author asked for this to run WITHOUT holding their turn open (Plan 20,
       /// stage 2). Only an agent sets it — a person's composer never waits on anything —
       /// and it rides the queue entry because the drain is what reads the doc and mints the
       /// block that records it.
-      ///
-      /// It changes nothing about what runs or who may approve it: a background command is
-      /// queued, editable and refusable exactly as every other one is. What it changes is
-      /// who is waiting, which is why it is here and not in the payload.
       Background : bool }
 
 module PendingAct =
@@ -133,12 +96,6 @@ module PendingAct =
         match act.Subject with
         | ForTerminal id -> Some id
         | ForCommand _ -> None
-
-    /// Whether a verdict has been given either way. The entry stays visible until whatever
-    /// carries it out consumes it, so "resolved" is a question about the registers rather
-    /// than about the entry's existence.
-    let isResolved (act: PendingAct) : bool =
-        Option.isSome act.ApprovedBy || Option.isSome act.RejectedBy
 
     /// The order value for a new act appended at the tail of its subject's queue. One
     /// function for both kinds: only a terminal drains serially, but an order that is
@@ -187,18 +144,14 @@ type SyncedSessionState =
       /// map is what makes concurrent creation safe (different keys never conflict)
       /// regardless of which surface each peer was looking at.
       Pending : Map<QueueId, PendingAct>
-      /// Which model the agent's turns run on. Collaborative, like the gates beside it and
-      /// for the same reason: it is a property of the SESSION, not of whoever happened to
-      /// open the picker, so everybody sees the same answer and sees it change.
+      /// Which model the agent's turns run on. Collaborative because it is a property of
+      /// the SESSION, not of whoever happened to open the picker, so everybody sees the
+      /// same answer and sees it change.
       ///
       /// `None` — the absence of the register — is "the provider's own default". The
       /// default is the absence again, so a session nobody has configured carries nothing
       /// restating what the provider already decides.
       Model       : ModelId option
-      /// The approval mode per subject. An absent entry is `GateSubject.defaultMode` — the
-      /// default is the absence, so a subject nobody has configured carries no register
-      /// restating what the default already says.
-      Gates : Map<GateSubject, ApprovalMode>
       /// Each terminal's size, as a synced register (Plan 13, stage 2b). Synced rather than
       /// per-viewer because a pty has ONE size and every peer is looking at the same screen:
       /// resizing to the smallest viewer is tmux's worst inheritance, so a viewer with less
@@ -217,17 +170,7 @@ module SyncedSessionState =
           TerminalDrafts = Map.empty
           Pending = Map.empty
           Model = None
-          Gates = Map.empty
           TerminalSizes = Map.empty }
-
-    /// A subject's approval mode, defaulting where none is set.
-    let gateOf (subject: GateSubject) (state: SyncedSessionState) : ApprovalMode =
-        state.Gates |> Map.tryFind subject |> Option.defaultValue (GateSubject.defaultMode subject)
-
-    /// A terminal's approval mode. The `ForTerminal` case of `gateOf`, named because the
-    /// terminal surface asks for it constantly.
-    let modeOf (terminal: TerminalId) (state: SyncedSessionState) : ApprovalMode =
-        gateOf (ForTerminal terminal) state
 
     /// A terminal's size, defaulting to 80x24 — the size every terminal has ever defaulted
     /// to, and the one the transcript header records when a terminal opens.

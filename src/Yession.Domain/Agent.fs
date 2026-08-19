@@ -70,8 +70,8 @@ type EnsureEnvironment = string -> Async<EnsureEnvironmentResult>
 ///
 /// Every case NAMES its own state, and that is the point rather than a nicety. Telling a
 /// model "queued" when it is actually blocked on a person has it conclude, after a silent
-/// pause, that its command failed and try something else — which is how a review gate turns
-/// into the agent routing around the review.
+/// pause, that its command failed and try something else — which is how it routes around
+/// whatever was holding it.
 type TerminalCommandStatus =
     /// It ran to an outcome. The ordinary answer.
     | TerminalCommandRan of CommandResult
@@ -84,14 +84,11 @@ type TerminalCommandStatus =
     /// `TerminalCommandRunning` says "be patient" about a thing that is waiting for the
     /// caller. Returned the moment detection hands the terminal over, deadline or no.
     | TerminalCommandInteractive
-    /// A human has to approve it. Unbounded in principle — they may be asleep — so the tool
-    /// returns rather than waits, and the turn says what it queued and why.
-    | TerminalCommandAwaitingApproval
     /// The terminal is not free: a peer is typing in it, or another block is running there.
-    /// Distinct from awaiting approval because it resolves differently — one ends when a
-    /// person makes a decision, the other when a person or a process finishes a task.
+    /// Ends when a person or a process finishes a task.
     | TerminalCommandAwaitingTerminal
-    /// Somebody said no. The other half of the approval gate, and the more interesting half.
+    /// The classifier said no (Plan 23). An answer, not an error: it names who and why, so
+    /// it is not retried another way.
     | TerminalCommandRefused of by: ActorRef * reason: string option
 
 /// What one `execute_command` answered with (Plan 13, stage 3b).
@@ -99,9 +96,9 @@ type TerminalCommandOutcome =
     { Terminal : TerminalId
       /// The handle that resumes this command, and it is the QUEUE entry's id rather than the
       /// block's — deliberately, because a block does not exist until the command runs, so a
-      /// block-id handle could not be returned by the two cases that most need one
-      /// (`AwaitingApproval`, `AwaitingTerminal`). The queue id names the REQUEST, which
-      /// exists from the moment it is visible to everyone.
+      /// block-id handle could not be returned by the case that most needs one
+      /// (`AwaitingTerminal`). The queue id names the REQUEST, which exists from the moment
+      /// it is visible to everyone.
       Handle : QueueId
       /// The block, once there is one. `None` while the command is still only a request.
       Block : BlockId option
@@ -115,17 +112,16 @@ type TerminalCommandOutcome =
       Elided : int }
 
 /// Run a command for the agent (Plan 13, stage 3b). ONE door: the agent has no private
-/// execution path, so a terminal set to require approval actually holds it.
+/// execution path, so the classifier that gates this gates everything the agent runs.
 ///
 /// `command` is a shell command LINE, not an executable plus argv. A terminal block is a line
-/// a human reads in a queue and may edit before approving, and an argv array is not that; the
+/// a human reads in a queue and may edit before it runs, and an argv array is not that; the
 /// quoting burden moves to the side that knows what it meant.
 ///
 /// `TerminalId option`: `None` means the session's agent terminal, opened on first use.
 ///
-/// It waits, bounded twice over — a short grace for an approval, then the command timeout for
-/// the process — and yields a handle rather than blocking a turn on a human. See
-/// `TerminalCommandWait` for the policy.
+/// It waits out the command timeout and yields a handle rather than blocking a turn on the
+/// work. See `TerminalCommandWait` for the policy.
 /// Where a command runs (Plan 15, stage 2). Before named sandboxes this was just "which
 /// terminal, or the agent's own"; now "the agent's own" has to say WHICH sandbox's, because
 /// a session has several and `execute_command` is still the only door into any of them.
@@ -239,7 +235,7 @@ type CheckPending = QueueId -> Async<Result<PendingOutcome, string>>
 /// So this one takes the lease, exactly as a person does: the agent shows up in the holder
 /// field a human shows up in, a human can steal it back mid-sentence, and every byte is in
 /// the transcript everyone reads. Refused on an instrumented terminal, where the answer is
-/// `execute_command` and the approval gate that comes with it.
+/// `execute_command` and the classifier that gates it.
 type WriteTerminal = TerminalId -> string -> Async<Result<string, string>>
 
 /// The tail of what a terminal has said, and how much of it was left out.
@@ -297,7 +293,7 @@ type ListTerminals = unit -> Async<Result<TerminalSummary list, string>>
 
 /// The read-only repo verbs (Plan 14): clone-and-orient, NO mutation of history and NO
 /// push — everything irreversible goes through `ExecuteCommand` in the WorkSandbox,
-/// where the approval gate and the transcript already are. Git runs confined beside the
+/// where the classifier and the transcript already are. Git runs confined beside the
 /// agent (the agent backend's sandbox family), and the clone URL is constructed from
 /// the validated `owner/repo`, so no verb can name an arbitrary remote.
 
@@ -305,7 +301,7 @@ type ListTerminals = unit -> Async<Result<TerminalSummary list, string>>
 /// when it is already there). The checkout is visible to every peer and to the
 /// WorkSandbox from the moment it lands.
 /// Answers with a `CommandOutcome` rather than the listing, because every MUTATING command
-/// goes through its approval gate (Plan 15, stage 3b) and a gate has three answers, not one.
+/// goes through its gate (Plan 15, stage 3b) and a gate has more than one answer.
 /// The rendering that used to live in the MCP adapter moved into the thunk the gate wraps —
 /// which is where it has to be anyway, since what the gate carries is what the agent reads.
 type AddRepo = RepoRef -> Async<Result<CommandOutcome, string>>
@@ -366,7 +362,7 @@ type ReadQuery = QueryName -> Async<Result<QueryValue, string>>
 /// "what is that terminal for" than the tool ever gave.
 type AgentCapabilities =
     { /// Run a command where the people in this session can see it (Plan 13, stage 3b).
-      /// The agent's ONLY execution path — that is what makes the approval gate real.
+      /// The agent's ONLY execution path — that is what makes the classifier's gate real.
       ExecuteCommand : ExecuteCommand
       /// Resume a handle `ExecuteCommand` yielded.
       CheckPending : CheckPending
