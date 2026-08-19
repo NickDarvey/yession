@@ -820,7 +820,8 @@ let private integrationTests =
                     { TerminalCommandWait.Observation.Block = None
                       TerminalCommandWait.Observation.InQueue = true
                       TerminalCommandWait.Observation.IsHead = true
-                      TerminalCommandWait.Observation.Hold = Some TerminalQueueDrain.AwaitingIntegration })
+                      TerminalCommandWait.Observation.Hold = Some TerminalQueueDrain.AwaitingIntegration
+                      TerminalCommandWait.Observation.Interactive = false })
                 (TerminalCommandWait.Return TerminalCommandAwaitingTerminal)
                 "no waiting at all"
 
@@ -911,8 +912,20 @@ let private flipTests =
                 (FlipToLive (PeerRef ada))
                 "the author of the command is the person who now needs the keyboard"
 
-        testCase "an agent's block does not flip — live mode is human-only" <| fun () ->
-            Expect.equal (TerminalFlip.propose true None false (Some ActorRef.Agent)) FlipNothing "no agent lease"
+        testCase "an agent's block entering the alt screen hands the AGENT the terminal" <| fun () ->
+            // The rule is the author's, not the human's (Plan 20, stage 6). Refusing here left
+            // a wedge: a block waiting for a keystroke nobody was allowed to send never
+            // finishes, so the terminal is busy for ever and its queue never moves.
+            Expect.equal
+                (TerminalFlip.propose true None false (Some ActorRef.Agent))
+                (FlipToLive ActorRef.Agent)
+                "the agent wrote the command, so the agent needs the keyboard"
+
+        testCase "nothing flips to a party that cannot type" <| fun () ->
+            // Not a policy: there is no surface anywhere that sends keystrokes as the process
+            // or as the system, so a lease here would be held by nobody.
+            Expect.equal (TerminalFlip.propose true None false (Some ActorRef.SessionProcess)) FlipNothing "nor the process"
+            Expect.equal (TerminalFlip.propose true None false (Some ActorRef.System)) FlipNothing "nor the system"
             Expect.equal (TerminalFlip.propose true None false None) FlipNothing "nor with no block at all"
 
         testCase "detection never overrides a lease somebody is holding" <| fun () ->
@@ -989,7 +1002,12 @@ let private blockOf (status: TerminalBlockStatus) : TerminalBlock =
 
 /// The observation of a request that is the head of its terminal's queue, held for `hold`.
 let private waitingOn (hold: TerminalQueueDrain.TerminalHold option) : TerminalCommandWait.Observation =
-    { TerminalCommandWait.Observation.Block = None; TerminalCommandWait.Observation.InQueue = true; TerminalCommandWait.Observation.IsHead = true; TerminalCommandWait.Observation.Hold = hold }
+    { Block = None; InQueue = true; IsHead = true; Hold = hold; Interactive = false }
+
+/// The observation of a request whose block exists — running or finished — with nothing left
+/// in the queue. `interactive` is whether detection holds the terminal.
+let private observing (status: TerminalBlockStatus) (interactive: bool) : TerminalCommandWait.Observation =
+    { Block = Some (blockOf status); InQueue = false; IsHead = false; Hold = None; Interactive = interactive }
 
 let private waitTests =
     testList "The command wait" [
@@ -1019,7 +1037,7 @@ let private waitTests =
             // it starts: both are waits on a process, so a quick one still chains.
             for observation in
                 [ waitingOn (Some TerminalQueueDrain.AwaitingBlock)
-                  { TerminalCommandWait.Observation.Block = Some (blockOf BlockRunning); TerminalCommandWait.Observation.InQueue = false; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = None } ] do
+                  observing BlockRunning false ] do
                 Expect.equal
                     (TerminalCommandWait.step true false observation)
                     TerminalCommandWait.KeepWaiting
@@ -1032,15 +1050,24 @@ let private waitTests =
                 (TerminalCommandWait.step
                     true
                     true
-                    { TerminalCommandWait.Observation.Block = Some (blockOf BlockRunning); TerminalCommandWait.Observation.InQueue = false; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = None })
+                    (observing BlockRunning false))
                 (TerminalCommandWait.Return TerminalCommandRunning)
                 "and a running block yields — the deadline is a yield, not a cancellation"
+
+        testCase "a block that has taken the screen is reported at once, deadline or no" <| fun () ->
+            // The one running block that will never finish on its own: it is waiting for the
+            // caller. Burning two minutes and then saying "still running" would spend the
+            // deadline telling the only party who can end it to be patient.
+            Expect.equal
+                (TerminalCommandWait.step false false (observing BlockRunning true))
+                (TerminalCommandWait.Return TerminalCommandInteractive)
+                "no waiting at all"
 
         testCase "an entry BEHIND another waits for the queue, whatever the head waits for" <| fun () ->
             // Reporting the head's reason as ours would tell the agent its own command needs
             // an approval when somebody else's does.
-            let behind =
-                { TerminalCommandWait.Observation.Block = None; TerminalCommandWait.Observation.InQueue = true; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = Some TerminalQueueDrain.AwaitingApproval }
+            let behind : TerminalCommandWait.Observation =
+                { Block = None; InQueue = true; IsHead = false; Hold = Some TerminalQueueDrain.AwaitingApproval; Interactive = false }
             Expect.equal (TerminalCommandWait.step true false behind) TerminalCommandWait.KeepWaiting "still queued"
             Expect.equal
                 (TerminalCommandWait.step true true behind)
@@ -1053,15 +1080,17 @@ let private waitTests =
                   BlockFinished (CommandFailed 3), TerminalCommandRan (CommandFailed 3)
                   BlockRejected (PeerRef bob, Some "not on prod"), TerminalCommandRefused (PeerRef bob, Some "not on prod") ] do
                 Expect.equal
-                    (TerminalCommandWait.step false false { TerminalCommandWait.Observation.Block = Some (blockOf status); TerminalCommandWait.Observation.InQueue = false; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = None })
+                    (TerminalCommandWait.step false false (observing status false))
                     (TerminalCommandWait.Return expected)
                     "an answer is returned the moment it exists"
 
         testCase "a withdrawn request is an absence, not an outcome" <| fun () ->
             // Deleting a queued entry is withdrawal and has no event. Reporting it as any
             // status would be inventing one.
+            let withdrawn : TerminalCommandWait.Observation =
+                { Block = None; InQueue = false; IsHead = false; Hold = None; Interactive = false }
             Expect.equal
-                (TerminalCommandWait.step false false { TerminalCommandWait.Observation.Block = None; TerminalCommandWait.Observation.InQueue = false; TerminalCommandWait.Observation.IsHead = false; TerminalCommandWait.Observation.Hold = None })
+                (TerminalCommandWait.step false false withdrawn)
                 TerminalCommandWait.Gone
                 "the caller is told the request is gone"
 
@@ -1074,6 +1103,7 @@ let private waitTests =
                 [ TerminalCommandRan (CommandSucceeded 0)
                   TerminalCommandRan (CommandFailed 1)
                   TerminalCommandRunning
+                  TerminalCommandInteractive
                   TerminalCommandAwaitingApproval
                   TerminalCommandAwaitingTerminal
                   TerminalCommandRefused (PeerRef bob, None) ]
@@ -2274,7 +2304,7 @@ let private sourceTests =
                 | Error reason -> Expect.stringContains reason "execute_command" "and it says where the answer is"
             }
 
-        testCaseAsync "on an instrumented terminal it is refused, because that is what blocks are for" <|
+        testCaseAsync "on an instrumented terminal nobody holds it is refused, because that is what blocks are for" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
