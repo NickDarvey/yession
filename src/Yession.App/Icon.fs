@@ -69,6 +69,11 @@ module Icon =
     /// which was four strokes in a 14px box: looked at on a real screen, its two bars merged
     /// and the whole thing read as a ⊤.
     let private pinPath = "M8 2.5 L11.5 6 L8 9.5 L4.5 6 Z M8 9.5 L8 13.5"
+    /// An archive box: a lid across the top, the body under it, and a notch in the middle of
+    /// the lid for the hand. Deliberately NOT a downward arrow or a tray with one — this set
+    /// already spends arrows on direction, and an arrow here would read as "download".
+    let private archivePath =
+        "M2.5 3.5 L13.5 3.5 L13.5 6.5 L2.5 6.5 Z M3.5 6.5 L3.5 12.5 L12.5 12.5 L12.5 6.5 M6.5 9 L9.5 9"
 
     // --- The vocabulary ----------------------------------------------------------------------
     // 14px inside a 24px icon button; 12px where an icon rides a caps-label line.
@@ -92,6 +97,10 @@ module Icon =
     let stop = stroked "w-3.5 h-3.5" stopPath
     let attach = stroked "w-3.5 h-3.5" attachPath
     let list = stroked "w-3.5 h-3.5" listPath
+    /// Retire this session from the working list. A row-riding verb like the three above, and
+    /// it needs no word for the same reason: it is rendered only on a row that can be
+    /// archived, and an archived row wears the word `Unarchive` instead.
+    let archive = stroked "w-3.5 h-3.5" archivePath
     /// Keep this tab, or stop keeping it. Never an `✕`: on a tab strip that glyph means
     /// "gone", and this control's whole point is that what it releases keeps running.
     let pin = stroked "w-3.5 h-3.5" pinPath

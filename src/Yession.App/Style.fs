@@ -218,6 +218,28 @@ module Style =
     /// and small: it is a signpost, not a second status.
     let recordLinkMark = "text-code text-ink-faint ml-1 align-[1px]"
 
+    /// A filter over a listed registry — which archive states the management page is showing.
+    /// Real links, because the filter IS the page's location, so these are chips only in how
+    /// they look; everything about how they behave comes free from `<a>`.
+    ///
+    /// The two faces differ by TONE and border, in the same vocabulary the buttons above use:
+    /// a selected chip sits on the working rim in full ink, an unselected one recedes to the
+    /// hairline in the faint step and comes up to ink under the pointer. No fill on either —
+    /// a filled chip would read as the page's CTA, and the CTA here is Create.
+    let private filterChipBase =
+        cls [ caps; "h-6 px-2 inline-flex items-center no-underline cursor-pointer transition-colors"
+              Stroke.ring; focusRing ]
+
+    let filterChipOn = cls [ filterChipBase; Stroke.rim; "text-ink" ]
+    let filterChipOff = cls [ filterChipBase; Stroke.hair; "text-ink-faint"; Stroke.hoverInk; "hover:text-ink" ]
+
+    /// A sortable column header. Wears the header's own caps-faint voice so a sortable column
+    /// does not shout over the ones that are not, and comes up to ink under the pointer — the
+    /// only thing that says it is a control, besides its focus ring and the direction mark it
+    /// carries. The `<th>` around it holds `aria-sort`, which is what actually states the sort.
+    let sortHeader =
+        cls [ label; "no-underline cursor-pointer hover:text-ink transition-colors"; focusRing ]
+
     /// A button with nothing to do YET — composed over one of the faces above, never used
     /// alone. It stays in the layout and in focus order (its work is coming, and a control
     /// that appears mid-sentence moves everything under the reader's hand); the BORDER carries

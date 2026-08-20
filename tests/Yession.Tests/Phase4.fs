@@ -32,7 +32,12 @@ let private record (id: string) (name: string) : SessionRecord =
     { SessionId = SessionId.create id |> expect
       DisplayName = name
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
-      DataDir = sprintf "sessions/%s" id }
+      DataDir = sprintf "sessions/%s" id
+      ArchivedAt = None }
+
+/// The moment an operator archived something, where a test needs one to be a value rather
+/// than a fact about now.
+let private archivedAt = DateTimeOffset (2026, 8, 1, 9, 30, 0, TimeSpan.Zero)
 
 let private sessionA = SessionId.create "alpha" |> expect
 let private sessionB = SessionId.create "beta" |> expect
@@ -186,6 +191,188 @@ let private stateTests =
                 ManagerStore.load path |> ignore
             with _ -> failedLoudly <- true
             Expect.isTrue failedLoudly "corruption must not load as empty state"
+    ]
+
+// -----------------------------------------------------------------------------
+// Archiving. A durable, reversible operator decision that retires a session from the
+// working list AND from the set of things that can run. Manager-only: nothing here
+// crosses the control channel, and nothing is deleted.
+// -----------------------------------------------------------------------------
+
+let private archiveTests =
+    testList "Archiving a session" [
+        testCase "archiving records when it happened" <| fun () ->
+            let archived = ManagerState.archive sessionA archivedAt twoSessions |> expect
+            Expect.equal
+                (ManagerState.tryFind sessionA archived |> Option.bind (fun r -> r.ArchivedAt))
+                (Some archivedAt)
+                "the record carries the moment it was archived"
+
+        testCase "archiving leaves every other session alone" <| fun () ->
+            let archived = ManagerState.archive sessionA archivedAt twoSessions |> expect
+            Expect.equal
+                (ManagerState.tryFind sessionB archived)
+                (ManagerState.tryFind sessionB twoSessions)
+                "beta is untouched"
+
+        // "When was this archived" has one answer, so a second click is not a new one.
+        testCase "archiving twice keeps the first moment" <| fun () ->
+            let again =
+                twoSessions
+                |> ManagerState.archive sessionA archivedAt
+                |> expect
+                |> ManagerState.archive sessionA (archivedAt.AddHours 5.0)
+                |> expect
+            Expect.equal
+                (ManagerState.tryFind sessionA again |> Option.bind (fun r -> r.ArchivedAt))
+                (Some archivedAt)
+                "the first archival stands"
+
+        testCase "archiving a session that is not registered is refused" <| fun () ->
+            let ghost = SessionId.create "ghost" |> expect
+            match ManagerState.archive ghost archivedAt twoSessions with
+            | Ok _ -> failwith "nothing was archived, so this must not report success"
+            | Error e -> Expect.stringContains e "ghost" "the refusal names the session"
+
+        testCase "unarchiving clears it" <| fun () ->
+            let back =
+                twoSessions
+                |> ManagerState.archive sessionA archivedAt
+                |> expect
+                |> ManagerState.unarchive sessionA
+                |> expect
+            Expect.equal back twoSessions "the registry is exactly as it was"
+
+        testCase "unarchiving a session that was never archived is not an error" <| fun () ->
+            let back = ManagerState.unarchive sessionA twoSessions |> expect
+            Expect.equal back twoSessions "it is already in the asked-for state"
+
+        // THE invariant the whole feature rests on. The lookup and this refusal are one
+        // verb, so no caller can hold a record without having been told.
+        testCase "an archived session cannot be launched" <| fun () ->
+            let archived = ManagerState.archive sessionA archivedAt twoSessions |> expect
+            match ManagerState.launchable sessionA archived with
+            | Ok _ -> failwith "an archived session was handed out as launchable"
+            | Error e -> Expect.stringContains e "archived" "the refusal says why, in words a human can act on"
+
+        testCase "an active session is launchable" <| fun () ->
+            let record = ManagerState.launchable sessionA twoSessions |> expect
+            Expect.equal record.SessionId sessionA "the record a launch may use"
+
+        testCase "an unregistered session is not launchable" <| fun () ->
+            let ghost = SessionId.create "ghost" |> expect
+            match ManagerState.launchable ghost twoSessions with
+            | Ok _ -> failwith "a session that does not exist was handed out as launchable"
+            | Error e -> Expect.stringContains e "ghost" "the refusal names the session"
+
+        testCase "an archived session round-trips through the codec" <| fun () ->
+            let archived = ManagerState.archive sessionA archivedAt twoSessions |> expect
+            let decoded = ManagerCodec.toString archived |> ManagerCodec.fromString |> expect
+            Expect.equal decoded archived "decode∘encode is the identity, archival and all"
+
+        // The same reading `mcpServers` gets, and for the same reason: the absence of the
+        // field is a true statement about that file, not a migration.
+        testCase "a state file written before archiving loads with every session active" <| fun () ->
+            let old =
+                """{"version":1,"sessions":[{"sessionId":"alpha","displayName":"Alpha work","createdAt":"2026-07-15T12:00:00.0000000+00:00","dataDir":"sessions/alpha"}]}"""
+            let decoded = ManagerCodec.fromString old |> expect
+            Expect.equal
+                (decoded.Sessions |> List.map (fun r -> r.ArchivedAt))
+                [ None ]
+                "a session nobody could have archived is active"
+
+        // Without this, a downgrade decodes a newer file, drops every field it does not
+        // recognise, and saves the loss back over the original.
+        testCase "a state file from a newer schema version is refused, not read as this one" <| fun () ->
+            let future =
+                """{"version":99,"sessions":[],"mcpServers":[]}"""
+            match ManagerCodec.fromString future with
+            | Ok _ -> failwith "a schema this build has never seen was decoded anyway"
+            | Error e -> Expect.stringContains e "99" "the refusal names the version it could not read"
+    ]
+
+// -----------------------------------------------------------------------------
+// Reading the registry: which archive states to show, and which way to order. Pure
+// rules over the durable registry, so they live with it and run in the cheap tier.
+// -----------------------------------------------------------------------------
+
+let private mixed : SessionRecord list =
+    [ { record "alpha" "Alpha work" with CreatedAt = DateTimeOffset (2026, 7, 1, 12, 0, 0, TimeSpan.Zero) }
+      { record "beta" "Beta work" with
+          CreatedAt = DateTimeOffset (2026, 7, 2, 12, 0, 0, TimeSpan.Zero)
+          ArchivedAt = Some archivedAt }
+      { record "gamma" "Gamma work" with CreatedAt = DateTimeOffset (2026, 7, 3, 12, 0, 0, TimeSpan.Zero) } ]
+
+let private named (query: SessionQuery) =
+    SessionQuery.apply query id mixed |> List.map (fun r -> SessionId.value r.SessionId)
+
+let private queryTests =
+    testList "Reading the session registry" [
+        testCase "by default only active sessions are shown" <| fun () ->
+            Expect.equal (named SessionQuery.defaults) [ "gamma"; "alpha" ] "beta is archived"
+
+        testCase "the archived filter shows the archived ones" <| fun () ->
+            Expect.equal (named { SessionQuery.defaults with Show = Set.singleton Archived }) [ "beta" ] "only beta"
+
+        testCase "both states shown is the whole registry" <| fun () ->
+            Expect.equal
+                (named { SessionQuery.defaults with Show = Set.ofList [ Active; Archived ] })
+                [ "gamma"; "beta"; "alpha" ]
+                "everything, newest first"
+
+        // Two cleared filters mean what they say. The surface renders this as an empty state
+        // with the controls that caused it directly above, never as an empty registry.
+        testCase "neither state shown is nothing" <| fun () ->
+            Expect.isEmpty (named { SessionQuery.defaults with Show = Set.empty }) "nothing was asked for"
+
+        testCase "newest first orders by when the session was created" <| fun () ->
+            Expect.equal
+                (named { Show = Set.ofList [ Active; Archived ]; Order = NewestFirst })
+                [ "gamma"; "beta"; "alpha" ]
+                "the most recently created leads"
+
+        testCase "oldest first is the other way round" <| fun () ->
+            Expect.equal
+                (named { Show = Set.ofList [ Active; Archived ]; Order = OldestFirst })
+                [ "alpha"; "beta"; "gamma" ]
+                "the earliest leads"
+
+        // A query string is what somebody bookmarked. Refusing one shows them no list at all,
+        // so every axis falls back rather than failing.
+        testCase "an absent query is the default one" <| fun () ->
+            Expect.equal (SessionQuery.ofQueryString "") SessionQuery.defaults "nothing asked for is the default view"
+
+        testCase "an unrecognised sort falls back to the default order" <| fun () ->
+            Expect.equal (SessionQuery.ofQueryString "?sort=banana").Order NewestFirst "not a refusal"
+
+        testCase "a query reads back the states it names" <| fun () ->
+            Expect.equal
+                (SessionQuery.ofQueryString "/?show=active&show=archived&sort=created-asc")
+                { Show = Set.ofList [ Active; Archived ]; Order = OldestFirst }
+                "both chips lit, oldest first"
+
+        // The empty set needs a WORD, because an absent key already means "you did not
+        // choose" — which is the default, not nothing.
+        testCase "a query round-trips through its own query string" <| fun () ->
+            for query in
+                [ SessionQuery.defaults
+                  { Show = Set.ofList [ Active; Archived ]; Order = OldestFirst }
+                  { Show = Set.singleton Archived; Order = NewestFirst }
+                  { Show = Set.empty; Order = OldestFirst } ] do
+                Expect.equal
+                    (SessionQuery.ofQueryString (SessionQuery.toQueryString query))
+                    query
+                    "what the surface links to is what it reads back"
+
+        testCase "toggling a state flips that one and leaves the other alone" <| fun () ->
+            Expect.equal
+                (SessionQuery.toggling Archived SessionQuery.defaults)
+                { SessionQuery.defaults with Show = Set.ofList [ Active; Archived ] }
+                "archived joins active rather than replacing it"
+
+        testCase "reversing an order changes nothing else" <| fun () ->
+            let query = { Show = Set.singleton Archived; Order = NewestFirst }
+            Expect.equal (SessionQuery.reversed query) { query with Order = OldestFirst } "only the direction moves"
     ]
 
 // -----------------------------------------------------------------------------
@@ -395,7 +582,8 @@ let private uiRecord : SessionRecord =
     { SessionId = SessionId.create "ui-render" |> expect
       DisplayName = "UI <Render>"
       CreatedAt = DateTimeOffset (2026, 7, 15, 12, 0, 0, TimeSpan.Zero)
-      DataDir = "sessions/ui-render" }
+      DataDir = "sessions/ui-render"
+      ArchivedAt = None }
 
 let private uiRenderTests =
     testList "Management UI rendering (Step 25)" [
@@ -413,11 +601,101 @@ let private uiRenderTests =
 
         testCase "the page is self-contained: an inline script drives it, no external sources" <| fun () ->
             let html =
-                ManagerUi.page "app.css" PublicAccess.Loopback [ { Record = uiRecord; Status = ProcessManager.NotRunning } ] []
+                ManagerUi.page
+                    "app.css"
+                    PublicAccess.Loopback
+                    SessionQuery.defaults
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+                    []
             Expect.isTrue (html.Contains "<script>") "an inline script drives the UI (no bundle)"
             Expect.isTrue (html.Contains "/sessions/") "the inline script talks to the fragment routes"
             Expect.isFalse (html.Contains "src=\"http") "no external/CDN scripts (local-first)"
             Expect.isTrue (html.Contains Dom.Manager.createSession) "the create form renders"
+
+        // Archiving. What must hold however this table is redrawn: a session that cannot be
+        // started is not offered a control that starts it, and the one act it CAN take is
+        // reachable and named.
+        testCase "an archived session's row offers Unarchive and not Launch" <| fun () ->
+            let archived =
+                ManagerUi.sessionRow
+                    PublicAccess.Loopback
+                    { Record = { uiRecord with ArchivedAt = Some archivedAt }; Status = ProcessManager.NotRunning }
+            Expect.isTrue (archived.Contains (Dom.attr Dom.Manager.unarchive "ui-render")) "the way back is offered"
+            Expect.isFalse
+                (archived.Contains (Dom.attr Dom.Manager.launch "ui-render"))
+                "a control whose only outcome is a refusal is not offered"
+
+        testCase "an archived session says archived rather than stopped" <| fun () ->
+            let archived =
+                ManagerUi.sessionRow
+                    PublicAccess.Loopback
+                    { Record = { uiRecord with ArchivedAt = Some archivedAt }; Status = ProcessManager.NotRunning }
+            Expect.isTrue
+                (archived.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusArchived))
+                "the cell answers the question a reader is actually asking"
+
+        // The downstream half of archiving-stops-it (AGENTS.md "Fixing bugs"): `Archive` stops
+        // the child BEFORE marking the record, so this pairing should not arise. If some later
+        // fault produces it anyway, the row must not hand somebody a live link into a session
+        // its operator retired — a plausible wrong answer is worse than a missing one.
+        testCase "an archived session is never offered as a link to open" <| fun () ->
+            let both =
+                ManagerUi.sessionRow
+                    PublicAccess.Loopback
+                    { Record = { uiRecord with ArchivedAt = Some archivedAt }
+                      Status = ProcessManager.Running (8199, 42) }
+            // The address is the discriminating assertion: the case above pins that a RUNNING
+            // row carries exactly this href, so its absence here cannot pass vacuously.
+            Expect.isFalse (both.Contains "http://127.0.0.1:8199/") "no address to reach it at"
+            Expect.isFalse (both.Contains Dom.Manager.openLink) "and nothing marked as the way in"
+
+        testCase "an active session can be archived, by a control with a name" <| fun () ->
+            let active = ManagerUi.sessionRow PublicAccess.Loopback { Record = uiRecord; Status = ProcessManager.NotRunning }
+            Expect.isTrue (active.Contains (Dom.attr Dom.Manager.archive "ui-render")) "the row can be archived"
+            // WCAG: an icon-only control carries an accessible name, and it names WHICH
+            // session — a column of "Archive" says nothing about which row you are on.
+            Expect.isTrue (active.Contains "aria-label=\"Archive UI &lt;Render&gt;\"") "named, and escaped"
+
+        testCase "the filter says which states are shown and links to the ones that are not" <| fun () ->
+            let table =
+                ManagerUi.sessionsTable
+                    PublicAccess.Loopback
+                    SessionQuery.defaults
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            Expect.isTrue (table.Contains (Dom.attr Dom.Manager.filter "show-active")) "the active filter is a control"
+            Expect.isTrue (table.Contains (Dom.attr Dom.Manager.filter "show-archived")) "so is the archived one"
+            Expect.isTrue (table.Contains "aria-current=\"true\"") "and the shown one says it is shown"
+            Expect.isTrue
+                (table.Contains "show=active&amp;show=archived")
+                "the unlit chip links to the query that adds it, computed server-side"
+
+        testCase "the created column declares which way it is sorted, and links to the reverse" <| fun () ->
+            let newest =
+                ManagerUi.sessionsTable
+                    PublicAccess.Loopback
+                    SessionQuery.defaults
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            Expect.isTrue (newest.Contains "aria-sort=\"descending\"") "the header states the sort"
+            Expect.isTrue (newest.Contains "sort=created-asc") "and links to the other direction"
+            let oldest =
+                ManagerUi.sessionsTable
+                    PublicAccess.Loopback
+                    { SessionQuery.defaults with Order = OldestFirst }
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            Expect.isTrue (oldest.Contains "aria-sort=\"ascending\"") "and the other way round"
+
+        // Saying "no sessions yet" over a registry that has three would send somebody
+        // looking for a bug in the Manager.
+        testCase "a filter that hides everything says so, rather than that there is nothing" <| fun () ->
+            let hidden =
+                ManagerUi.sessionsTable
+                    PublicAccess.Loopback
+                    { SessionQuery.defaults with Show = Set.singleton Archived }
+                    [ { Record = uiRecord; Status = ProcessManager.NotRunning } ]
+            Expect.isFalse (hidden.Contains "no sessions yet") "the registry is not empty"
+            Expect.isTrue (hidden.Contains "1 hidden") "it says what it is hiding"
+            let empty = ManagerUi.sessionsTable PublicAccess.Loopback SessionQuery.defaults []
+            Expect.isTrue (empty.Contains "no sessions yet") "an empty registry still says the plain thing"
 
         // Plan 17. Declaring is the ONE act that names a url, and the only management
         // action that can be refused for a reason a human has to read.
@@ -512,6 +790,66 @@ let private statusOfReply (reply: obj) : int = Fable.Core.Util.jsNative
 
 [<Emit("$0.body")>]
 let private bodyOfReply (reply: obj) : string = Fable.Core.Util.jsNative
+
+/// A Manager with its management endpoint up, over real child processes. Hoisted because
+/// the archiving cases below each pin ONE invariant and each needs one of these; the setup
+/// is what repeats, not the assertion.
+let private managerWithUi (name: string) =
+    let dataDir =
+        sprintf "tests/Yession.Tests/out/.data/%s-%d" name (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+    ProcessManager.createWithUi
+        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+            Strategy = Some Strategy.localhost }
+        (Some ManagerUi.tryHandle)
+
+/// The half of archiving that cannot be decided purely: it stops a real child, and the
+/// refusal has to hold over the wire and not just over a value.
+let private archiveFlowTests =
+    testList "Archiving over the process boundary" [
+        testCaseAsync "archiving a running session stops its child" <|
+            async {
+                let! pm = managerWithUi "arch-stop"
+                let id = SessionId.create "arch-stop" |> expect
+                pm.CreateSession "arch-stop" "Archive me" |> expect |> ignore
+                let! _ = pm.Launch id
+                Expect.isTrue
+                    (match (pm.TryFind id).Value.Status with ProcessManager.Running _ -> true | _ -> false)
+                    "it is running before we archive it"
+                let! archived = pm.Archive id
+                Expect.isTrue (Result.isOk archived) "archiving succeeded"
+                Expect.equal (pm.TryFind id).Value.Status ProcessManager.NotRunning "the child is gone"
+                do! pm.StopAll ()
+            }
+
+        testCaseAsync "an archived session refuses to launch, and says so as a conflict" <|
+            async {
+                let! pm = managerWithUi "arch-refuse"
+                let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
+                let id = SessionId.create "arch-refuse" |> expect
+                pm.CreateSession "arch-refuse" "Archive me" |> expect |> ignore
+                let! archived = pm.Archive id
+                Expect.isTrue (Result.isOk archived) "archived"
+                // Over the wire, because `/open` is the URL a session client's reconnect card
+                // points at: a bookmark landing there must read as a conflict it can resolve,
+                // not as the Manager having broken.
+                let! refused = getReply (baseUrl + "/sessions/arch-refuse/open") |> Async.AwaitPromise
+                Expect.equal (statusOfReply refused) 409 "a durable-state conflict, not a server fault"
+                Expect.stringContains (bodyOfReply refused) "archived" "and it says why"
+                do! pm.StopAll ()
+            }
+
+        testCaseAsync "unarchiving lets a session launch again" <|
+            async {
+                let! pm = managerWithUi "arch-back"
+                let id = SessionId.create "arch-back" |> expect
+                pm.CreateSession "arch-back" "Archive me" |> expect |> ignore
+                let! _ = pm.Archive id
+                pm.Unarchive id |> expect
+                let! launched = pm.Launch id
+                Expect.isTrue (Result.isOk launched) "the way back is a real way back"
+                do! pm.StopAll ()
+            }
+    ]
 
 let private uiFlowTests =
     testList "Management UI flow (Step 25)" [
@@ -1582,6 +1920,8 @@ let private registryStreamTests =
 let tests =
     testList "Phase4" [
         stateTests
+        archiveTests
+        queryTests
         uiRenderTests
         publicAccessTests
         themeContrastTests
@@ -1601,6 +1941,7 @@ let tests =
         Tag.needs "MCP server set over SSE (reverse control leg)" [ Tag.Ports ] (fun () -> mcpStreamTests)
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
+        Tag.needs "Archiving over the process boundary" [ Tag.Ports; Tag.Native ] (fun () -> archiveFlowTests)
         Tag.needs "Idle reaping over the process boundary (Plan 11)" [ Tag.Ports; Tag.Native ] (fun () -> reapingTests)
         // `Srt` for the same reason: the packaged child picks the sandbox DEFAULT, and this
         // suite waits on an environment that reached Running and a command that exited 0 —

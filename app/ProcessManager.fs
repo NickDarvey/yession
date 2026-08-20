@@ -52,6 +52,13 @@ type ProcessManager =
       Launch : SessionId -> Async<Result<int, string>>
       /// Stop a running session (SIGTERM, SIGKILL after a grace period).
       Stop : SessionId -> Async<Result<unit, string>>
+      /// Archive a session (durable): stop its running child, then mark it. ONE verb,
+      /// because an archived session left running is exactly what archiving exists to
+      /// prevent. Idempotent, and it deletes nothing — the session's stores stay put.
+      Archive : SessionId -> Async<Result<unit, string>>
+      /// Unarchive: durable, and the session is launchable again. Not async — an archived
+      /// session is by construction not running, so there is nothing to stop first.
+      Unarchive : SessionId -> Result<unit, string>
       /// Every registered session with its runtime status.
       Sessions : unit -> SessionView list
       /// Subscribe to session changes: the sink receives every session with its status
@@ -868,7 +875,8 @@ let createWithUi
                 { SessionId = id
                   DisplayName = if displayName.Trim().Length > 0 then displayName.Trim () else sessionId
                   CreatedAt = clock ()
-                  DataDir = sprintf "sessions/%s" (SessionId.value id) }
+                  DataDir = sprintf "sessions/%s" (SessionId.value id)
+                  ArchivedAt = None }
             match ManagerState.addSession record state with
             | Error e -> Error e
             | Ok next ->
@@ -884,10 +892,14 @@ let createWithUi
     let launch (sessionId: SessionId) : Async<Result<int, string>> =
         async {
             let key = SessionId.value sessionId
-            match ManagerState.tryFind sessionId state with
-            | None -> return Error (sprintf "unknown session %s" key)
-            | Some _ when Map.containsKey key children -> return Error (sprintf "session %s is already running" key)
-            | Some record ->
+            // `launchable` is the lookup AND the archived refusal (Yession.Manager.State):
+            // one verb, so no caller can hold a record without having been told it is
+            // archived. Already-running stays HERE, beside `children` — that is runtime
+            // state, which the durable registry deliberately holds none of.
+            match ManagerState.launchable sessionId state with
+            | Error reason -> return Error reason
+            | Ok _ when Map.containsKey key children -> return Error (sprintf "session %s is already running" key)
+            | Ok record ->
                 // Step 24: mint the per-launch secret — every launch gets one; it
                 // authenticates OAuth client registration, supervision reports, and the
                 // secrets/connections custody calls. The session scope is established
@@ -1019,6 +1031,52 @@ let createWithUi
                         |> ignore)
         }
 
+    // Archiving: TAKE, then write — the shape `Terminals.Write` established. The take is
+    // stopping the running child, and it comes first because a stop that genuinely fails
+    // must leave nothing half-done: either the child is gone AND the record says archived,
+    // or neither moved and the operator was told why. A session that was not running is not
+    // a failed take, it is the ordinary case.
+    //
+    // One verb rather than two, because an archived session left running is precisely what
+    // archiving exists to prevent, and a caller that had to remember to stop first is a
+    // caller that forgets.
+    let archive (sessionId: SessionId) : Async<Result<unit, string>> =
+        async {
+            let key = SessionId.value sessionId
+            match ManagerState.tryFind sessionId state with
+            | None -> return Error (sprintf "unknown session %s" key)
+            | Some record when record.ArchivedAt.IsSome -> return Ok ()
+            | Some _ ->
+                let! stopped =
+                    if Map.containsKey key children then stop sessionId else async { return Ok () }
+                match stopped with
+                | Error reason -> return Error reason
+                | Ok () ->
+                    match ManagerState.archive sessionId (clock ()) state with
+                    | Error reason -> return Error reason
+                    | Ok next ->
+                        // Durable before visible, as every registry write here is.
+                        ManagerStore.save statePath next
+                        state <- next
+                        publishSessions ()
+                        return Ok ()
+        }
+
+    // Unarchiving. Not async: an archived session is by construction not running, so there
+    // is nothing to take before writing.
+    let unarchive (sessionId: SessionId) : Result<unit, string> =
+        match ManagerState.tryFind sessionId state with
+        | None -> Error (sprintf "unknown session %s" (SessionId.value sessionId))
+        | Some record when record.ArchivedAt.IsNone -> Ok ()
+        | Some _ ->
+            match ManagerState.unarchive sessionId state with
+            | Error reason -> Error reason
+            | Ok next ->
+                ManagerStore.save statePath next
+                state <- next
+                publishSessions ()
+                Ok ()
+
     // The reaper's sweep (Plan 11). Every rule about WHEN a session may be stopped lives in
     // `Reaper.plan`, which is pure and decided without a clock or a process; this is the
     // loop over its answer, and it is deliberately the whole of the impure part.
@@ -1057,6 +1115,8 @@ let createWithUi
         { CreateSession = createSession
           Launch = launch
           Stop = stop
+          Archive = archive
+          Unarchive = unarchive
           Sessions = viewsNow
           SubscribeSessions = sessions.Register
           SetDisplayName = setDisplayName
