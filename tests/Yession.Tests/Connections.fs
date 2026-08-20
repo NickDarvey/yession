@@ -285,14 +285,32 @@ let private githubTarget scope : SecretId = { Scope = scope; Name = githubName }
 
 let private githubTests =
     testList "github connection module" [
-        testCase "pasted credentials classify by prefix" <| fun () ->
-            Expect.equal (GitHubConnection.classifyPasted "  github_pat_11ABC  ") (Ok "github_pat_11ABC") "fine-grained PAT, trimmed"
-            Expect.equal (GitHubConnection.classifyPasted "ghp_classic") (Ok "ghp_classic") "classic PAT"
-            Expect.equal (GitHubConnection.classifyPasted "ghu_apptoken") (Ok "ghu_apptoken") "app user token"
-            Expect.equal (GitHubConnection.classifyPasted "gho_devicetoken") (Ok "gho_devicetoken") "oauth device token"
-            Expect.isError (GitHubConnection.classifyPasted "hunter2") "not a github credential"
-            Expect.isError (GitHubConnection.classifyPasted "sk-ant-api03-x") "a claude credential is a paste mistake"
-            Expect.isError (GitHubConnection.classifyPasted "   ") "blank"
+        // A PAT is a bare string that does not expire on its own, so the paste leg is the
+        // right home for one however the deployment is configured.
+        testCase "pasted personal access tokens classify by prefix" <| fun () ->
+            for deviceFlow in [ true; false ] do
+                let classify = GitHubConnection.classifyPasted deviceFlow
+                Expect.equal (classify "  github_pat_11ABC  ") (Ok "github_pat_11ABC") "fine-grained PAT, trimmed"
+                Expect.equal (classify "ghp_classic") (Ok "ghp_classic") "classic PAT"
+                Expect.isError (classify "hunter2") "not a github credential"
+                Expect.isError (classify "sk-ant-api03-x") "a claude credential is a paste mistake"
+                Expect.isError (classify "   ") "blank"
+
+        // The paste leg stores `BrokeredStatic`, which never refreshes. A `ghu_`/`gho_` lives
+        // about eight hours, so accepting one where the grant leg is available mints a
+        // credential that is dead by morning — and reads as connected until something needs it.
+        testCase "an expiring user token is refused where the device flow could store it properly" <| fun () ->
+            let refused = GitHubConnection.classifyPasted true "ghu_apptoken"
+            Expect.isError refused "an App is configured, so Connect GitHub can land this as a grant"
+            match refused with
+            | Error reason -> Expect.stringContains reason "Connect GitHub" "and the refusal names the way in"
+            | Ok _ -> failwith "an expiring user token cannot go in as a static credential"
+
+        // Without an App there is no grant leg to send anyone to, so refusing would leave
+        // them with no path at all. An eight-hour credential beats none.
+        testCase "an expiring user token is accepted where paste is the only path there is" <| fun () ->
+            Expect.equal (GitHubConnection.classifyPasted false "ghu_apptoken") (Ok "ghu_apptoken") "app user token"
+            Expect.equal (GitHubConnection.classifyPasted false "gho_devicetoken") (Ok "gho_devicetoken") "oauth device token"
 
         testCase "every kind rides GITHUB_TOKEN" <| fun () ->
             Expect.equal (GitHubConnection.envVarFor OAuthConnection "t") ("GITHUB_TOKEN", "t") "oauth"
