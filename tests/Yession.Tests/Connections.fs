@@ -145,6 +145,41 @@ let private flowTests =
             Expect.isFalse (BrokerFlow.needsRefresh now (BrokeredOAuth { grant with ExpiresAt = None })) "no known expiry"
             Expect.isFalse (BrokerFlow.needsRefresh now (BrokeredStatic "sk")) "static never refreshes"
 
+        // The two ways one grant reaches a dead end. They are one function because a resolve
+        // and a status have to refuse by the same rule, and they are BOTH here because
+        // `needsRefresh` sees neither: it answers about the access token's clock, and the
+        // second case below is a grant it says `false` for precisely because there is
+        // nothing to refresh with.
+        testCase "beyondRefresh: a lapsed refresh token is past saving" <| fun () ->
+            let lapsed =
+                BrokeredOAuth { grant with RefreshExpiresAt = Some (now.AddSeconds -1.0) }
+            Expect.equal
+                (BrokerFlow.beyondRefresh now lapsed)
+                (Some "the refresh token has expired")
+                "no retry escapes this"
+
+        testCase "beyondRefresh: an expired access token with nothing behind it is past saving" <| fun () ->
+            let refreshless =
+                BrokeredOAuth { grant with RefreshToken = None; ExpiresAt = Some (now.AddSeconds -1.0) }
+            Expect.equal
+                (BrokerFlow.beyondRefresh now refreshless)
+                (Some "the access token has expired and there is nothing to refresh it with")
+                "nothing to refresh WITH is still nothing to retry"
+
+        testCase "beyondRefresh: a grant that can still rotate is not past saving" <| fun () ->
+            let live = BrokeredOAuth { grant with ExpiresAt = Some (now.AddSeconds -1.0) }
+            Expect.equal (BrokerFlow.beyondRefresh now live) None "an expired access token refreshes"
+            Expect.equal (BrokerFlow.beyondRefresh now (BrokeredOAuth grant)) None "so does a fresh one"
+            Expect.equal
+                (BrokerFlow.beyondRefresh now (BrokeredOAuth { grant with RefreshToken = None; ExpiresAt = None }))
+                None
+                "a grant stating no lifetime never comes due"
+
+        // Not an oversight, and the reason a rejection has to be reportable from outside:
+        // a static token carries no expiry at all, so nothing on this side can ever know.
+        testCase "beyondRefresh: a static token is never past saving on this side" <| fun () ->
+            Expect.equal (BrokerFlow.beyondRefresh now (BrokeredStatic "sk")) None "only a provider can say"
+
         testCase "merged keeps the previous refresh token when the response omits one" <| fun () ->
             let fresh = { grant with AccessToken = "at-2"; RefreshToken = None }
             Expect.equal (BrokerFlow.merged grant fresh).RefreshToken (Some "rt-1") "old refresh survives"
@@ -207,14 +242,42 @@ let private wireTests =
         testCase "the status list frame is value-free by type and round-trips" <| fun () ->
             let list : ConnectionStatusList =
                 { Connections =
-                    [ { Id = target (UserScope alice); Kind = OAuthConnection; UpdatedAt = DateTimeOffset.Parse "2026-07-28T10:00:00Z" }
-                      { Id = target (SessionScope sessionA); Kind = StaticConnection; UpdatedAt = DateTimeOffset.Parse "2026-07-28T11:00:00Z" } ] }
+                    // Both health states, because the reason a `SignInRequired` carries is
+                    // the only part of this frame that is not a fixed vocabulary.
+                    [ { Id = target (UserScope alice)
+                        Kind = OAuthConnection
+                        Health = ConnectionUsable
+                        UpdatedAt = DateTimeOffset.Parse "2026-07-28T10:00:00Z" }
+                      { Id = target (SessionScope sessionA)
+                        Kind = StaticConnection
+                        Health = SignInRequired "the refresh token has expired"
+                        UpdatedAt = DateTimeOffset.Parse "2026-07-28T11:00:00Z" } ] }
             Expect.equal (ControlWire.toString ControlWire.connectionStatusList list |> ControlWire.fromString ControlWire.connectionStatusList |> expect) list "identical"
     ]
 
-// --- Pure: the session-side Claude module ---------------------------------------------------
-
 open Yession.Host
+
+// --- Pure: which broker observations move a status frame -------------------------------------
+
+let private observationTests =
+    testList "broker observations" [
+        // Pinned in the cheap tier because it is the rule two subscribers used to each hold
+        // a copy of — the Manager's wiring and this file's control server — and a copy is
+        // what drifts. Both now ask this function, so a case added below is a case both
+        // answer the same way.
+        testCase "a status broadcast follows every observation that changes what is readable" <| fun () ->
+            let id = target (UserScope alice)
+            Expect.isTrue (Broker.changesReadableStatus (Broker.Connected (id, OAuthConnection))) "connecting"
+            Expect.isTrue (Broker.changesReadableStatus (Broker.Disconnected id)) "disconnecting"
+            Expect.isTrue
+                (Broker.changesReadableStatus (Broker.RefreshFailed (id, "the refresh token has expired")))
+                "a credential that stopped working is a change to what is readable"
+            Expect.isFalse
+                (Broker.changesReadableStatus (Broker.Resolved (id, OAuthConnection, true)))
+                "spending one is not — a frame per turn would say nothing, loudly"
+    ]
+
+// --- Pure: the session-side Claude module ---------------------------------------------------
 
 let private claudeTests =
     testList "claude connection module" [
@@ -667,6 +730,64 @@ let private brokerTests =
                 Expect.equal endpoint.Requests.Count 0 "and nothing was asked of the provider"
             }
 
+        // The case the old ordering could not see. `refreshExpired` used to be reached only
+        // inside the `needsRefresh` branch, so whether a finished grant was caught depended
+        // on the OTHER clock: an access token comfortably in date meant the resolve handed
+        // one out and the refusal arrived later from the provider, as a 401 nobody could
+        // read. Same dead grant, same refusal, whatever the access token says.
+        testCaseAsync "a lapsed refresh token is caught even while the access token is in date" <|
+            async {
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                let finished =
+                    BrokeredOAuth
+                        { AccessToken = "at-live"
+                          RefreshToken = Some "rt-spent"
+                          // An hour out — far outside the 5-minute margin, so nothing here
+                          // is due and the old code took the "hand it over" path.
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 3600.0)
+                          RefreshExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds -1.0)
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
+                let! _ = store.Set t (BrokeredCredentialCodec.toString finished)
+                match! broker.Resolve t with
+                | Error reason -> Expect.stringContains reason "sign in again" "the refusal says what to DO"
+                | Ok _ -> failwith "a grant that cannot rotate cannot resolve, however fresh its access token"
+                Expect.equal endpoint.Requests.Count 0 "and nothing was asked of the provider"
+            }
+
+        testCaseAsync "a status reports the same dead end a resolve refuses by" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let dead = target (UserScope alice)
+                let live = target (SessionScope sessionA)
+                let! _ =
+                    store.Set
+                        dead
+                        (BrokeredCredentialCodec.toString (
+                            BrokeredOAuth
+                                { AccessToken = "at"
+                                  RefreshToken = Some "rt"
+                                  ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 3600.0)
+                                  RefreshExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds -1.0)
+                                  TokenUrl = "http://t"
+                                  ClientId = "cid"
+                                  Dialect = FormEncoded }))
+                let! _ = store.Set live (BrokeredCredentialCodec.toString (BrokeredStatic "ghp_ok"))
+                let! list = broker.StatusOf [ dead; live ]
+                let healthOf id =
+                    list.Connections |> List.tryFind (fun c -> c.Id = id) |> Option.map (fun c -> c.Health)
+                Expect.equal
+                    (healthOf dead)
+                    (Some (SignInRequired "the refresh token has expired"))
+                    "the panel learns what the turn would have"
+                Expect.equal (healthOf live) (Some ConnectionUsable) "and a working credential still reads as one"
+            }
+
         testCaseAsync "concurrent resolves of one due grant refresh it once" <|
             async {
                 let! endpoint = startTokenEndpoint ()
@@ -714,6 +835,61 @@ let private brokerTests =
 let private caller sessionId users peers local : Control.ControlCaller =
     { SessionId = sessionId; Users = users; Peers = peers; Local = local }
 
+[<Emit("setTimeout($0, $1)")>]
+let private setTimer (f: unit -> unit) (ms: int) : float = jsNative
+
+[<Emit("clearTimeout($0)")>]
+let private clearTimer (handle: float) : unit = jsNative
+
+/// Watch a launch's status stream, and wait for the frame a case is about by predicate.
+///
+/// The wait is BOUNDED, for the reason `Support.Harness.waitForTimeoutMs` writes down: a
+/// frame that never arrives used to hang until the whole Node run's budget expired, which
+/// kills every suite after it and reports `tests timed out` with no name on it. Here the
+/// same fault is one named failing case that says which frame it wanted and how many it
+/// saw instead — which is the difference between reading the answer and bisecting for it.
+let private watchingConnections (url: string) (secret: string) =
+    let frames = ResizeArray<ConnectionStatusList> ()
+    let waiter : (unit -> unit) option ref = ref None
+    let cancel =
+        ControlClient.subscribeConnections url secret (fun list ->
+            frames.Add list
+            match waiter.Value with
+            | Some check -> check ()
+            | None -> ())
+    let expectFrame (what: string) (predicate: ConnectionStatusList -> bool) =
+        Async.FromContinuations (fun (cont, econt, _) ->
+            let settled = ref false
+            // Settled exactly once, by whichever comes first — a matching frame or the
+            // deadline. Both paths clear the waiter, so a timed-out case cannot leave a
+            // continuation behind for the next frame to fire.
+            let finish (act: unit -> unit) =
+                if not settled.Value then
+                    settled.Value <- true
+                    waiter.Value <- None
+                    act ()
+            let timer =
+                setTimer
+                    (fun () ->
+                        finish (fun () ->
+                            econt (
+                                exn (
+                                    sprintf
+                                        "no status frame %s within %dms (%d frame(s) seen: %A)"
+                                        what
+                                        Support.Harness.waitForTimeoutMs
+                                        frames.Count
+                                        (frames |> Seq.map (fun f -> f.Connections) |> List.ofSeq)))))
+                    Support.Harness.waitForTimeoutMs
+            let check () =
+                if frames |> Seq.exists predicate then
+                    finish (fun () ->
+                        clearTimer timer
+                        cont ())
+            waiter.Value <- Some check
+            check ())
+    frames, expectFrame, cancel
+
 /// A bare control server with the SAME pre-authorized connection handlers the Manager
 /// composes (ProcessManager.connectionsApiFor), plus the ProcessManager-style status
 /// broadcast: any broker change recomputes every caller's snapshot and pushes it.
@@ -736,9 +912,7 @@ let private startConnectionsServer (callers: (string * Control.ControlCaller) li
             | None -> ()
         let broker =
             Broker.create (fun () -> "http://manager.local/connections/callback") store (fun o ->
-                match o with
-                | Broker.Connected _ | Broker.Disconnected _ -> broadcast ()
-                | _ -> ())
+                if Broker.changesReadableStatus o then broadcast ())
         let api = ProcessManager.connectionsApiFor (fun _ -> ()) store broker
         apiRef.Value <- Some api
         let dummyRegister (_: string) (_: SessionId) (_: string) : Yession.Oidc.RegisterClientResponse =
@@ -811,32 +985,59 @@ let private routeTests =
                 let clientA = ControlClient.connections url "secret-a"
                 let! _ = clientA.Put (target (UserScope alice)) "sk-ant-oat01-x"
 
-                let frames = ResizeArray<ConnectionStatusList> ()
-                let waiter : (unit -> unit) option ref = ref None
-                let expectFrame (predicate: ConnectionStatusList -> bool) =
-                    Async.FromContinuations (fun (cont, _, _) ->
-                        if frames |> Seq.exists predicate then cont ()
-                        else
-                            waiter.Value <-
-                                Some (fun () ->
-                                    if frames |> Seq.exists predicate then
-                                        waiter.Value <- None
-                                        cont ()))
-                let cancel =
-                    ControlClient.subscribeConnections url "secret-a" (fun list ->
-                        frames.Add list
-                        match waiter.Value with
-                        | Some check -> check ()
-                        | None -> ())
+                let frames, expectFrame, cancel = watchingConnections url "secret-a"
 
                 // The snapshot names the existing credential, metadata only.
-                do! expectFrame (fun f -> f.Connections |> List.exists (fun s -> s.Id = target (UserScope alice) && s.Kind = StaticConnection))
+                do!
+                    expectFrame "naming the existing credential" (fun f ->
+                        f.Connections
+                        |> List.exists (fun s -> s.Id = target (UserScope alice) && s.Kind = StaticConnection))
                 // A second credential pushes a fresh frame.
                 let! _ = clientA.Put (target (SessionScope sessionA)) "sk-ant-api03-k"
-                do! expectFrame (fun f -> f.Connections |> List.length = 2)
+                do! expectFrame "carrying both credentials" (fun f -> f.Connections |> List.length = 2)
                 // Disconnect shrinks it again.
                 let! _ = clientA.Disconnect (target (SessionScope sessionA))
-                do! expectFrame (fun f -> frames.Count >= 3 && f.Connections |> List.length = 1)
+                do!
+                    expectFrame "back down to one after a disconnect" (fun f ->
+                        frames.Count >= 3 && f.Connections |> List.length = 1)
+                cancel.Stop ()
+            }
+
+        // The other half of "a status says whether this still works": a credential can die
+        // without anybody writing to the store, and until now nothing moved the frame when
+        // it did. A panel would sit on the healthy snapshot it was sent at subscribe time
+        // while every turn that touched the credential failed.
+        testCaseAsync "a credential that stops working pushes a fresh frame, with no write to the store" <|
+            async {
+                let! url = startConnectionsServer [ "secret-a", caller sessionA (Set.singleton alice) Set.empty false ]
+                let clientA = ControlClient.connections url "secret-a"
+                let t = target (UserScope alice)
+                // Connected, and finished: a refresh token that has already lapsed.
+                let! _ =
+                    clientA.PutGrant
+                        { Target = t
+                          AccessToken = "at"
+                          RefreshToken = Some "rt-spent"
+                          ExpiresIn = Some 3600
+                          RefreshTokenExpiresIn = Some -1
+                          TokenUrl = "http://unreachable.invalid/token"
+                          ClientId = "cid"
+                          TokenDialect = FormEncoded }
+
+                let frames, expectFrame, cancel = watchingConnections url "secret-a"
+                do! expectFrame "naming the connected credential" (fun f -> f.Connections |> List.exists (fun s -> s.Id = t))
+                let before = frames.Count
+
+                // Resolving is the moment the fault is discovered. Nothing is written.
+                let! resolved = clientA.Resolve t
+                Expect.isError resolved "a lapsed grant cannot resolve"
+
+                do!
+                    expectFrame "reporting the credential as needing a sign-in" (fun f ->
+                        frames.Count > before
+                        && f.Connections
+                           |> List.exists (fun s ->
+                               s.Id = t && s.Health = SignInRequired "the refresh token has expired"))
                 cancel.Stop ()
             }
     ]
@@ -1410,6 +1611,7 @@ let tests =
         codecTests
         flowTests
         wireTests
+        observationTests
         claudeTests
         githubTests
         Tag.needs "Broker service" [ Tag.Ports ] (fun () -> brokerTests)

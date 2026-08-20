@@ -48,6 +48,27 @@ type BrokerObservation =
     | Resolved of SecretId * ConnectionKind * refreshed: bool
     | RefreshFailed of SecretId * reason: string
 
+/// Whether this observation changes what a session may currently READ — which is the only
+/// question a status broadcast asks.
+///
+/// It lives here, beside the observations, rather than at whichever composition root
+/// happens to subscribe: the answer is a fact about the observation, and a subscriber that
+/// decided for itself is a subscriber that can be wrong on its own. There were two of them
+/// already — the Manager and the tests' control server — and they agreed only because
+/// somebody kept them in step by hand.
+///
+/// `RefreshFailed` is in because a credential that stopped working changes what is readable
+/// exactly as disconnecting one does. It used to be out, which is why a grant could die
+/// mid-session while every panel watching went on showing the status it was last sent.
+/// `Resolved` is out: a turn spending a credential changes nothing about it, and a frame
+/// per turn would be a broadcast storm saying nothing.
+let changesReadableStatus (observation: BrokerObservation) : bool =
+    match observation with
+    | Connected _
+    | Disconnected _
+    | RefreshFailed _ -> true
+    | Resolved _ -> false
+
 type BrokerService =
     { /// Mint state+PKCE for a flow and return the provider authorize URL to open.
       Begin : ControlWire.ConnectionBeginRequest -> Async<Result<ControlWire.ConnectionBeginResponse, string>>
@@ -174,28 +195,34 @@ let create
             | Error e -> return Error e
             | Ok None -> return Error "no credential connected"
             | Ok (Some credential) ->
-                if not (BrokerFlow.needsRefresh (now ()) credential) then
-                    observe (Resolved (target, BrokerFlow.kindOf credential, false))
-                    return Ok (BrokerFlow.kindOf credential, BrokerFlow.valueOf credential)
-                elif BrokerFlow.refreshExpired (now ()) credential then
-                    // Nothing to retry: the refresh token is past its own life, so the
-                    // grant is finished rather than stale. Say which, because "try again"
-                    // and "sign in again" are different instructions.
-                    let reason = "the refresh token has expired — sign in again"
+                // Beyond-refresh is asked FIRST, and unconditionally. It used to be reached
+                // only inside the `needsRefresh` branch, which made it a question about the
+                // ACCESS token's clock — so a grant whose refresh token had lapsed behind a
+                // still-live access token resolved happily and died at the provider instead,
+                // where the answer arrives as an opaque 401 rather than "sign in again".
+                // Nothing to retry means nothing to ask the provider, so this costs no round
+                // trip and refuses the same way whatever the other clock says.
+                match BrokerFlow.beyondRefresh (now ()) credential with
+                | Some why ->
+                    let reason = why + " — sign in again"
                     observe (RefreshFailed (target, reason))
                     return Error reason
-                else
-                    match credential with
-                    | BrokeredStatic _ ->
-                        // Unreachable (needsRefresh is false for static) but total.
-                        observe (Resolved (target, StaticConnection, false))
-                        return Ok (StaticConnection, BrokerFlow.valueOf credential)
-                    | BrokeredOAuth grant ->
-                        match grant.RefreshToken with
-                        | None ->
-                            observe (Resolved (target, OAuthConnection, false))
-                            return Ok (OAuthConnection, grant.AccessToken)
-                        | Some refreshToken -> return! refreshOnce target grant refreshToken
+                | None ->
+                    if not (BrokerFlow.needsRefresh (now ()) credential) then
+                        observe (Resolved (target, BrokerFlow.kindOf credential, false))
+                        return Ok (BrokerFlow.kindOf credential, BrokerFlow.valueOf credential)
+                    else
+                        match credential with
+                        | BrokeredStatic _ ->
+                            // Unreachable (needsRefresh is false for static) but total.
+                            observe (Resolved (target, StaticConnection, false))
+                            return Ok (StaticConnection, BrokerFlow.valueOf credential)
+                        | BrokeredOAuth grant ->
+                            match grant.RefreshToken with
+                            | None ->
+                                observe (Resolved (target, OAuthConnection, false))
+                                return Ok (OAuthConnection, grant.AccessToken)
+                            | Some refreshToken -> return! refreshOnce target grant refreshToken
         }
 
     { Begin =
@@ -299,6 +326,12 @@ let create
                             statuses
                             @ [ { ConnectionStatus.Id = target
                                   Kind = BrokerFlow.kindOf credential
+                                  // The same rule a resolve refuses by, so a panel and a turn
+                                  // never disagree about whether this credential still works.
+                                  Health =
+                                    BrokerFlow.beyondRefresh (now ()) credential
+                                    |> Option.map SignInRequired
+                                    |> Option.defaultValue ConnectionUsable
                                   UpdatedAt = updatedAt } ]
                     | Ok None | Error _ -> ()
                 return { Connections = statuses }

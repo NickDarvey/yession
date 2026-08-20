@@ -257,6 +257,30 @@ module BrokerFlow =
             | Some expiresAt -> now >= expiresAt
             | None -> false
 
+    /// Why this credential cannot be repaired by refreshing, if it cannot — the whole
+    /// "sign in again" rule in one place, so a resolve and a status answer it identically
+    /// rather than each deciding for itself.
+    ///
+    /// It is deliberately NOT `refreshExpired` with a nicer return type. That predicate
+    /// answers one question; this composes it with the OTHER way a grant reaches the same
+    /// dead end — an access token past its expiry with no refresh token behind it, which
+    /// `needsRefresh` says `false` for (nothing to refresh WITH) and which therefore used
+    /// to resolve happily right up to the moment the provider refused it.
+    ///
+    /// A static token is never beyond refresh HERE, and that is not an oversight: it has no
+    /// expiry model at all, so nothing on this side can know. Only a provider refusing it
+    /// can say, which is why a rejection has to be reportable from outside.
+    let beyondRefresh (now: DateTimeOffset) (credential: BrokeredCredential) : string option =
+        match credential with
+        | BrokeredStatic _ -> None
+        | BrokeredOAuth grant ->
+            if refreshExpired now credential then Some "the refresh token has expired"
+            elif
+                grant.RefreshToken.IsNone
+                && grant.ExpiresAt |> Option.exists (fun expiresAt -> now >= expiresAt)
+            then Some "the access token has expired and there is nothing to refresh it with"
+            else None
+
     let kindOf (credential: BrokeredCredential) : ConnectionKind =
         match credential with
         | BrokeredOAuth _ -> OAuthConnection
