@@ -131,11 +131,12 @@ module Style =
     /// button, and author line. Colour composes at the use site.
     let private caps = "font-semibold text-label tracking-caps uppercase"
 
-    /// The voice a body is written in: Noto Serif for a person, and the system's own Noto Sans
-    /// for the agent, which is part of the system (`--font-human`/`--font-agent`). Siblings, so
-    /// a conversation reads as one voice in two registers rather than two typefaces arguing —
-    /// and the difference is one of CLASS rather than of letterform detail, which is what makes
-    /// it survive 15px. Attribution the eye reads before the words — the author line and the avatar say the same thing, but
+    /// The voice a body is written in: Source Serif 4 for a person, and the system's own Noto
+    /// Sans for the agent, which is part of the system (`--font-human`/`--font-agent`). A serif
+    /// on the sans's own skeleton, so a conversation reads as one voice in two registers rather
+    /// than two typefaces arguing — the difference is one of CLASS rather than of letterform
+    /// detail, which is what makes it survive 15px, and of class ONLY, which is what keeps the
+    /// registers close (see the face story in `app/tailwind.css`). Attribution the eye reads before the words — the author line and the avatar say the same thing, but
     /// they say it once at the top, and a long turn scrolls past them.
     ///
     /// A face, not a colour: the caps author line already spends the palette on this
