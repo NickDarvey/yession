@@ -79,11 +79,21 @@ type ClaudeFlowState =
     | ClaudeBusy
     | ClaudeError of string
 
-/// What the /claude status probe reported: kind label ("oauth"/"static") per sign-in
-/// scope, when connected.
+/// One connected credential as a panel row reads it.
+///
+/// `SignInRequired` carries the REASON rather than a flag, because a row that says only
+/// "broken" sends somebody to guess. "the refresh token has expired" and "github rejected
+/// this credential" lead a person to the same button but tell them different things about
+/// why they are pressing it. `None` means nothing has established otherwise — not a promise
+/// that it works, which is a thing no side of this can honestly make about a static token.
+type ConnectionView =
+    { Kind : string
+      SignInRequired : string option }
+
+/// What the /claude status probe reported, per sign-in scope, when connected.
 type ClaudeStatus =
-    { SessionCredential : string option
-      MineCredential : string option
+    { SessionCredential : ConnectionView option
+      MineCredential : ConnectionView option
       /// Who the "all my sessions" scope would belong to here: `"user"` (this signed-in
       /// human alone) or `"local"` (the whole deployment — everyone who can reach this
       /// Manager, under `--auth localhost`). The panel must not promise "mine" for a
@@ -110,11 +120,10 @@ type GitHubFlowState =
     | GitHubBusy
     | GitHubError of string
 
-/// What the /github status probe reported: kind label ("oauth"/"static") per sign-in
-/// scope, when connected.
+/// What the /github status probe reported, per sign-in scope, when connected.
 type GitHubStatus =
-    { SessionCredential : string option
-      MineCredential : string option }
+    { SessionCredential : ConnectionView option
+      MineCredential : ConnectionView option }
 
 type GitHubViewState =
     { Status : GitHubStatus
@@ -1080,6 +1089,25 @@ module ClientModel =
     /// Every peer that is somewhere collaborative right now, with its name and where —
     /// never the local peer, who is not their own collaborator. Ordered by name so the
     /// roster does not reshuffle when a map's internal order changes.
+    /// Every connected credential that needs a person to sign in again, as
+    /// `(provider, reason)` — Claude's before GitHub's, and each panel's shared scope before
+    /// its session-only one, so the order on screen never depends on a map's iteration.
+    ///
+    /// A DERIVATION rather than a field, so the surfaces that report this — the panel rows,
+    /// the roster, the prompt over the timeline — cannot disagree about whether anything is
+    /// wrong. The view stays a total function of the model, and the cheap tier can ask this
+    /// question without rendering anything.
+    let signInRequired (model: ClientModel) : (string * string) list =
+        let needing (provider: string) (credential: ConnectionView option) =
+            match credential with
+            | Some view -> view.SignInRequired |> Option.map (fun reason -> provider, reason)
+            | None -> None
+        [ needing "claude" model.Claude.Status.MineCredential
+          needing "claude" model.Claude.Status.SessionCredential
+          needing "github" model.GitHub.Status.MineCredential
+          needing "github" model.GitHub.Status.SessionCredential ]
+        |> List.choose id
+
     let presentPeers (model: ClientModel) : (PeerId * string * FocusField) list =
         model.Presence
         |> Map.toList

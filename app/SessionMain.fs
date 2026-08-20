@@ -308,7 +308,7 @@ let private envCreds = (ambientCredential ()).IsSome
 // The session's live view of connected credentials (Plan 08): fed by the Manager's
 // connection-status stream, metadata only. Availability is DYNAMIC — a sign-in
 // mid-session flips the agent gate without a relaunch.
-let mutable private connectionStatus : Map<SecretId, ConnectionKind> = Map.empty
+let mutable private connectionStatus : Map<SecretId, ConnectionStatus> = Map.empty
 
 let private connectionsClient =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.connections url secret)
@@ -617,8 +617,12 @@ Async.StartImmediate (
         match controlChannel with
         | Some (url, secret) ->
             ControlClient.subscribeConnections url secret (fun list ->
+                // The WHOLE status, not just its kind. What a session may read and whether
+                // it still works arrive on the same frame, and keeping only half of it was
+                // why a panel could show a green dot over a credential the Manager already
+                // knew was finished.
                 connectionStatus <-
-                    list.Connections |> List.map (fun s -> s.Id, s.Kind) |> Map.ofList)
+                    list.Connections |> List.map (fun s -> s.Id, s) |> Map.ofList)
             |> ignore
         | None -> ()
         // The browser-facing Claude connection surface: only meaningful with both a

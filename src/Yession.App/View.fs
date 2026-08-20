@@ -351,8 +351,20 @@ module View =
     /// (and the prompt hanging under the row) change. Connecting flips "no agent" to "ready" in
     /// place; the roster never jumps.
     let private peopleSection (actions: ViewActions) (model: ClientModel) : TemplateResult =
+        // The agent's row says whether a turn can RUN, which is not the same question as
+        // whether a credential is stored. `agentAvailable` answers the second (any relevant
+        // credential, or the host's ambient one), so a Claude sign-in that has stopped
+        // working left this reading "ready" in green over a credential the next turn would
+        // fail on. The status word follows the credential's health; the gate does not, so
+        // the no-agent prompt keeps meaning "nothing is connected" rather than doubling up.
+        let claudeNeedsSignIn =
+            [ model.Claude.Status.MineCredential; model.Claude.Status.SessionCredential ]
+            |> List.exists (fun credential ->
+                credential |> Option.map (fun c -> c.SignInRequired.IsSome) |> Option.defaultValue false)
         let agentRow =
             match model.Claude.Status.AgentAvailable with
+            | Some true when claudeNeedsSignIn ->
+                html $"""<div class="{Style.person}" data-agent-presence="live"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]}"></span>agent<span class="{Style.statusErr} ml-auto"><span class="{Style.statusDot}"></span>{Dom.Text.signInAgainStatus}</span></div>"""
             | Some true ->
                 html $"""<div class="{Style.person}" data-agent-presence="live"><span class="{Style.cls [ Style.avatar; Style.agentAvatar; Style.personAvatar ]}"></span>agent<span class="{Style.statusOk} ml-auto"><span class="{Style.statusDot}"></span>ready</span></div>"""
             // The dimmed avatar and the status word carry the state; the button carries the
@@ -419,14 +431,40 @@ module View =
         | Some "user" -> "All my sessions"
         | _ -> "Everyone using this Yession"
 
+    /// How a connected credential reads on a panel row: green and its kind, or the fault
+    /// style and the words that name the fix. ONE function, because both connection panels
+    /// say the same thing about the same shape — a credential that read "sign in again" in
+    /// one panel and green in the other would be two copies having drifted, not a design.
+    ///
+    /// The health is a STATUS here, not a second call to action. Each panel's own Connect
+    /// control is already directly below this row and IS the remedy; the one new button for
+    /// this lives over the timeline, where somebody who never opens settings will meet it.
+    let private credentialStatus (label: string) (credential: ConnectionView) : TemplateResult =
+        match credential.SignInRequired with
+        | None ->
+            html $"""<span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({credential.Kind})</span>"""
+        | Some _ ->
+            html $"""<span class="{Style.statusErr}"><span class="{Style.statusDot}"></span>{label} — {Dom.Text.signInAgainStatus}</span>"""
+
+    /// Why, under the row, and only when there is a why. It is the provider's own words, so
+    /// it says what a person could not have guessed — "the refresh token has expired" and
+    /// "github rejected this credential" send them to the same button knowing different
+    /// things about how they got here.
+    let private credentialReason (hook: string) (scopeChoice: string) (credential: ConnectionView) : TemplateResult =
+        match credential.SignInRequired with
+        | None -> Lit.nothing
+        | Some reason -> html $"""<span class="{Style.small}" {hook}="{scopeChoice}">{reason}</span>"""
+
     /// The Claude connection panel (Plan 08), living in the settings drawer: status per
     /// sign-in scope, the OAuth flow (approve on claude.ai → paste the shown code), and
     /// the paste-a-token fallback.
     let private claudeSection (actions: ViewActions) (dispatch: ClientMsg -> unit) (claude: ClaudeViewState) : TemplateResult =
-        let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
-            match kind with
-            | Some kind ->
-                html $"""<div class="{Style.sideRow}" data-claude-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconBareDanger}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>{Icon.close}</button></div>"""
+        let connectedRow (label: string) (scopeChoice: string) (credential: ConnectionView option) =
+            match credential with
+            | Some credential ->
+                html $"""
+                    <div class="{Style.sideRow}" data-claude-connected="{scopeChoice}">{credentialStatus label credential}<button type="button" class="{Style.btnIconBareDanger}" aria-label="Disconnect" data-claude-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.ClaudeDisconnect scopeChoice)}>{Icon.close}</button></div>
+                    {credentialReason Dom.Hooks.claudeSignInRequired scopeChoice credential}"""
             | None -> html $""""""
         let controls =
             match claude.Flow with
@@ -525,10 +563,12 @@ module View =
     /// scope, the device flow (show the code → approve on github.com → the poll lands
     /// the grant), and the paste-a-token fallback.
     let private githubSection (actions: ViewActions) (dispatch: ClientMsg -> unit) (github: GitHubViewState) : TemplateResult =
-        let connectedRow (label: string) (scopeChoice: string) (kind: string option) =
-            match kind with
-            | Some kind ->
-                html $"""<div class="{Style.sideRow}" data-github-connected="{scopeChoice}"><span class="{Style.statusOk}"><span class="{Style.statusDot}"></span>{label} ({kind})</span><button type="button" class="{Style.btnIconBareDanger}" aria-label="Disconnect GitHub" data-github-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.GitHubDisconnect scopeChoice)}>{Icon.close}</button></div>"""
+        let connectedRow (label: string) (scopeChoice: string) (credential: ConnectionView option) =
+            match credential with
+            | Some credential ->
+                html $"""
+                    <div class="{Style.sideRow}" data-github-connected="{scopeChoice}">{credentialStatus label credential}<button type="button" class="{Style.btnIconBareDanger}" aria-label="Disconnect GitHub" data-github-disconnect="{scopeChoice}" @click={Ev(fun _ -> actions.GitHubDisconnect scopeChoice)}>{Icon.close}</button></div>
+                    {credentialReason Dom.Hooks.githubSignInRequired scopeChoice credential}"""
             | None -> html $""""""
         let controls =
             match github.Flow with

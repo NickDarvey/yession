@@ -1227,6 +1227,17 @@ let private getWithCookie (url: string) (cookie: string) : JS.Promise<HttpReply>
 let private cookieOf (jar: OidcHttp.Jar) : string =
     jar.Cookies |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> String.concat "; "
 
+/// "This scope has a credential connected", as the status body says it — and "it has none".
+///
+/// The shape lives HERE rather than in each case, because it used to live in four of them
+/// and adding one field to the wire broke all four at once. What these cases are about is
+/// whether a sign-in reached the session, not how the JSON spells it.
+let private connectedAt (scope: string) (body: string) : bool =
+    body.Contains (sprintf """"%s":{"kind":""" scope)
+
+let private notConnectedAt (scope: string) (body: string) : bool =
+    body.Contains (sprintf """"%s":null""" scope)
+
 /// Poll the session's /claude status until `predicate` holds — the session learns of
 /// credential changes over its control stream, so the flip is asynchronous by design.
 let private awaitClaudeStatus (sessionUrl: string) (cookie: string) (predicate: string -> bool) : Async<unit> =
@@ -1293,7 +1304,7 @@ let private e2eTests =
                     |> Async.AwaitPromise
                 Expect.equal putMine.status 200 (sprintf "the paste stores: %s" putMine.body)
                 do! awaitClaudeStatus sessionUrl cookieA (fun body ->
-                        body.Contains "\"mine\":\"static\"" && body.Contains "\"agent\":true")
+                        connectedAt "mine" body && body.Contains "\"agent\":true")
 
                 do! compose a a.Hello.PeerId "hello after sign-in"
                 a.Connection.SendDraft a.Hello.PeerId
@@ -1323,7 +1334,7 @@ let private e2eTests =
                 // B's own status surface agrees, without B having asserted any identity.
                 let cookieB = cookieOf openedB.Jar
                 do! awaitClaudeStatus sessionUrl cookieB (fun body ->
-                        body.Contains "\"mine\":\"static\"" && body.Contains "\"owner\":\"local\"")
+                        connectedAt "mine" body && body.Contains "\"owner\":\"local\"")
 
                 // 4. A stores a SESSION-scoped api key: it overrides for every actor —
                 //    Bob's next turn now runs on it.
@@ -1334,7 +1345,7 @@ let private e2eTests =
                         """{"scope":"session","token":"sk-ant-api03-fake"}"""
                     |> Async.AwaitPromise
                 Expect.equal putSession.status 200 (sprintf "the session-scoped paste stores: %s" putSession.body)
-                do! awaitClaudeStatus sessionUrl cookieA (fun body -> body.Contains "\"session\":\"static\"")
+                do! awaitClaudeStatus sessionUrl cookieA (connectedAt "session")
                 do! compose b b.Hello.PeerId "bob under the session credential"
                 b.Connection.SendDraft b.Hello.PeerId
                 do! b.Runner.WaitFor (fun m ->
@@ -1350,7 +1361,7 @@ let private e2eTests =
                     postJsonWithCookie (sessionUrl + "/claude/disconnect") cookieA """{"scope":"mine"}"""
                     |> Async.AwaitPromise
                 do! awaitClaudeStatus sessionUrl cookieA (fun body ->
-                        body.Contains "\"session\":null" && body.Contains "\"mine\":null")
+                        notConnectedAt "session" body && notConnectedAt "mine" body)
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()
@@ -1401,7 +1412,7 @@ let private e2eTests =
                         """{"scope":"mine","token":"sk-ant-oat01-alices"}"""
                     |> Async.AwaitPromise
                 Expect.equal putMine.status 200 (sprintf "alice connects her own: %s" putMine.body)
-                do! awaitClaudeStatus sessionUrl cookieAlice (fun body -> body.Contains "\"mine\":\"static\"")
+                do! awaitClaudeStatus sessionUrl cookieAlice (connectedAt "mine")
 
                 do! compose alice alice.Hello.PeerId "alice on her own credential"
                 alice.Connection.SendDraft alice.Hello.PeerId
@@ -1536,7 +1547,12 @@ let private recordingConnections () : RecordingConnections =
       Rejects = rejects }
 
 /// A bare server carrying only the /github handler, mounted at the origin root.
-let private startGitHubRoutes (connections: ControlClient.SessionConnections) (statusOf: SecretId -> ConnectionKind option) =
+/// A stored connection as the status cache would hold it. The timestamp is not what any
+/// of these cases are about, so it is fixed rather than a parameter.
+let private stored (kind: ConnectionKind) (health: ConnectionHealth) (id: SecretId) : ConnectionStatus =
+    { Id = id; Kind = kind; Health = health; UpdatedAt = DateTimeOffset.Parse "2026-08-21T00:00:00Z" }
+
+let private startGitHubRoutes (connections: ControlClient.SessionConnections) (statusOf: SecretId -> ConnectionStatus option) =
     async {
         let route = GitHubConnection.routes sessionA (stubAuth ()) connections statusOf ""
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
@@ -1598,8 +1614,10 @@ let private githubRouteTests =
                 // origin-partitioned localStorage, so it changed under the person holding it
                 // and every new value stranded the last one's credential.
                 let recorder = recordingConnections ()
-                let stored = ResizeArray<SecretId> ()
-                let! url = startGitHubRoutes recorder.Client (fun target -> if stored.Contains target then Some StaticConnection else None)
+                let storedTargets = ResizeArray<SecretId> ()
+                let! url =
+                    startGitHubRoutes recorder.Client (fun target ->
+                        if storedTargets.Contains target then Some (stored StaticConnection ConnectionUsable target) else None)
 
                 let! connected =
                     postJsonWithCookie (url + "/github/token") "who=anon" """{"scope":"mine","token":"ghp_abc"}"""
@@ -1608,20 +1626,20 @@ let private githubRouteTests =
                 Expect.equal recorder.Puts.Count 1 "one credential stored"
                 let target, _ = recorder.Puts.[0]
                 Expect.equal target.Scope LocalScope "owned by the deployment, not by any browser"
-                stored.Add target
+                storedTargets.Add target
 
                 // A DIFFERENT browser — no shared storage, no shared id, nothing carried over
                 // but the same deployment. Before this change it saw `"mine":null` and was
                 // shown a Connect button.
                 let! elsewhere = getWithCookie (url + "/github") "who=anon" |> Async.AwaitPromise
                 Expect.equal elsewhere.status 200 "readable"
-                Expect.isTrue (elsewhere.body.Contains "\"mine\":\"static\"") "already connected, from a browser that never connected anything"
+                Expect.isTrue (connectedAt "mine" elsewhere.body) "already connected, from a browser that never connected anything"
                 Expect.isTrue (elsewhere.body.Contains "\"owner\":\"local\"") "and says whose it is: the deployment's"
 
                 // An attributed user is untouched by any of it — they own their own, and the
                 // deployment's credential is not theirs to see.
                 let! alicesView = getWithCookie (url + "/github") "who=alice" |> Async.AwaitPromise
-                Expect.isTrue (alicesView.body.Contains "\"mine\":null") "an attributed user does not inherit it"
+                Expect.isTrue (notConnectedAt "mine" alicesView.body) "an attributed user does not inherit it"
                 Expect.isTrue (alicesView.body.Contains "\"owner\":\"user\"") "and owns by user"
             }
 
@@ -1754,21 +1772,25 @@ let private githubRouteTests =
             async {
                 let! stub = startStubGitHub ()
                 let recorder = recordingConnections ()
-                let connected = Map.ofList [ githubTarget (UserScope alice), StaticConnection ]
+                let aliceTarget = githubTarget (UserScope alice)
+                let connected = Map.ofList [ aliceTarget, stored StaticConnection ConnectionUsable aliceTarget ]
                 let! url = startGitHubRoutes recorder.Client (fun target -> Map.tryFind target connected)
                 do! withStubGitHub stub (Some "Iv1.test") (fun () ->
                     async {
                         let! forAlice = getWithCookie (url + "/github") "who=alice" |> Async.AwaitPromise
                         Expect.equal forAlice.status 200 "alice sees her own"
-                        Expect.isTrue (forAlice.body.Contains "\"mine\":\"static\"") "alice is connected"
-                        Expect.isTrue (forAlice.body.Contains "\"session\":null") "the session is not"
+                        Expect.isTrue (connectedAt "mine" forAlice.body) "alice is connected"
+                        Expect.isTrue
+                            (forAlice.body.Contains """"signInRequired":null""")
+                            "and nothing says otherwise"
+                        Expect.isTrue (notConnectedAt "session" forAlice.body) "the session is not"
                         Expect.isTrue (forAlice.body.Contains "\"owner\":\"user\"") "as a user"
 
                         // The same session, a different human: status is computed from the
                         // caller's identity, so bob does not learn he is signed in because
                         // alice is.
                         let! forBob = getWithCookie (url + "/github") "who=bob" |> Async.AwaitPromise
-                        Expect.isTrue (forBob.body.Contains "\"mine\":null") "bob is not connected"
+                        Expect.isTrue (notConnectedAt "mine" forBob.body) "bob is not connected"
                     })
             }
     ]

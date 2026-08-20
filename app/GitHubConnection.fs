@@ -282,7 +282,7 @@ let routes
     (sessionId: SessionId)
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
-    (statusOf: SecretId -> ConnectionKind option)
+    (statusOf: SecretId -> ConnectionStatus option)
     (mount: string)
     : IncomingMessage -> ServerResponse -> bool =
     // The pending device flow per target, held HERE and only here: the device code is
@@ -302,10 +302,23 @@ let routes
                     let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
                     match routeOf () with
                     | Some GitHubStatus ->
+                        // One connection as the panel reads it: which kind of credential it
+                        // is, and — when something has established that it no longer works —
+                        // why a person has to sign in again. `null` for a scope with nothing
+                        // connected. The GitHub panel reads the same shape from its own route;
+                        // both are pinned by their route suites.
                         let statusJson (target: SecretId) =
                             match statusOf target with
-                            | Some kind -> jsonString (kindLabel kind)
                             | None -> "null"
+                            | Some (status: ConnectionStatus) ->
+                                let signInRequired =
+                                    match status.Health with
+                                    | ConnectionUsable -> "null"
+                                    | SignInRequired reason -> jsonString reason
+                                sprintf
+                                    """{"kind":%s,"signInRequired":%s}"""
+                                    (jsonString (kindLabel status.Kind))
+                                    signInRequired
                         let sessionTarget : SecretId = { Scope = SessionScope sessionId; Name = secretName }
                         let mineTarget : SecretId = { Scope = CredentialOwner.scope owner; Name = secretName }
                         let ownerLabel =
