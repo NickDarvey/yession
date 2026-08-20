@@ -537,8 +537,12 @@ let startFull
 
         // Process-originated doc writes (the drain's queue removals) broadcast to every
         // peer; peer payloads are relayed by the receiving connection.
+        // Not released: this one belongs to the SESSION, and it outlives every peer in the
+        // map it broadcasts to (a client's own per-channel listener is the one that goes,
+        // in `App.connect`).
         DocSync.onLocalUpdate doc (fun payload ->
             connections |> Map.iter (fun _ channel -> sendState channel payload))
+        |> ignore
 
         // The drain re-arms on every doc update observed while idle, so an enqueue can
         // never be missed (liveness; recursion during a drain's own removal is cut by the
