@@ -425,7 +425,18 @@ module Dom =
         let stop = "data-stop"
         let openLink = "data-open"
         let createSession = "data-create-session"
+        /// The row's archive verb, and the archived row's way back. Both carry the session id.
+        let archive = "data-archive"
+        let unarchive = "data-unarchive"
+        /// A filter or sort control. Carries a STABLE name (`show-archived`, `sort`) rather
+        /// than the query it links to, so a swap can put focus back on the control that was
+        /// pressed even though its href just changed.
+        let filter = "data-filter"
         // Process status words shown in a row.
         let statusStopped = "stopped"
         let statusRunning = "running"
         let statusExited = "exited"
+        /// Not a process status — an operator's durable decision. It sits in the same cell
+        /// because "archived" is the answer a reader wants there, and "stopped" for a
+        /// session that can no longer start is true and useless.
+        let statusArchived = "archived"

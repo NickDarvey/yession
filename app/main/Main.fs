@@ -129,15 +129,32 @@ Async.StartImmediate(
         | Some _ -> ()
         | None -> manager.CreateSession sessionKey sessionKey |> expect |> ignore
 
-        match! manager.Launch sessionId with
-        | Error reason -> failwithf "default session failed to launch: %s" reason
-        | Ok sessionPort ->
+        // An ARCHIVED default session is not launched, and is not fatal. Launching it is a
+        // convenience, not a precondition for the Manager — and a boot that died here would
+        // lock the operator out completely, because the management UI is the only place to
+        // unarchive it and it would never come up. This reads `ArchivedAt` to decide whether
+        // to ATTEMPT; the refusal itself still lives in `ManagerState.launchable`, so the
+        // two cannot disagree. Every OTHER launch failure stays fatal: a child that cannot
+        // start is still a boot that should not claim to have succeeded.
+        let archived =
+            manager.TryFind sessionId
+            |> Option.bind (fun view -> view.Record.ArchivedAt)
+            |> Option.isSome
+        if archived then
             printfn
-                "Yession Manager: session %s launched at http://127.0.0.1:%d/  (child process, data=%s)"
+                "Yession Manager: session %s is archived — not launching it. Unarchive it in the management UI."
                 sessionKey
-                sessionPort
-                dataDir
-            match manager.EndpointPort with
-            | Some uiPort -> printfn "Yession Manager: management UI at http://127.0.0.1:%d/" uiPort
-            | None -> ()
+        else
+            match! manager.Launch sessionId with
+            | Error reason -> failwithf "default session failed to launch: %s" reason
+            | Ok sessionPort ->
+                printfn
+                    "Yession Manager: session %s launched at http://127.0.0.1:%d/  (child process, data=%s)"
+                    sessionKey
+                    sessionPort
+                    dataDir
+
+        match manager.EndpointPort with
+        | Some uiPort -> printfn "Yession Manager: management UI at http://127.0.0.1:%d/" uiPort
+        | None -> ()
     })
