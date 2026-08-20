@@ -275,6 +275,9 @@ let private observationTests =
             Expect.isFalse
                 (Broker.changesReadableStatus (Broker.Resolved (id, OAuthConnection, true)))
                 "spending one is not — a frame per turn would say nothing, loudly"
+            Expect.isTrue
+                (Broker.changesReadableStatus (Broker.Rejected (id, "github refused this credential")))
+                "and a provider refusing one certainly is"
     ]
 
 // --- Pure: the session-side Claude module ---------------------------------------------------
@@ -673,6 +676,49 @@ let private brokerTests =
                 let! raw = store.Resolve t
                 Expect.isTrue (expect raw |> Option.isSome) "the old entry survives for a reconnect"
                 Expect.isTrue (observed |> List.exists (function Broker.RefreshFailed _ -> true | _ -> false)) "observed"
+                // Reported as a fault to retry, NOT as a credential to re-authorize: the
+                // endpoint said nothing about the grant, only that it could not answer.
+                Expect.isFalse
+                    (observed |> List.exists (function Broker.Rejected _ -> true | _ -> false))
+                    "a provider that could not answer has not refused anything"
+                let! list = broker.StatusOf [ t ]
+                Expect.equal
+                    (list.Connections |> List.tryPick (fun c -> Some c.Health))
+                    (Some ConnectionUsable)
+                    "so the panel does not send anyone to sign in over a bad minute"
+            }
+
+        // The other half of that distinction, and the one no clock can predict: a refresh
+        // token revoked long before the expiry it stated — somebody removes the App at the
+        // provider. RFC 6749 §5.2 gives it a standard name, which is the only reason the
+        // broker can read it without learning whose service this is.
+        testCaseAsync "a provider calling the grant invalid is a sign-in to redo, not a fault to retry" <|
+            async {
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let mutable observed : Broker.BrokerObservation list = []
+                let broker = Broker.create (fun () -> "http://m/cb") store (fun o -> observed <- o :: observed)
+                let t = target (UserScope alice)
+                let due =
+                    BrokeredOAuth
+                        { AccessToken = "at-stale"
+                          RefreshToken = Some "rt-revoked"
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = None
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
+                let! _ = store.Set t (BrokeredCredentialCodec.toString due)
+                endpoint.SetResponse "error=invalid_grant"
+                let! resolved = broker.Resolve t
+                Expect.isError resolved "the refresh cannot succeed"
+                Expect.isTrue
+                    (observed |> List.exists (function Broker.Rejected _ -> true | _ -> false))
+                    "the grant is finished, and that is a different report from a failed refresh"
+                let! list = broker.StatusOf [ t ]
+                match list.Connections |> List.tryPick (fun c -> Some c.Health) with
+                | Some (SignInRequired _) -> ()
+                | other -> failwithf "a revoked grant must read as needing a sign-in, not %A" other
             }
 
         testCaseAsync "a grant handed over by a session is refreshable, unlike a pasted one" <|
@@ -757,6 +803,63 @@ let private brokerTests =
                 | Error reason -> Expect.stringContains reason "sign in again" "the refusal says what to DO"
                 | Ok _ -> failwith "a grant that cannot rotate cannot resolve, however fresh its access token"
                 Expect.equal endpoint.Requests.Count 0 "and nothing was asked of the provider"
+            }
+
+        // The half no clock can reach. A static token states no lifetime at all, so
+        // `beyondRefresh` says nothing about it for ever — the provider refusing it is the
+        // only event that will ever prove it dead.
+        testCaseAsync "a provider's refusal is what makes a static token read as finished" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                let! _ = broker.Put t "ghu_expired"
+                let healthOf () =
+                    async {
+                        let! list = broker.StatusOf [ t ]
+                        return list.Connections |> List.tryPick (fun c -> Some c.Health)
+                    }
+                let! before = healthOf ()
+                Expect.equal before (Some ConnectionUsable) "nothing here can tell yet"
+                let! recorded = broker.Reject t "github refused this credential"
+                Expect.equal recorded (Ok true) "the report is news"
+                let! after = healthOf ()
+                Expect.equal after (Some (SignInRequired "github refused this credential")) "and now it is known"
+            }
+
+        testCaseAsync "the same refusal reported twice is news once" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                let! _ = broker.Put t "ghu_expired"
+                let! first = broker.Reject t "github refused this credential"
+                let! again = broker.Reject t "github refused this credential"
+                Expect.equal first (Ok true) "the first time"
+                // A verb that retries reports the same refusal each attempt; three faults in
+                // the audit and three frames on the wire would all be the one fact.
+                Expect.equal again (Ok false) "the second time is the same fault, not a new one"
+            }
+
+        testCaseAsync "a refusal cannot outlive the credential it describes" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                // Nothing connected: there is nothing for a provider to have refused.
+                let! orphan = broker.Reject t "github refused this credential"
+                Expect.equal orphan (Ok false) "a refusal needs a credential to be about"
+
+                let! _ = broker.Put t "ghu_expired"
+                let! _ = broker.Reject t "github refused this credential"
+                // Signing in again is the remedy the panel offers, so it had better work:
+                // a mark surviving the write would send someone straight back to it.
+                let! _ = broker.Put t "ghp_fresh"
+                let! list = broker.StatusOf [ t ]
+                Expect.equal
+                    (list.Connections |> List.tryPick (fun c -> Some c.Health))
+                    (Some ConnectionUsable)
+                    "a new credential is not the one that was refused"
             }
 
         testCaseAsync "a status reports the same dead end a resolve refuses by" <|
@@ -974,6 +1077,15 @@ let private routeTests =
                 expect putSession
                 let! crossSession = clientB.Resolve (target (SessionScope sessionA))
                 Expect.isError crossSession "sibling session denied"
+
+                // Reporting a refusal is gated like resolving, because the only caller who
+                // can have been refused is one entitled to spend it.
+                let! putBack = clientB.Put (target (PeerScope peer1)) "sk-ant-oat01-x"
+                expect putBack
+                let! crossReject = clientA.Reject (target (PeerScope peer1)) "the provider said no"
+                Expect.isError crossReject "unwitnessed peer target denied"
+                let! ownReject = clientB.Reject (target (PeerScope peer1)) "the provider said no"
+                Expect.isTrue (expect ownReject) "the owner may report on its own credential"
 
                 let! disconnected = clientB.Disconnect (target (PeerScope peer1))
                 Expect.isTrue (expect disconnected) "disconnected"
@@ -1351,22 +1463,27 @@ type private RecordingConnections =
       /// Grants handed over for the Manager to refresh — the device flow's path, kept
       /// apart from `Puts` because which one a sign-in takes is the thing under test.
       Grants : ResizeArray<ControlWire.ConnectionPutGrantRequest>
-      Disconnects : ResizeArray<SecretId> }
+      Disconnects : ResizeArray<SecretId>
+      /// Credentials a verb reported the provider as having refused.
+      Rejects : ResizeArray<SecretId * string> }
 
 let private recordingConnections () : RecordingConnections =
     let puts = ResizeArray<SecretId * string> ()
     let grants = ResizeArray<ControlWire.ConnectionPutGrantRequest> ()
     let disconnects = ResizeArray<SecretId> ()
+    let rejects = ResizeArray<SecretId * string> ()
     { Client =
         { Begin = fun _ -> async { return Error "not under test" }
           Complete = fun _ _ -> async { return Error "not under test" }
           Put = fun target value -> async { puts.Add (target, value); return Ok () }
           PutGrant = fun request -> async { grants.Add request; return Ok () }
           Disconnect = fun target -> async { disconnects.Add target; return Ok true }
+          Reject = fun target reason -> async { rejects.Add (target, reason); return Ok true }
           Resolve = fun _ -> async { return Error "not under test" } }
       Puts = puts
       Grants = grants
-      Disconnects = disconnects }
+      Disconnects = disconnects
+      Rejects = rejects }
 
 /// A bare server carrying only the /github handler, mounted at the origin root.
 let private startGitHubRoutes (connections: ControlClient.SessionConnections) (statusOf: SecretId -> ConnectionKind option) =

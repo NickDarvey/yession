@@ -31,14 +31,37 @@ let private s256Challenge (verifier: string) : JS.Promise<string> = jsNative
   .then(async r => ({ status: r.status, body: await r.text() }))""")>]
 let private postGrant (url: string) (contentType: string) (body: string) : JS.Promise<{| status: int; body: string |}> = jsNative
 
-let private grantAt (tokenUrl: string) (request: TokenRequest) : Async<Result<string, string>> =
+/// Why a token request produced no grant, and the one distinction a caller acts on.
+///
+/// `Final` means the provider said this authorization is DEAD, not that it could not answer
+/// — so retrying cannot help and a person has to sign in again. Everything else (a 5xx, a
+/// timeout, a socket refused) is "try later", and treating those alike would send someone to
+/// re-authorize because their wifi dropped.
+type private GrantFailure = { Message : string; Final : bool }
+
+/// RFC 6749 §5.2: `invalid_grant` is the standard code for an authorization grant that is
+/// "expired, revoked, malformed, or invalid" — the shape of a refresh token whose App was
+/// revoked before its stated expiry, which no clock here can predict.
+///
+/// This stays STANDARDS-ONLY, like the rest of the broker: the code is from the RFC, not
+/// from any provider's dialect, so the broker still never learns which service it brokered.
+/// A provider that reports the same thing its own way is simply not final here, and reads as
+/// "try later" — the safe direction to be wrong in.
+let private isFinalRefusal (status: int) (body: string) : bool =
+    status >= 400 && status < 500 && body.Contains "invalid_grant"
+
+let private grantAt (tokenUrl: string) (request: TokenRequest) : Async<Result<string, GrantFailure>> =
     async {
         try
             let! reply = postGrant tokenUrl request.ContentType request.Body |> Interop.awaitPromise
             if reply.status >= 200 && reply.status < 300 then return Ok reply.body
-            else return Error (sprintf "token endpoint refused (%d): %s" reply.status reply.body)
+            else
+                return
+                    Error
+                        { Message = sprintf "token endpoint refused (%d): %s" reply.status reply.body
+                          Final = isFinalRefusal reply.status reply.body }
         with e ->
-            return Error (sprintf "token endpoint unreachable: %s" e.Message)
+            return Error { Message = sprintf "token endpoint unreachable: %s" e.Message; Final = false }
     }
 
 /// What the broker observed — identifiers only, adapted to audit records by the caller.
@@ -47,6 +70,8 @@ type BrokerObservation =
     | Disconnected of SecretId
     | Resolved of SecretId * ConnectionKind * refreshed: bool
     | RefreshFailed of SecretId * reason: string
+    /// The provider refused this credential, as reported by whoever spent it.
+    | Rejected of SecretId * reason: string
 
 /// Whether this observation changes what a session may currently READ — which is the only
 /// question a status broadcast asks.
@@ -66,7 +91,8 @@ let changesReadableStatus (observation: BrokerObservation) : bool =
     match observation with
     | Connected _
     | Disconnected _
-    | RefreshFailed _ -> true
+    | RefreshFailed _
+    | Rejected _ -> true
     | Resolved _ -> false
 
 type BrokerService =
@@ -86,6 +112,11 @@ type BrokerService =
       /// pasted token cannot rotate and this one can, so the two must not share a path.
       PutGrant : ControlWire.ConnectionPutGrantRequest -> Async<Result<unit, string>>
       Disconnect : SecretId -> Async<Result<bool, string>>
+      /// Record that the PROVIDER refused this credential. The one fact about a
+      /// credential's health that cannot be worked out here: a static token carries no
+      /// expiry, so "it stopped working" only ever arrives from whoever spent it.
+      /// Answers whether this changed anything.
+      Reject : SecretId -> string -> Async<Result<bool, string>>
       /// Metadata for whichever of `targets` exist — never values.
       StatusOf : SecretId list -> Async<ConnectionStatusList>
       /// The credential's current value, refreshing a due OAuth grant first (standard
@@ -103,13 +134,50 @@ let create
     let pending = PendingFlows (fun () -> System.DateTimeOffset.UtcNow.ToUnixTimeSeconds ())
     let now () = System.DateTimeOffset.UtcNow
 
+    // What a provider has told us about a credential we hold, keyed by target.
+    //
+    // In MEMORY, deliberately, and not in the encrypted envelope. Writing it there would
+    // rewrite `secrets.json` — re-encrypting a credential — every time a 401 came back, for
+    // a fact the next use re-learns anyway. It sits beside `inFlight` because it is the same
+    // kind of thing: what this Manager currently knows, not what it stores. A restart
+    // forgets, and the first verb after one is told again.
+    let rejected = Dictionary<SecretId, string> ()
+
+    /// Every write to a target goes through here, so forgetting the old rejection is part of
+    /// storing rather than something each caller has to remember: a credential that was just
+    /// connected is by definition not the one the provider refused, and a stale mark on it
+    /// would send someone to sign in again immediately after they just did.
     let storeCredential (target: SecretId) (credential: BrokeredCredential) : Async<Result<unit, string>> =
         async {
             match! store.Set target (BrokeredCredentialCodec.toString credential) with
             | Ok _ ->
+                rejected.Remove target |> ignore
                 observe (Connected (target, BrokerFlow.kindOf credential))
                 return Ok ()
             | Error e -> return Error e
+        }
+
+    let reject (target: SecretId) (reason: string) : Async<Result<bool, string>> =
+        async {
+            match! store.Resolve target with
+            | Error e -> return Error e
+            // Nothing connected here, so there is no credential for a provider to have
+            // refused. Recording one would leave a health state outliving the thing it
+            // describes — and the next connect would find it already marked.
+            | Ok None -> return Ok false
+            | Ok (Some _) ->
+                let alreadyKnown =
+                    match rejected.TryGetValue target with
+                    | true, existing -> existing = reason
+                    | _ -> false
+                // A verb that retries reports the same refusal each time; saying it once is
+                // what keeps that from being three faults in the audit and three frames on
+                // the wire.
+                if alreadyKnown then return Ok false
+                else
+                    rejected.[target] <- reason
+                    observe (Rejected (target, reason))
+                    return Ok true
         }
 
     let exchange (flow: PendingFlow) (state: string) (code: string) : Async<Result<unit, string>> =
@@ -119,7 +187,9 @@ let create
             let request =
                 BrokerFlow.exchangeRequest flow.Dialect flow.ClientId flow.RedirectUri flow.Verifier state code
             match! grantAt flow.TokenUrl request with
-            | Error e -> return Error e
+            // Nothing is stored yet, so there is no credential to mark — a first exchange
+            // that fails leaves the target exactly as empty as it was.
+            | Error failure -> return Error failure.Message
             | Ok json ->
                 match BrokerFlow.decodeTokenResponse (now ()) flow.TokenUrl flow.ClientId flow.Dialect json with
                 | Error e -> return Error (sprintf "token response malformed: %s" e)
@@ -151,14 +221,24 @@ let create
     // wedge the target forever.
     let inFlight = Dictionary<SecretId, JS.Promise<Result<ConnectionKind * string, string>>> ()
 
+
     let refreshGrant (target: SecretId) (grant: OAuthGrant) (refreshToken: string) =
         async {
             match! grantAt grant.TokenUrl (BrokerFlow.refreshRequest grant refreshToken) with
-            | Error e ->
-                // Keep the old entry: the user can reconnect, and the
+            | Error failure ->
+                // Keep the old entry either way: the user can reconnect, and the
                 // stale token may still be honored briefly.
-                observe (RefreshFailed (target, e))
-                return Error (sprintf "token refresh failed: %s" e)
+                //
+                // But a FINAL refusal is a different report from a failed one. A refresh
+                // token can be revoked long before the expiry it stated — somebody removes
+                // the App at the provider — and no clock here can see that coming, so the
+                // provider saying `invalid_grant` is the only way this is ever known.
+                // Without it a revoked grant retried forever behind a green panel.
+                if failure.Final then
+                    let! _ = reject target "the provider refused this sign-in — it may have been revoked"
+                    ()
+                else observe (RefreshFailed (target, failure.Message))
+                return Error (sprintf "token refresh failed: %s" failure.Message)
             | Ok json ->
                 match BrokerFlow.decodeTokenResponse (now ()) grant.TokenUrl grant.ClientId grant.Dialect json with
                 | Error e ->
@@ -169,6 +249,8 @@ let create
                     match! store.Set target (BrokeredCredentialCodec.toString (BrokeredOAuth merged)) with
                     | Error e -> return Error e
                     | Ok _ ->
+                        // A refresh that worked clears whatever the last one was told.
+                        rejected.Remove target |> ignore
                         observe (Resolved (target, OAuthConnection, true))
                         return Ok (OAuthConnection, merged.AccessToken)
         }
@@ -306,10 +388,14 @@ let create
             async {
                 match! store.Delete target with
                 | Ok existed ->
+                    // Same rule as storing one: the mark describes a credential, and this
+                    // target no longer has that credential.
+                    rejected.Remove target |> ignore
                     if existed then observe (Disconnected target)
                     return Ok existed
                 | Error e -> return Error e
             }
+      Reject = fun target reason -> reject target reason
       StatusOf =
         fun targets ->
             async {
@@ -326,12 +412,20 @@ let create
                             statuses
                             @ [ { ConnectionStatus.Id = target
                                   Kind = BrokerFlow.kindOf credential
-                                  // The same rule a resolve refuses by, so a panel and a turn
-                                  // never disagree about whether this credential still works.
+                                  // What a provider SAID outranks what we can work out: a
+                                  // refusal is evidence, and `beyondRefresh` is inference.
+                                  // For a static token the inference is always `None`, so
+                                  // the report is the only thing there is.
                                   Health =
-                                    BrokerFlow.beyondRefresh (now ()) credential
-                                    |> Option.map SignInRequired
-                                    |> Option.defaultValue ConnectionUsable
+                                    match rejected.TryGetValue target with
+                                    | true, reason -> SignInRequired reason
+                                    | _ ->
+                                        // Otherwise the same rule a resolve refuses by, so a
+                                        // panel and a turn never disagree about whether this
+                                        // credential still works.
+                                        BrokerFlow.beyondRefresh (now ()) credential
+                                        |> Option.map SignInRequired
+                                        |> Option.defaultValue ConnectionUsable
                                   UpdatedAt = updatedAt } ]
                     | Ok None | Error _ -> ()
                 return { Connections = statuses }
