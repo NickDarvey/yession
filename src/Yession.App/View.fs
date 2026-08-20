@@ -43,6 +43,11 @@ type ViewActions =
       /// shell root, like the nav); the browser also brings that column on screen and
       /// re-probes the Claude status on toggle, so settings always opens fresh.
       ToggleSettings : unit -> unit
+      /// Take the reader TO settings, never back. `ToggleSettings`'s one-way sibling, and
+      /// the difference matters for exactly one caller: the sign-in prompt over the timeline
+      /// is on screen whenever a credential needs one — including while the settings face is
+      /// already open — so a toggle there would shut the panel it is pointing at.
+      RevealSettings : unit -> unit
       /// Claude connection panel (Plan 08). Imperative because they read panel inputs and
       /// drive the /claude round-trips; the reducer only folds the resulting messages.
       /// Begin the sign-in flow for the scope in the panel's selector.
@@ -129,6 +134,7 @@ module ViewActions =
           ToggleNav = ignore
           ReportTitleSelection = ignore
           ToggleSettings = ignore
+          RevealSettings = ignore
           ClaudeConnect = ignore
           ClaudeComplete = ignore
           ClaudePasteToken = ignore
@@ -739,6 +745,42 @@ module View =
             </aside>"""
 
     // --- Conversation column ------------------------------------------------------------
+
+    /// The one call to action for a credential that stopped working, over the timeline where
+    /// somebody who never opens settings will meet it.
+    ///
+    /// It is the only NEW button this feature adds. The panel rows and the agent's roster row
+    /// say the same fact as a status, because a call to action repeated is wallpaper — the
+    /// rule `Style.fs`'s `noAgent*` block and the acceptance suite both already encode. Here
+    /// it is a button because, unlike a degraded leg, a dead credential does not recover on
+    /// its own.
+    ///
+    /// Shown whenever anything needs signing in, at every width — NOT only while the sidebar
+    /// is off screen, which is how the header's "no agent" stand-in behaves. The two differ
+    /// because their subjects do: an absent agent is a state you chose and can see in the
+    /// roster, while a credential that died is news, and news that only reaches you if a
+    /// column happens to be collapsed is news that does not reach you.
+    ///
+    /// Silent while the session leg is down, for a reason and not for tidiness: signing in
+    /// runs against the session, so a prompt offering it to somebody who cannot reach the
+    /// session is offering a button that cannot work. The degraded strip owns that moment,
+    /// and one strip at a time is what it has always promised.
+    let private signInPrompt (actions: ViewActions) (model: ClientModel) : TemplateResult =
+        match model.Connection, ClientModel.signInRequired model with
+        | Disconnected _, _
+        | _, [] -> Lit.nothing
+        // Whichever came first in the derivation's settled order. A second row would be the
+        // same instruction twice, and the panel it opens shows every provider anyway.
+        | _, (provider, reason) :: _ ->
+            html $"""
+                <section class="{Style.signInPrompt}" data-signin-required="{provider}">
+                  <span class="{Style.statusErr}"><span class="{Style.statusDot}"></span>{provider}</span>
+                  <span class="{Style.cls [ Style.small; Style.signInPromptReason ]}">{reason}</span>
+                  <button type="button" class="{Style.btnPrimary}"
+                          data-signin-again data-settings-toggle="prompt"
+                          @click={Ev(fun _ -> actions.RevealSettings ())}>{Dom.Text.signInAgain}</button>
+                </section>"""
+
 
     /// ONE degradation strip over the timeline: whichever leg is down, said once, with what
     /// still works. Nothing here disables anything below it — the composer, the queue, and the
@@ -2443,6 +2485,7 @@ module View =
             <div class="{Style.mainColumn}">
               {header actions dispatch model}
               {degradedBanner model}
+              {signInPrompt actions model}
               {chat actions dispatch model}
               {pendingActs actions dispatch model}
               {agentStrip actions model.Agent}
