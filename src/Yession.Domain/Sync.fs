@@ -676,7 +676,18 @@ module DocSync =
     let private refEq (a: obj) (b: obj) : bool = jsNative
 
     [<Emit("$0.on('update', $1)")>]
-    let private onUpdate (doc: Y.Doc) (handler: JS.Uint8Array -> obj -> unit) : unit = jsNative
+    let private addUpdateListener (doc: Y.Doc) (handler: JS.Uint8Array -> obj -> unit) : unit = jsNative
+
+    [<Emit("$0.off('update', $1)")>]
+    let private removeUpdateListener (doc: Y.Doc) (handler: JS.Uint8Array -> obj -> unit) : unit = jsNative
+
+    /// Register a doc listener and get back the way to stop it. ONE verb, because `off`
+    /// only removes a listener when handed the very function reference `on` was given —
+    /// a caller who kept the handler and remembered to pass it again is a caller who can
+    /// forget. The disposer closes over it, so there is nothing left to get wrong.
+    let private onUpdate (doc: Y.Doc) (handler: JS.Uint8Array -> obj -> unit) : unit -> unit =
+        addUpdateListener doc handler
+        fun () -> removeUpdateListener doc handler
 
     /// The origin tag under which remote payloads are applied, letting the local-update
     /// broadcast tell relayed changes from locally-originated ones.
@@ -694,16 +705,20 @@ module DocSync =
     /// `applyRemote`, including the Ylmish binding's writes). Remote payloads are excluded
     /// so a peer never echoes back what it was just sent; relaying to *other* peers is the
     /// hub's explicit job.
-    let onLocalUpdate (doc: Y.Doc) (send: string -> unit) : unit =
+    ///
+    /// Returns the way to stop sending. A registration that outlives what it sends over is
+    /// a leak with a symptom nobody attributes: the doc keeps calling a listener whose
+    /// channel is shut, and every local update walks one more of them per reconnect.
+    let onLocalUpdate (doc: Y.Doc) (send: string -> unit) : unit -> unit =
         onUpdate doc (fun update origin ->
             if not (refEq origin remoteOrigin) then send (toBase64 update))
 
     /// Invoke `handle` after every doc update, however it originated.
     let onAnyUpdate (doc: Y.Doc) (handle: unit -> unit) : unit =
-        onUpdate doc (fun _ _ -> handle ())
+        onUpdate doc (fun _ _ -> handle ()) |> ignore
 
     /// Invoke `persist` with every update applied to the doc, however it originated —
     /// the doc-persistence tap (Step 19). Register it before the observers that act on
     /// updates, so durability precedes visibility.
     let onAnyUpdatePayload (doc: Y.Doc) (persist: string -> unit) : unit =
-        onUpdate doc (fun update _ -> persist (toBase64 update))
+        onUpdate doc (fun update _ -> persist (toBase64 update)) |> ignore

@@ -200,6 +200,7 @@ let private runSchedule (ops: ScheduleOp list) : CaseResult =
         DocSync.onLocalUpdate thisProcess (fun payload ->
             if System.Object.ReferenceEquals (thisProcess, processDoc) then
                 DocSync.applyRemote thisShadow payload)
+        |> ignore
         // The while-idle trigger, exactly as the Host wires it.
         DocSync.onAnyUpdate thisProcess (fun () ->
             if System.Object.ReferenceEquals (thisProcess, processDoc) then sched.Drain ())

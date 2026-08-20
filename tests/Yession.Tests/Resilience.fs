@@ -938,6 +938,65 @@ let private lifecycleTests =
             }
     ]
 
+// --- What a connection leaves behind ------------------------------------------------------
+
+/// A channel that RECORDS what is sent over it and never refuses — not even after it is
+/// closed. That last part is the whole instrument: a real transport swallows a post-mortem
+/// send, so a doc listener nobody removed would keep firing into it and look exactly like a
+/// doc listener that was.
+let private recordingOver (channel: FrameChannel<string>) =
+    let sent = ResizeArray<SessionFrame<string>> ()
+    { channel with Send = fun frame -> async { sent.Add frame } }, sent
+
+let private releaseTests =
+    testList "A connection that has ended" [
+        testCaseAsync "stops feeding the doc to the channel it spoke over" <|
+            async {
+                // The leak this pins is per-CONNECTION and the doc is per-CLIENT, so it grows
+                // by one listener per reconnect — which the link heartbeat makes routine — and
+                // every local update then walks all of them, sending into channels that shut
+                // long ago.
+                let doc = Y.Doc.Create ()
+                let registry = BodyRegistry doc
+                let local = peer "ada" "Ada"
+                let clientEnd, serverEnd = Yession.SessionProcess.InMemoryChannel.createPair<string> ()
+                let channel, sent = recordingOver clientEnd
+                let connection =
+                    App.connect
+                        App.ConnectOptions.defaults
+                        doc
+                        registry
+                        (TextRegistry doc)
+                        { PeerId = local.PeerId; DisplayName = "Ada"; Token = "t" }
+                        ignore
+                        channel
+                let finished = ref false
+                Async.StartImmediate (async {
+                    do! connection.Run
+                    finished.Value <- true })
+
+                let states () = sent |> Seq.filter (function State _ -> true | _ -> false) |> Seq.length
+                let write (markdown: string) =
+                    Markdown.intoFragment markdown (registry.Fragment (BodyKey.draft local.PeerId))
+
+                // Anti-vacuity, and the reason the silence below means anything: while the pump
+                // runs, a local write really does reach the channel. Without this the test
+                // passes on a connection that never sent in the first place.
+                write "while the pump runs"
+                do! waitUntil "the live connection sends a local doc update" (fun () -> states () > 0)
+
+                do! serverEnd.Close ()
+                do! waitUntil "the pump ends when the far end goes" (fun () -> finished.Value)
+
+                let afterTheEnd = states ()
+                write "after the pump ended"
+                Expect.equal
+                    (states ())
+                    afterTheEnd
+                    "a doc update after the pump ended was still being sent — the connection's listener outlived it"
+            }
+    ]
+
 // --- What the failure looks like ----------------------------------------------------------
 
 let private surfaceTests =
@@ -1053,5 +1112,6 @@ let tests =
         channelTests
         linkTests
         lifecycleTests
+        releaseTests
         surfaceTests
     ]

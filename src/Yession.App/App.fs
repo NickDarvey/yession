@@ -707,8 +707,15 @@ module App =
         (dispatch: ClientMsg -> unit)
         (channel: FrameChannel<string>)
         : Connection =
-        DocSync.onLocalUpdate doc (fun payload ->
-            Async.StartImmediate (channel.Send (State (StateSync payload))))
+        // Registered here and released by `Run`, which is why the two are one verb rather
+        // than a disposer for the caller to remember: this listener belongs to the CHANNEL,
+        // not to the doc, and the doc outlives every channel that ever spoke over it. A
+        // client that reconnects — routine now that the link notices its own death — would
+        // otherwise leave one behind per attempt, each still sending into a shut channel,
+        // and every local update would walk all of them.
+        let stopSending =
+            DocSync.onLocalUpdate doc (fun payload ->
+                Async.StartImmediate (channel.Send (State (StateSync payload))))
 
         // No commands are issued by the client anymore (sending is a CRDT write);
         // responses to any future commands are currently uncorrelated.
@@ -848,7 +855,14 @@ module App =
             | _ -> ()
 
         { Run =
-            Connection.run hello dispatchAndConsume (DocSync.applyRemote doc) onResponse onEventsPage options.OnTerminalSnapshot channel
+            async {
+                try
+                    do!
+                        Connection.run hello dispatchAndConsume (DocSync.applyRemote doc) onResponse onEventsPage options.OnTerminalSnapshot channel
+                // However the pump ends — the channel closing, a fault, cancellation — the
+                // doc stops feeding it.
+                finally stopSending ()
+            }
           SendDraft =
             fun peerId ->
                 // Enqueue under the key the draft has carried since it was published, read from
