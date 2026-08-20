@@ -218,17 +218,29 @@ module ControlWire =
                 | "static" -> Decode.succeed StaticConnection
                 | other -> Decode.fail (sprintf "Unknown connection kind: %s" other)) }
 
+    /// Health rides as an OPTIONAL `signInRequired` reason rather than a tagged union:
+    /// present means `SignInRequired`, absent means usable. A frame minted before this
+    /// field existed therefore decodes as healthy, which is what it meant — the same
+    /// additive move `refreshExpiresAt` and `dialect` made in the credential envelope.
     let connectionStatus : Codec<ConnectionStatus> =
         { Encode =
             fun (s: ConnectionStatus) ->
                 Encode.object
                     [ "id", secretId.Encode s.Id
                       "kind", connectionKind.Encode s.Kind
+                      "signInRequired",
+                        (match s.Health with
+                         | ConnectionUsable -> Encode.nil
+                         | SignInRequired reason -> Encode.string reason)
                       "updatedAt", Codec.timestamp.Encode s.UpdatedAt ]
           Decode =
             Decode.object (fun get ->
                 { ConnectionStatus.Id = get.Required.Field "id" secretId.Decode
                   ConnectionStatus.Kind = get.Required.Field "kind" connectionKind.Decode
+                  ConnectionStatus.Health =
+                    get.Optional.Field "signInRequired" Decode.string
+                    |> Option.map SignInRequired
+                    |> Option.defaultValue ConnectionUsable
                   ConnectionStatus.UpdatedAt = get.Required.Field "updatedAt" Codec.timestamp.Decode }) }
 
     /// The `/control/connections` SSE frame: every connection the receiving launch may

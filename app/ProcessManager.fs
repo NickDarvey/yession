@@ -719,17 +719,19 @@ let createWithUi
                 (fun () -> issuerOf () + "/connections/callback")
                 store
                 (fun observation ->
+                    // Two separate questions, so two separate statements: what this goes
+                    // into the audit as, and whether it changes what a session may read.
+                    // The second is `Broker.changesReadableStatus` rather than a case list
+                    // here — see its comment for why that is not this file's to decide.
                     match observation with
                     | Broker.Connected (id, kind) ->
                         audit (SecretStore.Audit.connectionConnected id (sprintf "%A" kind))
-                        broadcastConnections.Value ()
-                    | Broker.Disconnected id ->
-                        audit (SecretStore.Audit.connectionDisconnected id)
-                        broadcastConnections.Value ()
+                    | Broker.Disconnected id -> audit (SecretStore.Audit.connectionDisconnected id)
                     | Broker.Resolved (id, kind, refreshed) ->
                         audit (SecretStore.Audit.connectionResolved id (sprintf "%A" kind) refreshed)
                     | Broker.RefreshFailed (id, reason) ->
-                        audit (SecretStore.Audit.connectionRefreshFailed id reason)))
+                        audit (SecretStore.Audit.connectionRefreshFailed id reason)
+                    if Broker.changesReadableStatus observation then broadcastConnections.Value ()))
 
     let connectionsApi : Control.ConnectionsApi option =
         match secretStore, broker with
