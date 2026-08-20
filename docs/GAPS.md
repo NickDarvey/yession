@@ -133,13 +133,29 @@ Items are roughly ordered by how much they matter.
     can be anywhere, so the allow-back is a platform list (`SrtTools.Runtime`) plus the
     install prefix of whatever is already running — `process.execPath`, srt's own package
     (its wrapped argv execs a vendored helper from inside the sandbox), and
-    `YESSION_CLAUDE_PATH` — plus `YESSION_SANDBOX_READ_PATHS` for a toolchain neither
-    finds. That last one ADDS to the platform list rather than replacing it. A path the
-    list is missing fails loudly and locally: a command cannot find its interpreter.
+    `YESSION_CLAUDE_PATH`, `YESSION_GIT_PATH` — plus `YESSION_SANDBOX_READ_PATHS` for a
+    toolchain neither finds. That last one ADDS to the platform list rather than replacing
+    it. A path the list is missing fails loudly and locally: a command cannot find its
+    interpreter.
     - **The darwin list is unverified.** No job here executes a suite on darwin (pr.yaml's
       macos job builds the package and enters the dev shell), so `linuxRuntimePaths` is
       pinned by the `Srt` tier and `darwinRuntimePaths` is what a Seatbelt profile
       conventionally allows back, checked against srt's implementation and nothing else.
+      It has already cost one release: with the read scope on, every git verb on macOS ran
+      PATH's `/usr/bin/git`, which is not git but a shim that resolves a developer
+      directory through a `/var/select` symlink — and srt's macOS escape hatch allows
+      metadata on DIRECTORIES, so the symlink stayed denied. Sessions reported
+      `xcode-select: error: unable to read data link … (Operation not permitted)`, which
+      reads as a broken Xcode install and is not one. The fix was to stop asking the host
+      which git to run (below), not to widen the scope for a shim.
+  - **Every binary a confined spawn execs is NAMED; git was the last exception.**
+    `YESSION_GIT_PATH` (the installable sets it on both platforms, unlike the Linux-only
+    srt tools) joins `YESSION_BWRAP_PATH`, `YESSION_SOCAT_PATH`, `YESSION_RIPGREP_PATH`
+    and `YESSION_CLAUDE_PATH`. Unset, the verbs still fall back to PATH so an off-Nix
+    install does not regress — and an `npm i -g yession` on macOS is exactly where that
+    fallback is wrong, so the git sandbox proves `git --version` before any verb runs one
+    and refuses with a sentence naming `YESSION_GIT_PATH` and `YESSION_SANDBOX_READ_PATHS`
+    instead of passing the host binary's excuse through.
     - **`/proc` and `/sys` are outside the scope by construction.** srt's root-deny
       expansion skips both (it remounts `/proc` itself, and a tmpfs over `/sys` breaks
       tooling for a tree that is read-only anyway). Neither is a route back to the denied

@@ -510,6 +510,7 @@ Async.StartImmediate (
                       // it, not the git sandbox's: nobody runs a build in the git sandbox.
                       VisibleAt = Sandboxes.reposVisibleAt workBackend reposDir
                       ExtraReadPaths = []
+                      Git = Repos.gitExecutable (Sandboxes.ambientEnv ())
                       AllowedDomains = [ "github.com" ]
                       AllowProtocol = "https"
                       CloneUrl = RepoRef.cloneUrl

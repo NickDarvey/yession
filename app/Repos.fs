@@ -85,6 +85,35 @@ let hardenedEnv (allowProtocol: string) (token: string option) : (string * strin
              sprintf "GIT_CONFIG_VALUE_%d" i, value ])
        |> List.concat)
 
+/// The git a verb runs, NAMED rather than looked up on PATH. Every other binary a
+/// confined spawn execs is named for this reason — srt's bwrap, socat and ripgrep, the
+/// agent's claude — and git was the exception until the exception cost a session.
+///
+/// On macOS `git` on PATH is `/usr/bin/git`, which is not git: it is a shim that resolves
+/// a developer directory first, through `xcode-select` reading the `/var/select` symlink.
+/// A sandbox that scopes its reads denies that symlink (srt's macOS escape hatch allows
+/// metadata on DIRECTORIES, and a symlink is not one), so the shim fails before git runs
+/// and reports it as a broken Xcode install — which is not what happened and not what
+/// fixes it. The same shim is why `credential.helper` has to be cleared above.
+///
+/// Empty or unset keeps PATH, so nothing off-Nix regresses; the installable names one.
+let gitExecutable (ambient: Map<string, string>) : string =
+    ambient
+    |> Map.tryFind "YESSION_GIT_PATH"
+    |> Option.map (fun path -> path.Trim ())
+    |> Option.filter (fun path -> path <> "")
+    |> Option.defaultValue "git"
+
+/// What a sandbox that cannot run git says. It is a whole sentence with the two knobs in
+/// it because the alternative is what shipped: the host binary's own parting words —
+/// `xcode-select: error: unable to read data link ...` — which name neither the sandbox
+/// nor anything an operator can set.
+let unusableGit (git: string) (reason: string) : string =
+    sprintf
+        "git ('%s') cannot run inside the sandbox: %s. Name a working git with YESSION_GIT_PATH; if it needs files the sandbox's read scope denies, name those with YESSION_SANDBOX_READ_PATHS."
+        git
+        reason
+
 /// Cap rendered git output. The head is kept — a status/log/diff front-loads its
 /// signal — and the elision is stated, never silent.
 let capText (limit: int) (text: string) : string =
@@ -113,6 +142,9 @@ type ReposConfig =
       /// the write binds, so an ancestor lands on top of the repos dir read-only and
       /// every clone fails. A sibling cannot cover it.
       ExtraReadPaths : string list
+      /// The git binary every verb spawns (`gitExecutable`). A path, or `git` for the
+      /// PATH lookup that is only safe where PATH's git is really git.
+      Git : string
       /// Egress for the git sandbox. Production: github.com.
       AllowedDomains : string list
       /// `GIT_ALLOW_PROTOCOL`. Production pins `https`; the test harness allows `file`.
@@ -185,20 +217,52 @@ let create (config: ReposConfig) : Result<ReposService, string> =
               WorkingDirectory = Some config.ReposDir
               Filesystem = Confined }
 
-        // A sandbox per policy, created on first use — under srt that is an
-        // argv-rewriting wrapper, not a container, so per-verb spawns stay cheap.
+        /// `git --version` inside the sandbox, before any verb runs one. A sandbox that
+        /// cannot run git is not a git sandbox, and this is where it says so: the
+        /// alternative is every verb reporting whatever the host's binary printed on its
+        /// way out, once per verb, in words that name neither the sandbox nor a knob.
+        ///
+        /// It costs one spawn per sandbox lifetime — two per session, milliseconds under
+        /// srt — and it is the guard that catches the NEXT unreadable runtime rather than
+        /// only the one that prompted it.
+        let usable (sandbox: Sandbox) : Async<Result<Sandbox, string>> =
+            async {
+                let mutable output = ""
+                let exec : SandboxExec =
+                    { Executable = config.Git
+                      Arguments = [ "--version" ]
+                      Env = Map.empty
+                      WorkingDirectory = Some config.ReposDir }
+                match! sandbox.Spawn exec (fun (_, chunk) -> output <- output + chunk) with
+                | Error reason -> return Error (unusableGit config.Git reason)
+                | Ok handle ->
+                    match! handle.Exited with
+                    | SandboxExited 0 -> return Ok sandbox
+                    | SandboxExited code ->
+                        return
+                            Error (unusableGit config.Git (sprintf "exit %d: %s" code (capText 400 (output.Trim ()))))
+                    | SandboxRunFailed reason -> return Error (unusableGit config.Git reason)
+            }
+
+        // A sandbox per policy, created and PROVED on first use — under srt that is an
+        // argv-rewriting wrapper, not a container, so per-verb spawns stay cheap. The
+        // answer is remembered either way: a sandbox that failed its probe fails every
+        // verb with the same sentence rather than re-probing per call.
         let lazySandbox (policy: SandboxPolicy) : unit -> Async<Result<Sandbox, string>> =
-            let mutable sandbox : Sandbox option = None
+            let mutable ready : Result<Sandbox, string> option = None
             fun () ->
                 async {
-                    match sandbox with
-                    | Some ready -> return Ok ready
+                    match ready with
+                    | Some answer -> return answer
                     | None ->
-                        match! createSandbox policy with
-                        | Error e -> return Error (sprintf "git sandbox: %s" e)
-                        | Ok created ->
-                            sandbox <- Some created
-                            return Ok created
+                        let! answer =
+                            async {
+                                match! createSandbox policy with
+                                | Error e -> return Error (sprintf "git sandbox: %s" e)
+                                | Ok created -> return! usable created
+                            }
+                        ready <- Some answer
+                        return answer
                 }
 
         let confined = lazySandbox policy
@@ -224,7 +288,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                     let mutable stdout = ""
                     let mutable stderr = ""
                     let exec : SandboxExec =
-                        { Executable = "git"
+                        { Executable = config.Git
                           Arguments = args
                           Env = hardenedEnv config.AllowProtocol token |> Map.ofList
                           WorkingDirectory = Some config.ReposDir }

@@ -101,6 +101,36 @@ let private pureTests =
                 (RepoRef.create (sprintf "%s/anything" Repos.stagingDirName))
                 "a clone in progress is unnameable as a repo, so the scan cannot surface one"
 
+        // What PATH's git IS differs by platform, and on macOS it is not git: `/usr/bin/git`
+        // is a shim that resolves a developer directory first, through a `/var/select`
+        // symlink a scoped sandbox denies. Naming one is the same rule srt's own tools
+        // follow, for the same reason.
+        testCase "the git a verb runs is the one named, not whatever PATH resolves" <| fun () ->
+            Expect.equal
+                (Repos.gitExecutable (Map.ofList [ "YESSION_GIT_PATH", " /nix/store/x/bin/git " ]))
+                "/nix/store/x/bin/git"
+                "a named git is trimmed and used"
+            Expect.equal
+                (Repos.gitExecutable (Map.ofList [ "YESSION_GIT_PATH", "" ]))
+                "git"
+                "a blank one is unset, not an executable of empty string"
+            Expect.equal
+                (Repos.gitExecutable Map.empty)
+                "git"
+                "and unnamed falls back to PATH, so an off-Nix install does not regress"
+
+        // The words an operator gets when git cannot run confined. What shipped instead was
+        // the host binary's own parting line — `xcode-select: error: unable to read data
+        // link ...` — which names neither the sandbox nor anything anyone can set, and was
+        // read as a broken Xcode install on a machine whose Xcode was fine.
+        testCase "an unusable git names the sandbox and the knobs, not the host binary's excuse" <| fun () ->
+            let message = Repos.unusableGit "/usr/bin/git" "exit 2: xcode-select: error: unable to read data link"
+            Expect.isTrue (message.Contains "/usr/bin/git") "which git could not run"
+            Expect.isTrue (message.Contains "inside the sandbox") "where it could not run"
+            Expect.isTrue (message.Contains "YESSION_GIT_PATH") "how to name a working one"
+            Expect.isTrue (message.Contains "YESSION_SANDBOX_READ_PATHS") "how to let it read what it needs"
+            Expect.isTrue (message.Contains "xcode-select") "and what it actually said, kept"
+
         testCase "capped output states its elision" <| fun () ->
             Expect.equal (Repos.capText 10 "short") "short" "under the cap, untouched"
             let capped = Repos.capText 5 "0123456789"
@@ -166,7 +196,7 @@ let private makeBareFixture (root: string) (name: string) : string =
     hostGit childProcess [| "clone"; "--bare"; work; bare |] fixtures
     bare
 
-let private serviceIn (root: string) (log: EventLog<SessionEvent>) : Repos.ReposService =
+let private serviceWith (git: string) (root: string) (log: EventLog<SessionEvent>) : Repos.ReposService =
     let reposDir = sprintf "%s/repos" root
     let fixtures = fixturesIn root
     mkdir nodeFs reposDir
@@ -177,12 +207,17 @@ let private serviceIn (root: string) (log: EventLog<SessionEvent>) : Repos.Repos
           // Host-family: a terminal reaches the checkouts at the directory itself.
           VisibleAt = Sandboxes.reposVisibleAt SrtBackend reposDir
           ExtraReadPaths = [ fixtures ]
+          Git = git
           AllowedDomains = []
           AllowProtocol = "file"
           CloneUrl = fun ref -> sprintf "file://%s/%s.git" fixtures (RepoRef.repo ref)
           ResolveToken = fun _ -> async { return None }
           Log = log }
     |> expect
+
+/// The service as a session builds it: this box's named git, or PATH's.
+let private serviceIn (root: string) (log: EventLog<SessionEvent>) : Repos.ReposService =
+    serviceWith (Repos.gitExecutable (Sandboxes.ambientEnv ())) root log
 
 let private freshLog () =
     InMemoryEventLog.create (SessionId.create "git-suite" |> expect) (fun () -> DateTimeOffset.UtcNow)
@@ -226,6 +261,23 @@ let private srtTests =
                 (expect listed)
                 [ { Repo = repo; Branch = "main"; Dirty = false; Path = sprintf "%s/repos/octo/hello" root } ]
                 "the listing is the filesystem's answer, and it says where"
+        }
+
+        testCaseAsync "a git that cannot run inside the sandbox refuses the verb in words that name a knob" <| async {
+            // The shape that shipped: on macOS the verbs ran PATH's `/usr/bin/git`, a shim
+            // that resolves a developer directory through files the read scope denies, so
+            // every verb failed with `xcode-select: error: ...` — read, reasonably, as a
+            // broken Xcode install on a machine whose Xcode was fine. The probe turns any
+            // unrunnable git into one sentence about the sandbox, whatever the reason.
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let service = serviceWith (sprintf "%s/not-a-git" root) root (freshLog ())
+            let! added = service.AddRepo caller (RepoRef.create "octo/hello" |> expect)
+            match added with
+            | Ok _ -> failwith "a verb ran with a git that does not exist"
+            | Error reason ->
+                Expect.isTrue (reason.Contains "cannot run inside the sandbox") "the sandbox is named as the place"
+                Expect.isTrue (reason.Contains "YESSION_GIT_PATH") "and the knob that fixes it"
         }
 
         testCaseAsync "a clone brings no hook templates with it" <| async {
