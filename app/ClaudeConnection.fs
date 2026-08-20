@@ -261,7 +261,7 @@ let routes
     (sessionId: SessionId)
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
-    (statusOf: SecretId -> ConnectionKind option)
+    (statusOf: SecretId -> ConnectionStatus option)
     (agentAvailable: unit -> bool)
     /// The path this session is served under (`""` at an origin root), stripped off the
     /// request the same way the rest of the session's surface strips it.
@@ -283,10 +283,23 @@ let routes
                     let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
                     match routeOf () with
                     | Some ClaudeStatus ->
+                        // One connection as the panel reads it: which kind of credential it
+                        // is, and — when something has established that it no longer works —
+                        // why a person has to sign in again. `null` for a scope with nothing
+                        // connected. The GitHub panel reads the same shape from its own route;
+                        // both are pinned by their route suites.
                         let statusJson (target: SecretId) =
                             match statusOf target with
-                            | Some kind -> jsonString (kindLabel kind)
                             | None -> "null"
+                            | Some (status: ConnectionStatus) ->
+                                let signInRequired =
+                                    match status.Health with
+                                    | ConnectionUsable -> "null"
+                                    | SignInRequired reason -> jsonString reason
+                                sprintf
+                                    """{"kind":%s,"signInRequired":%s}"""
+                                    (jsonString (kindLabel status.Kind))
+                                    signInRequired
                         let sessionTarget : SecretId = { Scope = SessionScope sessionId; Name = secretName }
                         let mineTarget : SecretId = { Scope = CredentialOwner.scope owner; Name = secretName }
                         // What "mine" MEANS here, so the panel can say it honestly:

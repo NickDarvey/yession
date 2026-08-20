@@ -790,10 +790,25 @@ let private urlEncode (value: string) : string = jsNative
 // origin-partitioned localStorage, so it changed under the person holding it and stranded
 // the credential behind every new one; ownership now comes off the cookie, Manager-side.
 
+// A connection arrives as `{kind, signInRequired}` or null, and is flattened to primitives
+// HERE rather than carried across as an object. Fable's mapping of an option-of-record onto
+// a JS value is the kind of thing that misbehaves quietly, and a status that silently
+// decodes to "nothing connected" is indistinguishable on screen from the truth. Two nullable
+// strings per scope cannot go wrong, and `ConnectionView` is assembled in F#.
 [<Emit("""fetch($0, { cache: 'no-store' })
-  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine, owner: s.owner, agent: !!s.agent })) : Promise.resolve({ ok: false, session: null, mine: null, owner: null, agent: false }))
-  .catch(() => ({ ok: false, session: null, mine: null, owner: null, agent: false }))""")>]
-let private fetchClaudeStatusAt (url: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; owner: string option; agent: bool |}> = jsNative
+  .then(r => r.ok ? r.json().then(s => ({ ok: true,
+    sessionKind: s.session ? String(s.session.kind || '') : null,
+    sessionSignIn: (s.session && s.session.signInRequired) || null,
+    mineKind: s.mine ? String(s.mine.kind || '') : null,
+    mineSignIn: (s.mine && s.mine.signInRequired) || null,
+    owner: s.owner, agent: !!s.agent }))
+    : Promise.resolve({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null, owner: null, agent: false }))
+  .catch(() => ({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null, owner: null, agent: false }))""")>]
+let private fetchClaudeStatusAt (url: string) : JS.Promise<{| ok: bool; sessionKind: string option; sessionSignIn: string option; mineKind: string option; mineSignIn: string option; owner: string option; agent: bool |}> = jsNative
+
+/// One scope's pair of nullable strings, as the panel's row reads it.
+let private viewOf (kind: string option) (signInRequired: string option) : ConnectionView option =
+    kind |> Option.map (fun kind -> { Kind = kind; SignInRequired = signInRequired })
 
 let private fetchClaudeStatus () =
     fetchClaudeStatusAt (SessionRoute.relative ClaudeStatus)
@@ -817,9 +832,14 @@ let private panelInput (selector: string) : string = jsNative
 // extra parsers below read the begin/poll replies.
 
 [<Emit("""fetch($0, { cache: 'no-store' })
-  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine })) : Promise.resolve({ ok: false, session: null, mine: null }))
-  .catch(() => ({ ok: false, session: null, mine: null }))""")>]
-let private fetchGitHubStatusAt (url: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
+  .then(r => r.ok ? r.json().then(s => ({ ok: true,
+    sessionKind: s.session ? String(s.session.kind || '') : null,
+    sessionSignIn: (s.session && s.session.signInRequired) || null,
+    mineKind: s.mine ? String(s.mine.kind || '') : null,
+    mineSignIn: (s.mine && s.mine.signInRequired) || null }))
+    : Promise.resolve({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null }))
+  .catch(() => ({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null }))""")>]
+let private fetchGitHubStatusAt (url: string) : JS.Promise<{| ok: bool; sessionKind: string option; sessionSignIn: string option; mineKind: string option; mineSignIn: string option |}> = jsNative
 
 let private fetchGitHubStatus () =
     fetchGitHubStatusAt (SessionRoute.relative GitHubStatus)
@@ -1242,7 +1262,12 @@ let private start () =
                 async {
                     let! status = fetchClaudeStatus () |> Async.AwaitPromise
                     if status.ok then
-                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine; Owner = status.owner; AgentAvailable = Some status.agent })
+                        dispatchRef (
+                            ClaudeStatusMsg
+                                { SessionCredential = viewOf status.sessionKind status.sessionSignIn
+                                  MineCredential = viewOf status.mineKind status.mineSignIn
+                                  Owner = status.owner
+                                  AgentAvailable = Some status.agent })
                 })
         let rec pollClaudeWhileAwaiting () =
             Async.StartImmediate (
@@ -1310,7 +1335,10 @@ let private start () =
                 async {
                     let! status = fetchGitHubStatus () |> Async.AwaitPromise
                     if status.ok then
-                        dispatchRef (GitHubStatusMsg { SessionCredential = status.session; MineCredential = status.mine })
+                        dispatchRef (
+                            GitHubStatusMsg
+                                { SessionCredential = viewOf status.sessionKind status.sessionSignIn
+                                  MineCredential = viewOf status.mineKind status.mineSignIn })
                 })
         let rec pollGitHubWhileAwaiting () =
             Async.StartImmediate (
