@@ -196,7 +196,7 @@ module private Children =
     [<Emit("(() => { try { $0.stdin.end() } catch {} })()")>]
     let private endStdin (child: obj) : unit = jsNative
 
-    [<Emit("(() => { try { process.kill(-$0.pid, 'SIGKILL') } catch { try { $0.kill('SIGKILL') } catch {} } })()")>]
+    [<Emit("(function (child) { try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch {} } })($0)")>]
     let private killTree (child: obj) : unit = jsNative
 
     /// A live registry of the children a sandbox spawned, so `Dispose` can take down
@@ -378,7 +378,7 @@ module DockerSandbox =
     [<Emit("$0.toString('utf8')")>]
     let private bufToStr (b: obj) : string = jsNative
 
-    [<Emit("($0.ExitCode == null ? -1 : $0.ExitCode)")>]
+    [<Emit("(function (inspect) { return (inspect.ExitCode == null ? -1 : inspect.ExitCode) })($0)")>]
     let private exitCodeOf (inspect: obj) : int = jsNative
 
     let private nodeFs : obj = importAll "node:fs"
@@ -895,7 +895,7 @@ module SrtSandbox =
                             ([ execPath (); srtPackage ] @ (named "YESSION_CLAUDE_PATH" |> Option.toList))
                             ambient })
 
-    [<Emit("({ network: { allowedDomains: $0, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: $1, allowRead: $2, allowWrite: $3, denyWrite: [], allowGitConfig: $8, disabled: $9 }, ...($4 ? { bwrapPath: $4 } : {}), ...($5 ? { socatPath: $5 } : {}), ...($6 ? { ripgrep: { command: $6 } } : {}), ...($7 ? { enableWeakerNestedSandbox: true } : {}) })")>]
+    [<Emit("(function (allowedDomains, denyRead, allowRead, allowWrite, bwrap, socat, ripgrep, weakNesting, allowGitConfig, filesystemDisabled) { return ({ network: { allowedDomains: allowedDomains, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: denyRead, allowRead: allowRead, allowWrite: allowWrite, denyWrite: [], allowGitConfig: allowGitConfig, disabled: filesystemDisabled }, ...(bwrap ? { bwrapPath: bwrap } : {}), ...(socat ? { socatPath: socat } : {}), ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}), ...(weakNesting ? { enableWeakerNestedSandbox: true } : {}) }) })($0, $1, $2, $3, $4, $5, $6, $7, $8, $9)")>]
     let private configObject
         (allowedDomains: string array)
         (denyRead: string array)
@@ -946,7 +946,7 @@ module SrtSandbox =
     [<Emit("$0.argv")>]
     let private argvOf (wrapped: obj) : string array = jsNative
 
-    [<Emit("$0.SandboxManager.updateConfig({ ...$0.SandboxManager.getConfig(), network: { ...$0.SandboxManager.getConfig().network, allowedDomains: $1 } })")>]
+    [<Emit("(function (srt, allowedDomains) { return srt.SandboxManager.updateConfig({ ...srt.SandboxManager.getConfig(), network: { ...srt.SandboxManager.getConfig().network, allowedDomains: allowedDomains } }) })($0, $1)")>]
     let private widenAllowlist (srt: obj) (allowedDomains: string array) : unit = jsNative
 
     // srt's manager is a PROCESS-WIDE singleton: one filtering proxy pair, one egress
@@ -1146,7 +1146,8 @@ module AgentSandbox =
     // `options.signal` takes the whole tree — that signal is the SDK's FORWARDED one,
     // firing only after its stdin-EOF + grace window, so the force-kill never pre-empts
     // the CLI's graceful shutdown.
-    [<Emit("""((cp) => (options) => {
+    [<Emit("""(function (cp) { return (
+((cp) => (options) => {
   const child = cp.spawn(options.command, options.args, { cwd: options.cwd || undefined, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true })
   const killTree = () => { try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch {} } }
   if (options.signal) {
@@ -1154,7 +1155,8 @@ module AgentSandbox =
     else options.signal.addEventListener('abort', killTree, { once: true })
   }
   return child
-})($0)""")>]
+})(cp)
+) })($0)""")>]
     let private hostSpawnerOver (cp: obj) : obj = jsNative
 
     /// The host-backend agent spawner, handed to the SDK as `spawnClaudeCodeProcess`.
@@ -1167,7 +1169,8 @@ module AgentSandbox =
     // and the real child is joined to them the moment the wrap resolves. Nothing here
     // decides anything: it buffers, pipes, forwards the two events the interface has, and
     // remembers a kill that arrived before there was anything to kill.
-    [<Emit("""((cp, stream, events, wrap) => (options) => {
+    [<Emit("""(function (cp, stream, events, wrap) { return (
+((cp, stream, events, wrap) => (options) => {
   const emitter = new events.EventEmitter()
   const stdin = new stream.PassThrough()
   const stdout = new stream.PassThrough()
@@ -1209,7 +1212,8 @@ module AgentSandbox =
     else options.signal.addEventListener('abort', abort, { once: true })
   }
   return proxy
-})($0, $1, $2, $3)""")>]
+})(cp, stream, events, wrap)
+) })($0, $1, $2, $3)""")>]
     let private srtSpawnerOver (cp: obj) (stream: obj) (events: obj) (wrap: System.Func<string, string array, string, JS.Promise<string array>>) : obj = jsNative
 
     /// The srt-backend agent spawner: the same seam, with the CLI coming up inside the

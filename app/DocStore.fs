@@ -22,7 +22,7 @@ let private writeFileSync (path: string) (text: string) : unit = fs.writeFileSyn
 [<Emit("$0.openSync($1, 'a')")>]
 let private openSyncAppend (fs: obj) (path: string) : int = jsNative
 
-[<Emit("($0.writeSync($1, $2), $0.fsyncSync($1))")>]
+[<Emit("(function (fs, fd, text) { return (fs.writeSync(fd, text), fs.fsyncSync(fd)) })($0, $1, $2)")>]
 let private writeSyncFsync (fs: obj) (fd: int) (text: string) : unit = jsNative
 
 [<Emit("$0.mkdirSync($1, { recursive: true })")>]

@@ -31,12 +31,12 @@ type private JsToolAnswer =
     abstract ok : bool
     abstract text : string
 
-[<Emit("""(async () => {
+[<Emit("""(async function (prompts, agentEnv, claudePath, descriptors, invoke, allowedTools, onChunk, registerAbort, claudeSpawner, maxTurns) {
   try {
     const sdk = await import('@anthropic-ai/claude-agent-sdk')
     const { z } = await import('zod')
     const controller = new AbortController()
-    $7(() => controller.abort())
+    registerAbort(() => controller.abort())
     // JSON Schema in, zod shape out. The SDK's tool builder wants zod; every other
     // boundary a descriptor crosses (MCP's tools/list, an external server, the audit
     // record) speaks JSON Schema — so the conversion belongs here, at the one edge that
@@ -65,14 +65,14 @@ type private JsToolAnswer =
     // One SDK MCP server per namespace, which is what puts the namespace in the wire name
     // the model sees (mcp__<namespace>__<tool>) without inventing a naming scheme.
     const byNamespace = new Map()
-    for (const d of $3) {
+    for (const d of descriptors) {
       let shape = {}
       try { shape = zodShape(JSON.parse(d.schema)) } catch (e) { shape = {} }
       const annotations = {}
       if (d.readOnly) annotations.readOnlyHint = true
       if (d.title) annotations.title = d.title
       const built = sdk.tool(d.name, d.description, shape, async (args) => {
-        const answer = await $4(d.ns, d.name, JSON.stringify(args || {}))
+        const answer = await invoke(d.ns, d.name, JSON.stringify(args || {}))
         return { content: [{ type: 'text', text: answer.text }], isError: !answer.ok }
       }, { annotations })
       if (!byNamespace.has(d.ns)) byNamespace.set(d.ns, [])
@@ -83,14 +83,14 @@ type private JsToolAnswer =
       mcpServers[entry[0]] = sdk.createSdkMcpServer({ name: entry[0], version: '1.0.0', tools: entry[1] })
     }
     const q = sdk.query({
-      prompt: $0.prompt,
+      prompt: prompts.prompt,
       options: {
-        systemPrompt: $0.system,
+        systemPrompt: prompts.system,
         // The session's model choice, and ONLY when it has made one: an absent option is
         // what leaves the pick to the SDK, and passing an empty string instead would be
         // this session inventing a model id of "".
-        ...($0.model ? { model: $0.model } : {}),
-        maxTurns: $9,
+        ...(prompts.model ? { model: prompts.model } : {}),
+        maxTurns: maxTurns,
         settingSources: [],
         includePartialMessages: true,
         mcpServers,
@@ -102,11 +102,11 @@ type private JsToolAnswer =
         // stays so our tools run without a permission round-trip, and it is COMPUTED from
         // the same descriptors the servers were built from, so the two cannot drift.
         tools: [],
-        allowedTools: $5,
+        allowedTools: allowedTools,
         abortController: controller,
-        ...($2 ? { pathToClaudeCodeExecutable: $2 } : {}),
-        env: $1,
-        spawnClaudeCodeProcess: $8
+        ...(claudePath ? { pathToClaudeCodeExecutable: claudePath } : {}),
+        env: agentEnv,
+        spawnClaudeCodeProcess: claudeSpawner
       }
     })
     let body = ''
@@ -121,7 +121,7 @@ type private JsToolAnswer =
       if (m.type === 'stream_event') {
         const e = m.event
         if (e && e.type === 'content_block_delta' && e.delta && typeof e.delta.text === 'string') {
-          $6(e.delta.text)
+          onChunk(e.delta.text)
           streamed += e.delta.text
         }
       } else if (m.type === 'result') {
@@ -136,7 +136,7 @@ type private JsToolAnswer =
         // The step ceiling is the one ending a person can do something about, so it says
         // what happened in words rather than handing back an SDK subtype nobody outside
         // this file has ever read.
-        else if (m.subtype === 'error_max_turns') failed = 'this turn stopped at its step limit of ' + $9 + ' model turns without finishing — say so and I will carry on from here'
+        else if (m.subtype === 'error_max_turns') failed = 'this turn stopped at its step limit of ' + maxTurns + ' model turns without finishing — say so and I will carry on from here'
         else failed = 'agent run ended: ' + m.subtype
       }
     }
@@ -145,7 +145,7 @@ type private JsToolAnswer =
   } catch (err) {
     return { ok: false, body: '', reason: String((err && err.message) || err), inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, model: '' }
   }
-})()""")>]
+})($0, $1, $2, $3, $4, $5, $6, $7, $8, $9)""")>]
 let private runQuery
     (prompts: {| system: string; prompt: string; model: string |})
     (agentEnv: obj)

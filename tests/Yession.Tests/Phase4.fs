@@ -757,7 +757,7 @@ let private spawnBundle (spawn: obj) (managerJs: string) (env: (string * string)
 [<Emit("$0.stdout.on('data', $1)")>]
 let private onStdout (child: obj) (handler: obj -> unit) : unit = Fable.Core.Util.jsNative
 
-[<Emit("typeof $0 === 'string' ? $0 : $0.toString('utf8')")>]
+[<Emit("(function (chunk) { return typeof chunk === 'string' ? chunk : chunk.toString('utf8') })($0)")>]
 let private chunkToString (chunk: obj) : string = Fable.Core.Util.jsNative
 
 [<Emit("$0.kill('SIGKILL')")>]

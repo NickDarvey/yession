@@ -55,7 +55,7 @@ let private eventsOf (log: EventLog<SessionEvent>) =
 // would arrive. These are the only Yjs calls in this file, and they exist so no production
 // API has to grow a setter that only a test would call.
 
-[<Fable.Core.Emit("(() => { const e = $0.getMap('pending').get($1); if (e) e.set($2, $3) })()")>]
+[<Fable.Core.Emit("(function (doc, id, field, value) { const e = doc.getMap('pending').get(id); if (e) e.set(field, value) })($0, $1, $2, $3)")>]
 let private setQueuedField (doc: Y.Doc) (id: string) (field: string) (value: obj) : unit = Fable.Core.Util.jsNative
 
 /// A queue entry field, set to whatever a peer we do not control might have written.
@@ -65,7 +65,7 @@ let private setQueuedFieldInDoc (doc: Y.Doc) (id: QueueId) (field: string) (valu
 /// A raw pending entry, written the way a build we no longer ship would have written one.
 /// No production writer has this shape any more — that is the point — so the only way to
 /// test tolerance of it is to write it as that build did.
-[<Fable.Core.Emit("(() => { const q = $0.getMap('pending'); const e = new $1.Map(); q.set($2, e); e.set('subject', $3); e.set('author', $4); e.set('order', 1) })()")>]
+[<Fable.Core.Emit("(function (doc, yjs, id, subject, author) { const q = doc.getMap('pending'); const e = new yjs.Map(); q.set(id, e); e.set('subject', subject); e.set('author', author); e.set('order', 1) })($0, $1, $2, $3, $4)")>]
 let private legacyPendingInDoc (doc: Y.Doc) (yjs: obj) (id: string) (subject: string) (author: string) : unit =
     Fable.Core.Util.jsNative
 

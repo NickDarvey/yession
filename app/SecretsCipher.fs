@@ -31,13 +31,15 @@ let generateKek () : string = jsNative
 [<Emit("crypto.subtle.importKey('raw', Buffer.from($0, 'base64url'), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])")>]
 let private importRaw (kekB64u: string) : JS.Promise<obj> = jsNative
 
-[<Emit("""(async (key, aad, plaintext) => {
+[<Emit("""(function (key, aad, plaintext) { return (
+(async (key, aad, plaintext) => {
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ct = await crypto.subtle.encrypt(
         { name: 'AES-GCM', iv, additionalData: Buffer.from(aad, 'utf8') },
         key, Buffer.from(plaintext, 'utf8'));
     return [Buffer.from(iv).toString('base64url'), Buffer.from(ct).toString('base64url')];
-})($0, $1, $2)""")>]
+})(key, aad, plaintext)
+) })($0, $1, $2)""")>]
 let private encryptImpl (key: obj) (aad: string) (plaintext: string) : JS.Promise<string * string> = jsNative
 
 [<Emit("""crypto.subtle.decrypt(

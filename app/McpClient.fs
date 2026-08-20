@@ -33,18 +33,18 @@ type private PostOutcome =
 /// `accept` names both content types the spec allows a Streamable HTTP server to answer
 /// with — a server picks, and a client that offered only one would work against half of
 /// them.
-[<Emit("""(async () => {
+[<Emit("""(async function (url, session, protocol, body) {
   try {
     const headers = { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' }
-    if ($1) headers['mcp-session-id'] = $1
-    if ($2) headers['mcp-protocol-version'] = $2
-    const r = await fetch($0, { method: 'POST', headers, body: $3 })
+    if (session) headers['mcp-session-id'] = session
+    if (protocol) headers['mcp-protocol-version'] = protocol
+    const r = await fetch(url, { method: 'POST', headers, body: body })
     const text = await r.text()
     return { ok: true, status: r.status, session: r.headers.get('mcp-session-id') || '', body: text, reason: '' }
   } catch (err) {
     return { ok: false, status: 0, session: '', body: '', reason: String((err && err.message) || err) }
   }
-})()""")>]
+})($0, $1, $2, $3)""")>]
 let private post (url: string) (session: string) (protocol: string) (body: string) : JS.Promise<PostOutcome> =
     jsNative
 

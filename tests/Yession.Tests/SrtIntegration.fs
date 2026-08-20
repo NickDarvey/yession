@@ -83,15 +83,17 @@ let private exitCode (run: SandboxRun) =
 
 /// Write to the proxy's stdin, close it, and resolve with (stdout, exit code) — the exact
 /// shape the SDK drives `spawnClaudeCodeProcess`'s result through.
-[<Emit("""(new Promise((resolve) => {
-  const child = $0({ command: $1, args: $2, cwd: $3, env: Object.fromEntries($4) })
+[<Emit("""(function (spawner, command, args, cwd, env, stdin) { return (
+(new Promise((resolve) => {
+  const child = spawner({ command: command, args: args, cwd: cwd, env: Object.fromEntries(env) })
   let out = ''
   child.stdout.on('data', (d) => { out += String(d) })
   child.on('exit', (code) => resolve([out, code == null ? -1 : code]))
   child.on('error', (e) => resolve([String((e && e.message) || e), -1]))
-  child.stdin.write($5)
+  child.stdin.write(stdin)
   child.stdin.end()
-}))""")>]
+}))
+) })($0, $1, $2, $3, $4, $5)""")>]
 let private driveSpawner
     (spawner: obj)
     (command: string)

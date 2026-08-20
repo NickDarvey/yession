@@ -492,7 +492,7 @@ let private runAgent () : RunAgent option =
     | _ ->
         if envCreds || connectedSomewhere () then Some (dispatching Agent.runWith) else None
 
-[<Fable.Core.Emit("(process.stdin.on('close', $0), process.stdin.on('end', $0), process.stdin.resume())")>]
+[<Fable.Core.Emit("(function (handler) { return (process.stdin.on('close', handler), process.stdin.on('end', handler), process.stdin.resume()) })($0)")>]
 let private onStdinClosed (handler: unit -> unit) : unit = Fable.Core.Util.jsNative
 
 Async.StartImmediate (

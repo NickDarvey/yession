@@ -61,7 +61,7 @@ let createServer (handler: IncomingMessage -> ServerResponse -> unit) : HttpServ
 let serverPort (server: HttpServer) : int = jsNative
 
 /// Decode a Node Buffer (or string) chunk to a UTF-8 string.
-[<Emit("typeof $0 === 'string' ? $0 : $0.toString('utf8')")>]
+[<Emit("(function (chunk) { return typeof chunk === 'string' ? chunk : chunk.toString('utf8') })($0)")>]
 let bufferToString (chunk: obj) : string = jsNative
 
 /// Read a request header. Node lowercases header names; None when absent.

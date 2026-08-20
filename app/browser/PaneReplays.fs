@@ -25,7 +25,7 @@ let private mountKey (el: obj) : string = jsNative
 [<Emit("$0.childElementCount > 0")>]
 let private isMounted (el: obj) : bool = jsNative
 
-[<Emit("while ($0.firstChild) $0.removeChild($0.firstChild)")>]
+[<Emit("(function (el) { while (el.firstChild) el.removeChild(el.firstChild) })($0)")>]
 let private clearChildren (el: obj) : unit = jsNative
 
 /// Drive this from the render loop, after every render.
