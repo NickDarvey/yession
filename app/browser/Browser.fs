@@ -315,9 +315,11 @@ let private placeTitleCursor (peer: string) (anchor: int) (head: int) : unit = j
 [<Emit("requestAnimationFrame(() => $0())")>]
 let private raf (f: unit -> unit) : unit = jsNative
 
-// A trailing debounce: presence decorations are pushed only after the doc stops changing, so a
-// decoration transaction never lands while y-prosemirror is applying remote content (which would
-// starve the read-only mirrors' rendering of that content — see `pushPresences`).
+// Two uses, and they are different shapes. A trailing debounce: presence decorations are pushed
+// only after the doc stops changing, so a decoration transaction never lands while y-prosemirror
+// is applying remote content (which would starve the read-only mirrors' rendering of that
+// content — see `pushPresences`). And an armed deadline: something is true NOW and only worth
+// saying if it is still true then (see `syncCatchUpTimer`).
 [<Emit("setTimeout($0, $1)")>]
 let private setTimeoutJs (f: unit -> unit) (ms: int) : float = jsNative
 [<Emit("clearTimeout($0)")>]
@@ -943,16 +945,33 @@ let private start () =
 
         // Presence is reported at most once per animation frame: a caret sweep or drag fires many
         // selection events, but the peer only needs the latest. `latestFocus` is coalesced; the
-        // rAF callback ships whatever it is at paint time.
+        // rAF callback ships whatever it is at paint time — and only if it differs from what was
+        // last shipped.
+        //
+        // The dedup lives HERE, with the one presence slot it governs, rather than in each
+        // reporter. Three of them share that slot — the rich editor's plugin, the title input,
+        // and terminal command lines — and a reporter that compared against its OWN last value
+        // would be answering a question about somebody else's write: a command line re-reporting
+        // `None` after the editor had claimed the caret would suppress a clear that was needed.
+        // Compared on the encoded focus, which is precisely what goes on the wire, so a report is
+        // dropped only when it would tell a collaborator nothing.
+        //
+        // Safe because presence is relayed live and last-write-wins (`Host.broadcastPresenceExcept`)
+        // — no TTL, so a repeat is never a keepalive. It costs a stationary caret nothing that the
+        // reporters were not already costing it: the editor plugin has always dropped an unmoved
+        // selection, so a peer arriving late has never been shown one.
         let mutable focusScheduled = false
         let mutable latestFocus : Focus option = None
+        let mutable sentFocus : Focus option option = None
         let sendFocus (focus: Focus option) =
             latestFocus <- focus
             if not focusScheduled then
                 focusScheduled <- true
                 raf (fun () ->
                     focusScheduled <- false
-                    connectionRef |> Option.iter (fun c -> c.ReportPresence latestFocus))
+                    if sentFocus <> Some latestFocus then
+                        sentFocus <- Some latestFocus
+                        connectionRef |> Option.iter (fun c -> c.ReportPresence latestFocus))
 
         /// Mount an editor on each `[data-rich-body]` host bound to its live fragment; remount when
         /// a host's fragment identity changes; and dispose editors whose host has left the DOM.
@@ -1023,6 +1042,10 @@ let private start () =
                     // never writes back, and never claims a caret.
                     elif terminalInputReadOnly el then None
                     else Some key
+                // Four events report the caret here and most report it unmoved — a keyup for
+                // every key that types rather than navigates, a click landing where the caret
+                // already was, the focus that precedes both. They are dropped by `sendFocus`,
+                // which is where the slot they all write to lives.
                 let reportFocus () =
                     match lineOf () with
                     | Some key ->
@@ -1167,6 +1190,20 @@ let private start () =
         // they starve y-prosemirror's rendering of remote content; the caret lands just after the
         // content settles. Only editors whose cursor set changed are dispatched (idle empty→empty
         // is skipped), so a settled editor with no cursors is never disturbed.
+        //
+        // The quiet is the CONDITION, not an approximation of one — which is worth writing down
+        // because it does not look that way, and the obvious improvement is wrong. Pacing this by
+        // `raf` instead reads better on every count: it is out of the render's own call stack,
+        // it is capped at one dispatch per frame, it runs after every observer of the update and
+        // before the paint, and it removes the freeze a typing collaborator suffers here (the doc
+        // never goes quiet while they type, so their caret does not move until they stop).
+        //
+        // It also reintroduces the bug. Once per frame is still often enough to starve the
+        // read-only mirror: under CI's load the two-peer E2E waited out its full thirty seconds
+        // for `B's mirror to render A's remote content`, which is the same blank mirror the
+        // debounce was added to fix. Tried, measured, reverted — so the freeze is a known cost
+        // here, and buying it back needs a mechanism that does not dispatch into a converging
+        // editor at all, not a shorter wait.
         let mutable pushTimer = 0.0
         let pushPresences () =
             clearTimeoutJs pushTimer

@@ -212,6 +212,18 @@ let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<
     }
 
 
+/// A page-function wait that says WHICH wait it was. Playwright reports only "Timeout 30000ms
+/// exceeded", and a case with a dozen waits is a case whose red names none of them — telling
+/// them apart then costs a full run of the gate per hypothesis, which is how guessing comes to
+/// cost the same as looking and wins every time. The label is the whole instrument.
+let private waitFor (what: string) (page: IPage) (predicate: string) : Async<unit> =
+    async {
+        try
+            do! await (page.WaitForFunctionAsync predicate) |> Async.Ignore
+        with e ->
+            failwithf "waiting for %s — %s\n  predicate: %s" what e.Message predicate
+    }
+
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
 let private connected = """document.querySelector('[data-connection]')?.textContent === 'Connected'"""
 
@@ -286,8 +298,8 @@ let tests =
                 let! _ = await (pageB.GotoAsync BASE)
 
                 // Both browser peers reach Connected over native WebRTC.
-                let! _ = await (pageA.WaitForFunctionAsync connected)
-                let! _ = await (pageB.WaitForFunctionAsync connected)
+                do! waitFor "A to connect" pageA connected
+                do! waitFor "B to connect" pageB connected
 
                 // A types Markdown into its rich composer with REAL key events, so the input
                 // rules fire: "# " turns the block into a heading rendered live as an <h1> —
@@ -297,23 +309,25 @@ let tests =
                 do! awaitU (pageA.Keyboard.TypeAsync "# Heading one")
                 let renderedHeading =
                     """document.querySelector('[data-rich-readonly="false"] .ProseMirror h1')?.textContent === 'Heading one'"""
-                let! _ = await (pageA.WaitForFunctionAsync renderedHeading)
+                do! waitFor "A's own typing to render as a heading" pageA renderedHeading
 
                 // B converges: it renders A's draft as the same formatted heading.
                 // (Regression guard: pushing presence decorations on every render used to starve
                 // y-prosemirror's rendering of REMOTE content here, so B's mirror stayed blank.)
-                do! await (pageB.WaitForFunctionAsync
-                            """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one')""") |> Async.Ignore
+                do! waitFor
+                        "B's mirror to render A's remote content"
+                        pageB
+                        """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one')"""
 
                 // And B JOINED it rather than opening a rival blank: the composer B is in is A's
                 // draft, which is why the "new message" way out is offered at all.
-                do! await (pageB.WaitForFunctionAsync """!!document.querySelector('[data-draft-new]')""") |> Async.Ignore
+                do! waitFor "B to be offered a way out of A's draft" pageB """!!document.querySelector('[data-draft-new]')"""
 
                 // B overlays A's live caret in it: A's presence (a base64 relative position over
                 // the draft body) decodes to a caret widget + name label. This lands just after
                 // the content settles (the decoration push is debounced off the active-convergence
                 // window). Guards remote BODY cursors end-to-end.
-                do! await (pageB.WaitForFunctionAsync """!!document.querySelector('.pm-caret')""") |> Async.Ignore
+                do! waitFor "B to overlay A's caret" pageB """!!document.querySelector('.pm-caret')"""
 
                 // B CO-EDITS A's draft — the collaboration the read-only mirror used to forbid —
                 // and A sees the words appear in the draft it started.
@@ -322,7 +336,7 @@ let tests =
                 do! awaitU (pageB.Keyboard.TypeAsync " and two")
                 let coEdited =
                     """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one and two')"""
-                let! _ = await (pageA.WaitForFunctionAsync coEdited)
+                do! waitFor "A to see B's co-edit" pageA coEdited
 
                 // B sends A's draft: any co-editor may. Both timelines show the immutable message.
                 // The durable body is MARKDOWN (`# Heading one and two`, from events not Yjs), but
@@ -330,8 +344,8 @@ let tests =
                 // showed — so the sent view mirrors the input: an <h1>, no literal `#`.
                 do! awaitU (pageB.ClickAsync "[data-send-draft]")
                 let inTimeline = """[...document.querySelectorAll('[data-conversation] [data-message-body] h1')].some(h => h.textContent.trim() === 'Heading one and two')"""
-                let! _ = await (pageA.WaitForFunctionAsync inTimeline)
-                do! await (pageB.WaitForFunctionAsync inTimeline) |> Async.Ignore
+                do! waitFor "A's timeline to show the sent message" pageA inTimeline
+                do! waitFor "B's timeline to show the sent message" pageB inTimeline
             }
 
         // Terminals (Plan 13) in a real browser: the one part of the panel that only a
