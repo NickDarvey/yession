@@ -473,6 +473,61 @@ let private uiChecklistTests =
             Expect.isTrue (row.Contains Dom.Text.signInAgainStatus) "the agent's own row says what is needed"
             Expect.isFalse (row.Contains ">ready<") "and no longer claims to be ready"
 
+        testCase "a credential that stopped working is offered a way to fix it, over the timeline" <| fun () ->
+            let html = Support.render (private' "github" "github rejected this credential")
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.signInRequired "github"))
+                "the prompt names which connection needs it"
+            Expect.isTrue (html.Contains Dom.Hooks.signInAgain) "and carries the button that leads to the fix"
+            Expect.isTrue (html.Contains Dom.Text.signInAgain) "in words"
+            // Over the timeline, not under it: this is a notice, and a notice below what it
+            // is about is one somebody scrolls past.
+            Expect.isTrue
+                (html.IndexOf Dom.Hooks.signInRequired < html.IndexOf Dom.Hooks.conversation)
+                "it sits above the conversation"
+
+        // The rule `Style.fs`'s noAgent block and the case below it already encode: a call to
+        // action repeated is wallpaper. The panel row and the roster row say the same fact as
+        // STATUSES, and exactly one button in the document offers the remedy.
+        testCase "the way to fix it is offered exactly once" <| fun () ->
+            let html = Support.render (private' "claude" "the refresh token has expired")
+            let occurrences (needle: string) = (html.Split needle |> Array.length) - 1
+            Expect.equal (occurrences Dom.Hooks.signInAgain) 1 "one button, not one per surface that mentions it"
+
+        // Two dead credentials are still one instruction, and the panel it opens shows both.
+        testCase "two credentials needing a sign-in are still one prompt" <| fun () ->
+            let needing reason = Some { Kind = "static"; SignInRequired = Some reason }
+            let both =
+                { representativeModel with
+                    Claude =
+                        { representativeModel.Claude with
+                            Status = { representativeModel.Claude.Status with MineCredential = needing "claude said no" } }
+                    GitHub =
+                        { representativeModel.GitHub with
+                            Status = { representativeModel.GitHub.Status with MineCredential = needing "github said no" } } }
+            let html = Support.render both
+            let occurrences (needle: string) = (html.Split needle |> Array.length) - 1
+            Expect.equal (occurrences Dom.Hooks.signInRequired) 1 "one prompt"
+            Expect.equal (occurrences Dom.Hooks.signInAgain) 1 "one button"
+
+        // Signing in runs against the session. Offering it to somebody who cannot reach the
+        // session is offering a button that cannot work — and the degraded strip already owns
+        // that moment, which is the one-strip-at-a-time promise it has always made.
+        testCase "nothing is offered while the session cannot be reached" <| fun () ->
+            let offline =
+                { private' "github" "github rejected this credential" with
+                    Connection = Disconnected (Some "transport closed") }
+            let html = Support.render offline
+            Expect.isFalse (html.Contains Dom.Hooks.signInRequired) "no sign-in prompt while offline"
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.degraded Dom.Text.degradedOffline))
+                "the degraded strip is what speaks for that moment"
+            // The panel row still says it. A status is true whether or not it can be acted on
+            // right now; only the OFFER is withheld.
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.githubSignInRequired "mine"))
+                "and the panel still reports the credential honestly"
+
         testCase "an empty timeline says whether it has looked, and the caret means one thing again" <| fun () ->
             // Two opposite facts used to wear the same mark. The idle caret says "nothing was
             // ever said here"; it was also what a client showed BEFORE it had read anything,

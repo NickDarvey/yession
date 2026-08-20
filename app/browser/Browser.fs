@@ -378,6 +378,40 @@ let private toggleNav () : unit = jsNative
 })()""")>]
 let private toggleSettings () : unit = jsNative
 
+// The same move, in one direction only.
+//
+// A call to action that leads to settings must never TAKE somebody there and back: the
+// prompt over the timeline is on screen whenever a credential needs signing in, including
+// while the settings face is already open, and a toggle there would shut the very panel it
+// is pointing at. The nav pivots stay toggles because a pivot is a two-way control and this
+// is not one.
+//
+// Idempotent by construction rather than by the caller checking first — `settings-open` is
+// SET, not flipped, so pressing it twice is pressing it once.
+[<Emit("""(() => {
+  const root = document.documentElement
+  const desktop = window.matchMedia('(min-width: 768px)').matches
+  const wasOpen = root.classList.contains('settings-open')
+  root.classList.add('settings-open')
+  // Bring the column on screen: `nav-alt` means the opposite thing on each side of the
+  // breakpoint — collapsed on desktop, drawer-open on mobile.
+  if (desktop) root.classList.remove('nav-alt')
+  else root.classList.add('nav-alt')
+  // Focus moves only when the face actually ARRIVED. Stealing it from whatever the reader
+  // was doing, to a control that was already on screen, would be the prompt reaching into a
+  // panel they are already reading.
+  if (!wasOpen) {
+    // TWO frames, for the reason the toggle needs them: the arriving face is
+    // `visibility: hidden` until the transition it just started reaches its first style
+    // flush, and `focus()` on a hidden element is a no-op.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const next = document.querySelector('[data-settings-toggle="close"]')
+      if (next) next.focus()
+    }))
+  }
+})()""")>]
+let private revealSettings () : unit = jsNative
+
 // The auth probe: `me` answers with a peer token when the browser's cookie (or an
 // auth-less session) allows it — total in BOTH axes it can fail on, because the two need
 // opposite remedies: `authorized = false` means log in (the shell renavigates), while
@@ -1406,6 +1440,12 @@ let private start () =
                     // the query surface needs no re-probe, because its stream has been
                     // pushing since start.
                     toggleSettings ()
+                    refreshClaude ()
+                    refreshGitHub ()
+                    refreshModels ()
+              RevealSettings =
+                fun () ->
+                    revealSettings ()
                     refreshClaude ()
                     refreshGitHub ()
                     refreshModels ()
