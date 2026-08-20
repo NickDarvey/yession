@@ -196,7 +196,16 @@ let private makeBareFixture (root: string) (name: string) : string =
     hostGit childProcess [| "clone"; "--bare"; work; bare |] fixtures
     bare
 
-let private serviceWith (git: string) (root: string) (log: EventLog<SessionEvent>) : Repos.ReposService =
+/// The service, with the git it runs, the credential it spends, and somewhere to record a
+/// network failure. The credential and the recorder are the caller's because whether a verb
+/// spent a credential is exactly what decides whether a failure says anything about one.
+let private serviceSpending
+    (git: string)
+    (token: string option)
+    (failures: ResizeArray<ActorRef * string>)
+    (root: string)
+    (log: EventLog<SessionEvent>)
+    : Repos.ReposService =
     let reposDir = sprintf "%s/repos" root
     let fixtures = fixturesIn root
     mkdir nodeFs reposDir
@@ -211,13 +220,22 @@ let private serviceWith (git: string) (root: string) (log: EventLog<SessionEvent
           AllowedDomains = []
           AllowProtocol = "file"
           CloneUrl = fun ref -> sprintf "file://%s/%s.git" fixtures (RepoRef.repo ref)
-          ResolveToken = fun _ -> async { return None }
+          ResolveToken = fun _ -> async { return token }
+          OnNetworkFailure = fun actor said -> async { failures.Add (actor, said) }
           Log = log }
     |> expect
 
-/// The service as a session builds it: this box's named git, or PATH's.
+/// This box's git, as a session would resolve it.
+let private namedGit = Repos.gitExecutable (Sandboxes.ambientEnv ())
+
+/// The service under a named git, anonymous. What the git-resolution cases drive.
+let private serviceWith (git: string) (root: string) (log: EventLog<SessionEvent>) : Repos.ReposService =
+    serviceSpending git None (ResizeArray ()) root log
+
+/// The service as a session builds it: this box's named git, or PATH's, and anonymous with
+/// nothing listening for failures. Every case that is not about credentials wants this one.
 let private serviceIn (root: string) (log: EventLog<SessionEvent>) : Repos.ReposService =
-    serviceWith (Repos.gitExecutable (Sandboxes.ambientEnv ())) root log
+    serviceWith namedGit root log
 
 let private freshLog () =
     InMemoryEventLog.create (SessionId.create "git-suite" |> expect) (fun () -> DateTimeOffset.UtcNow)
@@ -278,6 +296,30 @@ let private srtTests =
             | Error reason ->
                 Expect.isTrue (reason.Contains "cannot run inside the sandbox") "the sandbox is named as the place"
                 Expect.isTrue (reason.Contains "YESSION_GIT_PATH") "and the knob that fixes it"
+        }
+
+        // A verb that failed while spending somebody's credential is the only moment this
+        // session gets to find out that credential stopped working — nothing else here can
+        // tell. What the failure MEANS is not decided here (git cannot tell an expired token
+        // from a repo that is not there); this only has to say that one was spent.
+        testCaseAsync "a network verb that fails while spending a credential says so" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            let failures = ResizeArray<ActorRef * string> ()
+            // No fixture made, so the clone has nothing to clone.
+            let service = serviceSpending namedGit (Some "ghu_whatever") failures root (freshLog ())
+            let! added = service.AddRepo caller (RepoRef.create "octo/missing" |> expect)
+            Expect.isError added "the clone fails"
+            Expect.equal (List.ofSeq failures |> List.map fst) [ caller.Credential ] "reported once, against the credential's actor"
+            Expect.isTrue (failures |> Seq.forall (fun (_, said) -> said <> "")) "and carries what git said"
+        }
+
+        testCaseAsync "a network verb that fails anonymously says nothing about anyone's sign-in" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            let failures = ResizeArray<ActorRef * string> ()
+            let service = serviceSpending namedGit None failures root (freshLog ())
+            let! added = service.AddRepo caller (RepoRef.create "octo/missing" |> expect)
+            Expect.isError added "the clone still fails"
+            Expect.isEmpty failures "no credential was spent, so none can have been refused"
         }
 
         testCaseAsync "a clone brings no hook templates with it" <| async {

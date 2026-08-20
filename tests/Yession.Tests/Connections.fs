@@ -488,6 +488,26 @@ let private startTokenEndpoint () : Async<TokenEndpoint> =
               ContentTypes = contentTypes }
     }
 
+/// A stand-in for GitHub's `/user`, which answers whatever status the case sets. The only
+/// thing `refusedAt` reads is the status, so that is the whole endpoint.
+type private StatusEndpoint =
+    { Url : string
+      SetStatus : int -> unit }
+
+let private startStatusEndpoint () : Async<StatusEndpoint> =
+    async {
+        let mutable status = 200
+        let handler (_: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
+            res.``end`` "{}"
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        return
+            { Url = sprintf "http://127.0.0.1:%d/user" (Interop.serverPort listening)
+              SetStatus = fun s -> status <- s }
+    }
+
 let private openEphemeral () =
     async {
         let! opened = SecretStore.openStore None (KeyStore.random ())
@@ -1089,6 +1109,36 @@ let private routeTests =
 
                 let! disconnected = clientB.Disconnect (target (PeerScope peer1))
                 Expect.isTrue (expect disconnected) "disconnected"
+            }
+
+        // Whether GitHub still accepts a token, asked of GitHub. Only a 401 is a verdict:
+        // a 403 is what rate limiting and scope refusals look like, and both happen to a
+        // perfectly good credential.
+        testCaseAsync "only a flat refusal from github means the credential is finished" <|
+            async {
+                let! endpoint = startStatusEndpoint ()
+                let check (status: int) =
+                    async {
+                        endpoint.SetStatus status
+                        return! GitHubConnection.refusedAt endpoint.Url "ghu_token"
+                    }
+                let! refused = check 401
+                Expect.isSome refused "401 is github saying no"
+                let! rateLimited = check 403
+                Expect.isNone rateLimited "403 is rate limiting or scopes, not a dead token"
+                let! fine = check 200
+                Expect.isNone fine "and a token it accepts is not refused"
+                let! broken = check 500
+                Expect.isNone broken "a provider having a bad minute is not a verdict either"
+            }
+
+        testCaseAsync "a github check that cannot reach github is not a verdict" <|
+            async {
+                // Nothing listening: this is the shape of a box with no network, and telling
+                // somebody to sign in again because their wifi dropped would be worse than
+                // saying nothing at all.
+                let! unreachable = GitHubConnection.refusedAt "http://127.0.0.1:1/user" "ghu_token"
+                Expect.isNone unreachable "unreachable is this box's problem, not the token's"
             }
 
         testCaseAsync "the status stream sends a snapshot on subscribe and a fresh frame on change" <|

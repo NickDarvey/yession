@@ -156,6 +156,15 @@ type ReposConfig =
       /// caller names (Plan 08 precedence, applied by the composition). None =
       /// anonymous — public repos still clone; a private one fails with git's own words.
       ResolveToken : ActorRef -> Async<string option>
+      /// A network verb failed while spending the credential resolved for this actor.
+      ///
+      /// Beside `ResolveToken` deliberately, because they are two halves of one story: a
+      /// caller that can hand a verb a credential but cannot be told the verb failed with it
+      /// is exactly the caller that leaves a dead credential reading as healthy. Nothing here
+      /// decides what the failure MEANS — git's stderr cannot tell "your token expired" from
+      /// "that repo does not exist" (`Repository not found` is what github.com says for
+      /// both), so the composition asks the provider, which is the only place that knows.
+      OnNetworkFailure : ActorRef -> string -> Async<unit>
       Log : EventLog<SessionEvent> }
 
 /// Who is calling a mutating/network verb. The two halves genuinely differ for the
@@ -376,6 +385,9 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                     // git removes a target it created itself, but not one it was killed
                     // out of. Either way the staging area is ours to leave clean.
                     rmRecursive fs staging
+                    // Only when a credential was actually spent: an anonymous clone that
+                    // failed says nothing about anybody's sign-in.
+                    if token.IsSome then do! config.OnNetworkFailure caller.Credential e
                     return Error e
                 | Ok _ ->
                     // The owner directory is the rename's destination PARENT, and git made
@@ -479,7 +491,9 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 async {
                     let! token = config.ResolveToken caller.Credential
                     match! runOk confined token [ "-C"; pathOf repo; "fetch"; "--prune"; "--no-recurse-submodules"; "origin" ] with
-                    | Error e -> return Error e
+                    | Error e ->
+                        if token.IsSome then do! config.OnNetworkFailure caller.Credential e
+                        return Error e
                     | Ok run ->
                         // Fetch narrates on stderr; an up-to-date fetch says nothing.
                         let said = (run.Stderr + run.Stdout).Trim ()
