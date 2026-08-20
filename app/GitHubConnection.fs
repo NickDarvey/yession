@@ -238,6 +238,42 @@ let ownerOf (identity: CookieIdentity) : CredentialOwner =
   .catch(e => ({ ok: false, body: String(e) }))""")>]
 let private postJson (url: string) (body: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
 
+/// Ask GitHub whether a token is still good, as GitHub itself.
+///
+/// The alternative was reading git's stderr, and that is not an answer: `Repository not
+/// found` is what github.com says for a private repo you cannot see AND for a repo that is
+/// not there, so a dead credential and a typo are the same sentence. One authenticated
+/// request to the API distinguishes them definitively, and it is only ever made on a path
+/// that has already failed.
+///
+/// The endpoint is a parameter for the same reason the OAuth ones are: a suite needs
+/// somewhere to point it that is not the live provider.
+[<Emit("""fetch($0, { headers: { 'authorization': 'Bearer ' + $1, 'accept': 'application/vnd.github+json',
+                                 'user-agent': 'yession' } })
+  .then(r => ({ reachable: true, status: r.status }))
+  .catch(() => ({ reachable: false, status: 0 }))""")>]
+let private getUser (url: string) (token: string) : JS.Promise<{| reachable: bool; status: int |}> = jsNative
+
+let private userUrl = "https://api.github.com/user"
+
+/// Whether GitHub still accepts this token: `Some reason` when it definitively does not.
+///
+/// Only 401 counts. A 403 is GitHub's answer for rate limiting and for scope refusals, both
+/// of which happen to a perfectly good credential, and telling somebody to sign in again
+/// because they made too many requests would be worse than saying nothing. Unreachable is
+/// not a verdict either — that is this box's network, not the token.
+let refusedAt (url: string) (token: string) : Async<string option> =
+    async {
+        let! reply = getUser url token |> Interop.awaitPromise
+        if reply.reachable && reply.status = 401 then
+            return Some "github rejected this credential"
+        else return None
+    }
+
+/// The check as the session composes it, against GitHub's own endpoint.
+let refused (token: string) : Async<string option> =
+    refusedAt (envOr "YESSION_GITHUB_USER_URL" userUrl) token
+
 /// Build the /github* route handler. `statusOf` reads the session's live status cache
 /// (the same Manager connection stream that feeds /claude — a stored `github` entry
 /// appears there with no Manager changes, because status is envelope-shape detection).

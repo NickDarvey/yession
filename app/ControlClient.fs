@@ -191,6 +191,11 @@ type SessionConnections =
       /// later. The session never keeps the refresh token: it goes over this leg once.
       PutGrant : ControlWire.ConnectionPutGrantRequest -> Async<Result<unit, string>>
       Disconnect : SecretId -> Async<Result<bool, string>>
+      /// Tell the Manager the PROVIDER refused this credential. The one fact about a
+      /// credential's health that only the side SPENDING it can know — a static token has no
+      /// expiry to read, so nothing Manager-side can work this out. Answers whether it was
+      /// news, so a verb that retries does not report the same fault three times.
+      Reject : SecretId -> string -> Async<Result<bool, string>>
       Resolve : SecretId -> Async<Result<ConnectionKind * string, string>> }
 
 let connections (baseUrl: string) (secret: string) : SessionConnections =
@@ -228,6 +233,11 @@ let connections (baseUrl: string) (secret: string) : SessionConnections =
             post "disconnect"
                 (ControlWire.toString ControlWire.connectionDisconnectRequest { Target = target })
                 (ControlWire.fromString ControlWire.connectionDisconnectResponse >> Result.map (fun r -> r.Disconnected))
+      Reject =
+        fun target reason ->
+            post "reject"
+                (ControlWire.toString ControlWire.connectionRejectRequest { Target = target; Reason = reason })
+                (ControlWire.fromString ControlWire.connectionRejectResponse >> Result.map (fun r -> r.Recorded))
       Resolve =
         fun target ->
             post "resolve"

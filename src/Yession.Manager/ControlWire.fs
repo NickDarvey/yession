@@ -194,6 +194,15 @@ module ControlWire =
     type ConnectionResolveRequest = { Target : SecretId }
     type ConnectionResolveResponse = { Kind : ConnectionKind; Value : string }
 
+    /// A session reporting that the PROVIDER refused this credential — the one fact about a
+    /// credential's health that the Manager can never work out for itself. A static token
+    /// carries no expiry at all, so "it stopped working" only ever arrives from whoever
+    /// spent it. `Reason` is what to show a person, not a status code.
+    type ConnectionRejectRequest = { Target : SecretId; Reason : string }
+    /// Whether this changed anything — false if the credential was already known refused,
+    /// so a verb retried three times does not report three fresh faults.
+    type ConnectionRejectResponse = { Recorded : bool }
+
     let private secretId : Codec<SecretId> =
         { Encode =
             fun (id: SecretId) ->
@@ -357,6 +366,23 @@ module ControlWire =
           Decode =
             Decode.object (fun get ->
                 { ConnectionResolveRequest.Target = get.Required.Field "target" secretId.Decode }) }
+
+    let connectionRejectRequest : Codec<ConnectionRejectRequest> =
+        { Encode =
+            fun (r: ConnectionRejectRequest) ->
+                Encode.object
+                    [ "target", secretId.Encode r.Target
+                      "reason", Encode.string r.Reason ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionRejectRequest.Target = get.Required.Field "target" secretId.Decode
+                  ConnectionRejectRequest.Reason = get.Required.Field "reason" Decode.string }) }
+
+    let connectionRejectResponse : Codec<ConnectionRejectResponse> =
+        { Encode = fun (r: ConnectionRejectResponse) -> Encode.object [ "recorded", Encode.bool r.Recorded ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionRejectResponse.Recorded = get.Required.Field "recorded" Decode.bool }) }
 
     let connectionResolveResponse : Codec<ConnectionResolveResponse> =
         { Encode =

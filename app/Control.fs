@@ -32,6 +32,7 @@ module Yession.Host.Control
 //   POST /control/connections/put        { target, value }      -> "ok" (static token)
 //   POST /control/connections/put-grant  { target, accessToken, … } -> "ok" (refreshable)
 //   POST /control/connections/disconnect { target }             -> { disconnected }
+//   POST /control/connections/reject     { target, reason }     -> { recorded }
 //   POST /control/connections/resolve    { target }             -> { kind, value }
 //        (the ONE value-returning route (Plan 08): an agent turn needs the token
 //         in-process; policy gates it to targets whose scope the caller is bound to)
@@ -89,6 +90,7 @@ type ConnectionsApi =
       Put : ControlCaller -> ControlWire.ConnectionPutRequest -> Async<Result<unit, SecretsError>>
       PutGrant : ControlCaller -> ControlWire.ConnectionPutGrantRequest -> Async<Result<unit, SecretsError>>
       Disconnect : ControlCaller -> ControlWire.ConnectionDisconnectRequest -> Async<Result<ControlWire.ConnectionDisconnectResponse, SecretsError>>
+      Reject : ControlCaller -> ControlWire.ConnectionRejectRequest -> Async<Result<ControlWire.ConnectionRejectResponse, SecretsError>>
       Resolve : ControlCaller -> ControlWire.ConnectionResolveRequest -> Async<Result<ControlWire.ConnectionResolveResponse, SecretsError>>
       Status : ControlCaller -> Async<ConnectionStatusList> }
 
@@ -224,7 +226,7 @@ let tryHandle
                                         (fun deleted -> ControlWire.toString ControlWire.deleteSecretResponse { Deleted = deleted })
                                         outcome
                                 }))
-            | "POST", ("/control/connections/begin" | "/control/connections/complete" | "/control/connections/put" | "/control/connections/put-grant" | "/control/connections/disconnect" | "/control/connections/resolve" as connectionsPath) ->
+            | "POST", ("/control/connections/begin" | "/control/connections/complete" | "/control/connections/put" | "/control/connections/put-grant" | "/control/connections/disconnect" | "/control/connections/reject" | "/control/connections/resolve" as connectionsPath) ->
                 // Connections (Plan 08). Same thin-arm shape as secrets: decode, hand the
                 // verified caller to the pre-authorized handlers, map the outcome.
                 match connectionsApi with
@@ -270,6 +272,13 @@ let tryHandle
                                 async {
                                     let! outcome = api.Disconnect caller request
                                     respondWith (ControlWire.toString ControlWire.connectionDisconnectResponse) outcome
+                                }))
+                    | "/control/connections/reject" ->
+                        decodeAnd (ControlWire.fromString ControlWire.connectionRejectRequest) (fun request ->
+                            Async.StartImmediate (
+                                async {
+                                    let! outcome = api.Reject caller request
+                                    respondWith (ControlWire.toString ControlWire.connectionRejectResponse) outcome
                                 }))
                     | _ ->
                         decodeAnd (ControlWire.fromString ControlWire.connectionResolveRequest) (fun request ->

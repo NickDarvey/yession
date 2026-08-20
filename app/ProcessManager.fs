@@ -405,6 +405,20 @@ let connectionsApiFor
                     let! outcome = run (broker.Disconnect request.Target)
                     return outcome |> Result.map (fun existed -> { ControlWire.ConnectionDisconnectResponse.Disconnected = existed })
             }
+      // The same action as `Resolve`, and for the same kind of reason `PutGrant` shares
+      // `Connect`: the only caller who can have been refused by a provider is one that was
+      // entitled to spend the credential in the first place. A separate action would add a
+      // policy row without adding a distinction — every rule in this family permits exactly
+      // where the caller IS the target scope's owner.
+      Reject =
+        fun caller request ->
+            async {
+                match authorize caller ResolveCredential request.Target with
+                | Error e -> return Error e
+                | Ok () ->
+                    let! outcome = run (broker.Reject request.Target request.Reason)
+                    return outcome |> Result.map (fun recorded -> { ControlWire.ConnectionRejectResponse.Recorded = recorded })
+            }
       Resolve =
         fun caller request ->
             async {
@@ -731,6 +745,7 @@ let createWithUi
                         audit (SecretStore.Audit.connectionResolved id (sprintf "%A" kind) refreshed)
                     | Broker.RefreshFailed (id, reason) ->
                         audit (SecretStore.Audit.connectionRefreshFailed id reason)
+                    | Broker.Rejected (id, reason) -> audit (SecretStore.Audit.connectionRejected id reason)
                     if Broker.changesReadableStatus observation then broadcastConnections.Value ()))
 
     let connectionsApi : Control.ConnectionsApi option =
