@@ -121,13 +121,42 @@ Items are roughly ordered by how much they matter.
     fix is to install them, or to choose `host` deliberately.
   - **An unprivileged container needs `YESSION_SANDBOX_NESTED=weak`** (below), which is
     now on the default path rather than an opt-in one.
+  - **An srt sandbox reads what its policy names and nothing else**
+    ([Plan 24](plans/24-sandbox-read-scope.md)). srt's read model is permissive by default,
+    so denying only the invoking user's home — which is what this did until Plan 24 — left
+    every region nobody had thought to name readable by every agent-issued command: `/etc`,
+    a checkout the session was never given, and, when the Manager runs outside the
+    operator's home, another session's data directory. The deny is now `/`, re-expanded by
+    srt from the children of `/` at each spawn, with three holes: the policy's read paths,
+    everything it may write, and the host runtime.
+  - **The host runtime is the half of that scope this code cannot derive.** An interpreter
+    can be anywhere, so the allow-back is a platform list (`SrtTools.Runtime`) plus the
+    install prefix of whatever is already running — `process.execPath`, srt's own package
+    (its wrapped argv execs a vendored helper from inside the sandbox), and
+    `YESSION_CLAUDE_PATH` — plus `YESSION_SANDBOX_READ_PATHS` for a toolchain neither
+    finds. That last one ADDS to the platform list rather than replacing it. A path the
+    list is missing fails loudly and locally: a command cannot find its interpreter.
+    - **The darwin list is unverified.** No job here executes a suite on darwin (pr.yaml's
+      macos job builds the package and enters the dev shell), so `linuxRuntimePaths` is
+      pinned by the `Srt` tier and `darwinRuntimePaths` is what a Seatbelt profile
+      conventionally allows back, checked against srt's implementation and nothing else.
+    - **`/proc` and `/sys` are outside the scope by construction.** srt's root-deny
+      expansion skips both (it remounts `/proc` itself, and a tmpfs over `/sys` breaks
+      tooling for a tree that is read-only anyway). Neither is a route back to the denied
+      paths — `/proc/<pid>/root` does not resolve to the host root from inside, and bwrap
+      gives the sandbox its own pid namespace — but neither is scoped either.
+    - **srt's own default write paths reach into the denied home.** `getDefaultWritePaths()`
+      always allows `~/.npm/_logs` and `~/.claude/debug`, and srt re-binds an allowed write
+      path that its read-deny tmpfs wiped — so both are readable AND writable from inside a
+      sandbox whose policy names neither. The home they resolve against is the Session
+      Process's `os.homedir()`, so the fix is that process's own `HOME`, not the policy.
 - **The agent CLI runs through the `spawnClaudeCodeProcess` seam with a policy env**
   (AgentSandbox): allowlisted baseline + proxy passthrough, a per-session scratch HOME
   (`<data>/agent-home` — `~/.claude` state lives and dies with the session), exactly one
   credential, and a process-group kill on the SDK's forwarded abort signal.
-  srt — the default — adds OS confinement around it: the CLI reads and writes only its
-  scratch HOME of the operator's files, and reaches only `AgentSandbox`'s domains
-  (`YESSION_AGENT_DOMAINS`). `YESSION_AGENT_SANDBOX=host` opts out, leaving the file
+  srt — the default — adds OS confinement around it: the CLI reads and writes its scratch
+  HOME and reads the host runtime, and nothing else of the operator's files; and it reaches
+  only `AgentSandbox`'s domains (`YESSION_AGENT_DOMAINS`). `YESSION_AGENT_SANDBOX=host` opts out, leaving the file
   system and network open to the CLI. Docker is BY DESIGN not an agent backend: a container
   per session boot is the opposite of the sub-second start the agent needs, and the
   WorkSandbox keeps it.
@@ -414,7 +443,8 @@ Items are roughly ordered by how much they matter.
     scopes the exemption per SPAWN, never per path. So `add_repo`'s clone has its own
     sandbox with srt's filesystem rules off: for that one command git can read and write
     whatever the session's user can, including the credential files srt would otherwise
-    mask. Egress stays pinned to github.com, the env stays the hardened one, and every
+    mask. `filesystem.disabled` drops the READ policy with the write one, so the read scope
+    above does not reach this spawn either. Egress stays pinned to github.com, the env stays the hardened one, and every
     other verb keeps the confined policy — none of them writes a path srt objects to.
     macOS enforces the refusal as patterns and Linux as a scan of what already exists, so
     a Linux clone would have been fine confined; it is exempt there too rather than ship a

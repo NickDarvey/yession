@@ -43,9 +43,9 @@ let private nowMs () : float = jsNative
 
 // --- The sandbox under test ---------------------------------------------------------------
 
-/// A policy whose only writable place is `workspace`, whose only re-allowed read inside the
-/// denied home is `workspace`, and which names no domain at all — the fail-closed shape a
-/// session gets when nobody configured egress.
+/// A policy whose only writable place is `workspace`, whose only re-allowed read outside
+/// the host's runtime is `workspace`, and which names no domain at all — the fail-closed
+/// shape a session gets when nobody configured egress.
 let private policyIn (workspace: string) (domains: string list) : SandboxPolicy =
     { ReadPaths = [ workspace ]
       WritePaths = [ workspace ]
@@ -63,8 +63,7 @@ let private srtTools () =
 
 let private startSandbox (policy: SandboxPolicy) : Async<Sandbox> =
     async {
-        let ambient = Sandboxes.ambientEnv ()
-        let create = Sandboxes.SrtSandbox.create (srtTools ()) (Map.tryFind "HOME" ambient)
+        let create = Sandboxes.SrtSandbox.create (srtTools ())
         match! create policy with
         | Error reason -> return failwithf "srt sandbox failed: %s" reason
         | Ok sandbox -> return sandbox
@@ -130,8 +129,52 @@ let tests =
                 do! sandbox.Dispose ()
             })
 
+            testCaseAsync "a read outside the policy's paths is refused" (async {
+                // The half the write case above does not cover, and the one that was missing:
+                // reads used to be denied only inside the operator's home, so anything else
+                // nobody had thought to name — another session's data directory, a checkout
+                // this session was never given — was readable by every command.
+                let outside = mkdtemp nodeFs nodeOs
+                writeFile nodeFs (outside + "/secret") "not-yours"
+                let workspace = mkdtemp nodeFs nodeOs
+                let! sandbox = startSandbox (policyIn workspace [])
+                let! run, out, _ = shell sandbox (sprintf "cat %s/secret" outside)
+                Expect.notEqual (exitCode run) 0 "reading a path the policy never named fails"
+                Expect.isFalse (out.Contains "not-yours") "and its contents never reach stdout"
+                do! sandbox.Dispose ()
+            })
+
+            testCaseAsync "the host runtime stays readable, or no command could run at all" (async {
+                // The other half of denying every read: an interpreter the sandbox cannot read
+                // is a sandbox that runs nothing. This is the case that goes red when the
+                // allow-back list stops matching where this box keeps its runtime.
+                let workspace = mkdtemp nodeFs nodeOs
+                let! sandbox = startSandbox (policyIn workspace [])
+                let! run, out, _ =
+                    runInSandbox sandbox (nodePath ()) [ "-e"; "process.stdout.write('ran')" ] Map.empty None
+                Expect.equal (exitCode run) 0 "the interpreter this very process runs on is reachable inside"
+                Expect.isTrue (out.Contains "ran") "and it produced its output"
+                do! sandbox.Dispose ()
+            })
+
+            testCaseAsync "the agent's own sandbox keeps the runtime that starts the CLI" (async {
+                // The AgentSandbox names ONE path — its per-session scratch HOME — so it is
+                // the narrowest read scope in the product, and the place a missing allow-back
+                // would surface as a session that cannot start a turn at all.
+                let home = mkdtemp nodeFs nodeOs
+                let ambient = Sandboxes.ambientEnv ()
+                let policy =
+                    Sandboxes.AgentSandbox.policyFor ambient home (Sandboxes.AgentSandbox.envFor ambient home None)
+                let! sandbox = startSandbox policy
+                let! run, out, _ =
+                    runInSandbox sandbox (nodePath ()) [ "-e"; "process.stdout.write('ran')" ] Map.empty (Some home)
+                Expect.equal (exitCode run) 0 "the interpreter the CLI runs on is readable under the agent's policy"
+                Expect.isTrue (out.Contains "ran") "and it produced its output"
+                do! sandbox.Dispose ()
+            })
+
             testCaseAsync "a read of the operator's home is refused, while the workspace inside it is not" (async {
-                // The home directory is the region the policy denies; a workspace under it is
+                // The home is denied like everything else now; a workspace under it is
                 // re-allowed by name. Both halves matter: deny too little and secrets leak,
                 // deny too much and a session cannot use its own workspace.
                 let home = hostHome ()
@@ -186,10 +229,8 @@ let tests =
                 // command that only answers if every one of those was plumbed through.
                 let workspace = mkdtemp nodeFs nodeOs
                 let policy = policyIn workspace []
-                let ambient = Sandboxes.ambientEnv ()
                 let spawner =
-                    Sandboxes.AgentSandbox.srtClaudeSpawner (
-                        Sandboxes.SrtSandbox.wrapperFor (srtTools ()) (Map.tryFind "HOME" ambient) policy)
+                    Sandboxes.AgentSandbox.srtClaudeSpawner (Sandboxes.SrtSandbox.wrapperFor (srtTools ()) policy)
                 let! out, code =
                     driveSpawner spawner "/bin/cat" [||] workspace (Map.toArray policy.Env) "round-trip"
                     |> Interop.awaitPromise
