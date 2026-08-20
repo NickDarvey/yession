@@ -197,12 +197,27 @@ let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<
                     try
                         return!
                             await (page.EvaluateAsync<string>
-                                    """() => JSON.stringify({
+                                    """async () => JSON.stringify({
                                          url: location.href,
                                          title: document.title,
                                          connection: document.querySelector('[data-connection]')?.textContent ?? null,
                                          conversation: document.querySelector('[data-conversation]')?.textContent?.slice(0, 200) ?? null,
-                                         degraded: document.querySelector('[data-degraded]')?.getAttribute('data-degraded') ?? null
+                                         degraded: document.querySelector('[data-degraded]')?.getAttribute('data-degraded') ?? null,
+                                         // What this client KEPT, by store and entry count. An
+                                         // offline page renders out of these, so a store that is
+                                         // absent or empty is the difference between "the replay
+                                         // is broken" and "there was nothing to replay" — which
+                                         // a bare timeout cannot tell you and which cost a full
+                                         // run of the gate to tell apart once already.
+                                         kept: await (async () => {
+                                           try {
+                                             const out = {}
+                                             for (const n of await caches.keys()) {
+                                               out[n] = (await (await caches.open(n)).keys()).length
+                                             }
+                                             return out
+                                           } catch (e) { return 'unreadable: ' + e.message }
+                                         })()
                                        })""")
                     with pe -> return "unreadable: " + pe.Message
                 }
@@ -1494,6 +1509,38 @@ let private inTimeline =
 
 let private printedInTerminal = "printed-before-the-session-died"
 
+/// Has this client actually KEPT the thing the reload will replay?
+///
+/// On screen is not kept. The live leg puts a record in the model the moment it arrives, and
+/// the SAME record triggers a separate HTTP read that is what writes it to the store
+/// (`App.fs`: `TerminalRecordMsg` / `EventsAvailable` -> fetch -> `cache.Write`), started with
+/// `Async.StartImmediate` and awaited by nothing. So there is a window in which the assertion
+/// these cases make about the LIVE page is already true and the store behind the reload is
+/// still empty — measured at 1 run in 3 on an idle box, and wider on a loaded CI runner, where
+/// killing the session inside it left the reload nothing to replay and the case timed out
+/// naming no cause. Waiting on the store is the difference between testing this and testing
+/// that race, exactly as waiting on the worker's registration is below.
+let private keptIn (cachePart: string) (text: string) =
+    sprintf
+        """(async () => {
+             try {
+               const names = (await caches.keys()).filter(n => n.includes('%s'))
+               for (const n of names) {
+                 const c = await caches.open(n)
+                 for (const req of await c.keys()) {
+                   const r = await c.match(req)
+                   if (r && (await r.text()).includes('%s')) return true
+                 }
+               }
+             } catch (e) { return false }
+             return false
+           })()"""
+        cachePart
+        text
+
+let private transcriptKept = keptIn "/terminals/" printedInTerminal
+let private conversationKept = keptIn "/events" saidInTimeline
+
 let private terminalPrinted =
     sprintf
         """[...document.querySelectorAll('[data-terminal-output]')].some(o => o.textContent.includes('%s'))"""
@@ -1696,14 +1743,15 @@ let mountedTests =
                     do! awaitU (page.ClickAsync composerSel)
                     do! awaitU (page.Keyboard.TypeAsync saidInTimeline)
                     do! awaitU (page.Locator("[data-send-draft]").First.ClickAsync ())
-                    do! await (page.WaitForFunctionAsync inTimeline) |> Async.Ignore
+                    do! waitFor "the message in the timeline" page inTimeline
+                    do! waitFor "the conversation to be kept" page conversationKept
                 })
             (fun page ->
                 async {
                     // It has what this client had been reading. Scoped to the conversation
                     // element: a page-level match is satisfied by the roster and by the
                     // composer this text was typed into.
-                    do! await (page.WaitForFunctionAsync inTimeline) |> Async.Ignore
+                    do! waitFor "the conversation to come back offline" page inTimeline
                 })
 
         // The connection state is its own promise, and its own way to break: a client that
@@ -1715,9 +1763,10 @@ let mountedTests =
             (fun page ->
                 async {
                     do!
-                        await (page.WaitForFunctionAsync
-                                """document.querySelector('[data-connection]')?.textContent !== 'Connected'""")
-                        |> Async.Ignore
+                        waitFor
+                            "the client to stop claiming it is connected"
+                            page
+                            """document.querySelector('[data-connection]')?.textContent !== 'Connected'"""
                 })
 
         // Plan 22, and the other half of the bug report: the conversation came back offline
@@ -1736,7 +1785,8 @@ let mountedTests =
                     do! awaitU (page.ClickAsync composerInput)
                     do! awaitU (page.Keyboard.TypeAsync (sprintf "echo %s" printedInTerminal))
                     do! awaitU (page.ClickAsync "[data-terminal-send]")
-                    do! await (page.WaitForFunctionAsync terminalPrinted) |> Async.Ignore
+                    do! waitFor "the printed line on screen" page terminalPrinted
+                    do! waitFor "the transcript to be kept" page transcriptKept
                 })
             (fun page ->
                 async {
@@ -1744,7 +1794,7 @@ let mountedTests =
                     // records are there to be shown BEFORE anyone opens it — which is what a
                     // store read before the network buys.
                     do! awaitU (page.Locator("[data-terminal-toggle='show']").First.ClickAsync ())
-                    do! await (page.WaitForFunctionAsync terminalPrinted) |> Async.Ignore
+                    do! waitFor "the terminal output to come back offline" page terminalPrinted
                 }))
     ]
 
