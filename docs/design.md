@@ -165,6 +165,22 @@ as one:
   reading, writing, and sending continue — per "local first", a lost history feed costs
   history and nothing else.
 
+The session leg is supervised on the same terms, for the same reason: it is a leg that can
+fail independently, and it used to fail in a way nothing could see. A WebRTC data channel dies
+without saying so — a backgrounded phone, a WiFi-to-cellular switch — leaving `readyState` at
+`open`, sends accepted into nothing, and no `close` event ever. So every channel that carries
+a session is wrapped in `Link.supervise` (`Yession.Domain/Link.fs`) before anything else holds
+it: any inbound frame is proof of life, a quiet link is probed once a second, and three quiet
+ticks make it dead. Supervision is symmetric — the Session Process holds every peer to the
+heartbeat it answers — which is also how a silently-dead peer stops holding a terminal lease.
+
+Death has exactly one expression: the channel CLOSES. Nothing above the wrapper learns about
+liveness through a second channel, so there is no second state to keep consistent with the
+first, and the two pumps needed no change — the client reconnects and re-pushes its full doc
+state, the Session Process runs the cleanup it already ran. `LinkPolicy` takes its clock as a
+port exactly as `Resilience.Policy` does, so the whole quiet-tick sequence is asserted in the
+cheap tier in zero real time ([ADR](decisions/2026-08-20-session-link-liveness.md)).
+
 ---
 
 ## 3. Authority model (Phase 2)
