@@ -212,6 +212,31 @@ let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<
     }
 
 
+/// The text an element really carries, with remote-caret widgets subtracted.
+///
+/// A ProseMirror widget decoration's DOM lives INSIDE the node it is anchored in, so a
+/// co-editor's caret label sitting in a heading makes that heading's `textContent` read
+/// `"Heading oneada"` rather than `"Heading one"`. An assertion comparing `textContent`
+/// exactly is therefore not testing the content — it is testing the content AND whether
+/// anybody's caret happens to be parked in it, which is a race nothing in the test controls.
+///
+/// It cost a full CI run of #210 to learn that, twice, because the failure looks exactly like
+/// lost content: the heading never equals the string, the wait never settles, and the page is
+/// rendering the words perfectly the whole time.
+let private ownTextFn =
+    """((el) => el ? [...el.childNodes]
+          .filter(n => !(n.nodeType === 1 && n.classList.contains('pm-caret')))
+          .map(n => n.textContent).join('') : null)"""
+
+/// The own text of the first match, for a strict comparison.
+let private ownText (selector: string) =
+    sprintf "%s(document.querySelector('%s'))" ownTextFn selector
+
+/// Does any match carry exactly this text, carets aside? The `.some` form, because a page can
+/// hold several editors and the assertion is about one of them saying the words.
+let private someOwnText (selector: string) (text: string) =
+    sprintf "[...document.querySelectorAll('%s')].some(el => %s(el) === '%s')" selector ownTextFn text
+
 /// A page-function wait that says WHICH wait it was. Playwright reports only "Timeout 30000ms
 /// exceeded", and a case with a dozen waits is a case whose red names none of them — telling
 /// them apart then costs a full run of the gate per hypothesis, which is how guessing comes to
@@ -308,7 +333,7 @@ let tests =
                 do! awaitU (pageA.ClickAsync composer)
                 do! awaitU (pageA.Keyboard.TypeAsync "# Heading one")
                 let renderedHeading =
-                    """document.querySelector('[data-rich-readonly="false"] .ProseMirror h1')?.textContent === 'Heading one'"""
+                    sprintf "%s === 'Heading one'" (ownText "[data-rich-readonly=\"false\"] .ProseMirror h1")
                 do! waitFor "A's own typing to render as a heading" pageA renderedHeading
 
                 // B converges: it renders A's draft as the same formatted heading.
@@ -317,7 +342,7 @@ let tests =
                 do! waitFor
                         "B's mirror to render A's remote content"
                         pageB
-                        """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one')"""
+                        (someOwnText ".ProseMirror h1" "Heading one")
 
                 // And B JOINED it rather than opening a rival blank: the composer B is in is A's
                 // draft, which is why the "new message" way out is offered at all.
@@ -334,8 +359,7 @@ let tests =
                 do! awaitU (pageB.ClickAsync composer)
                 do! awaitU (pageB.Keyboard.PressAsync "End")
                 do! awaitU (pageB.Keyboard.TypeAsync " and two")
-                let coEdited =
-                    """[...document.querySelectorAll('.ProseMirror h1')].some(h => h.textContent === 'Heading one and two')"""
+                let coEdited = someOwnText ".ProseMirror h1" "Heading one and two"
                 do! waitFor "A to see B's co-edit" pageA coEdited
 
                 // B sends A's draft: any co-editor may. Both timelines show the immutable message.
@@ -713,7 +737,7 @@ let editorTests =
                 let! _ = await (page.WaitForFunctionAsync "!!document.querySelector('.ProseMirror br')")
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        "document.querySelectorAll('.ProseMirror > p').length === 1")
+                        "document.querySelectorAll('#host .ProseMirror > p').length === 1")
                 let! broken = await (page.EvaluateAsync<string> "() => window.__md()")
                 Expect.stringContains broken "first line" "the text before the break survived"
                 Expect.stringContains broken "same paragraph" "and the text after it"
@@ -724,7 +748,7 @@ let editorTests =
                 do! awaitU (page.Keyboard.TypeAsync "second block")
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        "document.querySelectorAll('.ProseMirror > p').length === 2")
+                        "document.querySelectorAll('#host .ProseMirror > p').length === 2")
                 let! md = await (page.EvaluateAsync<string> "() => window.__md()")
                 Expect.stringContains md "first line" "the first block survived"
                 Expect.stringContains md "second block" "Alt+Enter opened a second block"
@@ -760,6 +784,105 @@ let editorTests =
                     await (page.WaitForFunctionAsync
                         "[...document.querySelectorAll('.ProseMirror [style*=\"background-color\"]')].length > 0")
                 return ()
+            }
+
+        // The invariant a caret has to keep out of the way of. Pinned in the CHEAP browser
+        // tier because the only thing that could see it before was the two-peer WebRTC E2E,
+        // and only under enough CI load to lose the race — a thirty-second wait that says
+        // "timed out" and nothing else, twice, before the labels went on.
+        //
+        // What it pins is not the caret. It is that drawing one cannot cost a co-editor the
+        // words: `PushPresences` dispatches a stepless ProseMirror transaction, ProseMirror
+        // runs `ySyncPlugin`'s `view.update` on every state update regardless, and that hook
+        // reconciles the WHOLE document back into Yjs. Do it while content is still arriving
+        // and the push races the words it is drawing over.
+        editorCase "a caret drawn on every frame never costs the mirror its content" (EDITOR_PORT + 11) <| fun page ->
+            async {
+                do! waitFor "both peers to mount" page "!!document.querySelector('#peer-a .ProseMirror') && !!document.querySelector('#peer-b .ProseMirror')"
+
+                // Carets first, and left running for the whole case: the push has to be in
+                // flight WHILE the content arrives, which is the only arrangement in which it
+                // can race anything. Started before a single keystroke so no frame of the
+                // convergence happens un-stormed.
+                do! awaitU (page.EvaluateAsync "() => window.__caretStorm(true)")
+
+                // A types into its own composer. Real key events, so every keystroke is its own
+                // doc update and its own relay — the drip a collaborator actually produces,
+                // rather than one paste the mirror could absorb in a single frame.
+                do! awaitU (page.ClickAsync "#peer-a .ProseMirror")
+                do! awaitU (page.Keyboard.TypeAsync "# Heading one")
+
+                // The co-editor shows what was typed. This is the assertion the whole surface
+                // exists for: it goes red when a caret push costs the content it draws over.
+                //
+                // On failure it says WHICH of the four stories happened, because the DOM alone
+                // cannot: what each doc holds and what each editor rendered, side by side.
+                try
+                    do! waitFor
+                            "the co-editor to render the author's remote content"
+                            page
+                            (sprintf "%s === 'Heading one'" (ownText "#peer-b .ProseMirror h1"))
+                with e ->
+                    let! state = await (page.EvaluateAsync<string> "() => window.__convState()")
+                    return failwithf "%s\n  state: %s" e.Message state
+
+                // ...and the caret really is drawn there, so this is a test of a caret over
+                // content and not of an editor nobody decorated.
+                do! waitFor "the author's caret to be drawn in the mirror" page "!!document.querySelector('#peer-b .pm-caret')"
+
+                do! awaitU (page.EvaluateAsync "() => window.__caretStorm(false)")
+
+                // Anti-vacuity, and the reason a green here means anything: a storm that never
+                // ran converges beautifully. Frames are not free to assume — a page the browser
+                // decided not to paint would push none of them.
+                let! pushes = await (page.EvaluateAsync<int> "() => window.__caretPushes")
+                if pushes < 5 then
+                    failwithf
+                        "the caret storm pushed %d times — too few for convergence to have been raced at all, so this case proved nothing"
+                        pushes
+            }
+
+        // The other half of the same story, and the one the whole `pushPresences` debate turned
+        // on: drawing a remote caret must not WRITE to the shared document.
+        //
+        // It is not obvious that it doesn't. `PushPresences` dispatches a stepless ProseMirror
+        // transaction, and `ySyncPlugin`'s `view.update` hook — which runs on every state update,
+        // `docChanged` or not — reconciles the whole document back into Yjs through
+        // `_prosemirrorChanged`. The reconciliation is real and it is O(document); what this
+        // pins is that it emits nothing, so a caret is a read of the doc and never a write to it.
+        //
+        // Counted from OUR side rather than by patching the library: Yjs updates on the
+        // co-editor's doc whose origin is `ySyncPluginKey`, which is what that write-back tags
+        // its transaction with. Real doc updates, not a hook we hoped was called.
+        editorCase "drawing a remote caret writes nothing to the shared document" (EDITOR_PORT + 12) <| fun page ->
+            async {
+                do! waitFor "both peers to mount" page "!!document.querySelector('#peer-a .ProseMirror') && !!document.querySelector('#peer-b .ProseMirror')"
+                do! awaitU (page.EvaluateAsync "() => window.__caretStorm(true)")
+                do! awaitU (page.ClickAsync "#peer-a .ProseMirror")
+                do! awaitU (page.Keyboard.TypeAsync "# Heading one")
+                // Over CONTENT: an empty document is the case y-prosemirror short-circuits
+                // anyway (`initialContentChanged`), so a storm over nothing would prove nothing.
+                do! waitFor
+                        "the co-editor to render the author's remote content"
+                        page
+                        (sprintf "%s === 'Heading one'" (ownText "#peer-b .ProseMirror h1"))
+                do! awaitU (page.EvaluateAsync "() => window.__caretStorm(false)")
+
+                let! pushes = await (page.EvaluateAsync<int> "() => window.__caretPushes")
+                if pushes < 5 then
+                    failwithf "the caret storm pushed %d times — too few to have exercised the write-back at all" pushes
+                // The doc really moved under the storm — otherwise a write-back count of zero
+                // says the observer was never wired, not that nothing was written.
+                let! updates = await (page.EvaluateAsync<int> "() => window.__docUpdates")
+                if updates < 1 then
+                    failwith "the co-editor's doc took no updates at all, so a zero write-back count means the counter is broken, not that a caret is harmless"
+                let! writebacks = await (page.EvaluateAsync<int> "() => window.__writebacks")
+                Expect.equal
+                    writebacks
+                    0
+                    (sprintf
+                        "%d caret pushes produced %d Yjs updates from y-prosemirror's own write-back — drawing a caret is mutating the shared document, which is a co-editor's words at risk"
+                        pushes writebacks)
             }
 
         // The replay (Plan 13, stage 3e). Everything else about it is pinned DOM-free — the

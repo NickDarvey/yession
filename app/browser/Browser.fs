@@ -315,11 +315,9 @@ let private placeTitleCursor (peer: string) (anchor: int) (head: int) : unit = j
 [<Emit("requestAnimationFrame(() => $0())")>]
 let private raf (f: unit -> unit) : unit = jsNative
 
-// Two uses, and they are different shapes. A trailing debounce: presence decorations are pushed
-// only after the doc stops changing, so a decoration transaction never lands while y-prosemirror
-// is applying remote content (which would starve the read-only mirrors' rendering of that
-// content — see `pushPresences`). And an armed deadline: something is true NOW and only worth
-// saying if it is still true then (see `syncCatchUpTimer`).
+// An armed deadline: something is true NOW and only worth saying if it is still true then
+// (see `syncCatchUpTimer`). Nothing debounces on it any more — what needs pacing is paced by
+// the frame (`raf`).
 [<Emit("setTimeout($0, $1)")>]
 let private setTimeoutJs (f: unit -> unit) (ms: int) : float = jsNative
 [<Emit("clearTimeout($0)")>]
@@ -1184,31 +1182,38 @@ let private start () =
                 clearTimeoutJs catchUpTimer
                 catchUpTimer <- 0.0
 
-        // Overlay each body's remote cursors, DEBOUNCED: every render (re)arms a short timer, so
-        // the decoration dispatch fires only once the model — and thus the doc — has gone quiet.
-        // This keeps decoration transactions strictly out of the active-convergence window, where
-        // they starve y-prosemirror's rendering of remote content; the caret lands just after the
-        // content settles. Only editors whose cursor set changed are dispatched (idle empty→empty
-        // is skipped), so a settled editor with no cursors is never disturbed.
+        // Overlay each body's remote cursors, PACED BY THE FRAME: a render marks the push wanted
+        // and the next animation frame performs it, at most once per frame however many renders
+        // asked. Only editors whose cursor set changed are dispatched (idle empty→empty is
+        // skipped), so a settled editor with no cursors is never disturbed; an editor that HAS
+        // cursors is re-pushed regardless, because decorations are built from absolute positions
+        // and the content moving underneath them invalidates those.
         //
-        // The quiet is the CONDITION, not an approximation of one — which is worth writing down
-        // because it does not look that way, and the obvious improvement is wrong. Pacing this by
-        // `raf` instead reads better on every count: it is out of the render's own call stack,
-        // it is capped at one dispatch per frame, it runs after every observer of the update and
-        // before the paint, and it removes the freeze a typing collaborator suffers here (the doc
-        // never goes quiet while they type, so their caret does not move until they stop).
+        // This was a 150ms trailing debounce, waiting for the doc to go QUIET — a condition a
+        // typing collaborator never meets, so their caret froze for as long as they typed and
+        // jumped when they stopped. The comment above it said the wait kept decoration
+        // transactions out of y-prosemirror's active-convergence window, where they "starve" its
+        // rendering of remote content, and pointed at a two-peer E2E where a co-editor's mirror
+        // had stayed blank.
         //
-        // It also reintroduces the bug. Once per frame is still often enough to starve the
-        // read-only mirror: under CI's load the two-peer E2E waited out its full thirty seconds
-        // for `B's mirror to render A's remote content`, which is the same blank mirror the
-        // debounce was added to fix. Tried, measured, reverted — so the freeze is a known cost
-        // here, and buying it back needs a mechanism that does not dispatch into a converging
-        // editor at all, not a shorter wait.
-        let mutable pushTimer = 0.0
+        // That is not what was happening, and it is worth writing down because the evidence
+        // looked exactly like it. A ProseMirror widget decoration's DOM lives INSIDE the node it
+        // is anchored in, so a co-editor's caret label parked in a heading makes that heading's
+        // `textContent` read "Heading oneada". The E2E compared `textContent` to the words
+        // exactly — so it was asserting the content AND that nobody's caret was in it. Pushing
+        // carets sooner put one there sooner, and the wait then never settled: not late, never,
+        // which reads precisely like lost content.
+        //
+        // The cheap tier now pins the real invariant (`EditorHarness`, two editors on two docs
+        // relayed in-page): with a caret pushed on every frame throughout, both docs converge,
+        // both editors render, and y-prosemirror's own write-back emits ZERO Yjs updates. The
+        // decoration push is not a write, and it never was.
+        let mutable pushQueued = false
         let pushPresences () =
-            clearTimeoutJs pushTimer
-            pushTimer <-
-                setTimeoutJs (fun () ->
+            if not pushQueued then
+                pushQueued <- true
+                raf (fun () ->
+                    pushQueued <- false
                     for kv in mountedBodies do
                         let key = kv.Key
                         let _, _, handle = kv.Value
@@ -1216,7 +1221,7 @@ let private start () =
                         let prev = match lastPushed.TryGetValue key with | true, v -> v | _ -> []
                         if not (List.isEmpty cursors) || prev <> cursors then
                             lastPushed.[key] <- cursors
-                            handle.PushPresences cursors) 150
+                            handle.PushPresences cursors)
 
         /// Place collaborators' title carets by measurement (native inputs have no per-character
         /// geometry): decode each title-focused peer's relative anchor/head against the title

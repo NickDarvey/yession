@@ -22,6 +22,14 @@
          `asciinema-player` binding the client uses, driven by a `.cast` the client's own
          rebuild produced. -->
     <div id="replay"></div>
+    <!-- Two peers converging on ONE body, relayed in this page: no WebRTC, no Session
+         Process, no native addon. `#peer-a` is the author's editable composer, `#peer-b` the
+         read-only mirror a co-editor sees. `window.__caretStorm(true)` pushes presence
+         decorations into the mirror on every animation frame — which is what a real
+         collaborator's moving caret does, and what the two-peer WebRTC E2E can only
+         reproduce under load. -->
+    <div id="peer-a"></div>
+    <div id="peer-b"></div>
     <!-- The client shell (Plan 14, stage 2): the real `View.view` over a fixed model, with
          no Session Process behind it. Here to answer the two questions only a browser can —
          where focus goes when a chat chip opens a pane tab, and whether the tab strip is a
