@@ -41,23 +41,36 @@ let private pureTests =
             Expect.equal (Map.tryFind "GIT_TERMINAL_PROMPT" env) (Some "0") "never prompts"
             Expect.equal (Map.tryFind "GIT_ALLOW_PROTOCOL" env) (Some "https") "protocol pinned"
             let configs =
-                [ 0 .. 2 ]
+                [ 0 .. 3 ]
                 |> List.map (fun i ->
                     Map.find (sprintf "GIT_CONFIG_KEY_%d" i) env, Map.find (sprintf "GIT_CONFIG_VALUE_%d" i) env)
-            Expect.equal (Map.tryFind "GIT_CONFIG_COUNT" env) (Some "3") "three forced configs without a token"
+            Expect.equal (Map.tryFind "GIT_CONFIG_COUNT" env) (Some "4") "four forced configs without a token"
             Expect.isTrue (configs |> List.contains ("core.hooksPath", "/dev/null")) "hooks off"
             Expect.isTrue (configs |> List.contains ("core.fsmonitor", "false")) "fsmonitor off"
             Expect.isTrue (configs |> List.contains ("protocol.ext.allow", "never")) "ext transport off"
 
+        // A helper is never useful here (the token rides in as a header config), and the
+        // fallback is worse than useless: Apple's git carries `credential.helper=osxkeychain`
+        // in a config file the GLOBAL/SYSTEM nulling does not reach, and under launchd that
+        // helper blocks forever on a keychain prompt nobody can answer — a rejected token
+        // must FAIL the verb, not hang it.
+        testCase "the hardened env clears every credential helper" <| fun () ->
+            let env = Repos.hardenedEnv "https" None |> Map.ofList
+            let configs =
+                [ 0 .. 3 ]
+                |> List.map (fun i ->
+                    Map.find (sprintf "GIT_CONFIG_KEY_%d" i) env, Map.find (sprintf "GIT_CONFIG_VALUE_%d" i) env)
+            Expect.isTrue (configs |> List.contains ("credential.helper", "")) "helper list reset to empty"
+
         testCase "a token rides as one extra header config, never a bare env value" <| fun () ->
             let entries = Repos.hardenedEnv "https" (Some "gho_secret")
             let env = Map.ofList entries
-            Expect.equal (Map.tryFind "GIT_CONFIG_COUNT" env) (Some "4") "one more config"
+            Expect.equal (Map.tryFind "GIT_CONFIG_COUNT" env) (Some "5") "one more config"
             Expect.equal
-                (Map.tryFind "GIT_CONFIG_KEY_3" env)
+                (Map.tryFind "GIT_CONFIG_KEY_4" env)
                 (Some "http.https://github.com/.extraheader")
                 "scoped to github.com over https"
-            let value = Map.find "GIT_CONFIG_VALUE_3" env
+            let value = Map.find "GIT_CONFIG_VALUE_4" env
             Expect.isTrue (value.StartsWith "AUTHORIZATION: basic ") "a basic auth header"
             Expect.isFalse (value.Contains "gho_secret") "the raw token is base64-wrapped, not pasted"
             Expect.isFalse (entries |> List.exists (fun (_, v) -> v = "gho_secret")) "no entry carries the bare token"

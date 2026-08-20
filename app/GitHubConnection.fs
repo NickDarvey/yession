@@ -40,10 +40,11 @@ let secretName : SecretName =
     | Error e -> failwithf "github secret name invariant violated: %s" e
 
 /// GitHub's device-flow endpoints. There is no default client id: the operator
-/// registers their own GitHub App (device flow enabled, user-token expiration
-/// disabled — this session stores the token statically and cannot refresh it) and
-/// names its client id in `YESSION_GITHUB_CLIENT_ID`. Endpoints are overridable the
-/// way the Claude ones are, which is what the stub-server tests drive.
+/// registers their own GitHub App (device flow enabled; user-token expiration may stay
+/// on — the grant leg stores the refresh token with the Manager, which rotates the
+/// access token before each turn that needs it) and names its client id in
+/// `YESSION_GITHUB_CLIENT_ID`. Endpoints are overridable the way the Claude ones are,
+/// which is what the stub-server tests drive.
 let private deviceCodeUrl = "https://github.com/login/device/code"
 let private tokenUrl = "https://github.com/login/oauth/access_token"
 

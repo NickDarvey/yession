@@ -50,15 +50,24 @@ let validBranchName (raw: string) : Result<string, string> =
 
 /// The environment one git invocation runs with. Everything here is the point:
 /// no global/system config (a repo's own `.git/config` is already untrusted — the
-/// WorkSandbox can write it), no prompts, a pinned protocol allowlist, and the
-/// config-driven execution vectors (`hooksPath`, `fsmonitor`, `protocol.ext`) forced
-/// off via `GIT_CONFIG_*` — which apply with the highest precedence git knows, so a
-/// planted repo config cannot override them.
+/// WorkSandbox can write it), no prompts, a pinned protocol allowlist, no credential
+/// helpers, and the config-driven execution vectors (`hooksPath`, `fsmonitor`,
+/// `protocol.ext`) forced off via `GIT_CONFIG_*` — which apply with the highest
+/// precedence git knows, so a planted repo config cannot override them.
+///
+/// `credential.helper` is cleared explicitly because nulling the config FILES does not
+/// reach it: Apple's git reads its own extra config (CommandLineTools
+/// `share/git-core/gitconfig`, which sets `credential.helper=osxkeychain`) regardless of
+/// `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`, and `GIT_TERMINAL_PROMPT=0` does not cover
+/// helpers. A helper here is never useful — the token rides in as a header — and under
+/// launchd the keychain helper blocks forever on a prompt nobody can answer, so a 401
+/// became a clone hung for days. Cleared, the same fault fails in under a second.
 let hardenedEnv (allowProtocol: string) (token: string option) : (string * string) list =
     let configs =
         [ "core.hooksPath", "/dev/null"
           "core.fsmonitor", "false"
-          "protocol.ext.allow", "never" ]
+          "protocol.ext.allow", "never"
+          "credential.helper", "" ]
         @ (match token with
            | Some token ->
                let basic =
