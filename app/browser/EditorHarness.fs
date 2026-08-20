@@ -95,6 +95,145 @@ do
         None
     |> ignore
 
+// --- Two peers converging on one body (the caret write-back) -----------------------------
+//
+// What only a browser can answer about remote carets, and what no cheap test could reach
+// before this: whether pushing presence DECORATIONS while content is still arriving stops the
+// content arriving at all.
+//
+// The reason it needs saying at all. `PushPresences` dispatches a ProseMirror transaction
+// carrying no steps — but ProseMirror runs every plugin's `view.update` on every state update,
+// and `ySyncPlugin`'s hook is not gated on `docChanged`: it calls `_prosemirrorChanged`, which
+// walks the WHOLE document and reconciles it back into Yjs. The binding exempts its own
+// dispatches by holding a mutex across them; an unsolicited one holds nothing. So a caret push
+// is a write, and a caret push during convergence is a write that races the content.
+//
+// This surface is that race, reduced: two docs, two editors, relayed to each other IN THIS
+// PAGE. No WebRTC, no Session Process, no native addon — so it runs in the `Browser` tier
+// wherever Chromium exists, in seconds. The two-peer WebRTC E2E can also see this bug, but
+// only under enough load to lose the race, which cost two runs of the gate to learn once.
+
+[<Emit("document.getElementById('peer-a')")>]
+let private peerAHost : obj = jsNative
+
+[<Emit("document.getElementById('peer-b')")>]
+let private peerBHost : obj = jsNative
+
+/// Start or stop pushing presence decorations into the MIRROR on every animation frame.
+[<Emit("(function(f){ window.__caretStorm = f; })($0)")>]
+let private exposeStorm (f: bool -> unit) : unit = jsNative
+
+/// How many frames the storm has actually pushed on. Anti-vacuity: a convergence assertion
+/// passes trivially if the storm never ran, and "never ran" and "ran and was harmless" look
+/// identical from the outside.
+[<Emit("(function(n){ window.__caretPushes = n; })($0)")>]
+let private exposeCaretPushes (n: int) : unit = jsNative
+
+[<Emit("requestAnimationFrame(() => $0())")>]
+let private onFrame (f: unit -> unit) : unit = jsNative
+
+/// Count the Yjs updates a doc takes from `ySyncPlugin`'s OWN write-back — the ones whose
+/// origin is `ySyncPluginKey`, which is what `_prosemirrorChanged` tags its transaction with.
+///
+/// This is the instrument the caret question turns on, and it exists because the write-back
+/// is otherwise completely silent: it walks the whole document, it can emit CRDT operations,
+/// and it leaves no trace anywhere that a test could read. Counting from OUR side rather than
+/// patching the library keeps it honest — the number is real doc updates, not a hook we hoped
+/// was called.
+/// Counts BOTH, and the second one is what makes the first believable: `__docUpdates` is every
+/// update this doc took, `__writebacks` only those the write-back produced. A write-back count
+/// of zero means "drawing a caret wrote nothing" only if the doc was moving at all — otherwise
+/// it means the observer was never wired up, and the two look identical from a test.
+[<Emit("""(function (doc, key) {
+  let all = 0, back = 0
+  window.__docUpdates = 0
+  window.__writebacks = 0
+  doc.on('update', function (_update, origin) {
+    all++; window.__docUpdates = all
+    if (origin === key) { back++; window.__writebacks = back }
+  })
+})($0, $1)""")>]
+let private countWritebacks (doc: Y.Doc) (syncKey: obj) : unit = jsNative
+
+[<Import("ySyncPluginKey", "y-prosemirror")>]
+let private ySyncPluginKey : obj = jsNative
+
+[<Emit("(function(f){ window.__convState = f; })($0)")>]
+let private exposeConvState (f: unit -> string) : unit = jsNative
+
+/// The two docs' content and the two editors' rendered text, side by side. `docA`/`docB` are
+/// what the CRDT holds; `pmA`/`pmB` are what each editor actually put on screen. A gap between
+/// a doc and its own editor is a binding that stopped rendering; a gap between the two docs is
+/// a relay that stopped carrying.
+[<Emit("""JSON.stringify({
+  docA: $0, docB: $1, caretPushes: $2,
+  writebacks: window.__writebacks,
+  pmA: document.querySelector('#peer-a .ProseMirror')?.textContent ?? null,
+  pmB: document.querySelector('#peer-b .ProseMirror')?.textContent ?? null
+})""")>]
+let private convStateJson (docA: string) (docB: string) (pushes: int) : string = jsNative
+
+let private docA = Y.Doc.Create ()
+let private docB = Y.Doc.Create ()
+
+do
+    // The relay: each doc's local updates become the other's remote ones, exactly as the
+    // Session Process relays them between two browsers — minus the transport.
+    DocSync.onLocalUpdate docA (fun payload -> DocSync.applyRemote docB payload) |> ignore
+    DocSync.onLocalUpdate docB (fun payload -> DocSync.applyRemote docA payload) |> ignore
+
+    // Watch the MIRROR: it is the one whose carets are pushed, so it is the one whose
+    // write-back would race the content arriving into it.
+    countWritebacks docB ySyncPluginKey
+
+    let fragmentA = docA.getXmlFragment "shared"
+    let fragmentB = docB.getXmlFragment "shared"
+
+    // BOTH editable, because that is the arrangement the bug appears in: a co-editor JOINS the
+    // draft rather than watching it, so the second editor is a composer bound to the same body,
+    // with its own binding writing back into its own doc. A read-only mount is the easier case
+    // and proves less — it was the first thing this surface tried, and it converged happily.
+    let mutable selectionA : (string * string) option = None
+    Editor.mountEditor peerAHost fragmentA false (fun sel -> selectionA <- sel) None |> ignore
+    let mirror = Editor.mountEditor peerBHost fragmentB false ignore None
+
+    let mutable storming = false
+    let mutable pushes = 0
+    exposeCaretPushes 0
+    // A's caret, drawn in B — decoded against B's own doc, so the positions are real rather
+    // than replayed constants. Before A has reported a selection there is nothing to draw and
+    // the frame still counts as a push: what is under test is the dispatch, not the geometry.
+    let rec storm () =
+        if storming then
+            (match selectionA with
+             | Some (anchor, head) ->
+                 mirror.PushPresences
+                     [ ({ Colour = "hsl(200, 70%, 55%)"
+                          Selection = "hsla(200, 70%, 55%, 0.25)"
+                          Name = "ada"
+                          Anchor = anchor
+                          Head = head } : Editor.RemoteBodyCursor) ]
+             | None -> mirror.PushPresences [])
+            pushes <- pushes + 1
+            exposeCaretPushes pushes
+            onFrame storm
+    // What each side holds, as one JSON blob. A convergence failure has four candidate
+    // stories — the author never wrote it, the relay never carried it, the co-editor's doc has
+    // it but its editor never rendered it, or something wrote over it — and they are
+    // indistinguishable from the DOM alone. This tells them apart in the failure message
+    // instead of in a debugging session.
+    exposeConvState (fun () ->
+        convStateJson
+            (Markdown.ofFragment fragmentA)
+            (Markdown.ofFragment fragmentB)
+            pushes)
+
+    exposeStorm (fun on ->
+        if on && not storming then
+            storming <- true
+            onFrame storm
+        else storming <- on)
+
 // --- The shell, host-free (Plan 14, stage 2) --------------------------------------------
 //
 // The same page, for the same reason the replay shares it: this is the same KIND of thing —
