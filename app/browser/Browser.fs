@@ -315,9 +315,8 @@ let private placeTitleCursor (peer: string) (anchor: int) (head: int) : unit = j
 [<Emit("requestAnimationFrame(() => $0())")>]
 let private raf (f: unit -> unit) : unit = jsNative
 
-// A trailing debounce: presence decorations are pushed only after the doc stops changing, so a
-// decoration transaction never lands while y-prosemirror is applying remote content (which would
-// starve the read-only mirrors' rendering of that content — see `pushPresences`).
+// Arming a deadline: something is true NOW and only worth saying if it is still true then
+// (see `syncCatchUpTimer`). Not a debounce — what needs pacing is paced by the frame (`raf`).
 [<Emit("setTimeout($0, $1)")>]
 let private setTimeoutJs (f: unit -> unit) (ms: int) : float = jsNative
 [<Emit("clearTimeout($0)")>]
@@ -1023,6 +1022,22 @@ let private start () =
                     // never writes back, and never claims a caret.
                     elif terminalInputReadOnly el then None
                     else Some key
+                // Four events report the caret and most of them report it unmoved: a keyup for
+                // every key that types rather than navigates, a click landing where the caret
+                // already was, the focus that precedes both. The rich editor's plugin already
+                // drops those (`Editor.reportSelection`); this had nothing, so a command line
+                // broadcast a presence frame per keystroke saying where the caret still was.
+                //
+                // Compared on the ENCODED focus, which is precisely what would go on the wire,
+                // so a report is skipped only when it would tell a collaborator nothing. The
+                // remembered value carries its field, and one `<input>` is reused across a tab
+                // switch (see above) — so the same caret in a different terminal is a different
+                // focus, and reports.
+                let lastFocus : Focus option option ref = ref None
+                let report (focus: Focus option) =
+                    if lastFocus.Value <> Some focus then
+                        lastFocus.Value <- Some focus
+                        sendFocus focus
                 let reportFocus () =
                     match lineOf () with
                     | Some key ->
@@ -1030,9 +1045,9 @@ let private start () =
                         | Some field, Some (anchor, head) ->
                             let root = box (texts.Text key)
                             let enc i = ProseMirror.relPosFromTypeIndex root i |> ProseMirror.encodeRel
-                            sendFocus (Some { Field = field; Pos = { Anchor = enc anchor; Head = enc head } })
-                        | _ -> sendFocus None
-                    | None -> sendFocus None
+                            report (Some { Field = field; Pos = { Anchor = enc anchor; Head = enc head } })
+                        | _ -> report None
+                    | None -> report None
                 // Enter runs a command from a composer SLOT — the line you are writing.
                 // A queued command's line has already been sent; Enter there does
                 // nothing rather than queueing it twice.
@@ -1045,7 +1060,7 @@ let private start () =
                     el
                     (fun () -> lineOf () |> Option.iter (fun key -> TerminalText.setTo texts key (inputValue el)))
                     reportFocus
-                    (fun () -> sendFocus None)
+                    (fun () -> report None)
                     onEnter
                 |> ignore
                 let key = terminalInputKey el
@@ -1161,17 +1176,33 @@ let private start () =
                 clearTimeoutJs catchUpTimer
                 catchUpTimer <- 0.0
 
-        // Overlay each body's remote cursors, DEBOUNCED: every render (re)arms a short timer, so
-        // the decoration dispatch fires only once the model — and thus the doc — has gone quiet.
-        // This keeps decoration transactions strictly out of the active-convergence window, where
-        // they starve y-prosemirror's rendering of remote content; the caret lands just after the
-        // content settles. Only editors whose cursor set changed are dispatched (idle empty→empty
-        // is skipped), so a settled editor with no cursors is never disturbed.
-        let mutable pushTimer = 0.0
+        // Overlay each body's remote cursors, PACED BY THE FRAME: a render marks the push
+        // wanted and the next animation frame performs it, at most once per frame however
+        // many renders asked.
+        //
+        // What that buys is the thing the push must not do, stated rather than approximated.
+        // Dispatching a decoration transaction from inside the render — which is inside the
+        // doc-update path — re-enters it: the transaction is another update, which renders,
+        // which pushes again, and y-prosemirror never reaches the browser to paint the remote
+        // content it was applying (a co-editor's mirror stayed BLANK, not slow; the two-peer
+        // E2E guards it). A frame callback is outside that path by construction — every
+        // observer of the update has already run — and before the paint, so the caret lands
+        // in the same frame as the content it belongs to.
+        //
+        // It replaces a 150ms trailing debounce that bought the same re-entrancy break by
+        // waiting for the doc to go QUIET. That is a condition a typing collaborator never
+        // meets: their carets froze for as long as they typed and jumped when they stopped.
+        //
+        // Only editors whose cursor set changed are dispatched (idle empty→empty is skipped),
+        // so a settled editor with no cursors is never disturbed. An editor that HAS cursors
+        // is re-pushed regardless: decorations are built from absolute positions, which the
+        // content moving underneath them invalidates.
+        let mutable pushQueued = false
         let pushPresences () =
-            clearTimeoutJs pushTimer
-            pushTimer <-
-                setTimeoutJs (fun () ->
+            if not pushQueued then
+                pushQueued <- true
+                raf (fun () ->
+                    pushQueued <- false
                     for kv in mountedBodies do
                         let key = kv.Key
                         let _, _, handle = kv.Value
@@ -1179,7 +1210,7 @@ let private start () =
                         let prev = match lastPushed.TryGetValue key with | true, v -> v | _ -> []
                         if not (List.isEmpty cursors) || prev <> cursors then
                             lastPushed.[key] <- cursors
-                            handle.PushPresences cursors) 150
+                            handle.PushPresences cursors)
 
         /// Place collaborators' title carets by measurement (native inputs have no per-character
         /// geometry): decode each title-focused peer's relative anchor/head against the title
