@@ -33,6 +33,13 @@
    bookish proportions, and a stroke contrast whose thins sparkle at 15px light-on-black. Two
    distances where attribution needs one. Source Serif 4 keeps only the serifs.
 
+   Equal nominal weights are not equal optical weights: Source Serif's light is drawn thinner
+   than Noto Sans's, so at a shared 300 the agent read slightly heavier than the person. The
+   human body face is therefore 350 — instanced from the variable font (`fonttools
+   varLib.instancer wght=350`), since no static 350 is published — matched by eye against the
+   sans at 15px on black. The weight utility rides WITH the voice (`Style.messageVoice`), so
+   the two registers cannot drift apart again by one site composing its own weight.
+
    Each face is declared in `AssetFile` and copied beside this sheet by the build; the
    `url()`s below are passed through verbatim — Tailwind does not rewrite them — and resolve
    against wherever the sheet is served, which is inside the asset set next to `fonts/`. A
@@ -40,8 +47,9 @@
    stops the build.
 
    The weights are exactly what the surfaces wear, no more: the chrome sets four (the
-   extralight wordmark, light body, normal, semibold caps), a message three, and a terminal
-   two — 400, and 600 because that is what ANSI bold renders as. */
+   extralight wordmark, light body, normal, semibold caps), a message three (the 350 body —
+   see above — plus 400 headings and 600 bold), and a terminal two — 400, and 600 because
+   that is what ANSI bold renders as. */
 @font-face {
   font-family: 'Noto Sans';
   font-style: normal;
@@ -73,9 +81,9 @@
 @font-face {
   font-family: 'Source Serif 4';
   font-style: normal;
-  font-weight: 300;
+  font-weight: 350;
   font-display: swap;
-  src: url('fonts/source-serif-4-latin-300-normal.woff2') format('woff2');
+  src: url('fonts/source-serif-4-latin-350-normal.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Source Serif 4';

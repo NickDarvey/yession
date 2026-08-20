@@ -41,7 +41,7 @@ type AssetFile =
     | ``noto-sans-600``
     | ``neon-400``
     | ``neon-600``
-    | ``source-serif-300``
+    | ``source-serif-350``
     | ``source-serif-400``
     | ``source-serif-600``
 
@@ -70,7 +70,7 @@ module AssetFile =
         | AssetFile.``noto-sans-600`` -> "fonts/noto-sans-latin-600-normal.woff2", woff2
         | AssetFile.``neon-400`` -> "fonts/monaspace-neon-latin-400-normal.woff2", woff2
         | AssetFile.``neon-600`` -> "fonts/monaspace-neon-latin-600-normal.woff2", woff2
-        | AssetFile.``source-serif-300`` -> "fonts/source-serif-4-latin-300-normal.woff2", woff2
+        | AssetFile.``source-serif-350`` -> "fonts/source-serif-4-latin-350-normal.woff2", woff2
         | AssetFile.``source-serif-400`` -> "fonts/source-serif-4-latin-400-normal.woff2", woff2
         | AssetFile.``source-serif-600`` -> "fonts/source-serif-4-latin-600-normal.woff2", woff2
 
@@ -91,7 +91,7 @@ module AssetFile =
           AssetFile.``noto-sans-600``
           AssetFile.``neon-400``
           AssetFile.``neon-600``
-          AssetFile.``source-serif-300``
+          AssetFile.``source-serif-350``
           AssetFile.``source-serif-400``
           AssetFile.``source-serif-600`` ]
 
