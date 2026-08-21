@@ -399,6 +399,135 @@ let private uiChecklistTests =
             for label, marker in required do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
 
+        // --- a credential that stopped working ------------------------------------------
+        // Three surfaces, one fact. Each is asserted where it renders rather than against
+        // the whole page, because a whole-page render contains every surface at once and a
+        // bare `Contains` would be satisfied by whichever one happened to be right.
+
+        /// The representative client, with one connection needing a sign-in.
+        let private' (provider: string) (reason: string) =
+            let needing = Some { Kind = "static"; SignInRequired = Some reason }
+            match provider with
+            | "claude" ->
+                { representativeModel with
+                    Claude =
+                        { representativeModel.Claude with
+                            Status =
+                                { representativeModel.Claude.Status with
+                                    MineCredential = needing
+                                    AgentAvailable = Some true } } }
+            | _ ->
+                { representativeModel with
+                    GitHub = { representativeModel.GitHub with Status = { representativeModel.GitHub.Status with MineCredential = needing } } }
+
+        // The one derivation every surface reads, so they cannot disagree about whether
+        // anything is wrong. Ordered, not a map's iteration: what the prompt names first
+        // must not change between renders of an unchanged model.
+        testCase "what needs signing in is derived once, in a settled order" <| fun () ->
+            let needing reason = Some { Kind = "static"; SignInRequired = Some reason }
+            let both =
+                { representativeModel with
+                    Claude =
+                        { representativeModel.Claude with
+                            Status = { representativeModel.Claude.Status with MineCredential = needing "claude said no" } }
+                    GitHub =
+                        { representativeModel.GitHub with
+                            Status = { representativeModel.GitHub.Status with MineCredential = needing "github said no" } } }
+            Expect.equal
+                (ClientModel.signInRequired both)
+                [ "claude", "claude said no"; "github", "github said no" ]
+                "both, and always in this order"
+            Expect.isEmpty
+                (ClientModel.signInRequired representativeModel)
+                "and nothing at all when every connection is fine"
+
+        testCase "a panel row for a credential that stopped working says so, and says why" <| fun () ->
+            let html = Support.render (private' "github" "github rejected this credential")
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.githubSignInRequired "mine"))
+                "the row carries the fault on the scope it is held under"
+            Expect.isTrue
+                (html.Contains "github rejected this credential")
+                "with the provider's own words, which a person could not have guessed"
+
+        testCase "a healthy credential's row says nothing about signing in" <| fun () ->
+            let healthy =
+                { representativeModel with
+                    GitHub =
+                        { representativeModel.GitHub with
+                            Status =
+                                { representativeModel.GitHub.Status with
+                                    MineCredential = Some { Kind = "oauth"; SignInRequired = None } } } }
+            let html = Support.render healthy
+            Expect.isTrue (html.Contains "data-github-connected=\"mine\"") "it is still shown as connected"
+            Expect.isFalse (html.Contains Dom.Hooks.githubSignInRequired) "and nothing asks for a sign-in"
+            Expect.isFalse (html.Contains Dom.Hooks.signInRequired) "so no prompt over the timeline either"
+
+        // The roster used to read "ready" in green over a Claude credential the next turn
+        // would fail on, because the agent gate asks whether a credential is STORED and not
+        // whether it still works.
+        testCase "the agent's row follows the credential's health, not merely its presence" <| fun () ->
+            let html = Support.render (private' "claude" "the refresh token has expired")
+            let row = html.Substring (html.IndexOf (Dom.attr Dom.Hooks.agentPresence "live"))
+            let row = row.Substring (0, min 400 row.Length)
+            Expect.isTrue (row.Contains Dom.Text.signInAgainStatus) "the agent's own row says what is needed"
+            Expect.isFalse (row.Contains ">ready<") "and no longer claims to be ready"
+
+        testCase "a credential that stopped working is offered a way to fix it, over the timeline" <| fun () ->
+            let html = Support.render (private' "github" "github rejected this credential")
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.signInRequired "github"))
+                "the prompt names which connection needs it"
+            Expect.isTrue (html.Contains Dom.Hooks.signInAgain) "and carries the button that leads to the fix"
+            Expect.isTrue (html.Contains Dom.Text.signInAgain) "in words"
+            // Over the timeline, not under it: this is a notice, and a notice below what it
+            // is about is one somebody scrolls past.
+            Expect.isTrue
+                (html.IndexOf Dom.Hooks.signInRequired < html.IndexOf Dom.Hooks.conversation)
+                "it sits above the conversation"
+
+        // The rule `Style.fs`'s noAgent block and the case below it already encode: a call to
+        // action repeated is wallpaper. The panel row and the roster row say the same fact as
+        // STATUSES, and exactly one button in the document offers the remedy.
+        testCase "the way to fix it is offered exactly once" <| fun () ->
+            let html = Support.render (private' "claude" "the refresh token has expired")
+            let occurrences (needle: string) = (html.Split needle |> Array.length) - 1
+            Expect.equal (occurrences Dom.Hooks.signInAgain) 1 "one button, not one per surface that mentions it"
+
+        // Two dead credentials are still one instruction, and the panel it opens shows both.
+        testCase "two credentials needing a sign-in are still one prompt" <| fun () ->
+            let needing reason = Some { Kind = "static"; SignInRequired = Some reason }
+            let both =
+                { representativeModel with
+                    Claude =
+                        { representativeModel.Claude with
+                            Status = { representativeModel.Claude.Status with MineCredential = needing "claude said no" } }
+                    GitHub =
+                        { representativeModel.GitHub with
+                            Status = { representativeModel.GitHub.Status with MineCredential = needing "github said no" } } }
+            let html = Support.render both
+            let occurrences (needle: string) = (html.Split needle |> Array.length) - 1
+            Expect.equal (occurrences Dom.Hooks.signInRequired) 1 "one prompt"
+            Expect.equal (occurrences Dom.Hooks.signInAgain) 1 "one button"
+
+        // Signing in runs against the session. Offering it to somebody who cannot reach the
+        // session is offering a button that cannot work — and the degraded strip already owns
+        // that moment, which is the one-strip-at-a-time promise it has always made.
+        testCase "nothing is offered while the session cannot be reached" <| fun () ->
+            let offline =
+                { private' "github" "github rejected this credential" with
+                    Connection = Disconnected (Some "transport closed") }
+            let html = Support.render offline
+            Expect.isFalse (html.Contains Dom.Hooks.signInRequired) "no sign-in prompt while offline"
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.degraded Dom.Text.degradedOffline))
+                "the degraded strip is what speaks for that moment"
+            // The panel row still says it. A status is true whether or not it can be acted on
+            // right now; only the OFFER is withheld.
+            Expect.isTrue
+                (html.Contains (Dom.attr Dom.Hooks.githubSignInRequired "mine"))
+                "and the panel still reports the credential honestly"
+
         testCase "an empty timeline says whether it has looked, and the caret means one thing again" <| fun () ->
             // Two opposite facts used to wear the same mark. The idle caret says "nothing was
             // ever said here"; it was also what a client showed BEFORE it had read anything,

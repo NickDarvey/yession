@@ -368,6 +368,14 @@ module Audit =
             (("yession.connection.reason", StringValue reason) :: connectionAttrs id)
             "connection credential refresh failed"
 
+    /// The provider refused a credential we hold, as reported by whoever spent it. `warn`
+    /// like a failed refresh, and for the same reason: nothing is broken here, but a person
+    /// has to do something before the next turn that needs this can run.
+    let connectionRejected (id: SecretId) (reason: string) : Record =
+        make "yession.connection.rejected" Severity.warn
+            (("yession.connection.reason", StringValue reason) :: connectionAttrs id)
+            "connection credential refused by the provider"
+
     let inject (sessionId: SessionId) (name: SecretName) (source: string) : Record =
         make "yession.secret.inject" Severity.info
             [ session sessionId

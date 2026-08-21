@@ -194,6 +194,15 @@ module ControlWire =
     type ConnectionResolveRequest = { Target : SecretId }
     type ConnectionResolveResponse = { Kind : ConnectionKind; Value : string }
 
+    /// A session reporting that the PROVIDER refused this credential — the one fact about a
+    /// credential's health that the Manager can never work out for itself. A static token
+    /// carries no expiry at all, so "it stopped working" only ever arrives from whoever
+    /// spent it. `Reason` is what to show a person, not a status code.
+    type ConnectionRejectRequest = { Target : SecretId; Reason : string }
+    /// Whether this changed anything — false if the credential was already known refused,
+    /// so a verb retried three times does not report three fresh faults.
+    type ConnectionRejectResponse = { Recorded : bool }
+
     let private secretId : Codec<SecretId> =
         { Encode =
             fun (id: SecretId) ->
@@ -218,17 +227,29 @@ module ControlWire =
                 | "static" -> Decode.succeed StaticConnection
                 | other -> Decode.fail (sprintf "Unknown connection kind: %s" other)) }
 
+    /// Health rides as an OPTIONAL `signInRequired` reason rather than a tagged union:
+    /// present means `SignInRequired`, absent means usable. A frame minted before this
+    /// field existed therefore decodes as healthy, which is what it meant — the same
+    /// additive move `refreshExpiresAt` and `dialect` made in the credential envelope.
     let connectionStatus : Codec<ConnectionStatus> =
         { Encode =
             fun (s: ConnectionStatus) ->
                 Encode.object
                     [ "id", secretId.Encode s.Id
                       "kind", connectionKind.Encode s.Kind
+                      "signInRequired",
+                        (match s.Health with
+                         | ConnectionUsable -> Encode.nil
+                         | SignInRequired reason -> Encode.string reason)
                       "updatedAt", Codec.timestamp.Encode s.UpdatedAt ]
           Decode =
             Decode.object (fun get ->
                 { ConnectionStatus.Id = get.Required.Field "id" secretId.Decode
                   ConnectionStatus.Kind = get.Required.Field "kind" connectionKind.Decode
+                  ConnectionStatus.Health =
+                    get.Optional.Field "signInRequired" Decode.string
+                    |> Option.map SignInRequired
+                    |> Option.defaultValue ConnectionUsable
                   ConnectionStatus.UpdatedAt = get.Required.Field "updatedAt" Codec.timestamp.Decode }) }
 
     /// The `/control/connections` SSE frame: every connection the receiving launch may
@@ -345,6 +366,23 @@ module ControlWire =
           Decode =
             Decode.object (fun get ->
                 { ConnectionResolveRequest.Target = get.Required.Field "target" secretId.Decode }) }
+
+    let connectionRejectRequest : Codec<ConnectionRejectRequest> =
+        { Encode =
+            fun (r: ConnectionRejectRequest) ->
+                Encode.object
+                    [ "target", secretId.Encode r.Target
+                      "reason", Encode.string r.Reason ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionRejectRequest.Target = get.Required.Field "target" secretId.Decode
+                  ConnectionRejectRequest.Reason = get.Required.Field "reason" Decode.string }) }
+
+    let connectionRejectResponse : Codec<ConnectionRejectResponse> =
+        { Encode = fun (r: ConnectionRejectResponse) -> Encode.object [ "recorded", Encode.bool r.Recorded ]
+          Decode =
+            Decode.object (fun get ->
+                { ConnectionRejectResponse.Recorded = get.Required.Field "recorded" Decode.bool }) }
 
     let connectionResolveResponse : Codec<ConnectionResolveResponse> =
         { Encode =

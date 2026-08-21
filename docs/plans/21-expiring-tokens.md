@@ -96,6 +96,10 @@ A refresh still broadcasts no connection-status frame, so the panel shows a heal
 whose refresh is failing until a turn says otherwise. Unchanged by this plan, and now more
 reachable — worth an indicator when someone hits it.
 
+**Somebody hit it, and [Plan 24](24-credential-expiry.md) is what it cost.** Four days of a
+green dot over a credential that had expired eight hours after it was stored — through the paste
+leg this plan added the alternative to, 39 minutes before that alternative shipped.
+
 ## Migration
 
 None. A GitHub credential stored before this keeps working exactly as it did — static, and

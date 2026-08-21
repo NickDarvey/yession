@@ -247,6 +247,10 @@ let
   # silently pick up someone else's build — or find nothing, and fail a sandbox that had no
   # business depending on the host's incidental tools. macOS confines with Seatbelt, which ships
   # with the OS and needs none of them — hence Linux only.
+  #
+  # `YESSION_GIT_PATH` below is the same argument and NOT Linux-only, because macOS is
+  # where PATH's git is worst: `/usr/bin/git` there is a shim that resolves a developer
+  # directory before it is git, through files a scoped sandbox denies.
   srtToolFlags = lib.optionalString pkgs.stdenv.isLinux ''
     \
         --set-default YESSION_BWRAP_PATH ${pkgs.bubblewrap}/bin/bwrap \
@@ -274,10 +278,12 @@ let
       # which inherits YESSION_CLAUDE_PATH from this wrapper.
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-session" \
         --add-flags "$out/libexec/yession/bin/yession-session.js" \
-        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude ${srtToolFlags}
+        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude \
+        --set-default YESSION_GIT_PATH ${pkgs.git}/bin/git ${srtToolFlags}
       makeWrapper ${pkgs.nodejs_24}/bin/node "$out/bin/yession-manager" \
         --add-flags "$out/libexec/yession/bin/yession-manager.js" \
-        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude ${srtToolFlags}
+        --set-default YESSION_CLAUDE_PATH ${claude-code}/bin/claude \
+        --set-default YESSION_GIT_PATH ${pkgs.git}/bin/git ${srtToolFlags}
       runHook postInstall
     '';
     dontStrip = true;

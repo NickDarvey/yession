@@ -145,6 +145,41 @@ let private flowTests =
             Expect.isFalse (BrokerFlow.needsRefresh now (BrokeredOAuth { grant with ExpiresAt = None })) "no known expiry"
             Expect.isFalse (BrokerFlow.needsRefresh now (BrokeredStatic "sk")) "static never refreshes"
 
+        // The two ways one grant reaches a dead end. They are one function because a resolve
+        // and a status have to refuse by the same rule, and they are BOTH here because
+        // `needsRefresh` sees neither: it answers about the access token's clock, and the
+        // second case below is a grant it says `false` for precisely because there is
+        // nothing to refresh with.
+        testCase "beyondRefresh: a lapsed refresh token is past saving" <| fun () ->
+            let lapsed =
+                BrokeredOAuth { grant with RefreshExpiresAt = Some (now.AddSeconds -1.0) }
+            Expect.equal
+                (BrokerFlow.beyondRefresh now lapsed)
+                (Some "the refresh token has expired")
+                "no retry escapes this"
+
+        testCase "beyondRefresh: an expired access token with nothing behind it is past saving" <| fun () ->
+            let refreshless =
+                BrokeredOAuth { grant with RefreshToken = None; ExpiresAt = Some (now.AddSeconds -1.0) }
+            Expect.equal
+                (BrokerFlow.beyondRefresh now refreshless)
+                (Some "the access token has expired and there is nothing to refresh it with")
+                "nothing to refresh WITH is still nothing to retry"
+
+        testCase "beyondRefresh: a grant that can still rotate is not past saving" <| fun () ->
+            let live = BrokeredOAuth { grant with ExpiresAt = Some (now.AddSeconds -1.0) }
+            Expect.equal (BrokerFlow.beyondRefresh now live) None "an expired access token refreshes"
+            Expect.equal (BrokerFlow.beyondRefresh now (BrokeredOAuth grant)) None "so does a fresh one"
+            Expect.equal
+                (BrokerFlow.beyondRefresh now (BrokeredOAuth { grant with RefreshToken = None; ExpiresAt = None }))
+                None
+                "a grant stating no lifetime never comes due"
+
+        // Not an oversight, and the reason a rejection has to be reportable from outside:
+        // a static token carries no expiry at all, so nothing on this side can ever know.
+        testCase "beyondRefresh: a static token is never past saving on this side" <| fun () ->
+            Expect.equal (BrokerFlow.beyondRefresh now (BrokeredStatic "sk")) None "only a provider can say"
+
         testCase "merged keeps the previous refresh token when the response omits one" <| fun () ->
             let fresh = { grant with AccessToken = "at-2"; RefreshToken = None }
             Expect.equal (BrokerFlow.merged grant fresh).RefreshToken (Some "rt-1") "old refresh survives"
@@ -207,14 +242,45 @@ let private wireTests =
         testCase "the status list frame is value-free by type and round-trips" <| fun () ->
             let list : ConnectionStatusList =
                 { Connections =
-                    [ { Id = target (UserScope alice); Kind = OAuthConnection; UpdatedAt = DateTimeOffset.Parse "2026-07-28T10:00:00Z" }
-                      { Id = target (SessionScope sessionA); Kind = StaticConnection; UpdatedAt = DateTimeOffset.Parse "2026-07-28T11:00:00Z" } ] }
+                    // Both health states, because the reason a `SignInRequired` carries is
+                    // the only part of this frame that is not a fixed vocabulary.
+                    [ { Id = target (UserScope alice)
+                        Kind = OAuthConnection
+                        Health = ConnectionUsable
+                        UpdatedAt = DateTimeOffset.Parse "2026-07-28T10:00:00Z" }
+                      { Id = target (SessionScope sessionA)
+                        Kind = StaticConnection
+                        Health = SignInRequired "the refresh token has expired"
+                        UpdatedAt = DateTimeOffset.Parse "2026-07-28T11:00:00Z" } ] }
             Expect.equal (ControlWire.toString ControlWire.connectionStatusList list |> ControlWire.fromString ControlWire.connectionStatusList |> expect) list "identical"
     ]
 
-// --- Pure: the session-side Claude module ---------------------------------------------------
-
 open Yession.Host
+
+// --- Pure: which broker observations move a status frame -------------------------------------
+
+let private observationTests =
+    testList "broker observations" [
+        // Pinned in the cheap tier because it is the rule two subscribers used to each hold
+        // a copy of — the Manager's wiring and this file's control server — and a copy is
+        // what drifts. Both now ask this function, so a case added below is a case both
+        // answer the same way.
+        testCase "a status broadcast follows every observation that changes what is readable" <| fun () ->
+            let id = target (UserScope alice)
+            Expect.isTrue (Broker.changesReadableStatus (Broker.Connected (id, OAuthConnection))) "connecting"
+            Expect.isTrue (Broker.changesReadableStatus (Broker.Disconnected id)) "disconnecting"
+            Expect.isTrue
+                (Broker.changesReadableStatus (Broker.RefreshFailed (id, "the refresh token has expired")))
+                "a credential that stopped working is a change to what is readable"
+            Expect.isFalse
+                (Broker.changesReadableStatus (Broker.Resolved (id, OAuthConnection, true)))
+                "spending one is not — a frame per turn would say nothing, loudly"
+            Expect.isTrue
+                (Broker.changesReadableStatus (Broker.Rejected (id, "github refused this credential")))
+                "and a provider refusing one certainly is"
+    ]
+
+// --- Pure: the session-side Claude module ---------------------------------------------------
 
 let private claudeTests =
     testList "claude connection module" [
@@ -285,14 +351,32 @@ let private githubTarget scope : SecretId = { Scope = scope; Name = githubName }
 
 let private githubTests =
     testList "github connection module" [
-        testCase "pasted credentials classify by prefix" <| fun () ->
-            Expect.equal (GitHubConnection.classifyPasted "  github_pat_11ABC  ") (Ok "github_pat_11ABC") "fine-grained PAT, trimmed"
-            Expect.equal (GitHubConnection.classifyPasted "ghp_classic") (Ok "ghp_classic") "classic PAT"
-            Expect.equal (GitHubConnection.classifyPasted "ghu_apptoken") (Ok "ghu_apptoken") "app user token"
-            Expect.equal (GitHubConnection.classifyPasted "gho_devicetoken") (Ok "gho_devicetoken") "oauth device token"
-            Expect.isError (GitHubConnection.classifyPasted "hunter2") "not a github credential"
-            Expect.isError (GitHubConnection.classifyPasted "sk-ant-api03-x") "a claude credential is a paste mistake"
-            Expect.isError (GitHubConnection.classifyPasted "   ") "blank"
+        // A PAT is a bare string that does not expire on its own, so the paste leg is the
+        // right home for one however the deployment is configured.
+        testCase "pasted personal access tokens classify by prefix" <| fun () ->
+            for deviceFlow in [ true; false ] do
+                let classify = GitHubConnection.classifyPasted deviceFlow
+                Expect.equal (classify "  github_pat_11ABC  ") (Ok "github_pat_11ABC") "fine-grained PAT, trimmed"
+                Expect.equal (classify "ghp_classic") (Ok "ghp_classic") "classic PAT"
+                Expect.isError (classify "hunter2") "not a github credential"
+                Expect.isError (classify "sk-ant-api03-x") "a claude credential is a paste mistake"
+                Expect.isError (classify "   ") "blank"
+
+        // The paste leg stores `BrokeredStatic`, which never refreshes. A `ghu_`/`gho_` lives
+        // about eight hours, so accepting one where the grant leg is available mints a
+        // credential that is dead by morning — and reads as connected until something needs it.
+        testCase "an expiring user token is refused where the device flow could store it properly" <| fun () ->
+            let refused = GitHubConnection.classifyPasted true "ghu_apptoken"
+            Expect.isError refused "an App is configured, so Connect GitHub can land this as a grant"
+            match refused with
+            | Error reason -> Expect.stringContains reason "Connect GitHub" "and the refusal names the way in"
+            | Ok _ -> failwith "an expiring user token cannot go in as a static credential"
+
+        // Without an App there is no grant leg to send anyone to, so refusing would leave
+        // them with no path at all. An eight-hour credential beats none.
+        testCase "an expiring user token is accepted where paste is the only path there is" <| fun () ->
+            Expect.equal (GitHubConnection.classifyPasted false "ghu_apptoken") (Ok "ghu_apptoken") "app user token"
+            Expect.equal (GitHubConnection.classifyPasted false "gho_devicetoken") (Ok "gho_devicetoken") "oauth device token"
 
         testCase "every kind rides GITHUB_TOKEN" <| fun () ->
             Expect.equal (GitHubConnection.envVarFor OAuthConnection "t") ("GITHUB_TOKEN", "t") "oauth"
@@ -402,6 +486,26 @@ let private startTokenEndpoint () : Async<TokenEndpoint> =
               SetResponse = (fun r -> response <- r)
               Requests = requests
               ContentTypes = contentTypes }
+    }
+
+/// A stand-in for GitHub's `/user`, which answers whatever status the case sets. The only
+/// thing `refusedAt` reads is the status, so that is the whole endpoint.
+type private StatusEndpoint =
+    { Url : string
+      SetStatus : int -> unit }
+
+let private startStatusEndpoint () : Async<StatusEndpoint> =
+    async {
+        let mutable status = 200
+        let handler (_: Interop.IncomingMessage) (res: Interop.ServerResponse) =
+            res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "application/json" ]) |> ignore
+            res.``end`` "{}"
+        let server = Interop.createServer handler
+        let! listening =
+            Async.FromContinuations (fun (cont, _, _) -> server.listen (0, "127.0.0.1", fun () -> cont server) |> ignore)
+        return
+            { Url = sprintf "http://127.0.0.1:%d/user" (Interop.serverPort listening)
+              SetStatus = fun s -> status <- s }
     }
 
 let private openEphemeral () =
@@ -592,6 +696,49 @@ let private brokerTests =
                 let! raw = store.Resolve t
                 Expect.isTrue (expect raw |> Option.isSome) "the old entry survives for a reconnect"
                 Expect.isTrue (observed |> List.exists (function Broker.RefreshFailed _ -> true | _ -> false)) "observed"
+                // Reported as a fault to retry, NOT as a credential to re-authorize: the
+                // endpoint said nothing about the grant, only that it could not answer.
+                Expect.isFalse
+                    (observed |> List.exists (function Broker.Rejected _ -> true | _ -> false))
+                    "a provider that could not answer has not refused anything"
+                let! list = broker.StatusOf [ t ]
+                Expect.equal
+                    (list.Connections |> List.tryPick (fun c -> Some c.Health))
+                    (Some ConnectionUsable)
+                    "so the panel does not send anyone to sign in over a bad minute"
+            }
+
+        // The other half of that distinction, and the one no clock can predict: a refresh
+        // token revoked long before the expiry it stated — somebody removes the App at the
+        // provider. RFC 6749 §5.2 gives it a standard name, which is the only reason the
+        // broker can read it without learning whose service this is.
+        testCaseAsync "a provider calling the grant invalid is a sign-in to redo, not a fault to retry" <|
+            async {
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let mutable observed : Broker.BrokerObservation list = []
+                let broker = Broker.create (fun () -> "http://m/cb") store (fun o -> observed <- o :: observed)
+                let t = target (UserScope alice)
+                let due =
+                    BrokeredOAuth
+                        { AccessToken = "at-stale"
+                          RefreshToken = Some "rt-revoked"
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 60.0)
+                          RefreshExpiresAt = None
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
+                let! _ = store.Set t (BrokeredCredentialCodec.toString due)
+                endpoint.SetResponse "error=invalid_grant"
+                let! resolved = broker.Resolve t
+                Expect.isError resolved "the refresh cannot succeed"
+                Expect.isTrue
+                    (observed |> List.exists (function Broker.Rejected _ -> true | _ -> false))
+                    "the grant is finished, and that is a different report from a failed refresh"
+                let! list = broker.StatusOf [ t ]
+                match list.Connections |> List.tryPick (fun c -> Some c.Health) with
+                | Some (SignInRequired _) -> ()
+                | other -> failwithf "a revoked grant must read as needing a sign-in, not %A" other
             }
 
         testCaseAsync "a grant handed over by a session is refreshable, unlike a pasted one" <|
@@ -649,6 +796,121 @@ let private brokerTests =
                 Expect.equal endpoint.Requests.Count 0 "and nothing was asked of the provider"
             }
 
+        // The case the old ordering could not see. `refreshExpired` used to be reached only
+        // inside the `needsRefresh` branch, so whether a finished grant was caught depended
+        // on the OTHER clock: an access token comfortably in date meant the resolve handed
+        // one out and the refusal arrived later from the provider, as a 401 nobody could
+        // read. Same dead grant, same refusal, whatever the access token says.
+        testCaseAsync "a lapsed refresh token is caught even while the access token is in date" <|
+            async {
+                let! endpoint = startTokenEndpoint ()
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                let finished =
+                    BrokeredOAuth
+                        { AccessToken = "at-live"
+                          RefreshToken = Some "rt-spent"
+                          // An hour out — far outside the 5-minute margin, so nothing here
+                          // is due and the old code took the "hand it over" path.
+                          ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 3600.0)
+                          RefreshExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds -1.0)
+                          TokenUrl = endpoint.Url
+                          ClientId = "cid"
+                          Dialect = FormEncoded }
+                let! _ = store.Set t (BrokeredCredentialCodec.toString finished)
+                match! broker.Resolve t with
+                | Error reason -> Expect.stringContains reason "sign in again" "the refusal says what to DO"
+                | Ok _ -> failwith "a grant that cannot rotate cannot resolve, however fresh its access token"
+                Expect.equal endpoint.Requests.Count 0 "and nothing was asked of the provider"
+            }
+
+        // The half no clock can reach. A static token states no lifetime at all, so
+        // `beyondRefresh` says nothing about it for ever — the provider refusing it is the
+        // only event that will ever prove it dead.
+        testCaseAsync "a provider's refusal is what makes a static token read as finished" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                let! _ = broker.Put t "ghu_expired"
+                let healthOf () =
+                    async {
+                        let! list = broker.StatusOf [ t ]
+                        return list.Connections |> List.tryPick (fun c -> Some c.Health)
+                    }
+                let! before = healthOf ()
+                Expect.equal before (Some ConnectionUsable) "nothing here can tell yet"
+                let! recorded = broker.Reject t "github refused this credential"
+                Expect.equal recorded (Ok true) "the report is news"
+                let! after = healthOf ()
+                Expect.equal after (Some (SignInRequired "github refused this credential")) "and now it is known"
+            }
+
+        testCaseAsync "the same refusal reported twice is news once" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                let! _ = broker.Put t "ghu_expired"
+                let! first = broker.Reject t "github refused this credential"
+                let! again = broker.Reject t "github refused this credential"
+                Expect.equal first (Ok true) "the first time"
+                // A verb that retries reports the same refusal each attempt; three faults in
+                // the audit and three frames on the wire would all be the one fact.
+                Expect.equal again (Ok false) "the second time is the same fault, not a new one"
+            }
+
+        testCaseAsync "a refusal cannot outlive the credential it describes" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let t = target (UserScope alice)
+                // Nothing connected: there is nothing for a provider to have refused.
+                let! orphan = broker.Reject t "github refused this credential"
+                Expect.equal orphan (Ok false) "a refusal needs a credential to be about"
+
+                let! _ = broker.Put t "ghu_expired"
+                let! _ = broker.Reject t "github refused this credential"
+                // Signing in again is the remedy the panel offers, so it had better work:
+                // a mark surviving the write would send someone straight back to it.
+                let! _ = broker.Put t "ghp_fresh"
+                let! list = broker.StatusOf [ t ]
+                Expect.equal
+                    (list.Connections |> List.tryPick (fun c -> Some c.Health))
+                    (Some ConnectionUsable)
+                    "a new credential is not the one that was refused"
+            }
+
+        testCaseAsync "a status reports the same dead end a resolve refuses by" <|
+            async {
+                let! store = openEphemeral ()
+                let broker = Broker.create (fun () -> "http://m/cb") store ignore
+                let dead = target (UserScope alice)
+                let live = target (SessionScope sessionA)
+                let! _ =
+                    store.Set
+                        dead
+                        (BrokeredCredentialCodec.toString (
+                            BrokeredOAuth
+                                { AccessToken = "at"
+                                  RefreshToken = Some "rt"
+                                  ExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds 3600.0)
+                                  RefreshExpiresAt = Some (DateTimeOffset.UtcNow.AddSeconds -1.0)
+                                  TokenUrl = "http://t"
+                                  ClientId = "cid"
+                                  Dialect = FormEncoded }))
+                let! _ = store.Set live (BrokeredCredentialCodec.toString (BrokeredStatic "ghp_ok"))
+                let! list = broker.StatusOf [ dead; live ]
+                let healthOf id =
+                    list.Connections |> List.tryFind (fun c -> c.Id = id) |> Option.map (fun c -> c.Health)
+                Expect.equal
+                    (healthOf dead)
+                    (Some (SignInRequired "the refresh token has expired"))
+                    "the panel learns what the turn would have"
+                Expect.equal (healthOf live) (Some ConnectionUsable) "and a working credential still reads as one"
+            }
+
         testCaseAsync "concurrent resolves of one due grant refresh it once" <|
             async {
                 let! endpoint = startTokenEndpoint ()
@@ -696,6 +958,61 @@ let private brokerTests =
 let private caller sessionId users peers local : Control.ControlCaller =
     { SessionId = sessionId; Users = users; Peers = peers; Local = local }
 
+[<Emit("setTimeout($0, $1)")>]
+let private setTimer (f: unit -> unit) (ms: int) : float = jsNative
+
+[<Emit("clearTimeout($0)")>]
+let private clearTimer (handle: float) : unit = jsNative
+
+/// Watch a launch's status stream, and wait for the frame a case is about by predicate.
+///
+/// The wait is BOUNDED, for the reason `Support.Harness.waitForTimeoutMs` writes down: a
+/// frame that never arrives used to hang until the whole Node run's budget expired, which
+/// kills every suite after it and reports `tests timed out` with no name on it. Here the
+/// same fault is one named failing case that says which frame it wanted and how many it
+/// saw instead — which is the difference between reading the answer and bisecting for it.
+let private watchingConnections (url: string) (secret: string) =
+    let frames = ResizeArray<ConnectionStatusList> ()
+    let waiter : (unit -> unit) option ref = ref None
+    let cancel =
+        ControlClient.subscribeConnections url secret (fun list ->
+            frames.Add list
+            match waiter.Value with
+            | Some check -> check ()
+            | None -> ())
+    let expectFrame (what: string) (predicate: ConnectionStatusList -> bool) =
+        Async.FromContinuations (fun (cont, econt, _) ->
+            let settled = ref false
+            // Settled exactly once, by whichever comes first — a matching frame or the
+            // deadline. Both paths clear the waiter, so a timed-out case cannot leave a
+            // continuation behind for the next frame to fire.
+            let finish (act: unit -> unit) =
+                if not settled.Value then
+                    settled.Value <- true
+                    waiter.Value <- None
+                    act ()
+            let timer =
+                setTimer
+                    (fun () ->
+                        finish (fun () ->
+                            econt (
+                                exn (
+                                    sprintf
+                                        "no status frame %s within %dms (%d frame(s) seen: %A)"
+                                        what
+                                        Support.Harness.waitForTimeoutMs
+                                        frames.Count
+                                        (frames |> Seq.map (fun f -> f.Connections) |> List.ofSeq)))))
+                    Support.Harness.waitForTimeoutMs
+            let check () =
+                if frames |> Seq.exists predicate then
+                    finish (fun () ->
+                        clearTimer timer
+                        cont ())
+            waiter.Value <- Some check
+            check ())
+    frames, expectFrame, cancel
+
 /// A bare control server with the SAME pre-authorized connection handlers the Manager
 /// composes (ProcessManager.connectionsApiFor), plus the ProcessManager-style status
 /// broadcast: any broker change recomputes every caller's snapshot and pushes it.
@@ -718,9 +1035,7 @@ let private startConnectionsServer (callers: (string * Control.ControlCaller) li
             | None -> ()
         let broker =
             Broker.create (fun () -> "http://manager.local/connections/callback") store (fun o ->
-                match o with
-                | Broker.Connected _ | Broker.Disconnected _ -> broadcast ()
-                | _ -> ())
+                if Broker.changesReadableStatus o then broadcast ())
         let api = ProcessManager.connectionsApiFor (fun _ -> ()) store broker
         apiRef.Value <- Some api
         let dummyRegister (_: string) (_: SessionId) (_: string) : Yession.Oidc.RegisterClientResponse =
@@ -783,8 +1098,47 @@ let private routeTests =
                 let! crossSession = clientB.Resolve (target (SessionScope sessionA))
                 Expect.isError crossSession "sibling session denied"
 
+                // Reporting a refusal is gated like resolving, because the only caller who
+                // can have been refused is one entitled to spend it.
+                let! putBack = clientB.Put (target (PeerScope peer1)) "sk-ant-oat01-x"
+                expect putBack
+                let! crossReject = clientA.Reject (target (PeerScope peer1)) "the provider said no"
+                Expect.isError crossReject "unwitnessed peer target denied"
+                let! ownReject = clientB.Reject (target (PeerScope peer1)) "the provider said no"
+                Expect.isTrue (expect ownReject) "the owner may report on its own credential"
+
                 let! disconnected = clientB.Disconnect (target (PeerScope peer1))
                 Expect.isTrue (expect disconnected) "disconnected"
+            }
+
+        // Whether GitHub still accepts a token, asked of GitHub. Only a 401 is a verdict:
+        // a 403 is what rate limiting and scope refusals look like, and both happen to a
+        // perfectly good credential.
+        testCaseAsync "only a flat refusal from github means the credential is finished" <|
+            async {
+                let! endpoint = startStatusEndpoint ()
+                let check (status: int) =
+                    async {
+                        endpoint.SetStatus status
+                        return! GitHubConnection.refusedAt endpoint.Url "ghu_token"
+                    }
+                let! refused = check 401
+                Expect.isSome refused "401 is github saying no"
+                let! rateLimited = check 403
+                Expect.isNone rateLimited "403 is rate limiting or scopes, not a dead token"
+                let! fine = check 200
+                Expect.isNone fine "and a token it accepts is not refused"
+                let! broken = check 500
+                Expect.isNone broken "a provider having a bad minute is not a verdict either"
+            }
+
+        testCaseAsync "a github check that cannot reach github is not a verdict" <|
+            async {
+                // Nothing listening: this is the shape of a box with no network, and telling
+                // somebody to sign in again because their wifi dropped would be worse than
+                // saying nothing at all.
+                let! unreachable = GitHubConnection.refusedAt "http://127.0.0.1:1/user" "ghu_token"
+                Expect.isNone unreachable "unreachable is this box's problem, not the token's"
             }
 
         testCaseAsync "the status stream sends a snapshot on subscribe and a fresh frame on change" <|
@@ -793,32 +1147,59 @@ let private routeTests =
                 let clientA = ControlClient.connections url "secret-a"
                 let! _ = clientA.Put (target (UserScope alice)) "sk-ant-oat01-x"
 
-                let frames = ResizeArray<ConnectionStatusList> ()
-                let waiter : (unit -> unit) option ref = ref None
-                let expectFrame (predicate: ConnectionStatusList -> bool) =
-                    Async.FromContinuations (fun (cont, _, _) ->
-                        if frames |> Seq.exists predicate then cont ()
-                        else
-                            waiter.Value <-
-                                Some (fun () ->
-                                    if frames |> Seq.exists predicate then
-                                        waiter.Value <- None
-                                        cont ()))
-                let cancel =
-                    ControlClient.subscribeConnections url "secret-a" (fun list ->
-                        frames.Add list
-                        match waiter.Value with
-                        | Some check -> check ()
-                        | None -> ())
+                let frames, expectFrame, cancel = watchingConnections url "secret-a"
 
                 // The snapshot names the existing credential, metadata only.
-                do! expectFrame (fun f -> f.Connections |> List.exists (fun s -> s.Id = target (UserScope alice) && s.Kind = StaticConnection))
+                do!
+                    expectFrame "naming the existing credential" (fun f ->
+                        f.Connections
+                        |> List.exists (fun s -> s.Id = target (UserScope alice) && s.Kind = StaticConnection))
                 // A second credential pushes a fresh frame.
                 let! _ = clientA.Put (target (SessionScope sessionA)) "sk-ant-api03-k"
-                do! expectFrame (fun f -> f.Connections |> List.length = 2)
+                do! expectFrame "carrying both credentials" (fun f -> f.Connections |> List.length = 2)
                 // Disconnect shrinks it again.
                 let! _ = clientA.Disconnect (target (SessionScope sessionA))
-                do! expectFrame (fun f -> frames.Count >= 3 && f.Connections |> List.length = 1)
+                do!
+                    expectFrame "back down to one after a disconnect" (fun f ->
+                        frames.Count >= 3 && f.Connections |> List.length = 1)
+                cancel.Stop ()
+            }
+
+        // The other half of "a status says whether this still works": a credential can die
+        // without anybody writing to the store, and until now nothing moved the frame when
+        // it did. A panel would sit on the healthy snapshot it was sent at subscribe time
+        // while every turn that touched the credential failed.
+        testCaseAsync "a credential that stops working pushes a fresh frame, with no write to the store" <|
+            async {
+                let! url = startConnectionsServer [ "secret-a", caller sessionA (Set.singleton alice) Set.empty false ]
+                let clientA = ControlClient.connections url "secret-a"
+                let t = target (UserScope alice)
+                // Connected, and finished: a refresh token that has already lapsed.
+                let! _ =
+                    clientA.PutGrant
+                        { Target = t
+                          AccessToken = "at"
+                          RefreshToken = Some "rt-spent"
+                          ExpiresIn = Some 3600
+                          RefreshTokenExpiresIn = Some -1
+                          TokenUrl = "http://unreachable.invalid/token"
+                          ClientId = "cid"
+                          TokenDialect = FormEncoded }
+
+                let frames, expectFrame, cancel = watchingConnections url "secret-a"
+                do! expectFrame "naming the connected credential" (fun f -> f.Connections |> List.exists (fun s -> s.Id = t))
+                let before = frames.Count
+
+                // Resolving is the moment the fault is discovered. Nothing is written.
+                let! resolved = clientA.Resolve t
+                Expect.isError resolved "a lapsed grant cannot resolve"
+
+                do!
+                    expectFrame "reporting the credential as needing a sign-in" (fun f ->
+                        frames.Count > before
+                        && f.Connections
+                           |> List.exists (fun s ->
+                               s.Id = t && s.Health = SignInRequired "the refresh token has expired"))
                 cancel.Stop ()
             }
     ]
@@ -845,6 +1226,17 @@ let private getWithCookie (url: string) (cookie: string) : JS.Promise<HttpReply>
 
 let private cookieOf (jar: OidcHttp.Jar) : string =
     jar.Cookies |> Map.toList |> List.map (fun (k, v) -> sprintf "%s=%s" k v) |> String.concat "; "
+
+/// "This scope has a credential connected", as the status body says it — and "it has none".
+///
+/// The shape lives HERE rather than in each case, because it used to live in four of them
+/// and adding one field to the wire broke all four at once. What these cases are about is
+/// whether a sign-in reached the session, not how the JSON spells it.
+let private connectedAt (scope: string) (body: string) : bool =
+    body.Contains (sprintf """"%s":{"kind":""" scope)
+
+let private notConnectedAt (scope: string) (body: string) : bool =
+    body.Contains (sprintf """"%s":null""" scope)
 
 /// Poll the session's /claude status until `predicate` holds — the session learns of
 /// credential changes over its control stream, so the flip is asynchronous by design.
@@ -912,7 +1304,7 @@ let private e2eTests =
                     |> Async.AwaitPromise
                 Expect.equal putMine.status 200 (sprintf "the paste stores: %s" putMine.body)
                 do! awaitClaudeStatus sessionUrl cookieA (fun body ->
-                        body.Contains "\"mine\":\"static\"" && body.Contains "\"agent\":true")
+                        connectedAt "mine" body && body.Contains "\"agent\":true")
 
                 do! compose a a.Hello.PeerId "hello after sign-in"
                 a.Connection.SendDraft a.Hello.PeerId
@@ -942,7 +1334,7 @@ let private e2eTests =
                 // B's own status surface agrees, without B having asserted any identity.
                 let cookieB = cookieOf openedB.Jar
                 do! awaitClaudeStatus sessionUrl cookieB (fun body ->
-                        body.Contains "\"mine\":\"static\"" && body.Contains "\"owner\":\"local\"")
+                        connectedAt "mine" body && body.Contains "\"owner\":\"local\"")
 
                 // 4. A stores a SESSION-scoped api key: it overrides for every actor —
                 //    Bob's next turn now runs on it.
@@ -953,7 +1345,7 @@ let private e2eTests =
                         """{"scope":"session","token":"sk-ant-api03-fake"}"""
                     |> Async.AwaitPromise
                 Expect.equal putSession.status 200 (sprintf "the session-scoped paste stores: %s" putSession.body)
-                do! awaitClaudeStatus sessionUrl cookieA (fun body -> body.Contains "\"session\":\"static\"")
+                do! awaitClaudeStatus sessionUrl cookieA (connectedAt "session")
                 do! compose b b.Hello.PeerId "bob under the session credential"
                 b.Connection.SendDraft b.Hello.PeerId
                 do! b.Runner.WaitFor (fun m ->
@@ -969,7 +1361,7 @@ let private e2eTests =
                     postJsonWithCookie (sessionUrl + "/claude/disconnect") cookieA """{"scope":"mine"}"""
                     |> Async.AwaitPromise
                 do! awaitClaudeStatus sessionUrl cookieA (fun body ->
-                        body.Contains "\"session\":null" && body.Contains "\"mine\":null")
+                        notConnectedAt "session" body && notConnectedAt "mine" body)
 
                 do! a.Channel.Close ()
                 do! b.Channel.Close ()
@@ -1020,7 +1412,7 @@ let private e2eTests =
                         """{"scope":"mine","token":"sk-ant-oat01-alices"}"""
                     |> Async.AwaitPromise
                 Expect.equal putMine.status 200 (sprintf "alice connects her own: %s" putMine.body)
-                do! awaitClaudeStatus sessionUrl cookieAlice (fun body -> body.Contains "\"mine\":\"static\"")
+                do! awaitClaudeStatus sessionUrl cookieAlice (connectedAt "mine")
 
                 do! compose alice alice.Hello.PeerId "alice on her own credential"
                 alice.Connection.SendDraft alice.Hello.PeerId
@@ -1132,25 +1524,35 @@ type private RecordingConnections =
       /// Grants handed over for the Manager to refresh — the device flow's path, kept
       /// apart from `Puts` because which one a sign-in takes is the thing under test.
       Grants : ResizeArray<ControlWire.ConnectionPutGrantRequest>
-      Disconnects : ResizeArray<SecretId> }
+      Disconnects : ResizeArray<SecretId>
+      /// Credentials a verb reported the provider as having refused.
+      Rejects : ResizeArray<SecretId * string> }
 
 let private recordingConnections () : RecordingConnections =
     let puts = ResizeArray<SecretId * string> ()
     let grants = ResizeArray<ControlWire.ConnectionPutGrantRequest> ()
     let disconnects = ResizeArray<SecretId> ()
+    let rejects = ResizeArray<SecretId * string> ()
     { Client =
         { Begin = fun _ -> async { return Error "not under test" }
           Complete = fun _ _ -> async { return Error "not under test" }
           Put = fun target value -> async { puts.Add (target, value); return Ok () }
           PutGrant = fun request -> async { grants.Add request; return Ok () }
           Disconnect = fun target -> async { disconnects.Add target; return Ok true }
+          Reject = fun target reason -> async { rejects.Add (target, reason); return Ok true }
           Resolve = fun _ -> async { return Error "not under test" } }
       Puts = puts
       Grants = grants
-      Disconnects = disconnects }
+      Disconnects = disconnects
+      Rejects = rejects }
 
 /// A bare server carrying only the /github handler, mounted at the origin root.
-let private startGitHubRoutes (connections: ControlClient.SessionConnections) (statusOf: SecretId -> ConnectionKind option) =
+/// A stored connection as the status cache would hold it. The timestamp is not what any
+/// of these cases are about, so it is fixed rather than a parameter.
+let private stored (kind: ConnectionKind) (health: ConnectionHealth) (id: SecretId) : ConnectionStatus =
+    { Id = id; Kind = kind; Health = health; UpdatedAt = DateTimeOffset.Parse "2026-08-21T00:00:00Z" }
+
+let private startGitHubRoutes (connections: ControlClient.SessionConnections) (statusOf: SecretId -> ConnectionStatus option) =
     async {
         let route = GitHubConnection.routes sessionA (stubAuth ()) connections statusOf ""
         let handler (req: Interop.IncomingMessage) (res: Interop.ServerResponse) =
@@ -1212,8 +1614,10 @@ let private githubRouteTests =
                 // origin-partitioned localStorage, so it changed under the person holding it
                 // and every new value stranded the last one's credential.
                 let recorder = recordingConnections ()
-                let stored = ResizeArray<SecretId> ()
-                let! url = startGitHubRoutes recorder.Client (fun target -> if stored.Contains target then Some StaticConnection else None)
+                let storedTargets = ResizeArray<SecretId> ()
+                let! url =
+                    startGitHubRoutes recorder.Client (fun target ->
+                        if storedTargets.Contains target then Some (stored StaticConnection ConnectionUsable target) else None)
 
                 let! connected =
                     postJsonWithCookie (url + "/github/token") "who=anon" """{"scope":"mine","token":"ghp_abc"}"""
@@ -1222,20 +1626,20 @@ let private githubRouteTests =
                 Expect.equal recorder.Puts.Count 1 "one credential stored"
                 let target, _ = recorder.Puts.[0]
                 Expect.equal target.Scope LocalScope "owned by the deployment, not by any browser"
-                stored.Add target
+                storedTargets.Add target
 
                 // A DIFFERENT browser — no shared storage, no shared id, nothing carried over
                 // but the same deployment. Before this change it saw `"mine":null` and was
                 // shown a Connect button.
                 let! elsewhere = getWithCookie (url + "/github") "who=anon" |> Async.AwaitPromise
                 Expect.equal elsewhere.status 200 "readable"
-                Expect.isTrue (elsewhere.body.Contains "\"mine\":\"static\"") "already connected, from a browser that never connected anything"
+                Expect.isTrue (connectedAt "mine" elsewhere.body) "already connected, from a browser that never connected anything"
                 Expect.isTrue (elsewhere.body.Contains "\"owner\":\"local\"") "and says whose it is: the deployment's"
 
                 // An attributed user is untouched by any of it — they own their own, and the
                 // deployment's credential is not theirs to see.
                 let! alicesView = getWithCookie (url + "/github") "who=alice" |> Async.AwaitPromise
-                Expect.isTrue (alicesView.body.Contains "\"mine\":null") "an attributed user does not inherit it"
+                Expect.isTrue (notConnectedAt "mine" alicesView.body) "an attributed user does not inherit it"
                 Expect.isTrue (alicesView.body.Contains "\"owner\":\"user\"") "and owns by user"
             }
 
@@ -1368,21 +1772,25 @@ let private githubRouteTests =
             async {
                 let! stub = startStubGitHub ()
                 let recorder = recordingConnections ()
-                let connected = Map.ofList [ githubTarget (UserScope alice), StaticConnection ]
+                let aliceTarget = githubTarget (UserScope alice)
+                let connected = Map.ofList [ aliceTarget, stored StaticConnection ConnectionUsable aliceTarget ]
                 let! url = startGitHubRoutes recorder.Client (fun target -> Map.tryFind target connected)
                 do! withStubGitHub stub (Some "Iv1.test") (fun () ->
                     async {
                         let! forAlice = getWithCookie (url + "/github") "who=alice" |> Async.AwaitPromise
                         Expect.equal forAlice.status 200 "alice sees her own"
-                        Expect.isTrue (forAlice.body.Contains "\"mine\":\"static\"") "alice is connected"
-                        Expect.isTrue (forAlice.body.Contains "\"session\":null") "the session is not"
+                        Expect.isTrue (connectedAt "mine" forAlice.body) "alice is connected"
+                        Expect.isTrue
+                            (forAlice.body.Contains """"signInRequired":null""")
+                            "and nothing says otherwise"
+                        Expect.isTrue (notConnectedAt "session" forAlice.body) "the session is not"
                         Expect.isTrue (forAlice.body.Contains "\"owner\":\"user\"") "as a user"
 
                         // The same session, a different human: status is computed from the
                         // caller's identity, so bob does not learn he is signed in because
                         // alice is.
                         let! forBob = getWithCookie (url + "/github") "who=bob" |> Async.AwaitPromise
-                        Expect.isTrue (forBob.body.Contains "\"mine\":null") "bob is not connected"
+                        Expect.isTrue (notConnectedAt "mine" forBob.body) "bob is not connected"
                     })
             }
     ]
@@ -1392,6 +1800,7 @@ let tests =
         codecTests
         flowTests
         wireTests
+        observationTests
         claudeTests
         githubTests
         Tag.needs "Broker service" [ Tag.Ports ] (fun () -> brokerTests)

@@ -111,7 +111,17 @@ let private modelsUrl = "https://api.anthropic.com/v1/models"
 type private ModelsOutcome =
     abstract ok : bool
     abstract reason : string
+    /// The provider's status, or 0 when it never answered. Kept apart from `reason` because
+    /// one number decides something no prose can: whether the CREDENTIAL was refused, or
+    /// this lookup merely failed.
+    abstract status : int
     abstract models : {| id: string; name: string |} array
+
+/// Why a catalogue lookup produced nothing, and the one distinction its caller acts on.
+///
+/// `Refused` is a fact about the credential and belongs back at the Manager; everything else
+/// is a fact about this request and belongs nowhere but the picker's note.
+type ModelsFailure = { Message : string; Refused : bool }
 
 /// GET the catalogue on one credential, following the API's paging.
 ///
@@ -136,16 +146,16 @@ type private ModelsOutcome =
       const r = await fetch(next, { headers })
       if (!r.ok) {
         const detail = (await r.text()).slice(0, 200)
-        return { ok: false, reason: 'the provider answered ' + r.status + ': ' + detail, models: [] }
+        return { ok: false, reason: 'the provider answered ' + r.status + ': ' + detail, status: r.status, models: [] }
       }
       const body = await r.json()
       for (const m of (body.data || [])) models.push({ id: String(m.id || ''), name: String(m.display_name || '') })
       if (!body.has_more || !body.last_id) break
       next = url + '?limit=1000&after_id=' + encodeURIComponent(body.last_id)
     }
-    return { ok: true, reason: '', models }
+    return { ok: true, reason: '', status: 200, models }
   } catch (err) {
-    return { ok: false, reason: String((err && err.message) || err), models: [] }
+    return { ok: false, reason: String((err && err.message) || err), status: 0, models: [] }
   }
 })($0, $1, $2)""")>]
 let private fetchModels (envVar: string) (value: string) (url: string) : JS.Promise<ModelsOutcome> = jsNative
@@ -158,11 +168,15 @@ let private fetchModels (envVar: string) (value: string) (url: string) : JS.Prom
 /// The endpoint is a parameter so a test can point it at a provider it wrote — which is
 /// the only way the paging and the header dialects get exercised without a live account,
 /// and the only way to do it without a suite writing the process environment.
-let modelsAt (url: string) (credential: string * string) : Async<Result<AgentModel list, string>> =
+let modelsAt (url: string) (credential: string * string) : Async<Result<AgentModel list, ModelsFailure>> =
     async {
         let envVar, value = credential
         let! outcome = fetchModels envVar value url |> Interop.awaitPromise
-        if not outcome.ok then return Error outcome.reason
+        if not outcome.ok then
+            // Only 401. A 403 here is an org policy or a scope this key does not carry, both
+            // of which happen to a credential that is otherwise perfectly alive, and a 5xx or
+            // an unreachable host says nothing about the credential at all.
+            return Error { Message = outcome.reason; Refused = outcome.status = 401 }
         else
             return
                 outcome.models
@@ -176,7 +190,7 @@ let modelsAt (url: string) (credential: string * string) : Async<Result<AgentMod
 
 /// The lookup as the session composes it: this provider's endpoint, overridable the way
 /// its OAuth endpoints are.
-let models (credential: string * string) : Async<Result<AgentModel list, string>> =
+let models (credential: string * string) : Async<Result<AgentModel list, ModelsFailure>> =
     modelsAt (envOr "YESSION_CLAUDE_MODELS_URL" modelsUrl) credential
 
 /// A human label for a turn actor, for the "not connected" failure message.
@@ -247,7 +261,7 @@ let routes
     (sessionId: SessionId)
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
-    (statusOf: SecretId -> ConnectionKind option)
+    (statusOf: SecretId -> ConnectionStatus option)
     (agentAvailable: unit -> bool)
     /// The path this session is served under (`""` at an origin root), stripped off the
     /// request the same way the rest of the session's surface strips it.
@@ -269,10 +283,23 @@ let routes
                     let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
                     match routeOf () with
                     | Some ClaudeStatus ->
+                        // One connection as the panel reads it: which kind of credential it
+                        // is, and — when something has established that it no longer works —
+                        // why a person has to sign in again. `null` for a scope with nothing
+                        // connected. The GitHub panel reads the same shape from its own route;
+                        // both are pinned by their route suites.
                         let statusJson (target: SecretId) =
                             match statusOf target with
-                            | Some kind -> jsonString (kindLabel kind)
                             | None -> "null"
+                            | Some (status: ConnectionStatus) ->
+                                let signInRequired =
+                                    match status.Health with
+                                    | ConnectionUsable -> "null"
+                                    | SignInRequired reason -> jsonString reason
+                                sprintf
+                                    """{"kind":%s,"signInRequired":%s}"""
+                                    (jsonString (kindLabel status.Kind))
+                                    signInRequired
                         let sessionTarget : SecretId = { Scope = SessionScope sessionId; Name = secretName }
                         let mineTarget : SecretId = { Scope = CredentialOwner.scope owner; Name = secretName }
                         // What "mine" MEANS here, so the panel can say it honestly:

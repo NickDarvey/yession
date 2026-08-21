@@ -606,6 +606,21 @@ module Style =
     let degradedBanner =
         "shrink-0 flex items-baseline gap-3 px-8 py-2 bg-surface max-md:px-4 " + Stroke.dividerBottom
 
+    /// The sign-in prompt, in the same slot and the same hairline as the degradation strip:
+    /// a notice over the timeline, never a modal and never a blocker. It carries a real
+    /// button because unlike a degraded leg — which recovers on its own — a credential that
+    /// stopped working recovers only when a person does something.
+    ///
+    /// `flex-wrap` and `mr-auto` rather than a fixed row: the provider's own reason can be a
+    /// sentence, and on a phone it has to be able to take the line above the button instead
+    /// of squeezing it off the edge.
+    let signInPrompt =
+        "shrink-0 flex flex-wrap items-baseline gap-x-3 gap-y-2 px-8 py-2 bg-surface max-md:px-4 "
+        + Stroke.dividerBottom
+
+    /// The reason, taking the room between the status word and the button.
+    let signInPromptReason = "mr-auto"
+
     // --- Editable session title ------------------------------------------------------------
 
     /// The title block: the editable heading over its dim secondary id. `relative` anchors

@@ -887,12 +887,14 @@ module SrtSandbox =
                       Socat = named "YESSION_SOCAT_PATH"
                       Ripgrep = named "YESSION_RIPGREP_PATH"
                       Nesting = nesting
-                      // `YESSION_CLAUDE_PATH` names a claude install outside the SDK's own,
-                      // and the AgentSandbox has to be able to read the CLI it spawns.
+                      // The binaries a confined spawn execs but the platform list cannot
+                      // know the location of: the claude CLI the AgentSandbox starts, and
+                      // the git the repo verbs run.
                       Runtime =
                         runtimeReadPaths
                             (platform ())
-                            ([ execPath (); srtPackage ] @ (named "YESSION_CLAUDE_PATH" |> Option.toList))
+                            ([ execPath (); srtPackage ]
+                             @ ([ "YESSION_CLAUDE_PATH"; "YESSION_GIT_PATH" ] |> List.choose named))
                             ambient })
 
     [<Emit("(function (allowedDomains, denyRead, allowRead, allowWrite, bwrap, socat, ripgrep, weakNesting, allowGitConfig, filesystemDisabled) { return ({ network: { allowedDomains: allowedDomains, deniedDomains: [], strictAllowlist: true }, filesystem: { denyRead: denyRead, allowRead: allowRead, allowWrite: allowWrite, denyWrite: [], allowGitConfig: allowGitConfig, disabled: filesystemDisabled }, ...(bwrap ? { bwrapPath: bwrap } : {}), ...(socat ? { socatPath: socat } : {}), ...(ripgrep ? { ripgrep: { command: ripgrep } } : {}), ...(weakNesting ? { enableWeakerNestedSandbox: true } : {}) }) })($0, $1, $2, $3, $4, $5, $6, $7, $8, $9)")>]

@@ -6,9 +6,11 @@ module Yession.Host.GitHubConnection
 // standards-only public-client broker deliberately cannot carry — so this connection
 // uses the DEVICE FLOW instead (client id only, no secret anywhere): the session asks
 // github.com for a user code, the human approves it in their own browser, and the
-// session polls the token endpoint until the grant lands. The resulting token is
-// stored through the broker's existing paste path (`Put` → a static credential), so
-// the Manager stays untouched and never learns which service it stored.
+// session polls the token endpoint until the grant lands. What that produces is a whole
+// authorization rather than a bare string, so it is stored through the broker's GRANT leg
+// (`PutGrant` → `BrokeredOAuth`, Plan 21): the refresh token stays Manager-side and the
+// access token rotates before the turns that need it. The Manager still never learns which
+// service it stored. The paste leg remains for a PAT, which genuinely is a bare string.
 //
 // The token is a GitHub App user-to-server token: what it can reach is the
 // intersection of the USER's access and the APP's installations — which is the
@@ -56,11 +58,34 @@ let private configuredClientId () : string option =
 /// Validate a pasted static credential: a fine-grained PAT (`github_pat_…`), a classic
 /// PAT (`ghp_…`), or a user token from an App/OAuth flow run elsewhere (`ghu_…`,
 /// `gho_…`). Anything else is a paste mistake worth rejecting before it is stored.
-let classifyPasted (raw: string) : Result<string, string> =
+///
+/// The two user-token kinds are refused where the device flow can be run instead, because
+/// this leg stores `BrokeredStatic` — a credential `needsRefresh` answers `false` for,
+/// unconditionally. A `ghu_`/`gho_` lives about eight hours, so pasting one here mints a
+/// credential that is dead by morning and cannot rotate; `Connect GitHub` runs the same
+/// authorization and lands it through `PutGrant`, refresh token and all. That is not
+/// hypothetical: the credential on the author's own deployment was pasted this way 39
+/// minutes before the grant leg shipped, expired, and then read as a healthy connection
+/// for four days. Where no App is configured (`deviceFlowConfigured = false`) paste is the
+/// only path there is, so they are still accepted.
+let classifyPasted (deviceFlowConfigured: bool) (raw: string) : Result<string, string> =
     let trimmed = (defaultArg (Option.ofObj raw) "").Trim ()
-    let prefixes = [ "github_pat_"; "ghp_"; "ghu_"; "gho_" ]
-    if prefixes |> List.exists trimmed.StartsWith then Ok trimmed
-    else Error "expected a GitHub credential (github_pat_…/ghp_… personal access token, or a ghu_…/gho_… user token)"
+    let durable = [ "github_pat_"; "ghp_" ]
+    let expiring = [ "ghu_"; "gho_" ]
+    if durable |> List.exists trimmed.StartsWith then Ok trimmed
+    elif expiring |> List.exists trimmed.StartsWith && not deviceFlowConfigured then Ok trimmed
+    elif expiring |> List.exists trimmed.StartsWith then
+        Error
+            "a ghu_…/gho_… user token expires in a few hours and cannot be refreshed once pasted \
+             — use Connect GitHub, which stores a refresh token"
+    else
+        // The kinds this session will actually take, which is not the same list on both
+        // sides of the branch above — offering one it is about to refuse would be the
+        // message sending someone back for the token it just rejected.
+        let kinds =
+            if deviceFlowConfigured then "github_pat_…/ghp_… personal access token"
+            else "github_pat_…/ghp_… personal access token, or a ghu_…/gho_… user token"
+        Error (sprintf "expected a GitHub credential (%s)" kinds)
 
 /// The environment variable a resolved credential rides into a git invocation. One
 /// name for every kind: git credential helpers and `gh` both read `GITHUB_TOKEN`.
@@ -213,6 +238,42 @@ let ownerOf (identity: CookieIdentity) : CredentialOwner =
   .catch(e => ({ ok: false, body: String(e) }))""")>]
 let private postJson (url: string) (body: string) : JS.Promise<{| ok: bool; body: string |}> = jsNative
 
+/// Ask GitHub whether a token is still good, as GitHub itself.
+///
+/// The alternative was reading git's stderr, and that is not an answer: `Repository not
+/// found` is what github.com says for a private repo you cannot see AND for a repo that is
+/// not there, so a dead credential and a typo are the same sentence. One authenticated
+/// request to the API distinguishes them definitively, and it is only ever made on a path
+/// that has already failed.
+///
+/// The endpoint is a parameter for the same reason the OAuth ones are: a suite needs
+/// somewhere to point it that is not the live provider.
+[<Emit("""fetch($0, { headers: { 'authorization': 'Bearer ' + $1, 'accept': 'application/vnd.github+json',
+                                 'user-agent': 'yession' } })
+  .then(r => ({ reachable: true, status: r.status }))
+  .catch(() => ({ reachable: false, status: 0 }))""")>]
+let private getUser (url: string) (token: string) : JS.Promise<{| reachable: bool; status: int |}> = jsNative
+
+let private userUrl = "https://api.github.com/user"
+
+/// Whether GitHub still accepts this token: `Some reason` when it definitively does not.
+///
+/// Only 401 counts. A 403 is GitHub's answer for rate limiting and for scope refusals, both
+/// of which happen to a perfectly good credential, and telling somebody to sign in again
+/// because they made too many requests would be worse than saying nothing. Unreachable is
+/// not a verdict either — that is this box's network, not the token.
+let refusedAt (url: string) (token: string) : Async<string option> =
+    async {
+        let! reply = getUser url token |> Interop.awaitPromise
+        if reply.reachable && reply.status = 401 then
+            return Some "github rejected this credential"
+        else return None
+    }
+
+/// The check as the session composes it, against GitHub's own endpoint.
+let refused (token: string) : Async<string option> =
+    refusedAt (envOr "YESSION_GITHUB_USER_URL" userUrl) token
+
 /// Build the /github* route handler. `statusOf` reads the session's live status cache
 /// (the same Manager connection stream that feeds /claude — a stored `github` entry
 /// appears there with no Manager changes, because status is envelope-shape detection).
@@ -221,7 +282,7 @@ let routes
     (sessionId: SessionId)
     (auth: SessionAuth.Auth)
     (connections: ControlClient.SessionConnections)
-    (statusOf: SecretId -> ConnectionKind option)
+    (statusOf: SecretId -> ConnectionStatus option)
     (mount: string)
     : IncomingMessage -> ServerResponse -> bool =
     // The pending device flow per target, held HERE and only here: the device code is
@@ -241,10 +302,23 @@ let routes
                     let kindLabel kind = match kind with OAuthConnection -> "oauth" | StaticConnection -> "static"
                     match routeOf () with
                     | Some GitHubStatus ->
+                        // One connection as the panel reads it: which kind of credential it
+                        // is, and — when something has established that it no longer works —
+                        // why a person has to sign in again. `null` for a scope with nothing
+                        // connected. The GitHub panel reads the same shape from its own route;
+                        // both are pinned by their route suites.
                         let statusJson (target: SecretId) =
                             match statusOf target with
-                            | Some kind -> jsonString (kindLabel kind)
                             | None -> "null"
+                            | Some (status: ConnectionStatus) ->
+                                let signInRequired =
+                                    match status.Health with
+                                    | ConnectionUsable -> "null"
+                                    | SignInRequired reason -> jsonString reason
+                                sprintf
+                                    """{"kind":%s,"signInRequired":%s}"""
+                                    (jsonString (kindLabel status.Kind))
+                                    signInRequired
                         let sessionTarget : SecretId = { Scope = SessionScope sessionId; Name = secretName }
                         let mineTarget : SecretId = { Scope = CredentialOwner.scope owner; Name = secretName }
                         let ownerLabel =
@@ -307,7 +381,7 @@ let routes
                                                 pending <- Map.remove target pending
                                                 respondText res 400 reason
                                     | GitHubAction.Token ->
-                                        match body.Token |> Option.map classifyPasted with
+                                        match body.Token |> Option.map (classifyPasted (configuredClientId ()).IsSome) with
                                         | None -> respondText res 400 "missing token"
                                         | Some (Error e) -> respondText res 400 e
                                         | Some (Ok token) ->

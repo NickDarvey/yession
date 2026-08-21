@@ -378,6 +378,40 @@ let private toggleNav () : unit = jsNative
 })()""")>]
 let private toggleSettings () : unit = jsNative
 
+// The same move, in one direction only.
+//
+// A call to action that leads to settings must never TAKE somebody there and back: the
+// prompt over the timeline is on screen whenever a credential needs signing in, including
+// while the settings face is already open, and a toggle there would shut the very panel it
+// is pointing at. The nav pivots stay toggles because a pivot is a two-way control and this
+// is not one.
+//
+// Idempotent by construction rather than by the caller checking first — `settings-open` is
+// SET, not flipped, so pressing it twice is pressing it once.
+[<Emit("""(() => {
+  const root = document.documentElement
+  const desktop = window.matchMedia('(min-width: 768px)').matches
+  const wasOpen = root.classList.contains('settings-open')
+  root.classList.add('settings-open')
+  // Bring the column on screen: `nav-alt` means the opposite thing on each side of the
+  // breakpoint — collapsed on desktop, drawer-open on mobile.
+  if (desktop) root.classList.remove('nav-alt')
+  else root.classList.add('nav-alt')
+  // Focus moves only when the face actually ARRIVED. Stealing it from whatever the reader
+  // was doing, to a control that was already on screen, would be the prompt reaching into a
+  // panel they are already reading.
+  if (!wasOpen) {
+    // TWO frames, for the reason the toggle needs them: the arriving face is
+    // `visibility: hidden` until the transition it just started reaches its first style
+    // flush, and `focus()` on a hidden element is a no-op.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const next = document.querySelector('[data-settings-toggle="close"]')
+      if (next) next.focus()
+    }))
+  }
+})()""")>]
+let private revealSettings () : unit = jsNative
+
 // The auth probe: `me` answers with a peer token when the browser's cookie (or an
 // auth-less session) allows it — total in BOTH axes it can fail on, because the two need
 // opposite remedies: `authorized = false` means log in (the shell renavigates), while
@@ -790,10 +824,25 @@ let private urlEncode (value: string) : string = jsNative
 // origin-partitioned localStorage, so it changed under the person holding it and stranded
 // the credential behind every new one; ownership now comes off the cookie, Manager-side.
 
+// A connection arrives as `{kind, signInRequired}` or null, and is flattened to primitives
+// HERE rather than carried across as an object. Fable's mapping of an option-of-record onto
+// a JS value is the kind of thing that misbehaves quietly, and a status that silently
+// decodes to "nothing connected" is indistinguishable on screen from the truth. Two nullable
+// strings per scope cannot go wrong, and `ConnectionView` is assembled in F#.
 [<Emit("""fetch($0, { cache: 'no-store' })
-  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine, owner: s.owner, agent: !!s.agent })) : Promise.resolve({ ok: false, session: null, mine: null, owner: null, agent: false }))
-  .catch(() => ({ ok: false, session: null, mine: null, owner: null, agent: false }))""")>]
-let private fetchClaudeStatusAt (url: string) : JS.Promise<{| ok: bool; session: string option; mine: string option; owner: string option; agent: bool |}> = jsNative
+  .then(r => r.ok ? r.json().then(s => ({ ok: true,
+    sessionKind: s.session ? String(s.session.kind || '') : null,
+    sessionSignIn: (s.session && s.session.signInRequired) || null,
+    mineKind: s.mine ? String(s.mine.kind || '') : null,
+    mineSignIn: (s.mine && s.mine.signInRequired) || null,
+    owner: s.owner, agent: !!s.agent }))
+    : Promise.resolve({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null, owner: null, agent: false }))
+  .catch(() => ({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null, owner: null, agent: false }))""")>]
+let private fetchClaudeStatusAt (url: string) : JS.Promise<{| ok: bool; sessionKind: string option; sessionSignIn: string option; mineKind: string option; mineSignIn: string option; owner: string option; agent: bool |}> = jsNative
+
+/// One scope's pair of nullable strings, as the panel's row reads it.
+let private viewOf (kind: string option) (signInRequired: string option) : ConnectionView option =
+    kind |> Option.map (fun kind -> { Kind = kind; SignInRequired = signInRequired })
 
 let private fetchClaudeStatus () =
     fetchClaudeStatusAt (SessionRoute.relative ClaudeStatus)
@@ -817,9 +866,14 @@ let private panelInput (selector: string) : string = jsNative
 // extra parsers below read the begin/poll replies.
 
 [<Emit("""fetch($0, { cache: 'no-store' })
-  .then(r => r.ok ? r.json().then(s => ({ ok: true, session: s.session, mine: s.mine })) : Promise.resolve({ ok: false, session: null, mine: null }))
-  .catch(() => ({ ok: false, session: null, mine: null }))""")>]
-let private fetchGitHubStatusAt (url: string) : JS.Promise<{| ok: bool; session: string option; mine: string option |}> = jsNative
+  .then(r => r.ok ? r.json().then(s => ({ ok: true,
+    sessionKind: s.session ? String(s.session.kind || '') : null,
+    sessionSignIn: (s.session && s.session.signInRequired) || null,
+    mineKind: s.mine ? String(s.mine.kind || '') : null,
+    mineSignIn: (s.mine && s.mine.signInRequired) || null }))
+    : Promise.resolve({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null }))
+  .catch(() => ({ ok: false, sessionKind: null, sessionSignIn: null, mineKind: null, mineSignIn: null }))""")>]
+let private fetchGitHubStatusAt (url: string) : JS.Promise<{| ok: bool; sessionKind: string option; sessionSignIn: string option; mineKind: string option; mineSignIn: string option |}> = jsNative
 
 let private fetchGitHubStatus () =
     fetchGitHubStatusAt (SessionRoute.relative GitHubStatus)
@@ -1242,7 +1296,12 @@ let private start () =
                 async {
                     let! status = fetchClaudeStatus () |> Async.AwaitPromise
                     if status.ok then
-                        dispatchRef (ClaudeStatusMsg { SessionCredential = status.session; MineCredential = status.mine; Owner = status.owner; AgentAvailable = Some status.agent })
+                        dispatchRef (
+                            ClaudeStatusMsg
+                                { SessionCredential = viewOf status.sessionKind status.sessionSignIn
+                                  MineCredential = viewOf status.mineKind status.mineSignIn
+                                  Owner = status.owner
+                                  AgentAvailable = Some status.agent })
                 })
         let rec pollClaudeWhileAwaiting () =
             Async.StartImmediate (
@@ -1310,7 +1369,10 @@ let private start () =
                 async {
                     let! status = fetchGitHubStatus () |> Async.AwaitPromise
                     if status.ok then
-                        dispatchRef (GitHubStatusMsg { SessionCredential = status.session; MineCredential = status.mine })
+                        dispatchRef (
+                            GitHubStatusMsg
+                                { SessionCredential = viewOf status.sessionKind status.sessionSignIn
+                                  MineCredential = viewOf status.mineKind status.mineSignIn })
                 })
         let rec pollGitHubWhileAwaiting () =
             Async.StartImmediate (
@@ -1378,6 +1440,12 @@ let private start () =
                     // the query surface needs no re-probe, because its stream has been
                     // pushing since start.
                     toggleSettings ()
+                    refreshClaude ()
+                    refreshGitHub ()
+                    refreshModels ()
+              RevealSettings =
+                fun () ->
+                    revealSettings ()
                     refreshClaude ()
                     refreshGitHub ()
                     refreshModels ()

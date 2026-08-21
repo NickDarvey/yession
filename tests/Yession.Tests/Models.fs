@@ -112,9 +112,33 @@ let private lookupTests =
                 server.close ignore
                 match models with
                 | Ok _ -> failwith "a refusal must not read as a catalogue"
-                | Error reason ->
-                    Expect.isTrue (reason.Contains "401") "the status is in the reason"
-                    Expect.isTrue (reason.Contains "invalid x-api-key") "and so is what the provider said"
+                | Error failure ->
+                    Expect.isTrue (failure.Message.Contains "401") "the status is in the reason"
+                    Expect.isTrue (failure.Message.Contains "invalid x-api-key") "and so is what the provider said"
+                    // And it is marked as a fact about the CREDENTIAL, which is what lets it
+                    // travel back to the Manager rather than stopping at the picker's note.
+                    Expect.isTrue failure.Refused "a 401 is the provider refusing this credential"
+            }
+
+        // The other side of that line. Both of these happen to a credential that is working
+        // perfectly, so both must leave it alone: telling somebody to sign in again because
+        // an org policy blocked one endpoint, or because the provider had a bad minute,
+        // spends their time on the wrong problem.
+        testCaseAsync "a lookup that fails for reasons other than the credential leaves it alone" <|
+            async {
+                let! forbiddenUrl, forbiddenServer = serving (fun _ res -> json res 403 """{"error":{"message":"not permitted"}}""")
+                let! forbidden = ClaudeConnection.modelsAt forbiddenUrl ("ANTHROPIC_API_KEY", "sk-ant-fine")
+                forbiddenServer.close ignore
+                match forbidden with
+                | Ok _ -> failwith "a refusal must not read as a catalogue"
+                | Error failure -> Expect.isFalse failure.Refused "403 is a policy or a scope, not a dead key"
+
+                let! brokenUrl, brokenServer = serving (fun _ res -> json res 500 """{"error":{"message":"oops"}}""")
+                let! broken = ClaudeConnection.modelsAt brokenUrl ("ANTHROPIC_API_KEY", "sk-ant-fine")
+                brokenServer.close ignore
+                match broken with
+                | Ok _ -> failwith "a refusal must not read as a catalogue"
+                | Error failure -> Expect.isFalse failure.Refused "a provider having a bad minute is not a verdict"
             }
 
         testCaseAsync "a row the id invariant refuses costs that row, never the catalogue" <|

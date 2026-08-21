@@ -308,7 +308,7 @@ let private envCreds = (ambientCredential ()).IsSome
 // The session's live view of connected credentials (Plan 08): fed by the Manager's
 // connection-status stream, metadata only. Availability is DYNAMIC — a sign-in
 // mid-session flips the agent gate without a relaunch.
-let mutable private connectionStatus : Map<SecretId, ConnectionKind> = Map.empty
+let mutable private connectionStatus : Map<SecretId, ConnectionStatus> = Map.empty
 
 let private connectionsClient =
     controlChannel |> Option.map (fun (url, secret) -> ControlClient.connections url secret)
@@ -342,11 +342,20 @@ let private mcpServers =
 /// credential first, then the named actor's own, then the ambient `GITHUB_TOKEN` (the
 /// same last-resort idiom as the agent credential). None = anonymous — public repos
 /// still clone.
+/// The stored credential a repo verb would spend for this actor, if any.
+///
+/// Factored out so that spending one and reporting one refused cannot pick different
+/// targets. Two copies of this precedence would eventually disagree, and the way they would
+/// disagree is the worst one available: marking a credential nobody used, while the one that
+/// actually failed goes on reading as healthy.
+let private githubTargetFor (credentialActor: ActorRef) : SecretId option =
+    GitHubConnection.turnTargets sessionId credentialActor
+    |> List.filter (fun target -> Map.containsKey target connectionStatus)
+    |> List.tryHead
+
 let private resolveGitHubToken (credentialActor: ActorRef) : Async<string option> =
     async {
-        let targets =
-            GitHubConnection.turnTargets sessionId credentialActor
-            |> List.filter (fun target -> Map.containsKey target connectionStatus)
+        let targets = githubTargetFor credentialActor |> Option.toList
         let ambient () =
             match Interop.envOr "GITHUB_TOKEN" "" with
             | "" -> None
@@ -368,6 +377,37 @@ let private resolveGitHubToken (credentialActor: ActorRef) : Async<string option
         | _ -> return ambient ()
     }
 
+/// A repo network verb failed while spending a connected credential.
+///
+/// git cannot say whether the credential is why: `Repository not found` is what github.com
+/// answers BOTH for a token that may not see a private repo and for a repo that is not
+/// there, so reading its stderr would confuse an expired sign-in with a typo. GitHub itself
+/// can tell them apart, so ask it, and record a refusal only when it confirms one.
+///
+/// One extra request, only on a path that has already failed — and it is what turns four
+/// days of a green panel over a dead credential into a panel that says "sign in again".
+let private reportGitHubNetworkFailure (credentialActor: ActorRef) (_gitSaid: string) : Async<unit> =
+    async {
+        match connectionsClient, githubTargetFor credentialActor with
+        | Some client, Some target ->
+            match! client.Resolve target with
+            // The resolve path already reported this one, and its refusal is a better
+            // answer than anything a second opinion could add.
+            | Error _ -> return ()
+            | Ok (_, token) ->
+                match! GitHubConnection.refused token with
+                | None -> return ()
+                | Some reason ->
+                    match! client.Reject target reason with
+                    | Ok _ -> return ()
+                    | Error e ->
+                        eprintfn
+                            "[session %s] could not report the refused github credential: %s"
+                            (SessionId.value sessionId)
+                            e
+        | _ -> return ()
+    }
+
 /// What the session's gated commands are given: the services they run against, read as
 /// getters because both the table and the per-turn bindings are built from cells the boot
 /// async fills. The commands themselves live in `Commands.fs` — both halves of each, the
@@ -386,11 +426,17 @@ let private commandServices : Commands.CommandServices =
 /// One resolution, two callers: the turn dispatcher below and the models lookup. They ask
 /// the same question — whose credential does this party get — and a second copy of the
 /// precedence would be a second answer waiting to drift.
+/// The stored Claude credential this actor's calls run on, if any. Named once, for the same
+/// reason `githubTargetFor` is: spending a credential and reporting one refused must never
+/// pick different targets.
+let private claudeTargetFor (actor: ActorRef) : SecretId option =
+    ClaudeConnection.turnTargets sessionId actor
+    |> List.filter (fun target -> Map.containsKey target connectionStatus)
+    |> List.tryHead
+
 let private resolveCredential (actor: ActorRef) : Async<Result<(string * string) option, string>> =
     async {
-        let targets =
-            ClaudeConnection.turnTargets sessionId actor
-            |> List.filter (fun target -> Map.containsKey target connectionStatus)
+        let targets = claudeTargetFor actor |> Option.toList
         match connectionsClient, targets with
         | Some client, target :: _ ->
             match! client.Resolve target with
@@ -411,15 +457,43 @@ let private resolveCredential (actor: ActorRef) : Async<Result<(string * string)
 /// The models this session can run a turn on, looked up ONCE and kept for as long as the
 /// session lives (`ModelCatalogue.cached`). The picker's whole supply, and the only place
 /// the provider is asked what exists.
+/// Ask the provider for its catalogue, and report a refusal of the credential we asked
+/// with. This is the Claude counterpart of the GitHub check, and it is cheaper: the
+/// catalogue request IS an authenticated call, so its status is a verdict already — no
+/// second request, and nothing to parse.
+///
+/// It only ever runs where a lookup runs, and `ModelCatalogue.cached` keeps the first
+/// SUCCESS for the session's life. So this catches a credential that was already dead, not
+/// one that dies after a good lookup. For a brokered grant that gap is covered anyway — the
+/// Manager sees the refresh refused — and it is only a pasted `sk-ant-` key, which cannot
+/// refresh at all, that can die unseen mid-session.
+let private askProvider
+    (target: SecretId option)
+    (credential: string * string)
+    : Async<Result<AgentModel list, string>> =
+    async {
+        match! ClaudeConnection.models credential with
+        | Ok models -> return Ok models
+        | Error failure ->
+            match target, connectionsClient with
+            | Some target, Some client when failure.Refused ->
+                let! _ = client.Reject target "the provider rejected this Claude sign-in"
+                ()
+            | _ -> ()
+            return Error failure.Message
+    }
+
 let private listModels : ListModels =
     ModelCatalogue.cached (fun actor ->
         async {
             match! resolveCredential actor with
             | Error reason -> return Error reason
-            | Ok (Some credential) -> return! ClaudeConnection.models credential
+            | Ok (Some credential) -> return! askProvider (claudeTargetFor actor) credential
             | Ok None ->
                 match ambientCredential () with
-                | Some credential -> return! ClaudeConnection.models credential
+                // The ambient token is nobody's connection, so a refusal of it has no stored
+                // credential to mark — only the picker's note to explain it.
+                | Some credential -> return! askProvider None credential
                 // Unreachable: `Ok None` means the ambient credential is what a turn would
                 // run on, and that is exactly what `ambientCredential` has just answered.
                 | None -> return Error "no credential to ask the provider with"
@@ -510,10 +584,12 @@ Async.StartImmediate (
                       // it, not the git sandbox's: nobody runs a build in the git sandbox.
                       VisibleAt = Sandboxes.reposVisibleAt workBackend reposDir
                       ExtraReadPaths = []
+                      Git = Repos.gitExecutable (Sandboxes.ambientEnv ())
                       AllowedDomains = [ "github.com" ]
                       AllowProtocol = "https"
                       CloneUrl = RepoRef.cloneUrl
                       ResolveToken = resolveGitHubToken
+                      OnNetworkFailure = reportGitHubNetworkFailure
                       Log = log } with
             | Ok service -> reposService <- Some service
             | Error e -> failwithf "repos: %s" e
@@ -541,8 +617,12 @@ Async.StartImmediate (
         match controlChannel with
         | Some (url, secret) ->
             ControlClient.subscribeConnections url secret (fun list ->
+                // The WHOLE status, not just its kind. What a session may read and whether
+                // it still works arrive on the same frame, and keeping only half of it was
+                // why a panel could show a green dot over a credential the Manager already
+                // knew was finished.
                 connectionStatus <-
-                    list.Connections |> List.map (fun s -> s.Id, s.Kind) |> Map.ofList)
+                    list.Connections |> List.map (fun s -> s.Id, s) |> Map.ofList)
             |> ignore
         | None -> ()
         // The browser-facing Claude connection surface: only meaningful with both a

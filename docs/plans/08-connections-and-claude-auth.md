@@ -116,5 +116,7 @@ provider redirect ──────────► GET /connections/callback (M
 
 - Panel live push (another tab's sign-in appears only on the next poll; the agent
   gate itself is already live via the control stream).
-- Refresh-failure surfacing beyond per-turn errors (a panel health state).
+- ~~Refresh-failure surfacing beyond per-turn errors (a panel health state).~~ Done in
+  [Plan 24](24-credential-expiry.md), along with the half no Manager-side inference could
+  reach: a provider refusing a static token.
 - A second connection (GitHub) — session-side module + panel section only.

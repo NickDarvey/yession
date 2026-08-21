@@ -54,11 +54,31 @@ type ConnectionKind =
     | OAuthConnection
     | StaticConnection
 
+/// Whether a stored connection can still be used, as far as anything has been able to
+/// tell. Value-free like the rest of the status: a health cannot leak a credential
+/// because the type cannot carry one.
+///
+/// Two states, not three. There is deliberately no "expiring soon": a due grant refreshes
+/// on use without anyone being told, so a warning between "fine" and "broken" would name a
+/// moment nobody can act on. What is worth saying is the one thing a retry never escapes.
+///
+/// `ConnectionUsable` is a claim about what is KNOWN, not a promise. A static token has no
+/// expiry model at all — nothing can say it is dead until a provider refuses it — so this
+/// reads "usable as far as anyone can tell", and the provider is one of the things that
+/// tells us.
+type ConnectionHealth =
+    | ConnectionUsable
+    /// Beyond repair by retrying: whoever owns this has to sign in again. Carries what
+    /// learned it, because "the refresh token has expired" and "github refused this
+    /// credential" send a person to different places.
+    | SignInRequired of reason: string
+
 /// One stored connection as listings and the status stream see it. There is no value
 /// field — a status cannot leak a credential because the type cannot carry one.
 type ConnectionStatus =
     { Id : SecretId
       Kind : ConnectionKind
+      Health : ConnectionHealth
       UpdatedAt : DateTimeOffset }
 
 /// The status-stream frame: every connection the receiving launch may currently read.

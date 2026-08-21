@@ -110,6 +110,17 @@ module Dom =
         let settingsToggle = "data-settings-toggle"
         let settingsPanel = "data-settings-panel"
         let claudePanel = "data-claude-panel"
+        /// A connected credential that needs signing in again, valued by the scope it is
+        /// held under ("mine" | "session") — the same value its `*-connected` row carries,
+        /// so a test reads the fault off the same scope it sees the credential on.
+        let claudeSignInRequired = "data-claude-signin-required"
+        let githubSignInRequired = "data-github-signin-required"
+        /// The one prompt over the timeline (`Text.signInAgain`), valued by whichever
+        /// provider needs it, and the button in it that opens the settings face. Absent
+        /// entirely when nothing needs signing in — a surface that is only ever there when
+        /// something is wrong cannot be mistaken for chrome.
+        let signInRequired = "data-signin-required"
+        let signInAgain = "data-signin-again"
         /// The model picker (settings): the section, and the control itself. The control's
         /// VALUE is the session's current choice — a model id, or `default` where the
         /// provider is left to choose — so a test reads the state off the same attribute it
@@ -314,6 +325,12 @@ module Dom =
         let degradedReconnecting = "reconnecting"
         // The reconnect offer's button (Plan 11).
         let reopenSession = "Reopen session"
+        /// What a credential that stopped working asks for. The panel row says it as a
+        /// STATUS, in the caps the other status words use; the prompt over the timeline says
+        /// it on a button, in the sentence case the other actions use. One phrase either
+        /// way, because it is one thing to do.
+        let signInAgain = "Sign in again"
+        let signInAgainStatus = "sign in again"
         /// Ask now rather than waiting out the supervised backoff (Plan 20). The wording is
         /// what a person wants of it, not what it does to the loop.
         let retryNow = "Try again"
