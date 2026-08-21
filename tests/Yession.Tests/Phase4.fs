@@ -702,7 +702,7 @@ let private uiRenderTests =
         testCase "the MCP section renders its declarations, and the form that adds one" <| fun () ->
             let views = [ { ProcessManager.Record = uiRecord; ProcessManager.Status = ProcessManager.NotRunning } ]
             let empty = ManagerUi.mcpSection views []
-            Expect.isTrue (empty.Contains "no MCP servers declared") "an empty registry says so rather than showing a bare table"
+            Expect.isTrue (empty.Contains "no MCP servers") "an empty registry says so rather than showing a bare table"
             Expect.isTrue (empty.Contains "data-declare-mcp") "and still offers the form"
 
             let declared =

@@ -1035,22 +1035,22 @@ let private reconnectOfferTests =
         // deployment that strands it.
         testCase "a stable-address deployment promises the work comes back" <| fun () ->
             let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
-            Expect.isTrue (html.Contains "saved here and syncs") "the promise is kept where it can be"
-            Expect.isFalse (html.Contains "new address") "and no warning where none is due"
+            Expect.isTrue (html.Contains Dom.Text.reopenPromise) "the promise is kept where it can be"
+            Expect.isFalse (html.Contains Dom.Text.reopenPromiseEphemeral) "and no warning where none is due"
 
         testCase "an ephemeral-address deployment warns instead of promising" <| fun () ->
             let html =
                 Support.render
                     { stopped (Some "http://127.0.0.1:8321") (Some sessionId) with EphemeralStorage = true }
-            Expect.isTrue (html.Contains "reopens at a new address") "it says what reopening costs"
-            Expect.isFalse (html.Contains "saved here and syncs") "and never both"
+            Expect.isTrue (html.Contains Dom.Text.reopenPromiseEphemeral) "it says what reopening costs"
+            Expect.isFalse (html.Contains Dom.Text.reopenPromise) "and never both"
 
         // The banner and the card both render for a settled disconnection. The card is the
         // more specific message, so the banner must not restate the promise underneath it.
         testCase "the degraded banner does not repeat the promise while the offer shows" <| fun () ->
             let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
             Expect.equal
-                ((html.Split "saved here and syncs" |> Array.length) - 1)
+                ((html.Split Dom.Text.reopenPromise |> Array.length) - 1)
                 1
                 "stated once, by the card"
             Expect.isFalse (html.Contains Dom.Text.localFallback) "the banner's own promise stays out of it"

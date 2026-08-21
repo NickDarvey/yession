@@ -245,10 +245,7 @@ module View =
             // reconnect. Addressed by port it returns somewhere new, and everything written
             // here since it went is stranded — say so before they click, not after.
             let reopenPromise =
-                if model.EphemeralStorage then
-                    "It reopens at a new address, so anything written here since it stopped will not come with it."
-                else
-                    "Your work is saved here and syncs when it comes back."
+                if model.EphemeralStorage then Dom.Text.reopenPromiseEphemeral else Dom.Text.reopenPromise
             Some (
                 html
                     $"""
@@ -435,7 +432,7 @@ module View =
     let private sharedScopeLabel (owner: string option) : string =
         match owner with
         | Some "user" -> "All my sessions"
-        | _ -> "Everyone using this Yession"
+        | _ -> "All sessions"
 
     /// How a connected credential reads on a panel row: green and its kind, or the fault
     /// style and the words that name the fix. ONE function, because both connection panels
@@ -546,7 +543,7 @@ module View =
             match model.Models with
             | ModelsUnknown -> html $"""<span class="{Style.small}" data-model-note="pending">…</span>"""
             | ModelsLoaded [] ->
-                html $"""<span class="{Style.small}" data-model-note="empty">this provider offered no models to choose from</span>"""
+                html $"""<span class="{Style.small}" data-model-note="empty">no models offered</span>"""
             | ModelsLoaded _ -> Lit.nothing
             | ModelsUnavailable reason ->
                 html $"""<span class="{Style.small}" data-model-note="unavailable">{reason}</span>"""
@@ -1897,7 +1894,7 @@ module View =
         | None ->
             html $"""
                 <div class="{Style.paneReadonly}" data-pane-block="{BlockId.value blockId}">
-                  <div class="{Style.terminalOutputEmpty}">not in this client's record</div>
+                  <div class="{Style.terminalOutputEmpty}">not on this device</div>
                 </div>"""
         | Some block ->
             let tab = BlockTab (terminalId, blockId)

@@ -838,7 +838,7 @@ let createWithUi
                 res.writeHead (status, Fable.Core.JsInterop.createObj [ "content-type", box "text/html; charset=utf-8"; "cache-control", box "no-store" ]) |> ignore
                 res.``end`` html
             match broker with
-            | None -> respondHtml 404 (connectionsCallbackPage "Not available" "This Manager has no secrets store, so connections are disabled.")
+            | None -> respondHtml 404 (connectionsCallbackPage "Not available" "No secrets store here, so connections are disabled.")
             | Some b ->
                 match Interop.queryParamOf req.url "error" with
                 | Some providerError ->
@@ -851,7 +851,7 @@ let createWithUi
                             async {
                                 match! b.CompleteCallback state code with
                                 | Ok _ ->
-                                    respondHtml 200 (connectionsCallbackPage "Connected" "You can close this tab and return to your session.")
+                                    respondHtml 200 (connectionsCallbackPage "Connected" "Close this tab and return to your session.")
                                 | Error e ->
                                     respondHtml 400 (connectionsCallbackPage "Sign-in failed" e)
                             })

@@ -325,6 +325,13 @@ module Dom =
         let degradedReconnecting = "reconnecting"
         // The reconnect offer's button (Plan 11).
         let reopenSession = "Reopen session"
+        /// What reopening costs, on that offer's card. Two, because a deployment that
+        /// addresses sessions by port brings one back at a NEW origin, and a browser
+        /// partitions storage by origin — the promise the first can make is the one the
+        /// second cannot keep.
+        let reopenPromise = "Saved here and syncs when it is back."
+        let reopenPromiseEphemeral =
+            "It reopens at a new address — anything written here since it stopped will not come with it."
         /// What a credential that stopped working asks for. The panel row says it as a
         /// STATUS, in the caps the other status words use; the prompt over the timeline says
         /// it on a button, in the sentence case the other actions use. One phrase either
@@ -336,13 +343,13 @@ module Dom =
         let retryNow = "Try again"
         /// What every degraded state promises: this is a local-first client, so a lost leg
         /// costs sync, not the ability to work.
-        let localFallback = "You can keep writing — everything is saved locally and syncs when the session is back."
+        let localFallback = "Keep writing — saved locally, syncs when the session is back."
         /// The same promise where it cannot be kept (Plan 13): this deployment addresses
         /// sessions by port, so a session that restarts comes back at a new origin — and a
         /// browser partitions storage by origin, which strands anything written here in the
         /// meantime. Everything already sent is safe; it is on the server.
         let localFallbackEphemeral =
-            "You can keep writing, but this session reopens at a new address — anything written here while it is away will not come back with it."
+            "Keep writing, but this session reopens at a new address — anything written meanwhile is lost."
         /// The model picker's state token, and its first option, for when nobody has chosen:
         /// the provider decides. Named rather than blank because "no model is set" and
         /// "whatever the provider picks" are the same fact, and only one of them is a
@@ -354,8 +361,8 @@ module Dom =
         /// nothing is kept and — without this — nothing says why, which is indistinguishable
         /// from a bug. The remedy is the operator's, and it is one flag, so name it.
         let historyNotKept =
-            "History is not kept on this device: this session is served over plain HTTP, and a browser "
-            + "withholds storage of this kind outside a secure context. Serving it over HTTPS restores it."
+            "Not kept on this device: served over plain HTTP, and a browser withholds this storage "
+            + "outside a secure context. Serve over HTTPS to restore it."
         /// What the composer's keys do, shown in the composer while you are in it. Enter is
         /// the send because that is what every chat surface's Enter is; what it used to do
         /// did not disappear, it split in two — a line break and a paragraph, which Enter
@@ -366,7 +373,7 @@ module Dom =
         /// What stands where history this device does not hold would be (Plan 20). Said only
         /// while nothing is coming to fill it — see `View.chat` — so it is a fact about this
         /// client's own store rather than a complaint about the network.
-        let historyMissingLocally = "earlier history is not on this device"
+        let historyMissingLocally = "earlier history not on this device"
         // Offset placeholder (em dash) when nothing has been read yet.
         let offsetNone = "—"
         // Non-human authors.
@@ -388,8 +395,8 @@ module Dom =
         let pinned = "pinned"
         /// What a second activation of the tab you are on will do. A gesture has no control
         /// of its own to be labelled, so it says so from the tab it acts on.
-        let pinHint = "Select again to keep this tab"
-        let unpinHint = "Select again to release this tab"
+        let pinHint = "Select again to pin"
+        let unpinHint = "Select again to unpin"
         /// A queued command that will run as soon as the terminal is free.
         let queuedReady = "ready"
         /// A queued command held because a peer is typing in its terminal (Plan 13, stage
@@ -415,9 +422,9 @@ module Dom =
         let turnWoke = "woke"
         /// The same fact, at length, for the reader who wants it. Never the visible label:
         /// the chat's meta line is three short words wide.
-        let turnWokeCommandFinished = "The agent picked this up on its own: a command it left running in the background finished."
-        let turnWokeStreamEnded = "The agent picked this up on its own: a terminal it had been working in was attached to a stream that has now ended."
-        let turnWokeIntegrationLost = "The agent picked this up on its own: a terminal it had a command running in stopped reporting, so nothing further will say how that command ended."
+        let turnWokeCommandFinished = "The agent picked this up itself: a background command finished."
+        let turnWokeStreamEnded = "The agent picked this up itself: a terminal it worked in had its stream end."
+        let turnWokeIntegrationLost = "The agent picked this up itself: a terminal stopped reporting, so nothing will say how its command ended."
         // Conversation item status.
         let complete = "complete"
         let streaming = "streaming"
