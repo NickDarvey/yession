@@ -266,6 +266,56 @@ let private eventsOf (log: EventLog<SessionEvent>) : Async<SessionEvent list> =
         return page.Events |> List.map (fun envelope -> envelope.Event)
     }
 
+// --- Where a session puts its checkouts (cheap tier; fs only) ------------------------------
+// The layout is a claim about a TERMINAL: it starts in the workspace, so this is what
+// decides whether the agent's first `ls` shows the clones or an empty directory.
+
+let private layoutTests =
+    testList "the session's layout" [
+
+        testCase "a clone lands inside the workspace a terminal starts in" <| fun () ->
+            let dataDir = "/data/sessions/AAZ"
+            let workspace = Sandboxes.SessionLayout.workspaceFor dataDir SandboxName.defaultName
+            let repos = Sandboxes.SessionLayout.reposDir dataDir
+            Expect.isTrue
+                (repos.StartsWith (workspace + "/"))
+                "a checkout beside the workspace is one nobody sees without being told its path"
+
+        // The repos directory is shared by every sandbox — one parameter, the session's data
+        // dir, so there can only be one — but a WORKSPACE is the thing two sandboxes exist to
+        // keep apart.
+        testCase "a named sandbox works somewhere the default one does not" <| fun () ->
+            let dataDir = "/data/sessions/AAZ"
+            let named = SandboxName.create "review" |> expect
+            Expect.notEqual
+                (Sandboxes.SessionLayout.workspaceFor dataDir named)
+                (Sandboxes.SessionLayout.workspaceFor dataDir SandboxName.defaultName)
+                "what happens in one sandbox does not happen in the other"
+
+        // A data directory outlives its process, which is what makes a checkout survive a
+        // relaunch. Left at the old path the checkouts are not deleted, they are INVISIBLE:
+        // the listing scans the new path, reports nothing, and the agent re-clones over work
+        // that was never committed.
+        testCase "checkouts from the old layout are moved, not stranded" <| fun () ->
+            let dataDir = mkdtemp nodeFs nodeOs
+            mkdir nodeFs (sprintf "%s/octo/hello/.git" (Sandboxes.SessionLayout.legacyReposDir dataDir))
+            let repos = Sandboxes.SessionLayout.prepareReposDir dataDir
+            Expect.isTrue
+                (exists nodeFs (sprintf "%s/octo/hello/.git" repos))
+                "the checkout is where the listing now looks"
+
+        // `renameSync` onto a non-empty directory throws, and this runs at boot: a session
+        // that somehow had both would fail to start rather than decline the adoption.
+        testCase "a session already on the current layout still boots" <| fun () ->
+            let dataDir = mkdtemp nodeFs nodeOs
+            mkdir nodeFs (sprintf "%s/octo/hello/.git" (Sandboxes.SessionLayout.legacyReposDir dataDir))
+            mkdir nodeFs (sprintf "%s/octo/current/.git" (Sandboxes.SessionLayout.reposDir dataDir))
+            let repos = Sandboxes.SessionLayout.prepareReposDir dataDir
+            Expect.isTrue
+                (exists nodeFs (sprintf "%s/octo/current/.git" repos))
+                "the layout it already had is the one it keeps"
+    ]
+
 let private srtTests =
     testList "repo verbs under srt (local fixtures)" [
         testCaseAsync "add clones into the repos dir, records the fact, and re-add is a quiet no-op" <| async {
@@ -652,6 +702,7 @@ let private liveClone =
 let tests =
     testList "GitIntegration" [
         pureTests
+        layoutTests
         Tag.needs "Repo verbs (srt)" [ Tag.Srt ] (fun () -> srtTests)
         Tag.needs
             "add_repo (live model, real GitHub)"
