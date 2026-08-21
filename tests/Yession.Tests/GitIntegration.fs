@@ -119,6 +119,23 @@ let private pureTests =
                 "git"
                 "and unnamed falls back to PATH, so an off-Nix install does not regress"
 
+        // The probe that gates every verb was the one git invocation built by hand, with an
+        // EMPTY env — an env no verb ever runs with — so what it proved was never about the
+        // git the verbs use. git resolves its global config path before it does anything at
+        // all, `--version` included; it tolerates an EACCES there and treats every other
+        // errno as fatal; and a sandbox that denies the operator's home answers EPERM. So
+        // the probe died `fatal: unable to access '~/.config/git/config'` (exit 128) and
+        // refused a working git for the sandbox's whole lifetime, naming two knobs that were
+        // not the fault — one of which, followed, hands back the home the scope exists to
+        // deny. Every git spawned here is now built by `gitExec`, which cannot be called
+        // without the env.
+        testCase "the probe runs the verbs' hardened environment, never an empty one" <| fun () ->
+            let probe = Repos.gitExec "/nix/store/x/bin/git" "/repos" "https" None [ "--version" ]
+            Expect.equal
+                probe.Env
+                (Repos.hardenedEnv "https" None |> Map.ofList)
+                "a probe that runs a different environment gates verbs it cannot speak for"
+
         // The words an operator gets when git cannot run confined. What shipped instead was
         // the host binary's own parting line — `xcode-select: error: unable to read data
         // link ...` — which names neither the sandbox nor anything anyone can set, and was
@@ -296,6 +313,36 @@ let private srtTests =
             | Error reason ->
                 Expect.isTrue (reason.Contains "cannot run inside the sandbox") "the sandbox is named as the place"
                 Expect.isTrue (reason.Contains "YESSION_GIT_PATH") "and the knob that fixes it"
+        }
+
+        // The complement, and the fault the case above was written blind to: a git that CAN
+        // run, in a session whose operator has a global git config. The probe read it — it
+        // was the one git spawn built without the hardened env — so every verb was refused
+        // for a fault that lives in this repository, in words blaming the host's binary and
+        // the read scope.
+        //
+        // Why it stayed invisible until somebody hit it: the config has to be READABLE to
+        // break anything. Linux denies a read by mounting emptiness over the path, so git
+        // meets ENOENT and shrugs; Seatbelt answers EPERM, which git treats as fatal. A home
+        // outside the read scope would therefore pass this case on the platform CI runs
+        // while production stayed broken — so the config goes somewhere the sandbox may read
+        // (the fixtures dir, already an extra read path) and every platform runs the fault
+        // the way macOS ran it.
+        testCaseAsync "a global git config in the operator's home never reaches a verb" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let home = sprintf "%s/home" (fixturesIn root)
+            mkdir nodeFs home
+            // Malformed on purpose. A config git PARSES is a fault it reports as its own,
+            // which is exactly what an unhardened spawn hands back to whoever asked.
+            writeFile nodeFs (sprintf "%s/.gitconfig" home) "this is not a config\n"
+            let! added =
+                withEnv [ "HOME", Some home ] (fun () ->
+                    async {
+                        let service = serviceIn root (freshLog ())
+                        return! service.AddRepo caller (RepoRef.create "octo/hello" |> expect)
+                    })
+            Expect.isOk added "no git spawned here reads the operator's global config, the probe included"
         }
 
         // A verb that failed while spending somebody's credential is the only moment this

@@ -104,10 +104,42 @@ let gitExecutable (ambient: Map<string, string>) : string =
     |> Option.filter (fun path -> path <> "")
     |> Option.defaultValue "git"
 
+/// The one exec any git invocation here is built from — the probe and every verb alike.
+///
+/// A function rather than a record literal per call site, because `hardenedEnv` is not
+/// hardening if a call site can be written without it, and one was: the probe spawned
+/// `git --version` with an EMPTY env, which is an env no verb ever runs with. So it
+/// answered a question about a git nothing here executes, and it answered it wrong.
+///
+/// git resolves its global config path before it does anything at all, `--version`
+/// included. It tolerates an EACCES there — unreadable reads as absent — and treats every
+/// other errno as fatal. A sandbox that denies the operator's home (Plan 24's read scope)
+/// answers EPERM, not EACCES, so the probe died with `fatal: unable to access
+/// '~/.config/git/config'` (exit 128) on a host where every verb, which nulls that path,
+/// ran fine. The sandbox was then refused for its whole lifetime in words naming
+/// `YESSION_GIT_PATH` and `YESSION_SANDBOX_READ_PATHS`: a working binary, and a read scope
+/// whose only fault was doing its job. Following that advice would have widened the scope
+/// to hand back the home it exists to deny.
+let gitExec
+    (git: string)
+    (workingDirectory: string)
+    (allowProtocol: string)
+    (token: string option)
+    (args: string list)
+    : SandboxExec =
+    { Executable = git
+      Arguments = args
+      Env = hardenedEnv allowProtocol token |> Map.ofList
+      WorkingDirectory = Some workingDirectory }
+
 /// What a sandbox that cannot run git says. It is a whole sentence with the two knobs in
 /// it because the alternative is what shipped: the host binary's own parting words —
 /// `xcode-select: error: unable to read data link ...` — which name neither the sandbox
 /// nor anything an operator can set.
+///
+/// Both knobs are honest only because the probe now runs the verbs' env: what it rules out
+/// before it speaks is every config file git would otherwise have gone looking for, so
+/// what is left really is the binary or the runtime it reads.
 let unusableGit (git: string) (reason: string) : string =
     sprintf
         "git ('%s') cannot run inside the sandbox: %s. Name a working git with YESSION_GIT_PATH; if it needs files the sandbox's read scope denies, name those with YESSION_SANDBOX_READ_PATHS."
@@ -226,10 +258,19 @@ let create (config: ReposConfig) : Result<ReposService, string> =
               WorkingDirectory = Some config.ReposDir
               Filesystem = Confined }
 
+        /// Every git this service spawns, built in the one place that carries the hardened
+        /// env (`gitExec`) — so the probe below cannot drift from the verbs it speaks for.
+        let execFor (token: string option) (args: string list) : SandboxExec =
+            gitExec config.Git config.ReposDir config.AllowProtocol token args
+
         /// `git --version` inside the sandbox, before any verb runs one. A sandbox that
         /// cannot run git is not a git sandbox, and this is where it says so: the
         /// alternative is every verb reporting whatever the host's binary printed on its
         /// way out, once per verb, in words that name neither the sandbox nor a knob.
+        ///
+        /// It runs a VERB's environment (no token: `--version` reaches no remote), because
+        /// a probe that runs anything else proves nothing about the invocations it gates —
+        /// which is exactly how it once refused a git that worked.
         ///
         /// It costs one spawn per sandbox lifetime — two per session, milliseconds under
         /// srt — and it is the guard that catches the NEXT unreadable runtime rather than
@@ -237,12 +278,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
         let usable (sandbox: Sandbox) : Async<Result<Sandbox, string>> =
             async {
                 let mutable output = ""
-                let exec : SandboxExec =
-                    { Executable = config.Git
-                      Arguments = [ "--version" ]
-                      Env = Map.empty
-                      WorkingDirectory = Some config.ReposDir }
-                match! sandbox.Spawn exec (fun (_, chunk) -> output <- output + chunk) with
+                match! sandbox.Spawn (execFor None [ "--version" ]) (fun (_, chunk) -> output <- output + chunk) with
                 | Error reason -> return Error (unusableGit config.Git reason)
                 | Ok handle ->
                     match! handle.Exited with
@@ -296,12 +332,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 | Ok sandbox ->
                     let mutable stdout = ""
                     let mutable stderr = ""
-                    let exec : SandboxExec =
-                        { Executable = config.Git
-                          Arguments = args
-                          Env = hardenedEnv config.AllowProtocol token |> Map.ofList
-                          WorkingDirectory = Some config.ReposDir }
-                    match! sandbox.Spawn exec (fun (stream, chunk) ->
+                    match! sandbox.Spawn (execFor token args) (fun (stream, chunk) ->
                               match stream with
                               | Stdout -> stdout <- stdout + chunk
                               | Stderr -> stderr <- stderr + chunk) with
