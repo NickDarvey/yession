@@ -102,6 +102,9 @@ let all =
         // WebRTC host, so it runs wherever Chromium exists ([Browser]). The full two-peer
         // convergence/persistence E2E spawns the real Session Process, so it also needs Native.
         Tag.needs "Editor rendering (browser)" [ Tag.Browser ] (fun () -> Browser.editorTests)
+        // Measuring, not asserting — and never part of `check` or `verify`, which is why it
+        // needs a capability nothing else asks for. `tasks.fsx bench` is the only caller.
+        Tag.needs "Editor performance" [ Tag.Browser; Tag.Bench ] (fun () -> Bench.tests)
         Tag.needs "Browser E2E" [ Tag.Browser; Tag.Native ] (fun () -> Browser.tests)
         // A session served under a path, driven at its PUBLIC address through a
         // path-preserving proxy: the only check that `<base href>` resolution works in a

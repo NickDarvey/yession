@@ -41,6 +41,28 @@ jobs:
     uses: ./.github/workflows/verify.yml
     secrets: inherit
 
+  # The performance record. Runs after the gate, records this release's numbers on the orphan
+  # `bench` branch, and draws the chart the release carries.
+  #
+  # It does NOT guard, and the job does NOT block: a red master stops everybody else releasing,
+  # and a benchmark is never a good enough reason to hold delivery. The pull-request job is
+  # where a regression is meant to be caught (`pr.yaml`); by the time something reaches here it
+  # is a chart to read.
+  #
+  # `continue-on-error` cannot go on a job that `uses:` a reusable workflow, so the tolerance
+  # lives on the STEPS inside bench.yml, keyed off `guard`: when nothing is being guarded,
+  # nothing there is allowed to fail the run. `needs` carries package-npm only for the version
+  # to record this measurement as.
+  bench:
+    needs: [verify, package-npm]
+    if: github.ref == 'refs/heads/master'
+    uses: ./.github/workflows/bench.yml
+    with:
+      guard: false
+      record: true
+      label: ${{ needs.package-npm.outputs.version }}
+    secrets: inherit
+
   # One of the two parallel packaging channels (both only need `verify`): the npm tarball.
   package-npm:
     name: "package:npm"
@@ -142,7 +164,10 @@ jobs:
           echo "nix package boot smoke passed"
 
   release:
-    needs: package-npm
+    # `bench` is here so its artifact exists to download, NOT so it can stop the release: the
+    # job is continue-on-error, so a failed measurement completes as a success from `needs`'
+    # point of view and the download below simply finds nothing.
+    needs: [package-npm, bench]
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     env:
@@ -214,6 +239,13 @@ jobs:
         with:
           name: dist-npm
           path: dist
+      # Best effort, deliberately: a release that shipped without its chart is a release missing
+      # a picture, and a release held up over one is a release nobody got.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: bench
+          path: dist
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ env.VERSION }}
@@ -227,4 +259,9 @@ jobs:
           name: Yession ${{ env.VERSION }}
           prerelease: true
           generate_release_notes: true
-          files: dist/*.tgz
+          # `bench.json` and `bench.svg` are absent when the measurement did not run;
+          # action-gh-release does not fail on an unmatched glob, which is the behaviour wanted.
+          files: |
+            dist/*.tgz
+            dist/bench.json
+            dist/bench.svg

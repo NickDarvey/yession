@@ -51,6 +51,8 @@
     <Compile Include="Telemetry.fs" />
     <Compile Include="TelemetryE2E.fs" />
     <Compile Include="Browser.fs" />
+    <!-- After Browser.fs: it shares that fixture (serveStatic, chromiumPath, watching). -->
+    <Compile Include="Bench.fs" />
     <Compile Include="E2E.fs" />
     <Compile Include="Client.fs" />
     <Compile Include="Phase2.fs" />

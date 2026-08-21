@@ -1,0 +1,114 @@
+name: bench
+
+# What a person waits for, measured — and whether it is getting worse.
+#
+# `check` proves behaviour and says nothing about time, which leaves a whole class of change
+# invisible. This job measures the editor and collaboration path across three document sizes
+# (`tasks.fsx bench`), optionally judges the result against the recorded history
+# (`bench-guard`), and optionally records it (`bench-publish`). The two options are what let
+# the same file serve two very different callers:
+#
+#   * pull requests   guard: true,  record: false  — catch a regression before it merges
+#   * master releases guard: false, record: true   — chart it, and never block a release
+#
+# That split is deliberate. A regression should be caught by the person who caused it, on their
+# own pull request, where a red is cheap and actionable. A red on master stops everybody else
+# releasing, and a benchmark is not a good enough reason to hold delivery — anything that got
+# past the pull-request guard is a chart to read, not a release to block.
+#
+# The history lives on the orphan `bench` branch, one JSON line per release. Orphan so it never
+# touches master's history and never triggers release.yml (`branches: [master]`).
+
+on:
+  workflow_call:
+    inputs:
+      guard:
+        description: Fail the job when a metric is far above its recorded baseline.
+        type: boolean
+        default: false
+      record:
+        description: Append this measurement to the `bench` branch and redraw the chart.
+        type: boolean
+        default: false
+      label:
+        description: What to record this measurement as (a version).
+        type: string
+        default: ""
+  # Run by hand, against whatever ref is being worked on — the same argument verify.yml makes.
+  # Measuring a change before merging it is the whole point of having a number.
+  workflow_dispatch:
+    inputs:
+      guard:
+        description: Fail when a metric is far above its recorded baseline.
+        type: boolean
+        default: true
+      record:
+        description: Record this measurement. Leave off for a branch — the history is master's.
+        type: boolean
+        default: false
+
+# One measurement at a time per ref. Two benchmarks sharing a runner measure each other.
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # `bench-publish` pushes the orphan `bench` branch
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The baseline is read with `git show bench:history.jsonl`, so the branch has to be
+          # here. Fetching it by name rather than deepening the whole clone.
+          fetch-depth: 1
+      - name: Fetch the recorded history (absent on the very first run)
+        run: git fetch origin bench:bench --depth=50 || echo "no bench branch yet — this run records the first point"
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: cachix/cachix-action@v17
+        with:
+          name: yession
+          extraPullNames: devenv
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Install devenv
+        run: nix profile install nixpkgs#devenv
+      # `bench` provisions Chromium itself (the same PLAYWRIGHT_BROWSERS_PATH every browser tier
+      # uses) and runs only the `Editor performance` suite — no host, no WebRTC, no addon.
+      # Best effort whenever nothing is being guarded, which is the release's case: a benchmark
+      # is never a good enough reason to hold delivery, and `continue-on-error` cannot go on the
+      # job that calls this workflow. When `guard` IS on — a pull request — a failed measurement
+      # fails the job, because a guard that cannot measure has not cleared anything.
+      - name: Measure
+        continue-on-error: ${{ !inputs.guard }}
+        run: devenv shell -- bench
+      # Separate from the measurement, because judging and measuring are different jobs and only
+      # one of the two callers wants both. `bench-guard` re-measures once before failing, so a
+      # single unlucky sample cannot turn into a red pull request.
+      - name: Judge against the recorded baseline
+        if: inputs.guard
+        run: devenv shell -- bench-guard
+      - name: Record and redraw
+        if: inputs.record
+        continue-on-error: ${{ !inputs.guard }}
+        env:
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          [ -n "$LABEL" ] || { echo "record was asked for without a label to record it as"; exit 1; }
+          git config user.name "yession-bench"
+          git config user.email "bench@yession.invalid"
+          devenv shell -- bench-publish "$LABEL"
+      - uses: actions/upload-artifact@v4
+        # Always, so a guard failure still leaves the numbers that caused it behind to read.
+        if: always()
+        with:
+          name: bench
+          path: |
+            dist/bench.json
+            dist/bench.svg
+          if-no-files-found: ignore

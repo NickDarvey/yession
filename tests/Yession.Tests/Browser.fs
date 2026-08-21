@@ -63,7 +63,10 @@ let private urlIn (line: string) =
 let private chromiumExecutableNames =
     set [ "chrome"; "Google Chrome for Testing"; "Chromium" ]
 
-let private chromiumPath () : string =
+/// `internal` from here down wherever the benchmark suite (`Bench.fs`) shares it: one browser
+/// fixture serves both, rather than a second copy of the same launch/serve/listen scaffolding
+/// free to drift from this one.
+let internal chromiumPath () : string =
     let env name =
         match Environment.GetEnvironmentVariable name with
         | null | "" -> None
@@ -147,8 +150,8 @@ let mutable private pageA : IPage = null
 let mutable private pageB : IPage = null
 
 // Task -> Async adapters (this whole file is CLR-only, so Async.AwaitTask is available).
-let private await (t: Task<'a>) : Async<'a> = Async.AwaitTask t
-let private awaitU (t: Task) : Async<unit> = Async.AwaitTask t
+let internal await (t: Task<'a>) : Async<'a> = Async.AwaitTask t
+let internal awaitU (t: Task) : Async<unit> = Async.AwaitTask t
 
 // --- What the page saw (so a failure can say more than "timed out") ----------------------
 //
@@ -161,7 +164,7 @@ let private awaitU (t: Task) : Async<unit> = Async.AwaitTask t
 // So: keep what it says, and print it when a case fails. It costs nothing on the green path
 // and it is the only way to read a red one in CI, where nothing can be attached afterwards.
 
-type private Evidence () =
+type internal Evidence () =
     let lines = ResizeArray<string> ()
     /// Bounded: a page that is failing tends to say the same thing very fast, and a thousand
     /// identical lines is not more evidence than fifty.
@@ -170,7 +173,7 @@ type private Evidence () =
     member _.Lines = lock lines (fun () -> List.ofSeq lines)
 
 /// Listen to everything the page can tell us.
-let private watching (page: IPage) =
+let internal watching (page: IPage) =
     let ev = Evidence ()
     page.Console.Add (fun m ->
         if m.Type = "error" || m.Type = "warning" then ev.Note (sprintf "console %s: %s" m.Type m.Text))
@@ -183,7 +186,7 @@ let private watching (page: IPage) =
     ev
 
 /// Run a case; if it throws, print what the page saw before letting the failure through.
-let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<unit>) : Async<unit> =
+let internal reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<unit>) : Async<unit> =
     async {
         try
             do! body
@@ -610,11 +613,11 @@ let tests =
 
 let private EDITOR_PORT = 8181
 let private editorBase = sprintf "http://127.0.0.1:%d/" EDITOR_PORT
-let private harnessRoot = "tests/browser"
+let internal harnessRoot = "tests/browser"
 
 /// A tiny read-only static file server over `HttpListener` (the harness page + its bundle).
 /// Returns the listener so the caller can stop it; requests are served on a background loop.
-let private serveStatic (root: string) (port: int) : HttpListener =
+let internal serveStatic (root: string) (port: int) : HttpListener =
     let listener = new HttpListener ()
     listener.Prefixes.Add (sprintf "http://127.0.0.1:%d/" port)
     listener.Start ()
