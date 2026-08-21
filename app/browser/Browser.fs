@@ -1603,6 +1603,12 @@ let private start () =
             syncCatchUpTimer model
             pushPresences ()
             placeTitleCursorsAll ()
+            // The tab's name, which lives outside `#app` and so is the model's to push rather
+            // than Lit's to render. The NAME is computed in the model (`tabTitle`); this only
+            // applies it, and only on a change — assigning `document.title` every render is a
+            // write the browser need not be asked to make.
+            let tab = ClientModel.tabTitle model
+            if Browser.Dom.document.title <> tab then Browser.Dom.document.title <- tab
 
         App.makeProgram doc initial
         |> Program.withSetState setState

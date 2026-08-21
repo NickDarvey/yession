@@ -1152,6 +1152,28 @@ module ClientModel =
                 | Some presence when presence.DisplayName <> "" -> presence.DisplayName
                 | _ -> PeerId.value peer
 
+    /// What the browser tab is called: the session's own title, falling back to its id, and
+    /// always saying which product it belongs to. Every session shell served the constant
+    /// "Yession", so a person with three of them open had three identical tabs and no way to
+    /// tell which was which without visiting each.
+    ///
+    /// A pure projection rather than something the composition root assembles, because every
+    /// part of it is a decision — what wins, what a blank title falls back to, how the two
+    /// are joined — and a decision inside `setState` is one no cheap test can reach. The
+    /// browser only applies the answer.
+    ///
+    /// The id fallback is the honest one here, unlike `nameOf` where an id is a last resort:
+    /// this is the tab for a session, and its id is what the header shows beside the title
+    /// until somebody names it.
+    let tabTitle (model: ClientModel) : string =
+        let named = (Ylmish.Text.toString model.Synced.Title).Trim ()
+        let subject =
+            if named <> "" then Some named
+            else model.Session |> Option.map SessionId.value
+        match subject with
+        | Some subject -> sprintf "%s — yession" subject
+        | None -> "yession"
+
     /// Fold a message into the model.
     let update (msg: ClientMsg) (model: ClientModel) : ClientModel =
         match msg with

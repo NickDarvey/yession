@@ -463,13 +463,16 @@ let private bodyTemplate
             <header class="h-[88px] shrink-0 flex items-end pb-5 border-b border-hair">
               <h1 class="{Style.wordmark}">yession<span class="text-green">.</span> <span class="{Style.label}">manager</span></h1>
             </header>
-            <!-- The id is minted server-side (a Docker-safe Crockford id); only a human
-                 name is entered here. -->
+            <!-- Creating takes nothing but the press. The id is minted server-side (a
+                 Docker-safe Crockford one) and a session is NAMED from inside itself, in the
+                 title field at the top of its own header, which reports back here over the
+                 control channel. Asking for the name here as well made two naming surfaces
+                 out of one fact: what was typed on this page never reached the session, so a
+                 session created as "design review" opened as its raw id with an empty title
+                 field, and the name had to be typed a second time to have any effect. -->
             <form class="flex flex-col gap-3 pt-6 pb-8" method="post" action="/sessions" data-create-session>
-              <label class="{Style.label}" for="new-session-name">new session</label>
+              <span class="{Style.label}">new session</span>
               <div class="flex flex-wrap items-center gap-3">
-                <input id="new-session-name" name="name" placeholder="display name" autocomplete="off"
-                  class="{Style.fieldOf "w-72 max-w-full"}">
                 <button type="submit" class="{Style.btnPrimary}">Create</button>
               </div>
             </form>
@@ -688,7 +691,10 @@ let tryHandle
                         match formField body "id" with
                         | "" -> SessionId.value (SessionId.mint ())
                         | provided -> provided
-                    match pm.CreateSession id (formField body "name") with
+                    // No name: a session is named from inside itself and reports it back
+                    // (`setDisplayName`), so `DisplayName` starts as the minted id and the
+                    // list shows that until somebody names it.
+                    match pm.CreateSession id "" with
                     | Ok record -> seeOther res (sprintf "/sessions/%s/open" (SessionId.value record.SessionId))
                     | Error e -> respond res 400 "text/plain" e))
         // Declaring an MCP server (Plan 17). The ONE act that names a url, and the only
