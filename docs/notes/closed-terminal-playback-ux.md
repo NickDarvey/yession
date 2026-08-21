@@ -42,6 +42,66 @@ closed-row verbs; the same flows on the phone viewport.
    `idleTimeLimit` disagree about whose timeline they are on; needs a look at how
    asciinema-player 3.x combines those options.
 
+   *(Follow-up, confirmed live:)* **the terminal list's rewind verb does nothing but
+   select.** Its click dispatches `RewindTerminalMsg` then `SelectFromListMsg`
+   (View.fs:2048-2051), and the second reducer clears the `PanePlaying`/`PaneRewound` the
+   first just set — verified on an open terminal with recorded output: no player, no
+   *Jump to live*, no behind-label; the ordinary blocks view and composer render. The pane's
+   own `↑ replay from the start` (one message) works: player, *Jump to live*, "behind live",
+   focus handed on.
+
+## The play state machine, as it stands
+
+Four model fields have to agree for the pane to show the right thing, and every control
+writes a different subset of them:
+
+- `PaneChoice : PaneTab option` — which tab shows; doubles as the preview slot.
+- `PanePlaying : (PaneTab * int option) option` — "watch this tab's recording"; the `int` is
+  a transcript line only the `TerminalTab` mount ever reads (the step-out's start hint).
+- `PaneRewound : (TerminalId * int) option` — the DVR pin.
+- `TerminalList : bool` — the census face; while true it masks whatever the rest says.
+
+| control → message | Choice | Playing | Rewound | List |
+|---|---|---|---|---|
+| chat chip → `OpenPaneTabMsg` | tab | ∅ | ∅ | **kept (bug 2)** |
+| *Play recording* / *↑ play the recording* / *Play whole terminal* → `PlayRecordingMsg` | tab | (tab, seq?) | kept | kept |
+| *Back to output* → `SelectPaneTabMsg` | tab | ∅ | ∅ | kept |
+| *Back to blocks* → `SelectTerminalMsg` | terminal | ∅ | ∅ | kept |
+| *↑ replay from the start* → `RewindTerminalMsg` | terminal | (terminal, ∅) | (t, len) | kept |
+| *Jump to live* → `JumpToLiveMsg` | terminal | ∅ | ∅ | kept |
+| list row → `SelectFromListMsg` | terminal | ∅ | ∅ | false |
+| list rewind → `RewindTerminalMsg` **then** `SelectFromListMsg` | terminal | set, then ∅ | set, then ∅ | false |
+
+And whether a player is actually on screen (`playsRecording`) answers differently per tab
+kind: a `BlockTab` plays only when `PanePlaying` names it; a `StretchTab` always plays
+(replay is its only read); a `TerminalTab` plays when named OR when the affordance fold says
+`ReplayIsTheRead` (closed, no blocks) — plus `TerminalList` overriding all of it at render.
+
+Why it reads as a mess in the hand:
+
+- **One message, two different acts.** `PlayRecordingMsg` on a `BlockTab` swaps the view
+  INSIDE the tab (way back: *Back to output*, bottom action row, relabels in place); on a
+  `TerminalTab` it REPLACES the tab (way back: *Back to blocks*, floating overlay). Same
+  verb, different blast radius, different exit control in a different slot.
+- **The step-out eats your place.** The block tab is the preview; *Play whole terminal*
+  replaces the preview with the terminal tab, so *Back to blocks* lands on the terminal's
+  scrollback — the block tab you stepped out of no longer exists, and the only way back to
+  it is finding the chip in the chat again. A chip → block → whole → back round trip does
+  not return.
+- **Partial clears.** Each reducer resets the subset of fields its author was thinking
+  about: `OpenPaneTabMsg` clears playing+pin but not the list face (bug 2); the list's
+  rewind pairs two messages whose clear-sets cancel (bug above); `PlayRecordingMsg` clears
+  nothing, relying on every path into it having cleaned up first.
+- **Four ways into a player** — block play, chip step-out, closed-terminal play, DVR rewind
+  — each with its own back-affordance, focus target and clear-set; three ways for a player
+  to be "on" (`PanePlaying`, stretch-always, `ReplayIsTheRead`).
+
+The shape suggests one explicit mode instead of four fields agreeing — e.g.
+`PaneMode = Reading of PaneTab | Watching of {Tab; StartLine option; Pin option}` with the
+list face as a fifth `PaneTab`-like destination rather than a boolean mask — so every
+transition states the whole next mode and a control cannot half-clear its way into a state
+no one designed.
+
 ## Rough edges
 
 4. **The first row of a chat group hides under its sticky author header.** The header
