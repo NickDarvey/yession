@@ -315,12 +315,10 @@ let private script =
       history.replaceState(null, '', a.getAttribute('href'))
       openRows()
     })
-    document.addEventListener('submit', async (e) => {
-      const f = e.target.closest('[data-create-session]'); if (!f) return
-      e.preventDefault()
-      const r = await fetch('/sessions' + location.search, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(new FormData(f)) })
-      if (r.ok) { swap(sessionsEl(), await r.text()); f.reset() }
-    })
+    // Creating is deliberately NOT intercepted here: the form is a real POST, and the browser
+    // follows its redirect into the new session. Swapping a table in instead would leave this
+    // page in charge of an act whose whole point is to leave it — and every other page learns
+    // about the new session from the rows stream anyway.
     // Declaring an MCP server (Plan 17): the only place a url is written, and the only
     // management action that can be REFUSED for a reason a human needs to read — a name
     // clash. So this one reports, where create/launch/stop only swap.
@@ -467,7 +465,7 @@ let private bodyTemplate
             </header>
             <!-- The id is minted server-side (a Docker-safe Crockford id); only a human
                  name is entered here. -->
-            <form class="flex flex-col gap-3 pt-6 pb-8" data-create-session>
+            <form class="flex flex-col gap-3 pt-6 pb-8" method="post" action="/sessions" data-create-session>
               <label class="{Style.label}" for="new-session-name">new session</label>
               <div class="flex flex-wrap items-center gap-3">
                 <input id="new-session-name" name="name" placeholder="display name" autocomplete="off"
@@ -541,6 +539,13 @@ let private respond (res: ServerResponse) (status: int) (contentType: string) (b
     respondWith res status contentType "no-store" body
 
 let private html (res: ServerResponse) (body: string) = respond res 200 "text/html; charset=utf-8" body
+
+/// POST-redirect-GET. `303` rather than `302` so the browser is required to follow it with a
+/// GET: what the caller lands on is a resource, not a resubmission of the form waiting to be
+/// re-fired by a reload.
+let private seeOther (res: ServerResponse) (location: string) =
+    res.writeHead (303, createObj [ "location", box location; "cache-control", box "no-store" ]) |> ignore
+    res.``end`` ""
 
 /// A string as a JS literal, for the one inline script below — so a URL containing a quote
 /// is data rather than syntax.
@@ -664,6 +669,16 @@ let tryHandle
                     createObj [ "content-type", box "image/png"; "cache-control", box CachePolicy.shell ])
                 |> ignore
                 res.``end`` (decodeBase64 WebApp.iconPngBase64))
+        // Creating a session is asking to WORK in one. It used to answer with a refreshed
+        // table, which left the primary path at three acts — create, find the row, Launch —
+        // and then a fourth to open what you had just made. So the answer says where the
+        // session now is, and `/open` (below) does what it has always done: launch it if it
+        // is stopped and land the browser on its address.
+        //
+        // One answer, for every caller. A route that returned a fragment to some callers and
+        // a redirect to others would be two contracts wearing one address, and the one nobody
+        // was looking at is the one that would rot — which is precisely how the vanishing-row
+        // bug lived: two renderings of the session list, only one of them exercised.
         | "POST", "/sessions" ->
             Some (fun () ->
                 readBody req (fun body ->
@@ -674,7 +689,7 @@ let tryHandle
                         | "" -> SessionId.value (SessionId.mint ())
                         | provided -> provided
                     match pm.CreateSession id (formField body "name") with
-                    | Ok _ -> html res (tableNow ())
+                    | Ok record -> seeOther res (sprintf "/sessions/%s/open" (SessionId.value record.SessionId))
                     | Error e -> respond res 400 "text/plain" e))
         // Declaring an MCP server (Plan 17). The ONE act that names a url, and the only
         // one that is not read-only. There is deliberately no per-session enable beside it:

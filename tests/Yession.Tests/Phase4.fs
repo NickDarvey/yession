@@ -791,6 +791,14 @@ let private statusOfReply (reply: obj) : int = Fable.Core.Util.jsNative
 [<Emit("$0.body")>]
 let private bodyOfReply (reply: obj) : string = Fable.Core.Util.jsNative
 
+/// A form POST that does NOT follow its redirect. Where the create route points is the
+/// contract; an auto-following fetch would swallow it and assert the destination instead.
+[<Emit("fetch($0, { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: $1 }).then(async r => ({ status: r.status, cacheControl: '', location: r.headers.get('location') || '', body: await r.text() }))")>]
+let private postFormHere (url: string) (body: string) : JS.Promise<obj> = Fable.Core.Util.jsNative
+
+[<Emit("$0.location")>]
+let private locationOfReply (reply: obj) : string = Fable.Core.Util.jsNative
+
 /// A Manager with its management endpoint up, over real child processes. Hoisted because
 /// the archiving cases below each pin ONE invariant and each needs one of these; the setup
 /// is what repeats, not the assertion.
@@ -930,11 +938,14 @@ let private uiFlowTests =
                 let! css = Interop.getText (baseUrl + "/" + styleSheetUrl) |> Async.AwaitPromise
                 Expect.isTrue (css.Length > 500) "the shared local stylesheet serves from the endpoint (no CDN)"
 
-                // Create over the form endpoint.
-                let! created = postForm (baseUrl + "/sessions") "id=ui-1&name=UI+One" |> Async.AwaitPromise
-                Expect.equal (statusOfReply created) 200 "created"
-                Expect.isTrue ((bodyOfReply created).Contains (Dom.attr Dom.Manager.session "ui-1")) "the refreshed table holds the new session"
-                let! duplicate = postForm (baseUrl + "/sessions") "id=ui-1&name=Again" |> Async.AwaitPromise
+                // Create over the form endpoint. The answer is where the session now IS —
+                // creating one is asking to work in it, and `/open` is the stable route that
+                // launches it and lands you there. Not followed here: this case still wants
+                // it stopped, and what /open does with it is /open's own case below.
+                let! created = postFormHere (baseUrl + "/sessions") "id=ui-1&name=UI+One" |> Async.AwaitPromise
+                Expect.equal (statusOfReply created) 303 "creating hands the browser onward, rather than a table to look at"
+                Expect.equal (locationOfReply created) "/sessions/ui-1/open" "onward is the session's stable open route"
+                let! duplicate = postFormHere (baseUrl + "/sessions") "id=ui-1&name=Again" |> Async.AwaitPromise
                 Expect.equal (statusOfReply duplicate) 400 "duplicates are rejected"
 
                 // Launch from the UI; the fragment reflects it and the child REALLY serves.
@@ -1009,7 +1020,9 @@ let private uiFlowTests =
                 let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
                 let sessionId = SessionId.create "open-1" |> expect
 
-                let! _ = postForm (baseUrl + "/sessions") "id=open-1&name=Open+One" |> Async.AwaitPromise
+                // Registered in-process: creating over the form endpoint now LANDS you in the
+                // session, and what this case is about is `/open` finding one stopped.
+                pm.CreateSession "open-1" "Open One" |> expect |> ignore
 
                 // Stopped: /open has to start it before there is any address to give.
                 Expect.equal (pm.TryFind sessionId).Value.Status ProcessManager.NotRunning "created, not launched"
@@ -1079,7 +1092,7 @@ let private reapingTests =
                         (Some ManagerUi.tryHandle)
                 let baseUrl = sprintf "http://127.0.0.1:%d" pm.EndpointPort.Value
                 let sessionId = SessionId.create "reap-1" |> expect
-                let! _ = postForm (baseUrl + "/sessions") "id=reap-1&name=Reap+One" |> Async.AwaitPromise
+                pm.CreateSession "reap-1" "Reap One" |> expect |> ignore
 
                 // The address this deployment publishes for the session, before it has ever
                 // run: derived from the id alone, which is why it needs no port to compute.
