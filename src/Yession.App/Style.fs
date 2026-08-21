@@ -938,7 +938,10 @@ module Style =
               "group-focus-within:max-h-64 group-focus-within:overflow-y-auto motion-reduce:transition-none"
               fieldBare
               messageVoice false
-              "font-light text-body text-ink placeholder:text-ink-faint px-4 py-2"; touchType ]
+              // No `placeholder:` variant: this field is a mounted editor, not an `<input>`,
+              // so it has no placeholder attribute for that variant to have ever matched.
+              // The prompt comes from `editorHost` above.
+              "font-light text-body text-ink px-4 py-2"; touchType ]
 
     /// The writing side of the box: whose message it is, then the message. A column only
     /// because someone else's draft says so above the words; your own — the case that is

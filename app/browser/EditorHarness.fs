@@ -61,6 +61,9 @@ do
             (Some (fun () ->
                 sends <- sends + 1
                 exposeSends sends))
+            // The harness IS the composer, so it wears the composer's prompt: the browser
+            // tier can then read the placeholder where the editor really draws it.
+            Dom.Text.composerPlaceholder
     exposeMd (fun () -> Markdown.ofFragment fragment)
     exposePush (fun name ->
         match lastSelection with
@@ -194,8 +197,8 @@ do
     // with its own binding writing back into its own doc. A read-only mount is the easier case
     // and proves less — it was the first thing this surface tried, and it converged happily.
     let mutable selectionA : (string * string) option = None
-    Editor.mountEditor peerAHost fragmentA false (fun sel -> selectionA <- sel) None |> ignore
-    let mirror = Editor.mountEditor peerBHost fragmentB false ignore None
+    Editor.mountEditor peerAHost fragmentA false (fun sel -> selectionA <- sel) None "" |> ignore
+    let mirror = Editor.mountEditor peerBHost fragmentB false ignore None ""
 
     let mutable storming = false
     let mutable pushes = 0

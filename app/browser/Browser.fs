@@ -1051,8 +1051,15 @@ let private start () =
                             Some (fun () -> connectionRef |> Option.iter (fun c -> c.SendDraft author))
                         | _ -> None
                     let readOnly = hostReadOnly host
+                    // A prompt where there is a message to write — the same body the send
+                    // binding above belongs to. A queued message being edited already holds
+                    // words, and someone else's draft is not yours to be invited into.
+                    let placeholder =
+                        match fieldOfKey key with
+                        | Some (DraftBody _) -> Dom.Text.composerPlaceholder
+                        | _ -> ""
                     mountedBodies.[key] <-
-                        (fragment, readOnly, Editor.mountEditor host fragment readOnly reportFocus onSubmit)
+                        (fragment, readOnly, Editor.mountEditor host fragment readOnly reportFocus onSubmit placeholder)
                 match mountedBodies.TryGetValue key with
                 | true, (bound, readOnly, handle) when
                     not (System.Object.ReferenceEquals (bound, fragment)) || readOnly <> hostReadOnly host ->
