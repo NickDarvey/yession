@@ -1236,9 +1236,11 @@ let private compositionTests =
 
                 let! manager = startPackagedManager env
 
-                // Create and launch a session from the management UI.
-                let! created = postForm (manager.UiUrl + "sessions") "id=composed&name=Composed" |> Async.AwaitPromise
-                Expect.equal (statusOfReply created) 200 "created via the UI"
+                // Create and launch a session from the management UI. The redirect is not
+                // followed: creating now launches and opens, and this case wants the launch
+                // to be its own act so the fragment it answers with names the port below.
+                let! created = postFormHere (manager.UiUrl + "sessions") "id=composed&name=Composed" |> Async.AwaitPromise
+                Expect.equal (statusOfReply created) 303 "created via the UI"
                 let! launched = postForm (manager.UiUrl + "sessions/composed/launch") "" |> Async.AwaitPromise
                 let row = bodyOfReply launched
                 Expect.isTrue (row.Contains (Dom.attr Dom.Manager.status Dom.Manager.statusRunning)) "launched via the UI"
