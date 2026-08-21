@@ -131,11 +131,12 @@ module Style =
     /// button, and author line. Colour composes at the use site.
     let private caps = "font-semibold text-label tracking-caps uppercase"
 
-    /// The voice a body is written in: Noto Serif for a person, and the system's own Noto Sans
-    /// for the agent, which is part of the system (`--font-human`/`--font-agent`). Siblings, so
-    /// a conversation reads as one voice in two registers rather than two typefaces arguing —
-    /// and the difference is one of CLASS rather than of letterform detail, which is what makes
-    /// it survive 15px. Attribution the eye reads before the words — the author line and the avatar say the same thing, but
+    /// The voice a body is written in: Source Serif 4 for a person, and the system's own Noto
+    /// Sans for the agent, which is part of the system (`--font-human`/`--font-agent`). A serif
+    /// on the sans's own skeleton, so a conversation reads as one voice in two registers rather
+    /// than two typefaces arguing — the difference is one of CLASS rather than of letterform
+    /// detail, which is what makes it survive 15px, and of class ONLY, which is what keeps the
+    /// registers close (see the face story in `app/tailwind.css`). Attribution the eye reads before the words — the author line and the avatar say the same thing, but
     /// they say it once at the top, and a long turn scrolls past them.
     ///
     /// A face, not a colour: the caps author line already spends the palette on this
@@ -147,7 +148,14 @@ module Style =
     /// peer's draft, a queued message, every field they type into — so text does not change
     /// typeface at the moment it is sent. A command line is the exception and stays
     /// `font-terminal` (`fieldMono`): what is being written there is machine input.
-    let messageVoice (isAgent: bool) = if isAgent then "font-agent" else "font-human"
+    ///
+    /// The BODY WEIGHT is part of the voice, because the two faces do not weigh the same at
+    /// the same number: Source Serif's light is drawn thinner than Noto Sans's, so a shared
+    /// `font-light` read the agent slightly heavier than the person. The human body face is
+    /// a 350 instanced for exactly this (see `app/tailwind.css`), and the utility lives here
+    /// so no use site can compose its own weight and reopen the gap.
+    let messageVoice (isAgent: bool) =
+        if isAgent then "font-agent font-light" else "font-human font-[350]"
     let label = caps + " text-ink-faint"
     let mono = "font-terminal text-code text-ink"
     let monoOut = "font-terminal text-code-sm text-ink-faint whitespace-pre-wrap"
@@ -722,8 +730,9 @@ module Style =
     let whoAgent = caps + " text-blue"
     /// `pl-8` is the group head's own geometry — 20px avatar + 12px gutter — so bodies, chips
     /// (`chatChip`, already at 32px) and tool runs all share one reading edge under the name.
-    let messageBody = "pl-8 font-light text-body text-ink"
-    let messageBodyStreaming = "pl-8 font-light text-body text-ink-dim"
+    // No weight here: these compose with `messageVoice`, which owns the body weight.
+    let messageBody = "pl-8 text-body text-ink"
+    let messageBodyStreaming = "pl-8 text-body text-ink-dim"
 
     let caret =
         "inline-block w-[7px] h-[15px] bg-blue align-[-2px] ml-0.5 animate-blink motion-reduce:animate-none"
@@ -879,7 +888,7 @@ module Style =
     let queueInput =
         cls [ "flex-1 min-w-0 self-center h-5"; fieldBare
               messageVoice false
-              "font-light text-small leading-5 text-ink-dim focus-within:text-ink"; touchType ]
+              "text-small leading-5 text-ink-dim focus-within:text-ink"; touchType ]
 
     let queueTools =
         "flex gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 transition-opacity"
@@ -938,7 +947,7 @@ module Style =
               "group-focus-within:max-h-64 group-focus-within:overflow-y-auto motion-reduce:transition-none"
               fieldBare
               messageVoice false
-              "font-light text-body text-ink placeholder:text-ink-faint px-4 py-2"; touchType ]
+              "text-body text-ink placeholder:text-ink-faint px-4 py-2"; touchType ]
 
     /// The writing side of the box: whose message it is, then the message. A column only
     /// because someone else's draft says so above the words; your own — the case that is
@@ -976,7 +985,7 @@ module Style =
     /// The clamped body: the same read-only editor as anywhere else, held to one line. `truncate`
     /// on the host would fight ProseMirror's block children, so the clamp is on its descendants.
     let draftSummaryBody =
-        "flex-1 min-w-0 " + messageVoice false + " font-light text-small leading-8 text-ink-dim "
+        "flex-1 min-w-0 " + messageVoice false + " text-small leading-8 text-ink-dim "
         + "overflow-hidden whitespace-nowrap [&_*]:inline [&_*]:truncate [&_*]:m-0"
 
     /// Who is in this draft right now: one dot per live caret, coloured by peer (`PeerColour`).

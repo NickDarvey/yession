@@ -339,9 +339,9 @@ let private buildAssets (outDir: string) (minify: bool) =
         | AssetFile.``noto-sans-600``
         | AssetFile.``neon-400``
         | AssetFile.``neon-600``
-        | AssetFile.``noto-serif-300``
-        | AssetFile.``noto-serif-400``
-        | AssetFile.``noto-serif-600`` -> vendored file
+        | AssetFile.``source-serif-350``
+        | AssetFile.``source-serif-400``
+        | AssetFile.``source-serif-600`` -> vendored file
 
     AssetFile.all |> List.iter produce
 
