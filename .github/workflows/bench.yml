@@ -52,8 +52,18 @@ concurrency:
   group: bench-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: write # `bench-publish` pushes the orphan `bench` branch
+# No `permissions` block, deliberately, and this is the one thing about this file that is not
+# obvious. A called workflow can only REDUCE its caller's token; asking for more is not a
+# runtime error but a startup_failure — the whole run refuses to load, with no jobs and nothing
+# in the log to read. `contents: write` here did exactly that to the pull-request gate, because
+# pr.yaml declares no permissions and so gets the repository default.
+#
+# So the caller decides: release.yml declares `contents: write` at its top and `bench-publish`
+# pushes the orphan branch under it; pr.yaml grants nothing extra and does not record. That is
+# also verify.yml's arrangement, and the reason to match it rather than invent a second one.
+#
+# `lint` does not catch this: actionlint type-checks a workflow in isolation and has no view of
+# what a caller will grant.
 
 jobs:
   bench:
