@@ -27,7 +27,7 @@ type AssetFile =
     | ``app``
     /// The replay player's stylesheet, its own file because the shell defers it.
     | ``player``
-    // The faces, vendored under `app/fonts` (both SIL OFL 1.1; see the two LICENCE files beside
+    // The faces, vendored under `app/fonts` (all SIL OFL 1.1; see the LICENCE files beside
     // them). Three families for four voices, because the agent speaks in the system's face —
     // sans is the machine, serif is the person, and the terminal is the terminal.
     //
@@ -41,9 +41,9 @@ type AssetFile =
     | ``noto-sans-600``
     | ``neon-400``
     | ``neon-600``
-    | ``noto-serif-300``
-    | ``noto-serif-400``
-    | ``noto-serif-600``
+    | ``source-serif-350``
+    | ``source-serif-400``
+    | ``source-serif-600``
 
 module AssetFile =
 
@@ -70,9 +70,9 @@ module AssetFile =
         | AssetFile.``noto-sans-600`` -> "fonts/noto-sans-latin-600-normal.woff2", woff2
         | AssetFile.``neon-400`` -> "fonts/monaspace-neon-latin-400-normal.woff2", woff2
         | AssetFile.``neon-600`` -> "fonts/monaspace-neon-latin-600-normal.woff2", woff2
-        | AssetFile.``noto-serif-300`` -> "fonts/noto-serif-latin-300-normal.woff2", woff2
-        | AssetFile.``noto-serif-400`` -> "fonts/noto-serif-latin-400-normal.woff2", woff2
-        | AssetFile.``noto-serif-600`` -> "fonts/noto-serif-latin-600-normal.woff2", woff2
+        | AssetFile.``source-serif-350`` -> "fonts/source-serif-4-latin-350-normal.woff2", woff2
+        | AssetFile.``source-serif-400`` -> "fonts/source-serif-4-latin-400-normal.woff2", woff2
+        | AssetFile.``source-serif-600`` -> "fonts/source-serif-4-latin-600-normal.woff2", woff2
 
     let path (file: AssetFile) : string = fst (describe file)
     let contentType (file: AssetFile) : string = snd (describe file)
@@ -91,9 +91,9 @@ module AssetFile =
           AssetFile.``noto-sans-600``
           AssetFile.``neon-400``
           AssetFile.``neon-600``
-          AssetFile.``noto-serif-300``
-          AssetFile.``noto-serif-400``
-          AssetFile.``noto-serif-600`` ]
+          AssetFile.``source-serif-350``
+          AssetFile.``source-serif-400``
+          AssetFile.``source-serif-600`` ]
 
     /// The file a request's path names, if it names one at all. The lookup a server does — and
     /// the reason nothing derived from a request path ever reaches the file system.

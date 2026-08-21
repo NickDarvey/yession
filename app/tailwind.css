@@ -10,7 +10,7 @@
    never render, and this sheet is render-blocking.
 
    Every typeface the product wears is vendored under `app/fonts/` rather than fetched — same
-   rule as everything else the shell serves, no CDN. Both are SIL OFL 1.1; the two licences sit
+   rule as everything else the shell serves, no CDN. All are SIL OFL 1.1; the licences sit
    beside the faces.
 
    Four voices, three families, one rule: SANS IS THE MACHINE — the chrome, and the agent,
@@ -19,15 +19,26 @@
 
    The chrome is Noto Sans, which is where the Segoe UI this design was drawn around went:
    Segoe cannot be redistributed, and Noto descends from the same designer's humanist line, so
-   a box without Segoe stops guessing and every box reads the same. A person's words are Noto
-   Serif, its sibling — same superfamily, so the two share proportion and vertical metrics and
-   a conversation reads as one voice in two registers rather than two typefaces arguing.
+   a box without Segoe stops guessing and every box reads the same. A person's words are
+   Source Serif 4, a serif drawn to sit beside a humanist sans (it is Source Sans's
+   companion): near-monoline strokes, wedge serifs, and the sans's own x-height and open
+   apertures, so a conversation reads as one voice in two registers rather than two typefaces
+   arguing.
 
-   That similarity is the point, and it is also the trap. The first attempt at these two put
-   the conversation in Monaspace Xenon and Krypton, whose difference lives in letterform
-   DETAIL: at 15px they differ in their zero and nothing else, which is not attribution. What
-   survives body size is a difference of CLASS, on a shared skeleton — which is exactly what a
-   sans and its own serif are.
+   The distance between the two registers is tuned from both ends, and each end has claimed a
+   face here. The first attempt put the conversation in Monaspace Xenon and Krypton, whose
+   difference lives in letterform DETAIL: at 15px they differ in their zero and nothing else,
+   which is not attribution — what survives body size is a difference of CLASS. The second was
+   Noto Serif, which stacked a difference of STYLE on top of the class: transitional skeleton,
+   bookish proportions, and a stroke contrast whose thins sparkle at 15px light-on-black. Two
+   distances where attribution needs one. Source Serif 4 keeps only the serifs.
+
+   Equal nominal weights are not equal optical weights: Source Serif's light is drawn thinner
+   than Noto Sans's, so at a shared 300 the agent read slightly heavier than the person. The
+   human body face is therefore 350 — instanced from the variable font (`fonttools
+   varLib.instancer wght=350`), since no static 350 is published — matched by eye against the
+   sans at 15px on black. The weight utility rides WITH the voice (`Style.messageVoice`), so
+   the two registers cannot drift apart again by one site composing its own weight.
 
    Each face is declared in `AssetFile` and copied beside this sheet by the build; the
    `url()`s below are passed through verbatim — Tailwind does not rewrite them — and resolve
@@ -36,8 +47,9 @@
    stops the build.
 
    The weights are exactly what the surfaces wear, no more: the chrome sets four (the
-   extralight wordmark, light body, normal, semibold caps), a message three, and a terminal
-   two — 400, and 600 because that is what ANSI bold renders as. */
+   extralight wordmark, light body, normal, semibold caps), a message three (the 350 body —
+   see above — plus 400 headings and 600 bold), and a terminal two — 400, and 600 because
+   that is what ANSI bold renders as. */
 @font-face {
   font-family: 'Noto Sans';
   font-style: normal;
@@ -67,25 +79,25 @@
   src: url('fonts/noto-sans-latin-600-normal.woff2') format('woff2');
 }
 @font-face {
-  font-family: 'Noto Serif';
+  font-family: 'Source Serif 4';
   font-style: normal;
-  font-weight: 300;
+  font-weight: 350;
   font-display: swap;
-  src: url('fonts/noto-serif-latin-300-normal.woff2') format('woff2');
+  src: url('fonts/source-serif-4-latin-350-normal.woff2') format('woff2');
 }
 @font-face {
-  font-family: 'Noto Serif';
+  font-family: 'Source Serif 4';
   font-style: normal;
   font-weight: 400;
   font-display: swap;
-  src: url('fonts/noto-serif-latin-400-normal.woff2') format('woff2');
+  src: url('fonts/source-serif-4-latin-400-normal.woff2') format('woff2');
 }
 @font-face {
-  font-family: 'Noto Serif';
+  font-family: 'Source Serif 4';
   font-style: normal;
   font-weight: 600;
   font-display: swap;
-  src: url('fonts/noto-serif-latin-600-normal.woff2') format('woff2');
+  src: url('fonts/source-serif-4-latin-600-normal.woff2') format('woff2');
 }
 @font-face {
   font-family: 'Monaspace Neon';
@@ -172,7 +184,7 @@
 
   --font-ui: 'Noto Sans', var(--fallback-sans);
   --font-terminal: 'Monaspace Neon', var(--fallback-mono);
-  --font-human: 'Noto Serif', var(--fallback-serif);
+  --font-human: 'Source Serif 4', var(--fallback-serif);
   /* The agent speaks in the system's face, so this is not a second declaration of it — it is
      the same voice, named for the thing that wears it. If the agent ever needs its own face,
      one line here changes and nothing else does. */
