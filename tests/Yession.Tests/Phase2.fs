@@ -151,6 +151,15 @@ let private toolsWithRuntime (runtime: string list) : Sandboxes.SrtTools =
       Nesting = Sandboxes.StrictNesting
       Runtime = runtime }
 
+/// A config with every Linux tool named — the shape a `startFailure` verdict is read off.
+let private namedToolsConfig : Sandboxes.SrtConfig =
+    Sandboxes.SrtSandbox.configFor
+        { toolsWithRuntime [] with
+            Bwrap = Some "/usr/bin/bwrap"
+            Socat = Some "/usr/bin/socat"
+            Ripgrep = Some "/usr/bin/rg" }
+        Support.emptyPolicy
+
 let private sandboxPolicyTests =
     testList "Sandbox policy (pure)" [
         testCase "backend parsing accepts exactly host, srt, and docker — and fails closed" <| fun () ->
@@ -241,6 +250,32 @@ let private sandboxPolicyTests =
             Expect.equal config.Bwrap (Some "/usr/bin/bwrap") "the named confinement tool rides through"
             Expect.equal config.Ripgrep (Some "/usr/bin/rg") "and so does the scanner srt will not start without"
             Expect.isFalse config.WeakNesting "the strict profile is what a configured host gets"
+
+        testCase "a refusal naming a tool this process can execute settled nothing about the host" <| fun () ->
+            // srt reports a fork it could not take — no `which` on PATH, a box too busy to
+            // hand one out inside a second — as `ripgrep (<path>) not found`. The file is
+            // right there, so the host was never the question that got answered.
+            Expect.equal
+                (Sandboxes.SrtSandbox.startFailure (fun _ -> true) namedToolsConfig)
+                Sandboxes.NothingSettled
+                "the next sandbox asks again rather than inheriting an answer nobody gave"
+
+        testCase "a refusal naming a tool this process cannot execute is a host that cannot confine" <| fun () ->
+            Expect.equal
+                (Sandboxes.SrtSandbox.startFailure (fun path -> path <> "/usr/bin/rg") namedToolsConfig)
+                Sandboxes.HostCannotConfine
+                "that answer does not change while the process lives, so it is the one kept"
+
+        testCase "the sentence for a probe that did not run contradicts srt instead of repeating it" <| fun () ->
+            let said =
+                Sandboxes.SrtSandbox.probeDidNotRun
+                    namedToolsConfig
+                    3
+                    "Sandbox dependencies not available: ripgrep (/usr/bin/rg) not found"
+            Expect.isTrue (said.Contains "/usr/bin/rg") "the path srt called missing is named"
+            Expect.isTrue
+                (said.Contains "executable in this process")
+                "beside the thing that contradicts it, so nobody goes looking for a tool that is there"
 
         testCase "a policy naming no domains gets no egress, never all of it" <| fun () ->
             let config = Sandboxes.SrtSandbox.configFor (toolsWithRuntime []) Support.emptyPolicy

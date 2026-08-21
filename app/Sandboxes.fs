@@ -678,6 +678,26 @@ type SrtConfig =
       /// Egress and credential env scrubbing are untouched. Undo when it can be a path.
       FilesystemDisabled : bool }
 
+/// What a manager start that FAILED actually settled — and so whether the sandbox after
+/// it is handed that refusal or starts one of its own.
+///
+/// srt's dependency check is not a stat. `whichSync` forks `which` — a shell script on a
+/// Debian-derived host, so two execs — under a one-second timeout, and reports EVERY way
+/// that fork can fail as `<tool> not found`: no `which` on this process's PATH, a box too
+/// busy to hand out a fork inside a second, EMFILE, ENOMEM. A NAMED bwrap or socat escapes
+/// that (srt checks those with `accessSync(X_OK)`); only ripgrep's named path goes through
+/// `which`. Which is why the whole tier fails on that one line, about a file sitting right
+/// there, executable, while the other two tools it needs are never mentioned.
+type StartFailure =
+    /// A tool the config names cannot be executed by this process either. Nothing about
+    /// that changes while the process lives, so the refusal is kept and every later
+    /// sandbox is given it instead of paying to rediscover it.
+    | HostCannotConfine
+    /// Every tool the config names is executable right here, so a refusal that blames one
+    /// of them settled nothing about this host: srt's probe did not run. Forgotten, and
+    /// the next sandbox asks again.
+    | NothingSettled
+
 /// OS-level confinement via `@anthropic-ai/sandbox-runtime` (bubblewrap on Linux,
 /// Seatbelt on macOS): a wrapped spawn, no container, and egress that is ENFORCED —
 /// the network namespace is unshared, so the only route out is srt's filtering proxy.
@@ -936,11 +956,8 @@ module SrtSandbox =
     [<Emit("$0.SandboxManager.initialize($1)")>]
     let private initialize (srt: obj) (config: obj) : JS.Promise<unit> = jsNative
 
-    [<Emit("$0.SandboxManager.checkDependenciesAsync()")>]
-    let private checkDependencies (srt: obj) : JS.Promise<obj> = jsNative
-
-    [<Emit("(($0.errors ?? []).join('; '))")>]
-    let private dependencyErrors (check: obj) : string = jsNative
+    [<Emit("$0.SandboxManager.reset()")>]
+    let private resetManager (srt: obj) : JS.Promise<unit> = jsNative
 
     [<Emit("$0.SandboxManager.wrapWithSandboxArgv($1, undefined, $2, undefined, $3 || undefined)")>]
     let private wrapArgv (srt: obj) (command: string) (custom: obj) (cwd: string) : JS.Promise<obj> = jsNative
@@ -958,11 +975,55 @@ module SrtSandbox =
     let mutable private starting : JS.Promise<obj> option = None
     let mutable private allowed : Set<string> = Set.empty
 
-    /// Reset the memoized process-wide manager. For tests that drive a fresh session in
-    /// the same process — production initializes once and keeps it until the process ends.
-    let forgetManager () =
-        starting <- None
-        allowed <- Set.empty
+    /// The tools this config names srt must run. macOS names none — Seatbelt ships with
+    /// the OS — so the list is empty there, and so is what a failed start there settles.
+    let namedTools (config: SrtConfig) : string list =
+        [ config.Bwrap; config.Socat; config.Ripgrep ] |> List.choose id
+
+    /// What a failed start settled, read against what this process can see of the tools it
+    /// named. Pure in the predicate, so the decision is pinned in the cheap tier — without
+    /// a sandbox, and without a box that has to be having a bad minute.
+    let startFailure (executable: string -> bool) (config: SrtConfig) : StartFailure =
+        if namedTools config |> List.forall executable then NothingSettled else HostCannotConfine
+
+    /// How many times a start that settled nothing is asked again, and how long it waits in
+    /// between. A fork that could not be taken is a condition that passes — but only for
+    /// somebody who waits and asks again, and srt asks exactly once.
+    let private startAttempts = 3
+    let private startBackoffMs = 250
+
+    /// What a start that asked and never got an answer says. srt's own sentence — `ripgrep
+    /// (/nix/store/…-ripgrep-15.2.0/bin/rg) not found` — sends whoever reads it to look for
+    /// a tool that is right there, so it is quoted rather than passed on, next to the thing
+    /// that contradicts it.
+    let probeDidNotRun (config: SrtConfig) (attempts: int) (reason: string) : string =
+        sprintf
+            "srt refused to start %d times running: %s. Every tool it needs is executable in this process (%s), so what failed is srt's own dependency probe — a forked `which` under a one-second timeout, which reports a fork it could not take as a tool that is not there — and not the tool it names."
+            attempts
+            reason
+            (namedTools config |> String.concat ", ")
+
+    /// Forget the process-wide manager: this module's memo AND srt's own, which the memo
+    /// only fronts. Both, because `initialize` returns early once srt has a manager — the
+    /// dependency probe included — so forgetting one half is not a fresh start, it is a
+    /// start that skips the very thing a fresh one exists to redo. Called when a start
+    /// settled nothing, and by tests that drive a fresh session in the same process;
+    /// production starts once and keeps it until the process ends.
+    let forgetManager () : Async<unit> =
+        async {
+            match starting with
+            | None -> ()
+            | Some promise ->
+                starting <- None
+                allowed <- Set.empty
+                try
+                    let! srt = Interop.awaitPromise promise
+                    do! Interop.awaitPromise (resetManager srt)
+                with _ -> ()
+        }
+
+    [<Emit("$0.catch($1)")>]
+    let private whenRejected (promise: JS.Promise<obj>) (handler: obj -> unit) : unit = jsNative
 
     let private managerFor (config: SrtConfig) : Async<obj> =
         match starting with
@@ -978,26 +1039,43 @@ module SrtSandbox =
         | None ->
             allowed <- Set.ofList config.AllowedDomains
             // Started once, here, and memoized as its promise — including a start that
-            // FAILED, so every later sandbox reports the same reason instead of retrying
-            // an initialization the host cannot support.
+            // failed BECAUSE THIS HOST CANNOT CONFINE, so every later sandbox reports the
+            // reason instead of rediscovering it. A start that settled nothing is not
+            // that: it is asked again below, and forgotten if it still cannot answer.
             let promise =
                 Async.StartAsPromise (
                     async {
                         let! srt = Interop.awaitPromise (importSrt ())
                         if not (supportedPlatform srt) then
                             return failwith "this platform has no srt sandbox"
-                        // Always CONFINED, whichever sandbox got here first: srt reads
-                        // the session config for anything a spawn does not name, so an
-                        // exempt one initializing the manager would hand its exemption
-                        // to the session. The exemption rides `customConfig` per spawn,
-                        // which wins outright over this.
-                        do! Interop.awaitPromise (initialize srt (toJs { config with FilesystemDisabled = false }))
-                        let! check = Interop.awaitPromise (checkDependencies srt)
-                        match dependencyErrors check with
-                        | "" -> return srt
-                        | errors -> return failwith errors
+                        let rec attempt (left: int) =
+                            async {
+                                try
+                                    // Always CONFINED, whichever sandbox got here first: srt
+                                    // reads the session config for anything a spawn does not
+                                    // name, so an exempt one initializing the manager would
+                                    // hand its exemption to the session. The exemption rides
+                                    // `customConfig` per spawn, which wins outright over this.
+                                    do! Interop.awaitPromise (initialize srt (toJs { config with FilesystemDisabled = false }))
+                                    return srt
+                                with ex ->
+                                    match startFailure Fs.executable config with
+                                    | HostCannotConfine -> return raise ex
+                                    | NothingSettled when left > 1 ->
+                                        do! Async.Sleep startBackoffMs
+                                        return! attempt (left - 1)
+                                    | NothingSettled -> return failwith (probeDidNotRun config startAttempts ex.Message)
+                            }
+                        return! attempt startAttempts
                     })
             starting <- Some promise
+            // The forgetting rides the PROMISE rather than a caller: attached before anyone
+            // else can be handed it, it runs once and ahead of every awaiter's continuation,
+            // so no caller can clear a start that is not the one it watched fail.
+            whenRejected promise (fun _ ->
+                match startFailure Fs.executable config with
+                | HostCannotConfine -> ()
+                | NothingSettled -> forgetManager () |> Async.StartImmediate)
             Interop.awaitPromise promise
 
     let create (tools: SrtTools) : CreateSandbox =
