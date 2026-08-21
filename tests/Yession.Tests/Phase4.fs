@@ -851,6 +851,59 @@ let private archiveFlowTests =
             }
     ]
 
+// -----------------------------------------------------------------------------
+// Every registry write announces itself. `createSession` used to save the record and
+// tell only the MCP hub, so the session hub retained a PRE-CREATE list until the next
+// launch, exit or rename — SSR rendered the new session, then the rows stream handed
+// any page connecting in that window a list without it and the row vanished in front
+// of whoever had just made it. Invisible to the person creating it (their page swaps
+// from the POST answer, and nothing published over it) and invisible to every test
+// that launched straight afterwards, because the launch published a correct list.
+//
+// So both halves are asserted against the HUB — what a subscriber is actually handed —
+// and neither launches anything: the gap only exists before the first lifecycle event.
+// -----------------------------------------------------------------------------
+
+let private managerAlone (name: string) =
+    let dataDir =
+        sprintf "tests/Yession.Tests/out/.data/%s-%d" name (int (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds ()) % 1000000)
+    ProcessManager.create
+        { ProcessManager.Options.defaults dataDir nodePath [ "app/SessionMain.js" ] with
+            Strategy = Some Strategy.localhost }
+
+let private registryPublishTests =
+    testList "Registry writes announce themselves (UX review P0)" [
+        testCaseAsync "creating a session pushes it to a subscriber already listening" <|
+            async {
+                let! pm = managerAlone "pub-live"
+                let frames = ResizeArray<ProcessManager.SessionView list> ()
+                let cancel = pm.SubscribeSessions frames.Add
+                let seen = frames.Count
+                pm.CreateSession "pub-live" "Published live" |> expect |> ignore
+                Expect.isTrue
+                    (frames
+                     |> Seq.skip seen
+                     |> Seq.exists (fun f -> f |> List.exists (fun v -> SessionId.value v.Record.SessionId = "pub-live")))
+                    "the create itself pushed a frame carrying the new session"
+                cancel.Stop ()
+                do! pm.StopAll ()
+            }
+
+        testCaseAsync "a subscriber connecting after a create is handed it" <|
+            async {
+                let! pm = managerAlone "pub-retained"
+                pm.CreateSession "pub-retained" "Published retained" |> expect |> ignore
+                let mutable first : ProcessManager.SessionView list option = None
+                let cancel = pm.SubscribeSessions (fun f -> if first.IsNone then first <- Some f)
+                Expect.equal
+                    (first |> Option.map (List.map (fun v -> SessionId.value v.Record.SessionId)))
+                    (Some [ "pub-retained" ])
+                    "the retained snapshot is current, not the list from before the create"
+                cancel.Stop ()
+                do! pm.StopAll ()
+            }
+    ]
+
 let private uiFlowTests =
     testList "Management UI flow (Step 25)" [
         testCaseAsync "create -> launch -> open -> stop -> resume -> crash, all over the management endpoint, with live status pushed on the rows stream" <|
@@ -1942,6 +1995,9 @@ let tests =
         Tag.needs "Session registry stream over SSE (Plan 09)" [ Tag.Ports; Tag.Native ] (fun () -> registryStreamTests)
         Tag.needs "Management UI flow (Step 25)" [ Tag.Ports; Tag.Native ] (fun () -> uiFlowTests)
         Tag.needs "Archiving over the process boundary" [ Tag.Ports; Tag.Native ] (fun () -> archiveFlowTests)
+        // `Ports` only: a ProcessManager binds its control endpoint on creation, but nothing
+        // here launches a child — the invariant is about the moment BEFORE the first launch.
+        Tag.needs "Registry writes announce themselves (UX review P0)" [ Tag.Ports ] (fun () -> registryPublishTests)
         Tag.needs "Idle reaping over the process boundary (Plan 11)" [ Tag.Ports; Tag.Native ] (fun () -> reapingTests)
         // `Srt` for the same reason: the packaged child picks the sandbox DEFAULT, and this
         // suite waits on an environment that reached Running and a command that exited 0 —
