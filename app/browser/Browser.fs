@@ -1410,13 +1410,21 @@ let private start () =
         // The read surface (Plan 15): subscribe once, fold every frame. A malformed frame
         // is dropped rather than thrown — this is a best-effort push leg, and a stream
         // that dies on one bad line takes the whole surface down with it.
-        openQueryStream
-            (SessionRoute.relative SessionRoute.Queries)
-            (fun data ->
-                match Codec.fromString Codec.queryFrame data with
-                | Ok frame -> dispatchRef (QueryFrameMsg frame)
-                | Error _ -> ())
-        |> ignore
+        //
+        // Opened by the `/me` probe's authorized branch below, not here. This stream carries
+        // the same cookie every other fetch does, so on a cold unauthenticated open it can
+        // only 401 — and an EventSource reconnects on its own, so it 401s again and again in
+        // the seconds before the login bounce navigates away. Nobody is waiting on a frame
+        // that cannot arrive, and the console it was filling is the one anybody debugging a
+        // real authorization fault has to read.
+        let subscribeQueries () =
+            openQueryStream
+                (SessionRoute.relative SessionRoute.Queries)
+                (fun data ->
+                    match Codec.fromString Codec.queryFrame data with
+                    | Ok frame -> dispatchRef (QueryFrameMsg frame)
+                    | Error _ -> ())
+            |> ignore
 
         let githubAction (run: unit -> Async<Result<GitHubFlowState option, string>>) =
             dispatchRef (GitHubFlowMsg GitHubBusy)
@@ -1673,8 +1681,10 @@ let private start () =
             // signed in for this session (docs/plans/07 — peer-scoped secrets).
             navigateTo (SessionRoute.relative Login + "?peer_id=" + urlEncode (PeerId.value peerId))
         else
-            // Authenticated: the Claude panel's status is knowable now.
+            // Authenticated: the Claude panel's status is knowable now, and the read
+            // surface's stream has a cookie that will be accepted.
             refreshClaude ()
+            subscribeQueries ()
             let hello =
                 { PeerId = peerId
                   DisplayName = displayName
