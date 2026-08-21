@@ -102,6 +102,58 @@ list face as a fifth `PaneTab`-like destination rather than a boolean mask — s
 transition states the whole next mode and a control cannot half-clear its way into a state
 no one designed.
 
+## Step back: what is the reader actually trying to do?
+
+The controls name the implementation's nouns — *blocks*, *recording*, *whole terminal* — and
+none of those is a thing a user has in their head. "Back to blocks" answers the question
+"which projection of the transcript am I mounted on", which is the developer's question. A
+reader in this flow only ever has three intents:
+
+1. **"What did this command print?"** — the chip's promise. Answered by text: skimmable,
+   copyable, searchable. The block tab does this well.
+2. **"What was going on around it?"** — context. The natural answer is the terminal's
+   scrollback, *scrolled to that command* — more of the same text. Today the step-out
+   answers it with a VIDEO that opens twenty seconds of dead air away (bug 3): the most
+   expensive presentation, at the wrong position, for an intent that wanted cheap text.
+3. **"Show me what actually happened, as it happened"** — behavior: a TUI session, a
+   progress bar, timing, the thing text cannot carry. This is the only intent that wants a
+   player at all.
+
+Which exposes the real structure: the reader is always looking at ONE thing — this
+terminal's history — at a **position** (which command / how far in) and in one of two
+**fidelities** (text, or playback). Those are orthogonal, and every confusion in the state
+machine above comes from encoding them as *destinations you travel between*:
+
+- "Play recording" / "Back to output" is a fidelity toggle wearing navigation words — and it
+  behaves like the toggle it is (same slot, focus kept). Fine, mislabeled.
+- "Play whole terminal" is a POSITION change (this command → its surroundings) fused to a
+  fidelity change (text → playback), which is why coming "back" has nowhere to return to:
+  the trip mutated two axes and the exit only restores one.
+- "Back to blocks" is the fidelity toggle again, but because entry conflated the axes, exit
+  must be a different control with a different name in a different slot — and the name it
+  got is the internal noun.
+- The DVR is the same fidelity swap on a live terminal (position pinned at "now"); "Jump to
+  live" is fidelity back to text/live. Same toggle, third and fourth spellings.
+
+So the reframe: **position is navigation, fidelity is a mode, and the mode never moves
+you.** Concretely —
+
+- A chip's context intent gets its own verb: **"Show in terminal"** — the closed terminal's
+  ordinary text scrollback, scrolled to and highlighting that command. No player. This is
+  what "play whole terminal" was reaching for, and text answers it instantly with none of
+  bug 3's dead air.
+- One **watch/read toggle**, one label pair everywhere (*Watch* / *Show output* — words a
+  user has), one slot, focus kept — on a block, on a closed terminal, on a live one (where
+  *Watch* means the DVR and the way back is *Live*). Toggling fidelity NEVER changes
+  position, so every "where did my tab go" case disappears without a rule to remember.
+- The player, when entered from a command, starts AT that command because position carried
+  over — not because a `startAt` hint rode a message and survived the right subset of
+  reducers.
+
+That is also the state-machine fix from the previous section arrived at from the user's
+side: `position × fidelity` is exactly the `PaneMode` record, and the reason four fields
+keep half-agreeing today is that the UI's own vocabulary never decided these were two axes.
+
 ## Rough edges
 
 4. **The first row of a chat group hides under its sticky author header.** The header
