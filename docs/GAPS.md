@@ -487,6 +487,14 @@ Items are roughly ordered by how much they matter.
     production path no CI here exercises. Both of these go away the day srt can exempt a
     subtree rather than a spawn, or reads `allowGitConfig` per spawn — the clone takes the
     ordinary confined policy again and `FilesystemConfinement` loses its only caller.
+  - **A docker terminal does not open on the checkouts.** Under the host-family backends
+    the repos directory sits inside the workspace a terminal starts in
+    (`Sandboxes.SessionLayout`), so the agent's first `ls` shows what it cloned. The docker
+    backend cannot: its workspace is whatever the image's working directory is — this
+    session composes no `WorkingDirectory`, so nothing here knows the path — and the repos
+    dir arrives as a bind mount at `/repos` beside it. A verb still ANSWERS with the right
+    path (`reposVisibleAt`), so nothing is unreachable; it is one `cd` the other backends
+    no longer need.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **The session's imperative API is split, and only half of it is built**
