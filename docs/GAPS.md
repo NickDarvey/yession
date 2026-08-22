@@ -156,6 +156,26 @@ Items are roughly ordered by how much they matter.
     fallback is wrong, so the git sandbox proves `git --version` before any verb runs one
     and refuses with a sentence naming `YESSION_GIT_PATH` and `YESSION_SANDBOX_READ_PATHS`
     instead of passing the host binary's excuse through.
+    - **That probe then refused a git that worked, because it was the one git spawn built
+      without the hardened env.** `git --version` ran with an EMPTY env, which is an env no
+      verb ever runs with: git resolves its global config path before it does anything at
+      all, tolerates an `EACCES` there and treats every other errno as fatal, and Seatbelt
+      answers `EPERM`. So on a macOS host whose operator has a `~/.config/git/config` — a
+      home-manager install always does — the probe died `fatal: unable to access …
+      (Operation not permitted)`, exit 128, and every repo verb was refused for the
+      sandbox's whole lifetime in words blaming the binary and the read scope. Neither was
+      at fault, and taking the sentence's advice (`YESSION_SANDBOX_READ_PATHS=$HOME/.config
+      /git`) would have widened the scope to hand back part of the home Plan 24 exists to
+      deny. Every git spawned by the repo verbs is now built by one function that carries
+      the env, so a probe cannot again gate verbs it does not run as.
+    - **Linux cannot reproduce that class of fault, which is why it shipped.** srt denies a
+      read on Linux by mounting emptiness over the path, so a denied config reads as ENOENT
+      and git shrugs; Seatbelt denies it in place, and `EPERM` is fatal. Any suite that
+      plants an unreadable file and expects git to fail is therefore green on the platform
+      CI runs no matter which env the spawn carries. The regression test instead plants a
+      MALFORMED config somewhere the sandbox may read, which fails identically on both
+      platforms — it pins that no git spawned here reads the operator's global config, not
+      the errno that made the difference visible.
     - **`/proc` and `/sys` are outside the scope by construction.** srt's root-deny
       expansion skips both (it remounts `/proc` itself, and a tmpfs over `/sys` breaks
       tooling for a tree that is read-only anyway). Neither is a route back to the denied
@@ -467,6 +487,14 @@ Items are roughly ordered by how much they matter.
     production path no CI here exercises. Both of these go away the day srt can exempt a
     subtree rather than a spawn, or reads `allowGitConfig` per spawn — the clone takes the
     ordinary confined policy again and `FilesystemConfinement` loses its only caller.
+  - **A docker terminal does not open on the checkouts.** Under the host-family backends
+    the repos directory sits inside the workspace a terminal starts in
+    (`Sandboxes.SessionLayout`), so the agent's first `ls` shows what it cloned. The docker
+    backend cannot: its workspace is whatever the image's working directory is — this
+    session composes no `WorkingDirectory`, so nothing here knows the path — and the repos
+    dir arrives as a bind mount at `/repos` beside it. A verb still ANSWERS with the right
+    path (`reposVisibleAt`), so nothing is unreachable; it is one `cd` the other backends
+    no longer need.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **The session's imperative API is split, and only half of it is built**

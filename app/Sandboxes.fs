@@ -76,6 +76,59 @@ let egressFor (backend: SandboxBackend) (ambient: Map<string, string>) : string 
         |> List.ofArray
         |> Some
 
+/// Where a session's workspaces and its checkouts sit under its data directory.
+///
+/// One module because these are not independent facts. A terminal starts in the
+/// workspace, so a checkout that is not under it is a checkout nobody sees without being
+/// told its absolute path first — and an agent told to find one spends its step ceiling
+/// looking. Computed apart, in the composition root, they drifted into siblings: `ls` in
+/// a fresh terminal showed an empty directory while the clones sat next door.
+module SessionLayout =
+
+    /// The workspace a host-family sandbox works in. `default` keeps the session's own
+    /// `workspace` path, so nothing about an existing session changes; a named one gets
+    /// its own, because two sandboxes exist precisely so that what happens in one does
+    /// not happen in the other.
+    let workspaceFor (dataDir: string) (sandbox: SandboxName) : string =
+        if sandbox = SandboxName.defaultName then sprintf "%s/workspace" dataDir
+        else sprintf "%s/sandboxes/%s/workspace" dataDir (SandboxName.value sandbox)
+
+    /// The session's repos directory, INSIDE the workspace a terminal opens in. One
+    /// directory for the whole session — the git verbs clone into it, every work sandbox
+    /// reads and builds it — so a NAMED sandbox reaches it at this same absolute path,
+    /// carried as a write path rather than as a child of its own workspace.
+    let reposDir (dataDir: string) : string =
+        sprintf "%s/repos" (workspaceFor dataDir SandboxName.defaultName)
+
+    /// Where a session that predates the layout above left its checkouts: beside the
+    /// workspace instead of inside it.
+    let legacyReposDir (dataDir: string) : string = sprintf "%s/repos" dataDir
+
+    /// The session's repos directory, ready to be cloned into: anything a pre-layout
+    /// session left adopted, the directory itself created, the path returned.
+    ///
+    /// One verb rather than two calls, because the order between them is load-bearing and
+    /// invisible — creating the directory first is exactly what would make the adoption
+    /// find a live layout and decline — and the caller that gets that wrong strands
+    /// somebody's work without any of this failing.
+    ///
+    /// The adoption is there because a session's data directory outlives its process, which
+    /// is what makes a checkout survive idle reaping and relaunch. A session cloned into
+    /// before this layout relaunches with its repos at the old path; left there they are
+    /// not deleted, they are INVISIBLE — the listing scans the new path, reports nothing,
+    /// and the agent re-clones over work that was never committed. It declines when both
+    /// paths exist, because a rename onto a non-empty directory throws and this runs at
+    /// boot: a session that somehow had both would fail to start instead. Delete the
+    /// adoption once no live session predates the layout.
+    let prepareReposDir (dataDir: string) : string =
+        let legacy = legacyReposDir dataDir
+        let current = reposDir dataDir
+        if legacy <> current && Fs.exists legacy && not (Fs.exists current) then
+            Fs.ensureDir (workspaceFor dataDir SandboxName.defaultName)
+            Fs.rename legacy current
+        Fs.ensureDir current
+        current
+
 /// Where the session's repos directory is reachable from INSIDE a work sandbox. The
 /// host-family backends share the directory itself (srt binds the same absolute path, so
 /// the name does not change); the docker backend cannot share a host path by policy and
@@ -98,9 +151,12 @@ let policyFor
     (resolved: Map<string, string>)
     (workspace: string option)
     // The session's repos directory (Plan 14), shared into the WorkSandbox so a
-    // bootstrap clone is visible the moment it lands. For the host-family backends it
-    // is a write path beside the workspace; the docker backend carries it as a bind
-    // mount on the spec instead (`SessionMain`), so it is None there.
+    // bootstrap clone is visible the moment it lands. A write path in its own right
+    // under the host-family backends, whether or not this sandbox's workspace already
+    // contains it — the DEFAULT sandbox's does (`SessionLayout`), a named one's does
+    // not, and a path named twice costs nothing while a path named never costs the
+    // checkout. The docker backend carries it as a bind mount on the spec instead
+    // (`SessionMain`), so it is None there.
     (reposDir: string option)
     : SandboxPolicy =
     let env =

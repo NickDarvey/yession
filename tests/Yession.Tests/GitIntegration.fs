@@ -119,6 +119,23 @@ let private pureTests =
                 "git"
                 "and unnamed falls back to PATH, so an off-Nix install does not regress"
 
+        // The probe that gates every verb was the one git invocation built by hand, with an
+        // EMPTY env — an env no verb ever runs with — so what it proved was never about the
+        // git the verbs use. git resolves its global config path before it does anything at
+        // all, `--version` included; it tolerates an EACCES there and treats every other
+        // errno as fatal; and a sandbox that denies the operator's home answers EPERM. So
+        // the probe died `fatal: unable to access '~/.config/git/config'` (exit 128) and
+        // refused a working git for the sandbox's whole lifetime, naming two knobs that were
+        // not the fault — one of which, followed, hands back the home the scope exists to
+        // deny. Every git spawned here is now built by `gitExec`, which cannot be called
+        // without the env.
+        testCase "the probe runs the verbs' hardened environment, never an empty one" <| fun () ->
+            let probe = Repos.gitExec "/nix/store/x/bin/git" "/repos" "https" None [ "--version" ]
+            Expect.equal
+                probe.Env
+                (Repos.hardenedEnv "https" None |> Map.ofList)
+                "a probe that runs a different environment gates verbs it cannot speak for"
+
         // The words an operator gets when git cannot run confined. What shipped instead was
         // the host binary's own parting line — `xcode-select: error: unable to read data
         // link ...` — which names neither the sandbox nor anything anyone can set, and was
@@ -249,6 +266,56 @@ let private eventsOf (log: EventLog<SessionEvent>) : Async<SessionEvent list> =
         return page.Events |> List.map (fun envelope -> envelope.Event)
     }
 
+// --- Where a session puts its checkouts (cheap tier; fs only) ------------------------------
+// The layout is a claim about a TERMINAL: it starts in the workspace, so this is what
+// decides whether the agent's first `ls` shows the clones or an empty directory.
+
+let private layoutTests =
+    testList "the session's layout" [
+
+        testCase "a clone lands inside the workspace a terminal starts in" <| fun () ->
+            let dataDir = "/data/sessions/AAZ"
+            let workspace = Sandboxes.SessionLayout.workspaceFor dataDir SandboxName.defaultName
+            let repos = Sandboxes.SessionLayout.reposDir dataDir
+            Expect.isTrue
+                (repos.StartsWith (workspace + "/"))
+                "a checkout beside the workspace is one nobody sees without being told its path"
+
+        // The repos directory is shared by every sandbox — one parameter, the session's data
+        // dir, so there can only be one — but a WORKSPACE is the thing two sandboxes exist to
+        // keep apart.
+        testCase "a named sandbox works somewhere the default one does not" <| fun () ->
+            let dataDir = "/data/sessions/AAZ"
+            let named = SandboxName.create "review" |> expect
+            Expect.notEqual
+                (Sandboxes.SessionLayout.workspaceFor dataDir named)
+                (Sandboxes.SessionLayout.workspaceFor dataDir SandboxName.defaultName)
+                "what happens in one sandbox does not happen in the other"
+
+        // A data directory outlives its process, which is what makes a checkout survive a
+        // relaunch. Left at the old path the checkouts are not deleted, they are INVISIBLE:
+        // the listing scans the new path, reports nothing, and the agent re-clones over work
+        // that was never committed.
+        testCase "checkouts from the old layout are moved, not stranded" <| fun () ->
+            let dataDir = mkdtemp nodeFs nodeOs
+            mkdir nodeFs (sprintf "%s/octo/hello/.git" (Sandboxes.SessionLayout.legacyReposDir dataDir))
+            let repos = Sandboxes.SessionLayout.prepareReposDir dataDir
+            Expect.isTrue
+                (exists nodeFs (sprintf "%s/octo/hello/.git" repos))
+                "the checkout is where the listing now looks"
+
+        // `renameSync` onto a non-empty directory throws, and this runs at boot: a session
+        // that somehow had both would fail to start rather than decline the adoption.
+        testCase "a session already on the current layout still boots" <| fun () ->
+            let dataDir = mkdtemp nodeFs nodeOs
+            mkdir nodeFs (sprintf "%s/octo/hello/.git" (Sandboxes.SessionLayout.legacyReposDir dataDir))
+            mkdir nodeFs (sprintf "%s/octo/current/.git" (Sandboxes.SessionLayout.reposDir dataDir))
+            let repos = Sandboxes.SessionLayout.prepareReposDir dataDir
+            Expect.isTrue
+                (exists nodeFs (sprintf "%s/octo/current/.git" repos))
+                "the layout it already had is the one it keeps"
+    ]
+
 let private srtTests =
     testList "repo verbs under srt (local fixtures)" [
         testCaseAsync "add clones into the repos dir, records the fact, and re-add is a quiet no-op" <| async {
@@ -296,6 +363,36 @@ let private srtTests =
             | Error reason ->
                 Expect.isTrue (reason.Contains "cannot run inside the sandbox") "the sandbox is named as the place"
                 Expect.isTrue (reason.Contains "YESSION_GIT_PATH") "and the knob that fixes it"
+        }
+
+        // The complement, and the fault the case above was written blind to: a git that CAN
+        // run, in a session whose operator has a global git config. The probe read it — it
+        // was the one git spawn built without the hardened env — so every verb was refused
+        // for a fault that lives in this repository, in words blaming the host's binary and
+        // the read scope.
+        //
+        // Why it stayed invisible until somebody hit it: the config has to be READABLE to
+        // break anything. Linux denies a read by mounting emptiness over the path, so git
+        // meets ENOENT and shrugs; Seatbelt answers EPERM, which git treats as fatal. A home
+        // outside the read scope would therefore pass this case on the platform CI runs
+        // while production stayed broken — so the config goes somewhere the sandbox may read
+        // (the fixtures dir, already an extra read path) and every platform runs the fault
+        // the way macOS ran it.
+        testCaseAsync "a global git config in the operator's home never reaches a verb" <| async {
+            let root = mkdtemp nodeFs nodeOs
+            makeBareFixture root "hello" |> ignore
+            let home = sprintf "%s/home" (fixturesIn root)
+            mkdir nodeFs home
+            // Malformed on purpose. A config git PARSES is a fault it reports as its own,
+            // which is exactly what an unhardened spawn hands back to whoever asked.
+            writeFile nodeFs (sprintf "%s/.gitconfig" home) "this is not a config\n"
+            let! added =
+                withEnv [ "HOME", Some home ] (fun () ->
+                    async {
+                        let service = serviceIn root (freshLog ())
+                        return! service.AddRepo caller (RepoRef.create "octo/hello" |> expect)
+                    })
+            Expect.isOk added "no git spawned here reads the operator's global config, the probe included"
         }
 
         // A verb that failed while spending somebody's credential is the only moment this
@@ -605,6 +702,7 @@ let private liveClone =
 let tests =
     testList "GitIntegration" [
         pureTests
+        layoutTests
         Tag.needs "Repo verbs (srt)" [ Tag.Srt ] (fun () -> srtTests)
         Tag.needs
             "add_repo (live model, real GitHub)"
