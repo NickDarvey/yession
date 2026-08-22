@@ -702,8 +702,14 @@ module Style =
     /// says things like `/home/user/.yession/sessions/AAZFRYD.../repos`, so a token wider than
     /// the column is the ordinary case, not the pathological one. `overflow-wrap` inherits, so
     /// the rule is stated once for everything the timeline will ever hold.
+    /// The leading gap is the first child's MARGIN, not this box's padding, and that is load
+    /// bearing rather than a spelling preference. A sticky child's `top-0` pins it to this
+    /// scroller's padding box — so a top padding here is a strip the pinned author line can
+    /// never reach, and scrolled text rides up through it above the name. Carried in flow
+    /// instead, the gap scrolls away with everything else and the line pins flush.
     let timeline =
-        "flex-1 overflow-y-auto px-8 py-6 flex flex-col gap-6 max-md:px-4 max-md:py-4 max-md:gap-5 break-words"
+        "flex-1 overflow-y-auto px-8 pb-6 flex flex-col gap-6 [&>*:first-child]:mt-6 "
+        + "max-md:px-4 max-md:pb-4 max-md:gap-5 max-md:[&>*:first-child]:mt-4 break-words"
 
     /// One actor's consecutive run — their messages, the commands they ran, the tools they
     /// called — under ONE author line. Attribution is said where it CHANGES, which is how a
@@ -712,14 +718,26 @@ module Style =
     let messageGroup = "flex flex-col gap-3 max-w-[46rem]"
 
     /// The author line: avatar and name, STICKY — while a long run scrolls, who is speaking
-    /// stays readable at the top of the column. The upward padding (cancelled by the negative
-    /// margin, so nothing moves at rest) is what the stuck line's ground covers: without it,
-    /// content scrolls visibly through the timeline's own top padding above the name. It is
-    /// ground over ground until the moment it is needed.
-    /// (`pb-1 -mb-1` is the same trick downward, one step: without it the stuck line's ground
-    /// ends exactly at the label's last pixel and scrolled text touches the name.)
+    /// stays readable at the top of the column.
+    ///
+    /// `pb-1 -mb-1` gives the stuck line's ground one step past the label, so scrolled text
+    /// does not touch the name: padding paints it, the negative margin keeps it out of flow.
+    ///
+    /// There was a `pt-6 -mt-6` above it meant to do the same upward — and it did neither
+    /// thing it claimed. Padding pushes content DOWN inside a box; a negative top margin pulls
+    /// the FOLLOWING siblings up rather than lifting this box. Measured, the pair put the name
+    /// 48px below the column top instead of 24 and laid the first message 16px UP INTO this
+    /// opaque `bg-bg z-10` band — so every conversation opened with its first line sliced in
+    /// half under the speaker's name, and the ground it was buying extended nowhere above the
+    /// box at all.
+    ///
+    /// What it was reaching for is real, and `timeline` now holds it: the column's leading gap
+    /// is the first child's margin rather than the scroller's padding, so `top-0` pins this
+    /// line flush to the scrollport's own top edge and there is no strip left above the name
+    /// for scrolled text to show through. The rule that fixes it lives with the box that
+    /// creates it, which is why it is stated there and not compensated for here.
     let messageGroupHead =
-        "sticky top-0 z-10 bg-bg flex items-center gap-3 pt-6 -mt-6 max-md:pt-4 max-md:-mt-4 pb-1 -mb-1"
+        "sticky top-0 z-10 bg-bg flex items-center gap-3 pb-1 -mb-1"
 
     /// One item inside a group: its (rare) meta line over its body.
     let messageItem = "flex flex-col gap-1"
@@ -947,7 +965,10 @@ module Style =
               "group-focus-within:max-h-64 group-focus-within:overflow-y-auto motion-reduce:transition-none"
               fieldBare
               messageVoice false
-              "text-body text-ink placeholder:text-ink-faint px-4 py-2"; touchType ]
+              // No `placeholder:` variant: this field is a mounted editor, not an `<input>`,
+              // so it has no placeholder attribute for that variant to have ever matched. The
+              // prompt is drawn on the editor itself — `[data-rich-body]` in `tailwind.css`.
+              "text-body text-ink px-4 py-2"; touchType ]
 
     /// The writing side of the box: whose message it is, then the message. A column only
     /// because someone else's draft says so above the words; your own — the case that is
