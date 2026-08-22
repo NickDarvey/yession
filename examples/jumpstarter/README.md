@@ -66,6 +66,9 @@ a person can watch and type into. It is in `_meta` rather than in the content be
 is for the *client*, not for the model — a client that has never heard of the key ignores it,
 still gets the prose, and still has the three console tools.
 
+The contract behind that url — which two rules are load-bearing and which are courtesies — is
+[docs/streams.md](../../docs/streams.md).
+
 `serial_expect` remains the tool that matters on the control leg, with or without a stream:
 request/response cannot stream, but *waiting for a prompt* is a request/response question, and
 that is what console interaction mostly is.

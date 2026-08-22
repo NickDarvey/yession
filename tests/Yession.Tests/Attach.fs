@@ -3,6 +3,11 @@ module Yession.Tests.Attach
 // Attaching a terminal to somebody else's byte stream (Plan 16, part D), over a real
 // WebSocket against a loopback provider.
 //
+// The provider below is also the REFERENCE implementation `docs/streams.md` points an
+// outside implementer at: the smallest thing that conforms, running on every `check Ports`.
+// That is the only reason it cannot rot — a sample nobody executes drifts from the client
+// it claims to match, which is what the spec exists to stop.
+//
 // The provider here is written by hand — an HTTP upgrade, the RFC 6455 accept hash, and
 // enough frame handling to echo — rather than built on a library, and that is the point
 // rather than an inconvenience: the whole reason for choosing WebSocket over something of
@@ -50,6 +55,13 @@ type private Provider =
       'Upgrade: websocket\r\nConnection: Upgrade\r\n' +
       'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n')
     if (req.url === '/abrupt') { setTimeout(() => socket.destroy(), 30); return }
+    // A provider that says things on the TEXT channel we have no meaning for: a control type
+    // from a later version, and something that is not JSON at all — which is what reaching
+    // for a framework's `send_text` to emit device output looks like from here.
+    if (req.url === '/talkative') {
+      socket.write(frame(0x1, JSON.stringify({ type: 'from-a-later-version' })))
+      socket.write(frame(0x1, 'device output on the wrong channel'))
+    }
     let buffer = Buffer.alloc(0)
     socket.on('data', (chunk) => {
       buffer = Buffer.concat([buffer, chunk])
@@ -136,6 +148,51 @@ let portsTests =
                 handle.Kill ()
                 let! ending = handle.Exited
                 Expect.equal ending (SandboxExited 7) "the in-band exited frame carries the code"
+                do! provider.stop () |> Async.AwaitPromise
+            }
+
+        // Control types will be added, and a client that treated an unknown one as fatal
+        // would break every provider written against the newer spec. Ignoring it is the rule
+        // `docs/streams.md` states, and this is the rule rather than the wording.
+        testCaseAsync "a text frame we have no meaning for does not end the stream" <|
+            async {
+                let! provider = startProvider () |> Async.AwaitPromise
+                let received = System.Text.StringBuilder ()
+                let! attached =
+                    Yession.Host.AttachWs.attach (ticket provider.port "/talkative" device) 80 24 (fun text ->
+                        received.Append text |> ignore)
+                let handle = attached |> expect
+                handle.Write "still here"
+                let! echoed = until (fun () -> received.ToString().Contains "echo:still here")
+                Expect.isTrue echoed "the stream carries data after text it could not read"
+                // Close the socket before the server: `server.close` waits for its
+                // connections, so a test that walks away from an open one hangs the whole
+                // suite rather than failing.
+                handle.Kill ()
+                let! _ = handle.Exited
+                do! provider.stop () |> Async.AwaitPromise
+            }
+
+        // Text is CONTROL, and a provider that sends device output on it gets a terminal
+        // showing nothing while every layer below is working correctly. So the bytes must
+        // NOT arrive as output — the fault is the provider's, and a client that quietly
+        // accepted them would make the wire mean two things.
+        testCaseAsync "device output sent as text is not mistaken for output" <|
+            async {
+                let! provider = startProvider () |> Async.AwaitPromise
+                let received = System.Text.StringBuilder ()
+                let! attached =
+                    Yession.Host.AttachWs.attach (ticket provider.port "/talkative" device) 80 24 (fun text ->
+                        received.Append text |> ignore)
+                let handle = attached |> expect
+                handle.Write "marker"
+                let! echoed = until (fun () -> received.ToString().Contains "echo:marker")
+                Expect.isTrue echoed "the round trip completed, so anything text-borne had arrived by now"
+                Expect.isFalse
+                    (received.ToString().Contains "device output on the wrong channel")
+                    "a text frame is never data"
+                handle.Kill ()
+                let! _ = handle.Exited
                 do! provider.stop () |> Async.AwaitPromise
             }
 

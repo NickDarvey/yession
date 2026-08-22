@@ -18,6 +18,8 @@ namespace Yession.Domain
 /// saying up front what it cannot host, rather than failing the first time somebody needs
 /// it. The three are genuinely independent: a serial line has no size and no exit code but
 /// carries bytes perfectly well, and a remote shell may have all three.
+///
+/// What each one buys the provider that claims it is in `docs/streams.md`.
 type SourceCapabilities =
     { /// Can the OSC 133 bootstrap be typed into it, so its output resolves into blocks with
       /// exit codes? False means LIVE ONLY: the transcript records everything, the lease
@@ -85,6 +87,8 @@ module StreamOffer =
     /// Reverse-DNS prefixed because it IS an extension: if MCP grows a standard streaming
     /// affordance, the decoder learns that one, reads both for a release, and this is
     /// deleted. A bare `stream` would make that a flag day.
+    ///
+    /// The offer's shape, and the wire behind the url, are specified in `docs/streams.md`.
     let metaKey = "dev.yession/stream"
 
     /// The host of an absolute url, lowercased, with any port and userinfo removed. `None`

@@ -666,6 +666,7 @@ module Codec =
     ///
     /// Every other field defaults to the conservative reading — `byteStream` capabilities,
     /// no label, not renewable — so the smallest conforming provider adds one string.
+    /// `docs/streams.md` is what such a provider reads.
     let streamOffer (meta: string) : StreamOffer option =
         let capabilities : Decoder<SourceCapabilities> =
             Decode.object (fun get ->

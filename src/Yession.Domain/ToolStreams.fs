@@ -11,6 +11,9 @@ namespace Yession.Domain
 // A DECORATOR over the registry rather than a branch inside the MCP client, for the reason
 // `ToolUseLog` is one: every call the agent makes goes through `InvokeTool`, in-process and
 // proxied alike, so a seam here cannot be bypassed by a tool that arrives later.
+//
+// What a provider has to do to be heard here — the offer, its admission, and the wire behind
+// the url — is `docs/streams.md`.
 
 open System.Collections.Generic
 
