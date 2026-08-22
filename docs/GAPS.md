@@ -119,6 +119,18 @@ Items are roughly ordered by how much they matter.
     `npm i -g yession` on a bare box does not have them, and the session fails when its
     sandbox is created rather than starting unconfined. That is the intended trade — the
     fix is to install them, or to choose `host` deliberately.
+  - **srt reports a probe it could not RUN as a tool that is not there.** Its dependency
+    check is not a stat: `whichSync` forks `which` — a shell script on a Debian-derived
+    host, so two execs — under a one-second timeout, and every way that fork can fail (no
+    `which` on this process's PATH, a box too busy to hand one out inside a second, EMFILE,
+    ENOMEM) comes back as `ripgrep (<path>) not found`. Only ripgrep's named path goes
+    through `which`; a named bwrap or socat is checked with `accessSync(X_OK)`, which is
+    why a bad minute refuses every srt sandbox in a run on that one line, about a file
+    sitting right there, executable. So a refusal is read against this process's own stat
+    before it is believed: a start that settled nothing is asked again (three times, 250ms
+    apart) and then forgotten rather than memoized into every later sandbox, and what it
+    reports contradicts srt's sentence instead of repeating it. Undo when srt stats an
+    absolute path — still `which` in 0.0.73 — or at least surfaces the spawn's errno.
   - **An unprivileged container needs `YESSION_SANDBOX_NESTED=weak`** (below), which is
     now on the default path rather than an opt-in one.
   - **An srt sandbox reads what its policy names and nothing else**
@@ -487,6 +499,14 @@ Items are roughly ordered by how much they matter.
     production path no CI here exercises. Both of these go away the day srt can exempt a
     subtree rather than a spawn, or reads `allowGitConfig` per spawn — the clone takes the
     ordinary confined policy again and `FilesystemConfinement` loses its only caller.
+  - **A docker terminal does not open on the checkouts.** Under the host-family backends
+    the repos directory sits inside the workspace a terminal starts in
+    (`Sandboxes.SessionLayout`), so the agent's first `ls` shows what it cloned. The docker
+    backend cannot: its workspace is whatever the image's working directory is — this
+    session composes no `WorkingDirectory`, so nothing here knows the path — and the repos
+    dir arrives as a bind mount at `/repos` beside it. A verb still ANSWERS with the right
+    path (`reposVisibleAt`), so nothing is unreachable; it is one `cd` the other backends
+    no longer need.
   - **`.yession.yml` is still unconsumed**: the bootstrap files land in the checkout,
     and nothing reads them into the environment spec yet — that is the follow-up plan.
 - **The session's imperative API is split, and only half of it is built**

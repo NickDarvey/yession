@@ -151,12 +151,9 @@ let private representativeModel : ClientModel =
       TerminalKeyframes = Map.empty
       TerminalScreens = Map.empty
       Pins = []
-      PaneChoice = None
-      PanePlaying = None
-      PaneRewound = None
+      Pane = None
       TerminalsOpen = true
       // The pane shows a TAB by default; the list is what the cases below turn on.
-      TerminalList = false
       Claude =
         { Status = { SessionCredential = None; MineCredential = None; Owner = None; AgentAvailable = Some false }
           Flow = ClaudeIdle }
@@ -259,7 +256,7 @@ let private closedTerminalModel : ClientModel =
             { Terminals =
                 representativeModel.Terminals.Terminals
                 |> List.map (fun t -> { t with IsOpen = false; ClosedReason = Some "closed by a peer" }) }
-        PaneChoice = Some (TerminalTab terminalId) }
+        Pane = Some (OnTab (Reading (TerminalTab terminalId))) }
 
 /// A closed terminal whose bytes came from a provider that said its stream can be asked for
 /// again (Plan 19, step 4) — the one case where a closed terminal has a way back.
@@ -336,7 +333,7 @@ let private uiChecklistTests =
             let html = Support.render representativeModel
             let required =
                 [ "session connection status", Dom.Hooks.connection
-                  "connection state value", Dom.hookText Dom.Hooks.connection Dom.Text.connected
+                  "connection state value", Dom.attr Dom.Hooks.connection Dom.Text.connected
                   "editable session title", Dom.Hooks.sessionTitle
                   "title body", "planning the launch"
                   "session id secondary identifier", Dom.hookText Dom.Hooks.sessionId "demo-session"
@@ -629,7 +626,7 @@ let private uiChecklistTests =
                   // its result.
                   "the commands it ran are listed", Dom.attr Dom.Hooks.terminalBlock "block-ui"
                   "and the way to its recording is offered",
-                  Dom.attr Dom.Hooks.terminalPlay (TerminalId.value terminalId) ] do
+                  Dom.attr Dom.Hooks.terminalWatch "watch" ] do
                 Expect.isTrue (html.Contains marker) (sprintf "%s (`%s`) must render" label marker)
             // Nothing can be run in a closed terminal, so nothing offers to: a command line
             // that queues into a terminal with no shell behind it is the misleading half.
@@ -920,7 +917,7 @@ let private uiChecklistTests =
 // next improvement while saying the design was wrong.
 let private terminalListTests =
     testList "The terminal list" [
-        let listed (model: ClientModel) = Support.render { model with TerminalList = true }
+        let listed (model: ClientModel) = Support.render { model with Pane = Some (OnList (model.Pane |> Option.bind PaneMode.onTab)) }
         let id = TerminalId.value terminalId
 
         // Every case below is the same shape deliberately: the verb where it works, and its
@@ -1000,27 +997,48 @@ let private reconnectOfferTests =
                 (html.Contains "http://127.0.0.1:8321/sessions/demo-session/open")
                 "pointing at the manager's open route for THIS session"
 
+        /// The nav column's connection section alone. The report has two mounts now — the
+        /// column, and the bar for where the column cannot be seen — so a whole-page
+        /// `Contains` is answered by whichever happened to be right.
+        let navConnection (html: string) : string =
+            let at = html.IndexOf Dom.Hooks.feed
+            Expect.isTrue (at >= 0) "the connection section renders at all"
+            let start = html.LastIndexOf ("<section", at)
+            html.Substring (start, html.IndexOf ("</section>", at) - start)
+
         // Replaces, never accompanies: the status word and a button to fix it would be
         // saying the same thing twice.
         testCase "the offer replaces the connection status word" <| fun () ->
+            let column = navConnection (Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId)))
+            Expect.isTrue (column.Contains Dom.Hooks.sessionGone) "the card is what the column shows"
+            Expect.isFalse (column.Contains "not connected") "not the status word as well"
+            // The reason itself is not lost — it moves behind the card's disclosure.
+            Expect.isTrue (column.Contains "the session did not answer") "the reason still reaches the reader"
+
+        // The report has two mounts and only one is ever visible, so the way back has to be on
+        // BOTH or it is missing from whichever is showing. It went missing from the bar's:
+        // once the column's mount became `max-md:hidden` — the rule that stops the report
+        // being read twice — a phone could be told its session had stopped and offered
+        // nothing whatever to do about it.
+        testCase "the way back is offered at both mounts, since only one is ever seen" <| fun () ->
             let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
-            // `data-connection-reason` has `data-connection` as a prefix, so this one
-            // assertion covers both the status word and its separate reason line.
-            Expect.isFalse (html.Contains Dom.Hooks.connection) "neither the status word nor its reason line"
-            // The reason itself is not lost — it moves into the card's copy.
-            Expect.isTrue (html.Contains "the session did not answer") "the reason still reaches the reader"
+            Expect.equal
+                ((html.Split Dom.Hooks.sessionReopen |> Array.length) - 1)
+                2
+                "the nav column's card, and the bar for where the column cannot be seen"
+            Expect.isTrue ((navConnection html).Contains Dom.Hooks.sessionReopen) "one of them is the column's"
 
         // The three ways the offer must decline to render, each of which would otherwise be
         // a button that cannot work.
         testCase "no manager origin means no offer, just the status" <| fun () ->
-            let html = Support.render (stopped None (Some sessionId))
-            Expect.isFalse (html.Contains Dom.Hooks.sessionGone) "nothing to ask, so nothing offered"
-            Expect.isTrue (html.Contains Dom.Hooks.connection) "the ordinary status still renders"
+            let column = navConnection (Support.render (stopped None (Some sessionId)))
+            Expect.isFalse (column.Contains Dom.Hooks.sessionGone) "nothing to ask, so nothing offered"
+            Expect.isTrue (column.Contains "not connected") "the ordinary status still renders"
 
         testCase "no session id means no offer" <| fun () ->
-            let html = Support.render (stopped (Some "http://127.0.0.1:8321") None)
-            Expect.isFalse (html.Contains Dom.Hooks.sessionGone) "nothing to ask FOR"
-            Expect.isTrue (html.Contains Dom.Hooks.connection) "the ordinary status still renders"
+            let column = navConnection (Support.render (stopped (Some "http://127.0.0.1:8321") None))
+            Expect.isFalse (column.Contains Dom.Hooks.sessionGone) "nothing to ask FOR"
+            Expect.isTrue (column.Contains "not connected") "the ordinary status still renders"
 
         testCase "a session that is merely reconnecting is not offered a reopen" <| fun () ->
             let html =
@@ -1035,25 +1053,25 @@ let private reconnectOfferTests =
         // deployment that strands it.
         testCase "a stable-address deployment promises the work comes back" <| fun () ->
             let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
-            Expect.isTrue (html.Contains "saved here and syncs") "the promise is kept where it can be"
-            Expect.isFalse (html.Contains "new address") "and no warning where none is due"
+            Expect.isTrue (html.Contains Dom.Text.reopenPromise) "the promise is kept where it can be"
+            Expect.isFalse (html.Contains Dom.Text.reopenPromiseEphemeral) "and no warning where none is due"
 
         testCase "an ephemeral-address deployment warns instead of promising" <| fun () ->
             let html =
                 Support.render
                     { stopped (Some "http://127.0.0.1:8321") (Some sessionId) with EphemeralStorage = true }
-            Expect.isTrue (html.Contains "reopens at a new address") "it says what reopening costs"
-            Expect.isFalse (html.Contains "saved here and syncs") "and never both"
+            Expect.isTrue (html.Contains Dom.Text.reopenPromiseEphemeral) "it says what reopening costs"
+            Expect.isFalse (html.Contains Dom.Text.reopenPromise) "and never both"
 
-        // The banner and the card both render for a settled disconnection. The card is the
-        // more specific message, so the banner must not restate the promise underneath it.
-        testCase "the degraded banner does not repeat the promise while the offer shows" <| fun () ->
-            let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
+        // The card is the more specific message, so within the column it is the ONLY one:
+        // a status word, a promise and a card that repeats both would be one fact three times.
+        testCase "the column says it once, by the card" <| fun () ->
+            let column = navConnection (Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId)))
             Expect.equal
-                ((html.Split "saved here and syncs" |> Array.length) - 1)
+                ((column.Split Dom.Text.reopenPromise |> Array.length) - 1)
                 1
-                "stated once, by the card"
-            Expect.isFalse (html.Contains Dom.Text.localFallback) "the banner's own promise stays out of it"
+                "the promise is stated once"
+            Expect.isFalse (column.Contains Dom.Text.localFallback) "and never beside the bar's wording of it"
 
         testCase "a connected session shows no offer" <| fun () ->
             Expect.isFalse
@@ -1181,26 +1199,26 @@ let private syncStatusTests =
                         IsCatchingUp = false
                         CatchUpIsSlow = false } }
 
-        // Case-INSENSITIVE on purpose: the two reports differed in their capitals (one used
-        // the shared token, the other a literal), so a case-sensitive count saw one of each
-        // and called it fine.
-        testCase "'up to date' is said exactly once on the screen" <| fun () ->
+        // It used to be said once, having been said three times before that. Now it is said
+        // nowhere: "everything is fine" is the least actionable thing a screen can carry, and
+        // a client that is working says so by working. What survives is the state TOKEN, on
+        // an attribute, which is what a test should have been reading all along.
+        testCase "a healthy client says nothing about its connection" <| fun () ->
             let html = (Support.render settled).ToLowerInvariant ()
-            let rec count (from: int) (n: int) =
-                match html.IndexOf ("up to date", from) with
-                | -1 -> n
-                | i -> count (i + 1) (n + 1)
-            Expect.equal (count 0 0) 1 "one report of a healthy sync, not one per surface"
+            for word in [ "up to date"; ">connected<"; ">connecting<"; "not connected" ] do
+                Expect.isFalse (html.Contains word) (sprintf "nothing on the screen reads %s" word)
+            Expect.isTrue
+                ((Support.render settled).Contains (Dom.attr Dom.Hooks.connection Dom.Text.connected))
+                "but the state is still on the attribute a test reads"
 
         testCase "a brief catch-up says nothing at all" <| fun () ->
             let html = Support.render { representativeModel with EventConsumer = { representativeModel.EventConsumer with CatchUpIsSlow = false } }
             Expect.isFalse (html.Contains Dom.Hooks.catchUp) "the sidebar line stays put"
-            Expect.isFalse (html.Contains "catching up") "and the header keeps saying what it was saying"
+            Expect.isFalse (html.Contains "Catching up") "and nothing anywhere else says it either"
 
         testCase "a catch-up worth waiting on is reported, with its progress" <| fun () ->
             let html = Support.render representativeModel
             Expect.isTrue (html.Contains (Dom.hookText Dom.Hooks.catchUp Dom.Text.catchingUp)) "the sidebar names it"
-            Expect.isTrue (html.Contains "catching up") "and so does the header"
             Expect.isTrue (html.Contains Dom.Hooks.lastProcessedOffset) "with how far it has got"
 
         // The flag describes a catch-up that is RUNNING, so it cannot outlive one: a timer
@@ -1247,7 +1265,34 @@ let private chromeTests =
         // contains its controls. Scanned HERE rather than pinned again beside the list's own
         // tests: the accessibility floor is asserted once and centrally, and a surface that
         // is invisible to the scan is a surface the floor does not cover.
-        let listShell = Support.render { representativeModel with TerminalList = true }
+        let listShell = Support.render { representativeModel with Pane = Some (OnList None) }
+        // Every notice at once — a dead feed, a credential the provider rejected, a session
+        // that stopped, and a deployment that can keep none of it. Scanned here for the same
+        // reason the terminal list is: a surface the floor's scan cannot see is a surface the
+        // floor does not cover, and the disclosures these notices fold their detail into are
+        // controls like any other.
+        //
+        // TWO renders, because the session leg SUBSUMES the history leg — a Process nobody can
+        // reach cannot serve its feed either, and the report says one problem — so a stalled
+        // feed is only ever reported over a session that is otherwise fine.
+        let stoppedShell =
+            Support.render
+                { representativeModel with
+                    Connection = Disconnected (Some "the session did not answer")
+                    Manager = Some "http://127.0.0.1:8321"
+                    CanKeepHistory = false
+                    EphemeralStorage = true
+                    GitHub =
+                        { representativeModel.GitHub with
+                            Status =
+                                { representativeModel.GitHub.Status with
+                                    MineCredential = Some { Kind = "static"; SignInRequired = Some "github rejected this credential" } } } }
+        let stalledShell =
+            Support.render
+                { representativeModel with
+                    Connection = Connected
+                    EventConsumer = { representativeModel.EventConsumer with Feed = FeedStalled "ECONNREFUSED" } }
+        let noticeShell = stoppedShell + stalledShell
 
         // Every input either wears the ONE field face (a ring that goes blue on focus) or
         // wears nothing at all, because the row around it carries the stroke. What is ruled
@@ -1263,7 +1308,7 @@ let private chromeTests =
         // The failure this pins is silent by nature: a control with `outline-2` and no
         // `outline` draws nothing, and you only find out with a keyboard.
         testCase "every button and link declares a visible focus ring" <| fun () ->
-            for classes in classesOf [ "button"; "a " ] (shell + settingsShell + listShell) do
+            for classes in classesOf [ "button"; "a "; "summary" ] (shell + settingsShell + listShell + noticeShell) do
                 Expect.isTrue
                     (classes.Contains "focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue")
                     (sprintf "a control has no visible focus ring: %s" classes)
@@ -1291,6 +1336,66 @@ let private chromeTests =
         // while breaking nothing, which is the shape this suite does not keep (AGENTS.md,
         // "Writing tests"). That focus is VISIBLE is the invariant, and the cases above are
         // what hold it.
+
+        // The degradation bar is fixed above all three panes on a phone, so its height and the
+        // room the panes leave for it are one number in three class strings — and they cannot
+        // be composed from a shared token, because Tailwind emits only classes that appear
+        // literally in the source. That makes drift between them silent in the worst way: the
+        // stylesheet simply lacks the class, the bar falls back to its content height, and the
+        // result is a bar overlapping the header or a band of dead space under it. Arithmetic,
+        // not design — the number may be any number, so long as it is the same one.
+        testCase "the bar's height and the room the panes leave for it are one number" <| fun () ->
+            let sizeOf (what: string) (token: string) =
+                let n = token.Substring (token.LastIndexOf '-' + 1)
+                Expect.isTrue (n |> Seq.forall System.Char.IsDigit && n <> "") (sprintf "%s ends in a size: %s" what token)
+                n
+            let height = sizeOf "the bar's height" Style.degradedBarHeight
+            Expect.equal (sizeOf "the overlays' inset" Style.degradedBarRoom) height "an overlay leaves exactly the bar"
+            Expect.equal (sizeOf "the column's padding" Style.degradedBarRoomPad) height "and so does the column"
+
+        // --- what a notice says first -----------------------------------------------------
+
+        /// The rendered page with every `<details …data-detail>` cut out of it: what a notice
+        /// says WITHOUT anyone opening anything.
+        let rec onTheSurface (html: string) : string =
+            match html.IndexOf Dom.Hooks.detail with
+            | -1 -> html
+            | at ->
+                let start = html.LastIndexOf ("<details", at)
+                let stop = html.IndexOf ("</details>", at)
+                if start < 0 || stop < 0 then html
+                else onTheSurface (html.Remove (start, stop + "</details>".Length - start))
+
+        // A disclosure is only a disclosure if the browser is the one making it. Written as a
+        // real `<details>`/`<summary>`, it arrives keyboard-operable and announced; written as
+        // a div with a click handler it arrives as neither, and looks identical.
+        testCase "every folded mechanism is a real details/summary" <| fun () ->
+            let rec check (from: int) (n: int) =
+                match noticeShell.IndexOf (Dom.Hooks.detail, from) with
+                | -1 -> n
+                | at ->
+                    let start = noticeShell.LastIndexOf ("<", at)
+                    let stop = noticeShell.IndexOf ("</details>", at)
+                    Expect.equal (noticeShell.Substring (start, "<details".Length)) "<details" "the element is a details"
+                    Expect.isTrue
+                        (stop > at && noticeShell.Substring(at, stop - at).Contains "<summary")
+                        "and it opens by a summary, not by a handler on something else"
+                    check (stop + 1) (n + 1)
+            Expect.isTrue (check 0 0 > 0) "the notices this shell renders do fold something away"
+
+        // The half of the split that can regress silently. Leading with the consequence is
+        // visible the moment anybody looks at the screen; losing the mechanism is not — a
+        // fault nobody can read is a fault nobody can report, and the words that go missing
+        // are the provider's and the transport's own.
+        testCase "a notice keeps its mechanism, and keeps it off the surface" <| fun () ->
+            let surface = onTheSurface noticeShell
+            for what, mechanism in
+                [ "the transport's reason for stopping", "the session did not answer"
+                  "the feed's fault", "ECONNREFUSED"
+                  "the provider's own words", "github rejected this credential"
+                  "why nothing can be kept here", Dom.Text.historyNotKeptWhy ] do
+                Expect.isTrue (noticeShell.Contains mechanism) (sprintf "%s is still in the document" what)
+                Expect.isFalse (surface.Contains mechanism) (sprintf "%s is not also on the surface" what)
     ]
 
 // What the session page must keep saying, whatever it comes to look like: one person wears

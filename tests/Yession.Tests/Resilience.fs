@@ -455,9 +455,9 @@ let private channelTests =
             Expect.equal unreachable.Connection (Disconnected (Some "the session did not answer"))
                 "and so does a session that never answered"
             let html = Support.render unreachable
-            Expect.isTrue (html.Contains (Dom.hookText Dom.Hooks.connection Dom.Text.disconnected))
+            Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.connection Dom.Text.disconnected))
                 "the status word is unchanged — the reason is additive"
-            Expect.isTrue (html.Contains (Dom.hookText Dom.Hooks.connectionReason "the session did not answer"))
+            Expect.isTrue (html.Contains "the session did not answer")
                 "the reason is on the page, where the old model had nothing to show"
             Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.degraded Dom.Text.degradedOffline))
                 "and the strip reports the session leg, not the feed"

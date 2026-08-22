@@ -198,7 +198,7 @@ let private tableTemplate
         | _, true -> "no filter selected — pick active or archived above"
         | _, false ->
             let hidden = List.length all - List.length views
-            sprintf "no sessions match this filter — %d hidden" hidden
+            sprintf "no sessions match — %d hidden" hidden
     let rows =
         match views with
         | [] ->
@@ -315,12 +315,10 @@ let private script =
       history.replaceState(null, '', a.getAttribute('href'))
       openRows()
     })
-    document.addEventListener('submit', async (e) => {
-      const f = e.target.closest('[data-create-session]'); if (!f) return
-      e.preventDefault()
-      const r = await fetch('/sessions' + location.search, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(new FormData(f)) })
-      if (r.ok) { swap(sessionsEl(), await r.text()); f.reset() }
-    })
+    // Creating is deliberately NOT intercepted here: the form is a real POST, and the browser
+    // follows its redirect into the new session. Swapping a table in instead would leave this
+    // page in charge of an act whose whole point is to leave it — and every other page learns
+    // about the new session from the rows stream anyway.
     // Declaring an MCP server (Plan 17): the only place a url is written, and the only
     // management action that can be REFUSED for a reason a human needs to read — a name
     // clash. So this one reports, where create/launch/stop only swap.
@@ -387,7 +385,7 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
         | [] ->
             [ html $"""
                 <tr>
-                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers declared — a session reaches only its own tools</td>
+                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers — a session reaches only its own tools</td>
                 </tr>""" ]
         | declarations -> declarations |> List.map (mcpRowTemplate views)
     let options =
@@ -465,13 +463,16 @@ let private bodyTemplate
             <header class="h-[88px] shrink-0 flex items-end pb-5 border-b border-hair">
               <h1 class="{Style.wordmark}">yession<span class="text-green">.</span> <span class="{Style.label}">manager</span></h1>
             </header>
-            <!-- The id is minted server-side (a Docker-safe Crockford id); only a human
-                 name is entered here. -->
-            <form class="flex flex-col gap-3 pt-6 pb-8" data-create-session>
-              <label class="{Style.label}" for="new-session-name">new session</label>
+            <!-- Creating takes nothing but the press. The id is minted server-side (a
+                 Docker-safe Crockford one) and a session is NAMED from inside itself, in the
+                 title field at the top of its own header, which reports back here over the
+                 control channel. Asking for the name here as well made two naming surfaces
+                 out of one fact: what was typed on this page never reached the session, so a
+                 session created as "design review" opened as its raw id with an empty title
+                 field, and the name had to be typed a second time to have any effect. -->
+            <form class="flex flex-col gap-3 pt-6 pb-8" method="post" action="/sessions" data-create-session>
+              <span class="{Style.label}">new session</span>
               <div class="flex flex-wrap items-center gap-3">
-                <input id="new-session-name" name="name" placeholder="display name" autocomplete="off"
-                  class="{Style.fieldOf "w-72 max-w-full"}">
                 <button type="submit" class="{Style.btnPrimary}">Create</button>
               </div>
             </form>
@@ -542,6 +543,13 @@ let private respond (res: ServerResponse) (status: int) (contentType: string) (b
 
 let private html (res: ServerResponse) (body: string) = respond res 200 "text/html; charset=utf-8" body
 
+/// POST-redirect-GET. `303` rather than `302` so the browser is required to follow it with a
+/// GET: what the caller lands on is a resource, not a resubmission of the form waiting to be
+/// re-fired by a reload.
+let private seeOther (res: ServerResponse) (location: string) =
+    res.writeHead (303, createObj [ "location", box location; "cache-control", box "no-store" ]) |> ignore
+    res.``end`` ""
+
 /// A string as a JS literal, for the one inline script below — so a URL containing a quote
 /// is data rather than syntax.
 [<Fable.Core.Emit("JSON.stringify($0)")>]
@@ -564,7 +572,7 @@ let private openingPage (target: string) : string =
 <html lang="en"><head><meta charset="utf-8"><title>Opening session</title>
 <style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}p{color:#444}</style>
 </head><body>
-<h1>Opening your session…</h1>
+<h1>Opening session…</h1>
 <p id="status">Waiting for it to answer.</p>
 <p><a id="target" href="%s">Open it directly</a></p>
 <script>
@@ -579,7 +587,7 @@ let private openingPage (target: string) : string =
     } catch (e) {
       if (attempts >= 40) {
         document.getElementById('status').textContent =
-          'The session started, but its address is still not answering after 20 seconds. ' +
+          'The session started, but its address is not answering after 20 seconds. ' +
           'If this deployment maps session ports through a proxy, that mapping has not appeared.'
         return
       }
@@ -664,6 +672,16 @@ let tryHandle
                     createObj [ "content-type", box "image/png"; "cache-control", box CachePolicy.shell ])
                 |> ignore
                 res.``end`` (decodeBase64 WebApp.iconPngBase64))
+        // Creating a session is asking to WORK in one. It used to answer with a refreshed
+        // table, which left the primary path at three acts — create, find the row, Launch —
+        // and then a fourth to open what you had just made. So the answer says where the
+        // session now is, and `/open` (below) does what it has always done: launch it if it
+        // is stopped and land the browser on its address.
+        //
+        // One answer, for every caller. A route that returned a fragment to some callers and
+        // a redirect to others would be two contracts wearing one address, and the one nobody
+        // was looking at is the one that would rot — which is precisely how the vanishing-row
+        // bug lived: two renderings of the session list, only one of them exercised.
         | "POST", "/sessions" ->
             Some (fun () ->
                 readBody req (fun body ->
@@ -673,8 +691,11 @@ let tryHandle
                         match formField body "id" with
                         | "" -> SessionId.value (SessionId.mint ())
                         | provided -> provided
-                    match pm.CreateSession id (formField body "name") with
-                    | Ok _ -> html res (tableNow ())
+                    // No name: a session is named from inside itself and reports it back
+                    // (`setDisplayName`), so `DisplayName` starts as the minted id and the
+                    // list shows that until somebody names it.
+                    match pm.CreateSession id "" with
+                    | Ok record -> seeOther res (sprintf "/sessions/%s/open" (SessionId.value record.SessionId))
                     | Error e -> respond res 400 "text/plain" e))
         // Declaring an MCP server (Plan 17). The ONE act that names a url, and the only
         // one that is not read-only. There is deliberately no per-session enable beside it:

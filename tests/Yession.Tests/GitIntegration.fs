@@ -199,6 +199,10 @@ let private hostGit (cp: obj) (args: string array) (cwd: string) : unit = jsNati
 /// srt skips the re-bind of a path that is itself the write path.
 let private fixturesIn (root: string) : string = sprintf "%s/fixtures" root
 
+/// Where THIS harness's checkouts land — the session's own layout, asked for rather than
+/// spelled out again at each of the ten places below that name a path under it.
+let private reposIn (root: string) : string = Sandboxes.SessionLayout.reposDir root
+
 /// A local bare repo with one commit on `main` — what the service clones from, over the
 /// `file` protocol the test config allows.
 let private makeBareFixture (root: string) (name: string) : string =
@@ -223,7 +227,11 @@ let private serviceSpending
     (root: string)
     (log: EventLog<SessionEvent>)
     : Repos.ReposService =
-    let reposDir = sprintf "%s/repos" root
+    // The session's own layout, not a second guess at it: these verbs run against a repos
+    // directory nested inside a workspace in production, and a harness that flattens that
+    // is a harness testing a shape nothing ships. The fixtures stay a SIBLING of it (see
+    // `fixturesIn`) — that rule is about ancestry, which nesting does not change.
+    let reposDir = reposIn root
     let fixtures = fixturesIn root
     mkdir nodeFs reposDir
     mkdir nodeFs fixtures
@@ -266,6 +274,56 @@ let private eventsOf (log: EventLog<SessionEvent>) : Async<SessionEvent list> =
         return page.Events |> List.map (fun envelope -> envelope.Event)
     }
 
+// --- Where a session puts its checkouts (cheap tier; fs only) ------------------------------
+// The layout is a claim about a TERMINAL: it starts in the workspace, so this is what
+// decides whether the agent's first `ls` shows the clones or an empty directory.
+
+let private layoutTests =
+    testList "the session's layout" [
+
+        testCase "a clone lands inside the workspace a terminal starts in" <| fun () ->
+            let dataDir = "/data/sessions/AAZ"
+            let workspace = Sandboxes.SessionLayout.workspaceFor dataDir SandboxName.defaultName
+            let repos = Sandboxes.SessionLayout.reposDir dataDir
+            Expect.isTrue
+                (repos.StartsWith (workspace + "/"))
+                "a checkout beside the workspace is one nobody sees without being told its path"
+
+        // The repos directory is shared by every sandbox — one parameter, the session's data
+        // dir, so there can only be one — but a WORKSPACE is the thing two sandboxes exist to
+        // keep apart.
+        testCase "a named sandbox works somewhere the default one does not" <| fun () ->
+            let dataDir = "/data/sessions/AAZ"
+            let named = SandboxName.create "review" |> expect
+            Expect.notEqual
+                (Sandboxes.SessionLayout.workspaceFor dataDir named)
+                (Sandboxes.SessionLayout.workspaceFor dataDir SandboxName.defaultName)
+                "what happens in one sandbox does not happen in the other"
+
+        // A data directory outlives its process, which is what makes a checkout survive a
+        // relaunch. Left at the old path the checkouts are not deleted, they are INVISIBLE:
+        // the listing scans the new path, reports nothing, and the agent re-clones over work
+        // that was never committed.
+        testCase "checkouts from the old layout are moved, not stranded" <| fun () ->
+            let dataDir = mkdtemp nodeFs nodeOs
+            mkdir nodeFs (sprintf "%s/octo/hello/.git" (Sandboxes.SessionLayout.legacyReposDir dataDir))
+            let repos = Sandboxes.SessionLayout.prepareReposDir dataDir
+            Expect.isTrue
+                (exists nodeFs (sprintf "%s/octo/hello/.git" repos))
+                "the checkout is where the listing now looks"
+
+        // `renameSync` onto a non-empty directory throws, and this runs at boot: a session
+        // that somehow had both would fail to start rather than decline the adoption.
+        testCase "a session already on the current layout still boots" <| fun () ->
+            let dataDir = mkdtemp nodeFs nodeOs
+            mkdir nodeFs (sprintf "%s/octo/hello/.git" (Sandboxes.SessionLayout.legacyReposDir dataDir))
+            mkdir nodeFs (sprintf "%s/octo/current/.git" (Sandboxes.SessionLayout.reposDir dataDir))
+            let repos = Sandboxes.SessionLayout.prepareReposDir dataDir
+            Expect.isTrue
+                (exists nodeFs (sprintf "%s/octo/current/.git" repos))
+                "the layout it already had is the one it keeps"
+    ]
+
 let private srtTests =
     testList "repo verbs under srt (local fixtures)" [
         testCaseAsync "add clones into the repos dir, records the fact, and re-add is a quiet no-op" <| async {
@@ -278,7 +336,7 @@ let private srtTests =
             let listing = expect listing
             Expect.equal listing.Branch "main" "on the fixture's default branch"
             Expect.isFalse listing.Dirty "clean checkout"
-            Expect.isTrue (exists nodeFs (sprintf "%s/repos/octo/hello/.git" root)) "checkout landed at owner/repo"
+            Expect.isTrue (exists nodeFs (sprintf "%s/octo/hello/.git" (reposIn root))) "checkout landed at owner/repo"
             let! events = eventsOf log
             match events with
             | [ SessionEvent.RepoAdded added ] ->
@@ -294,8 +352,43 @@ let private srtTests =
             let! listed = service.ListRepos ()
             Expect.equal
                 (expect listed)
-                [ { Repo = repo; Branch = "main"; Dirty = false; Path = sprintf "%s/repos/octo/hello" root } ]
+                [ { Repo = repo; Branch = "main"; Dirty = false; Path = sprintf "%s/octo/hello" (reposIn root) } ]
                 "the listing is the filesystem's answer, and it says where"
+        }
+
+        // Every case here uses an absolute mkdtemp; a SESSION's data directory need not be
+        // one — the unset-`YESSION_SESSION_DATA` default is relative, and so is what the
+        // live suite passes. That difference was invisible and total: the clone landed and
+        // then every verb, `add_repo`'s own listing included, reported `cannot change to
+        // ...: No such file or directory` about the checkout it had just made, because
+        // `git -C <relative>` runs in a sandbox whose cwd is already that directory and so
+        // resolves it twice. A repo on disk that no verb would admit to.
+        testCaseAsync "a relative repos directory is still one, however git is asked about it" <| async {
+            let fixtures = mkdtemp nodeFs nodeOs
+            makeBareFixture fixtures "hello" |> ignore
+            // Relative on purpose. Fixtures stay absolute so the only variable is this.
+            let relRepos =
+                Sandboxes.SessionLayout.reposDir
+                    (sprintf "tests/Yession.Tests/out/.data/relative-%s" (string (Guid.NewGuid ())))
+            mkdir nodeFs relRepos
+            let log = freshLog ()
+            let service =
+                Repos.create
+                    { Backend = SrtBackend
+                      ReposDir = relRepos
+                      VisibleAt = Sandboxes.reposVisibleAt SrtBackend relRepos
+                      ExtraReadPaths = [ fixturesIn fixtures ]
+                      Git = namedGit
+                      AllowedDomains = []
+                      AllowProtocol = "file"
+                      CloneUrl = fun ref -> sprintf "file://%s/%s.git" (fixturesIn fixtures) (RepoRef.repo ref)
+                      ResolveToken = fun _ -> async { return None }
+                      OnNetworkFailure = fun _ _ -> async { return () }
+                      Log = log }
+                |> expect
+            let repo = RepoRef.create "octo/hello" |> expect
+            let! listing = service.AddRepo caller repo
+            Expect.equal (expect listing).Branch "main" "the verb reports the checkout it made"
         }
 
         testCaseAsync "a git that cannot run inside the sandbox refuses the verb in words that name a knob" <| async {
@@ -382,7 +475,7 @@ let private srtTests =
             // this suite cannot see that failure; what it can see is the flag that avoids
             // it, which is the absence of the directory the copy would have filled.
             Expect.isFalse
-                (exists nodeFs (sprintf "%s/repos/octo/hello/.git/hooks" root))
+                (exists nodeFs (sprintf "%s/octo/hello/.git/hooks" (reposIn root)))
                 "no hooks directory to populate (the clone asks for no templates)"
         }
 
@@ -412,8 +505,8 @@ let private srtTests =
             let service = serviceIn root log
             let repo = RepoRef.create "octo/hello" |> expect
             let! _ = service.AddRepo caller repo
-            let checkout = sprintf "%s/repos/octo/hello" root
-            let marker = sprintf "%s/repos/PWNED" root
+            let checkout = sprintf "%s/octo/hello" (reposIn root)
+            let marker = sprintf "%s/PWNED" (reposIn root)
             // What a poisoned WorkSandbox could plant: an executable hook, and a config
             // pointing fsmonitor at it. Both are inside the sandbox's own write set, so
             // only the per-invocation GIT_CONFIG_* overrides stand between them and
@@ -444,7 +537,7 @@ let private srtTests =
             makeBareFixture root "hello" |> ignore
             let service = serviceIn root (freshLog ())
             let repo = RepoRef.create "octo/hello" |> expect
-            let checkout = sprintf "%s/repos/octo/hello" root
+            let checkout = sprintf "%s/octo/hello" (reposIn root)
             let mutable halfMade = false
             let mutable running = true
             // Watch the visible path for as long as the clone runs. There are only two
@@ -480,9 +573,9 @@ let private srtTests =
             let repo = RepoRef.create "octo/missing" |> expect
             let! added = service.AddRepo caller repo
             Expect.isError added "a clone of something that is not there fails"
-            Expect.isFalse (exists nodeFs (sprintf "%s/repos/octo/missing" root)) "nothing at the visible path"
+            Expect.isFalse (exists nodeFs (sprintf "%s/octo/missing" (reposIn root))) "nothing at the visible path"
             Expect.equal
-                (readDirSafe nodeFs (sprintf "%s/repos/%s" root Repos.stagingDirName))
+                (readDirSafe nodeFs (sprintf "%s/%s" (reposIn root) Repos.stagingDirName))
                 [||]
                 "and nothing left in the staging area"
             let! events = eventsOf log
@@ -497,7 +590,7 @@ let private srtTests =
             // Exactly what a clone that died partway used to leave at the visible path: a
             // repository with no commit in it. Nothing can produce this any more, but a
             // machine that ran the old code still has one.
-            let checkout = sprintf "%s/repos/octo/hello" root
+            let checkout = sprintf "%s/octo/hello" (reposIn root)
             mkdir nodeFs checkout
             hostGit childProcess [| "init"; "-b"; "main" |] checkout
             let! added = service.AddRepo caller repo
@@ -531,13 +624,119 @@ let private srtTests =
             let human : Repos.RepoCaller = { Actor = PeerRef ada; Credential = PeerRef ada }
             let! removed = service.RemoveRepo human repo
             expect removed
-            Expect.isFalse (exists nodeFs (sprintf "%s/repos/octo/hello" root)) "checkout gone"
+            Expect.isFalse (exists nodeFs (sprintf "%s/octo/hello" (reposIn root))) "checkout gone"
             let! events = eventsOf log
             match events |> List.rev |> List.head with
             | SessionEvent.RepoRemoved r -> Expect.equal r.Actor (PeerRef ada) "the human is the acting party"
             | other -> failwithf "expected RepoRemoved last, got %A" other
             let! refetch = service.FetchRepo caller repo
             Expect.isError refetch "a removed repo is legibly not here"
+        }
+    ]
+
+[<Emit("process.execPath")>]
+let private nodeExecutable : string = jsNative
+
+// --- [Ports; Native; Srt]: the session's own composition, without a model -------------------
+//
+// The verbs above are driven against a config this file writes. What that cannot reach is the
+// one the SESSION writes — and that is where the fault lived: a relative data directory
+// flowed from the composition root into `Repos.create`, `git -C` resolved every path twice,
+// and every verb reported a failure about a checkout sitting right there.
+//
+// The live case below could not catch it either. It settles the moment the checkout appears,
+// which is while the agent is still streaming, so it never observes what the VERB said. This
+// one does, deterministically: a real Session Process over its real composition, a data
+// directory that is relative on purpose, a checkout planted where the session will look, and
+// the answer read off the `repos` query — the same projection a person's settings surface
+// shows. No model, so nothing here turns on what a model decides to call.
+
+let private reposQueryDeadlineMs = 30_000
+
+let private compositionTests =
+    testList "the repos the session itself reports" [
+        testCaseAsync "a session reads back a checkout in its own repos directory" <| async {
+            // RELATIVE on purpose: this is the condition the harness above never had, and the
+            // one that broke every verb. `Fs.absolute` at the root and at `Repos.create` is
+            // what this is holding down.
+            let dataDir =
+                sprintf "tests/Yession.Tests/out/.data/repos-query-%s" (string (Guid.NewGuid ()))
+            let! pm =
+                ProcessManager.create
+                    { ProcessManager.Options.defaults dataDir nodeExecutable [ "app/SessionMain.js" ] with
+                        Strategy = Some Strategy.localhost }
+            let record = pm.CreateSession "repos-query" "Repos" |> expect
+
+            // Planted BEFORE the launch, so the session finds it rather than races it. A real
+            // repository, because the answer under test is git's: the branch it is on.
+            let sessionDir = sprintf "%s/%s" dataDir record.DataDir
+            let checkout = sprintf "%s/octo/hello" (Sandboxes.SessionLayout.reposDir sessionDir)
+            mkdir nodeFs checkout
+            hostGit childProcess [| "init"; "-b"; "main" |] checkout
+            writeFile nodeFs (sprintf "%s/README.md" checkout) "planted\n"
+            hostGit childProcess [| "add"; "." |] checkout
+            hostGit childProcess [| "commit"; "-m"; "planted" |] checkout
+
+            let! launched = pm.Launch record.SessionId
+            let port = launched |> expect
+            let sessionUrl = sprintf "http://127.0.0.1:%d" port
+            let! opened = OidcHttp.openSession sessionUrl
+
+            let frames = ResizeArray<QueryFrame> ()
+            let subscription =
+                Sse.subscribe
+                    (sessionUrl + "/queries")
+                    [ "cookie", OidcHttp.cookieHeader opened.Jar ]
+                    (fun data ->
+                        match Codec.fromString Codec.queryFrame data with
+                        | Ok frame -> frames.Add frame
+                        | Error _ -> ())
+
+            let reposRows () =
+                frames
+                |> Seq.tryPick (fun frame ->
+                    match frame with
+                    | QueryValued (name, RowsOf rows) when QueryName.value name = "repos" -> Some rows
+                    | _ -> None)
+
+            let! _ = settledWithin reposQueryDeadlineMs (fun () -> (reposRows ()).IsSome)
+
+            // A query that FAILS to read sends nothing — there is no error frame — so a red
+            // here is a silence, and silence has three causes worth telling apart: the stream
+            // never connected, the repos capability never started (no declaration), or it
+            // started and git could not read the checkout (declared, never valued). That last
+            // one is the fault this case exists for, and without this line all three print
+            // the same timeout.
+            let declared =
+                frames
+                |> Seq.tryPick (fun frame ->
+                    match frame with
+                    | QueriesDeclared defs -> Some (defs |> List.map (fun d -> QueryName.value d.Name))
+                    | _ -> None)
+            let arrived =
+                sprintf
+                    "%d frame(s); declared: %s; repos valued: %b"
+                    frames.Count
+                    (match declared with
+                     | Some names -> String.concat ", " names
+                     | None -> "(the stream never declared anything)")
+                    (reposRows ()).IsSome
+
+            match reposRows () with
+            | Some [ row ] ->
+                let cell key = row |> List.tryPick (fun (k, v) -> if k = key then Some v else None)
+                Expect.equal (cell "repo") (Some (CellText "octo/hello")) "the checkout it was given"
+                // The assertion the fault would have failed: this is git's answer about the
+                // checkout, and getting it means `git -C` reached it.
+                Expect.equal (cell "branch") (Some (CellText "main")) "on the branch git says it is on"
+            | Some other -> failwithf "expected exactly the planted repo, got %A (%s)" other arrived
+            | None ->
+                failwithf
+                    "the repos query never said what is checked out here — %s. A declared query that never values is one whose read failed, which is what a relative repos directory does to every verb."
+                    arrived
+
+            subscription.Stop ()
+            do! pm.StopAll ()
         }
     ]
 
@@ -560,9 +759,6 @@ let private srtTests =
 // broken, and the report is what says which way: no turn ran at all (no agent item), a turn ran
 // and the clone was refused (the agent's words carry git's), or the clone hung (a turn in
 // flight, nothing on disk).
-
-[<Emit("process.execPath")>]
-let private nodeExecutable : string = jsNative
 
 [<Emit("(() => { try { return $0.readdirSync($1).join(', ') || '<empty>' } catch (e) { return '<' + (e.code || e.message) + '>' } })()")>]
 let private listDir (fs: obj) (path: string) : string = jsNative
@@ -593,7 +789,13 @@ let private liveClone =
             let! ada = connectClient (sprintf "http://127.0.0.1:%d/signal" port) opened.PeerToken "ada" "Ada"
 
             let sessionDir = sprintf "%s/%s" dataDir record.DataDir
-            let reposDir = sprintf "%s/repos" sessionDir
+            // ASKED FOR, never re-derived: this is the session's own answer for where its
+            // checkouts live, and a second `sprintf` here is exactly the drift `SessionLayout`
+            // exists to prevent. It had one — the repos directory moved inside the workspace
+            // and this line kept looking beside it, so the case reported "no checkout" about a
+            // checkout sitting one directory away. Only the release gate runs this tier, so the
+            // stale copy could not be caught anywhere it would have been cheap to catch.
+            let reposDir = Sandboxes.SessionLayout.reposDir sessionDir
             let checkout = sprintf "%s/%s" reposDir liveRepo
 
             /// Everything a reader needs to tell the three faults apart, printed whatever happens.
@@ -652,7 +854,12 @@ let private liveClone =
 let tests =
     testList "GitIntegration" [
         pureTests
+        layoutTests
         Tag.needs "Repo verbs (srt)" [ Tag.Srt ] (fun () -> srtTests)
+        Tag.needs
+            "Repos the session reports"
+            [ Tag.Ports; Tag.Native; Tag.Srt ]
+            (fun () -> compositionTests)
         Tag.needs
             "add_repo (live model, real GitHub)"
             [ Tag.LiveAgent; Tag.Ports; Tag.Native; Tag.Srt ]

@@ -25,8 +25,14 @@ let private expect =
 
 let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local-session") |> expect
 let private port = Interop.envOr "YESSION_PORT" "0" |> int
+// ABSOLUTE, whatever it was given. The default below is relative, and so is what the test
+// harness passes; every path this session stores, binds into a sandbox, or reports to a
+// person is derived from it. A relative one still WORKS for anything resolved once — which
+// is why it survived this long — and silently breaks whatever resolves it twice. `Repos`
+// guards its own boundary too (see `Repos.create`): that is the same rule at the place a
+// relative path becomes a wrong answer rather than the place it is born.
 let private dataDir =
-    Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId))
+    Fs.absolute (Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId)))
 
 // The control channel to the Manager (Step 24): supervision reports, secrets custody,
 // AND this launch's OAuth client registration all authenticate with the same
@@ -102,18 +108,17 @@ let private secretsCapabilitiesFor (sessionId: SessionId) =
 // The session's repos directory (Plan 14): one host path both sandboxes see — the git
 // verbs clone into it, the WorkSandbox reads and builds it. Created at boot so its
 // existence is never a per-operation question, and living in the data dir so a checkout
-// survives idle reaping and relaunch with the session.
-let private reposDir = sprintf "%s/repos" dataDir
-do Fs.ensureDir reposDir
+// survives idle reaping and relaunch with the session. WHERE under the data dir is
+// `Sandboxes.SessionLayout`'s to say, because the answer is a statement about the
+// workspace a terminal opens in and not something this file can decide alone.
+let private reposDir = Sandboxes.SessionLayout.prepareReposDir dataDir
 
-/// The session's WorkSandboxes (Plan 15, stage 2), by name. `default` is the sandbox
-/// every session has always had and keeps its workspace path, so nothing about an
-/// existing session changes; a named one gets its own workspace under `sandboxes/<name>`,
-/// because two sandboxes exist precisely so that what happens in one does not happen in
-/// the other. The repos directory is shared by all of them — that is what it is for.
-/// `credentials` is a parameter rather than a module value because resolving one is a
-/// Plan 08 question answered further down this file (it needs the control channel and the
-/// connection-status cache), and a composition root should not have to be read backwards.
+/// The session's WorkSandboxes (Plan 15, stage 2), by name — each in the workspace
+/// `SessionLayout` gives it, all of them sharing the one repos directory, which is what
+/// it is for. `credentials` is a parameter rather than a module value because resolving
+/// one is a Plan 08 question answered further down this file (it needs the control channel
+/// and the connection-status cache), and a composition root should not have to be read
+/// backwards.
 let private makeSandboxes
     (credentials: WorkSandboxes.CredentialSource list)
     : Yession.SessionProcess.EventLog<SessionEvent> -> WorkSandboxes.WorkSandboxes =
@@ -136,9 +141,7 @@ let private makeSandboxes
     let workspaceFor (sandbox: SandboxName) =
         match workBackend with
         | HostBackend
-        | SrtBackend ->
-            if sandbox = SandboxName.defaultName then Some (sprintf "%s/workspace" dataDir)
-            else Some (sprintf "%s/sandboxes/%s/workspace" dataDir (SandboxName.value sandbox))
+        | SrtBackend -> Some (Sandboxes.SessionLayout.workspaceFor dataDir sandbox)
         | DockerBackend -> workSpec.WorkingDirectory
     let sharedRepos =
         match workBackend with

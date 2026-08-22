@@ -279,7 +279,7 @@ let private liveModeTests =
                                  |> Seq.filter (fun r -> r.Kind = TranscriptInput)
                                  |> Seq.map (fun r -> r.Data)
                                  |> List.ofSeq)
-                                [ "echo drained\n" ]
+                                [ "echo drained\r\n" ]
                                 "the drain's command line is recorded as input, and it alone"
                 })
 

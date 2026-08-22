@@ -62,7 +62,8 @@ type ProcessManager =
       /// Every registered session with its runtime status.
       Sessions : unit -> SessionView list
       /// Subscribe to session changes: the sink receives every session with its status
-      /// immediately, then a fresh full list on every launch, exit, and display-name change.
+      /// immediately, then a fresh full list on every launch, every exit, and every write to
+      /// the registry (see `commit` — create, rename, archive, unarchive).
       /// The VIEWS, not a wire frame — `/sessions/stream` projects them to the registry's
       /// Running set (`registryFrameOf`), the management page renders them as its table, and
       /// one publish serves both. Returns an unsubscribe.
@@ -570,33 +571,46 @@ let createWithUi
     // ordinary version promotion restarted the Manager under it.
     publishMcpServers ()
 
-    // Declare an MCP server. Durable before visible, like every other registry write, and
-    // refused rather than resolved when the name would collide — the operator is standing
-    // right there and can pick another.
+    /// Take a new registry state: durable, then assigned, then announced on every hub that
+    /// projects the registry. THE way to write `state` — a caller that could save without
+    /// publishing is not a caller to be trusted with three lines, it is the bug this was.
+    /// `createSession` wrote the record, told the MCP hub, and never told the session hub, so
+    /// the retained snapshot kept a pre-create list until the next launch, exit or rename:
+    /// SSR rendered the new session, then the rows stream handed every page that connected in
+    /// that window a list without it and the row disappeared in front of whoever made it.
+    ///
+    /// Both hubs, on every write, without asking which one this change was "really" about.
+    /// The session list and each session's resolved MCP set are both projections of `state`,
+    /// and a "did this change affect that projection" test here would be a second, quietly
+    /// disagreeing implementation of the projection itself — the same argument
+    /// `publishMcpServers` already makes for republishing whole sets to every session. The
+    /// redundant frame is cheap and idempotent at both ends: a set that did not move keeps
+    /// its connections (`McpClient.apply`), and a table that did not move re-renders equal.
+    let commit (next: ManagerState) : unit =
+        ManagerStore.save statePath next
+        state <- next
+        publishSessions ()
+        publishMcpServers ()
+
+    // Declare an MCP server. Refused rather than resolved when the name would collide — the
+    // operator is standing right there and can pick another.
     let declareMcpServer (declaration: McpDeclaration) : Result<unit, string> =
         match ManagerState.declareMcpServer declaration state with
         | Error e -> Error e
         | Ok next ->
-            ManagerStore.save statePath next
-            state <- next
-            publishMcpServers ()
+            commit next
             Ok ()
 
     let withdrawMcpServer (name: McpServerName) (audience: McpAudience) : unit =
         let next = ManagerState.withdrawMcpServer name audience state
-        if next.McpServers <> state.McpServers then
-            ManagerStore.save statePath next
-            state <- next
-            publishMcpServers ()
+        if next.McpServers <> state.McpServers then commit next
 
     // Update a session's display name (the reported title). Idempotent: unknown sessions and
-    // no-op renames are skipped, and the registry write is durable before it is visible.
+    // no-op renames are skipped.
     let setDisplayName (sessionId: SessionId) (displayName: string) : unit =
         match ManagerState.tryFind sessionId state with
         | Some record when record.DisplayName <> displayName ->
-            state <- ManagerState.setDisplayName sessionId displayName state
-            ManagerStore.save statePath state
-            publishSessions ()
+            commit (ManagerState.setDisplayName sessionId displayName state)
         | _ -> ()
 
     // The control channel's activity report (Plan 11): the secret identifies the reporting
@@ -851,7 +865,7 @@ let createWithUi
                             async {
                                 match! b.CompleteCallback state code with
                                 | Ok _ ->
-                                    respondHtml 200 (connectionsCallbackPage "Connected" "You can close this tab and return to your session.")
+                                    respondHtml 200 (connectionsCallbackPage "Connected" "Close this tab and return to your session.")
                                 | Error e ->
                                     respondHtml 400 (connectionsCallbackPage "Sign-in failed" e)
                             })
@@ -897,13 +911,11 @@ let createWithUi
             match ManagerState.addSession record state with
             | Error e -> Error e
             | Ok next ->
-                // Durable before visible: the registry write precedes any use.
-                ManagerStore.save statePath next
-                state <- next
-                // A brand-new session may already be named by a host-wide declaration
-                // (Plan 17), and the hub retains per session — so seed its set now rather
-                // than leaving it empty until the next declaration change.
-                publishMcpServers ()
+                // `commit` is the whole of it: durable before visible, the new row on the
+                // session hub, and — because a brand-new session may already be named by a
+                // host-wide declaration (Plan 17), and that hub retains per session — its
+                // resolved set seeded rather than left empty until the next declaration.
+                commit next
                 Ok record
 
     let launch (sessionId: SessionId) : Async<Result<int, string>> =
@@ -1072,10 +1084,7 @@ let createWithUi
                     match ManagerState.archive sessionId (clock ()) state with
                     | Error reason -> return Error reason
                     | Ok next ->
-                        // Durable before visible, as every registry write here is.
-                        ManagerStore.save statePath next
-                        state <- next
-                        publishSessions ()
+                        commit next
                         return Ok ()
         }
 
@@ -1089,9 +1098,7 @@ let createWithUi
             match ManagerState.unarchive sessionId state with
             | Error reason -> Error reason
             | Ok next ->
-                ManagerStore.save statePath next
-                state <- next
-                publishSessions ()
+                commit next
                 Ok ()
 
     // The reaper's sweep (Plan 11). Every rule about WHEN a session may be stopped lives in

@@ -119,10 +119,18 @@ type ViewActions =
       /// back into a selector. Without this, closing a tab strands focus on a control that
       /// has just been removed from the document.
       FocusChat : string -> unit
-      /// Hand focus to whichever DVR control replaced the one just pressed (Plan 14,
-      /// stage 7): Rewind and Jump-to-live each remove the other from the document, so the
-      /// press that swaps them would otherwise strand focus on a control that has gone.
-      FocusDvr : TerminalId -> unit }
+      /// Hand focus to a terminal's watch toggle when the reader has been stranded (Plan 14,
+      /// stage 7; Plan 25, stage 3).
+      ///
+      /// The toggle itself never needs this: it relabels in place, so a press keeps its own
+      /// focus. What does is the AUTOMATIC catch-up — a rewound cast playing off its end
+      /// unmounts the player under whoever was focused inside it — and that is the only
+      /// caller left now the four differently-named exits have become one control.
+      FocusWatch : unit -> unit
+      /// Scroll a terminal's history to one of its commands and mark it (Plan 25, stage 3) —
+      /// the browser's half of "show in terminal". Imperative for the same reason `FocusPane`
+      /// is: the model moves the reader's position, and only the document can scroll.
+      RevealBlock : TerminalId -> BlockId -> unit }
 
 module ViewActions =
     /// A no-op action set for rendering the view to a string (SSR + tests). The handlers
@@ -155,7 +163,8 @@ module ViewActions =
           ResizeTerminal = fun _ _ _ -> ()
           FocusPane = ignore
           FocusChat = ignore
-          FocusDvr = ignore }
+          FocusWatch = ignore
+          RevealBlock = fun _ _ -> () }
 
 module View =
 
@@ -202,6 +211,35 @@ module View =
         | PeerRef peer -> ClientModel.nameOf peer model
         | UserRef _ | ActorRef.Agent | ActorRef.SessionProcess | ActorRef.System -> authorLabel actor
 
+    /// The mechanism behind a notice, folded away under one word.
+    ///
+    /// Every surface that reports a fault has two things to say and they are not equals: what
+    /// it costs the reader, and why it is happening. The second used to sit beside the first
+    /// in the same faint sentence — a transport's reason, an OAuth provider's words, the
+    /// browser's storage rules — and on the strip over the timeline it was CONCATENATED with
+    /// the first by a `·`, so the promise that the work was safe arrived as the tail of a
+    /// sentence about an attempt counter.
+    ///
+    /// So: the consequence stays on the surface, and this takes the rest. A real
+    /// `<details>`/`<summary>`, like the timeline's tool runs and a block's facts — the
+    /// browser's own disclosure, so it is keyboard-operable and announced without any of it
+    /// being this view's to arrange. Nothing is hidden from a reader who cannot open it
+    /// either: the words are in the document, which is what a `<details>` is FOR and what a
+    /// tooltip would not have been.
+    ///
+    /// TOTAL over an empty list, so a surface with no mechanism to explain renders no
+    /// control — a disclosure over nothing is a promise of detail that is not there.
+    let private detailNote (token: string) (why: string list) : TemplateResult =
+        match why |> List.filter (fun w -> w <> "") with
+        | [] -> Lit.nothing
+        | why ->
+            let line (w: string) = html $"""<span class="{Style.detailBody}">{w}</span>"""
+            html $"""
+                <details class="{Style.detailNote}" data-detail="{token}">
+                  <summary class="{Style.detailSummary}">{Dom.Text.details}</summary>
+                  {why |> List.map line}
+                </details>"""
+
     let private messageStatusLabel =
         function
         | Complete -> Dom.Text.complete
@@ -236,19 +274,44 @@ module View =
     /// nothing to reopen), a Manager to ask, and a session to ask for; absent any of them
     /// the ordinary status renders. The view never reads the DOM, so there is no path that
     /// produces a button with nowhere to go — the shell omitting the meta tag is enough.
-    let private reconnectOffer (actions: ViewActions) (model: ClientModel) : TemplateResult option =
+    /// The way back, wherever the report is. ONE definition, because it is one act and it
+    /// now has two homes: the card in the nav column, and the bar for where the column cannot
+    /// be seen. It briefly had only the first — which, once the column's mount became
+    /// `max-md:hidden`, meant a phone could be told its session had stopped and offered
+    /// nothing whatever to do about it.
+    ///
+    /// TOTAL over the model for the same reasons the card always was: reopening needs a
+    /// settled disconnection, a Manager to ask, and a session to ask for. Absent any of them
+    /// there is no link, rather than a button with nowhere to go.
+    let private reopenAction (actions: ViewActions) (model: ClientModel) (extra: string) : TemplateResult option =
         match model.Connection, model.Manager, model.Session with
-        | Disconnected (Some reason), Some origin, Some sessionId ->
+        | Disconnected (Some _), Some origin, Some sessionId ->
             let target = sprintf "%s/sessions/%s/open" origin (SessionId.value sessionId)
+            Some (
+                html $"""
+                    <a class="{Style.cls [ Style.btnPrimary; extra ]}"
+                       href="{target}"
+                       data-session-reopen="{target}"
+                       @click={Ev(fun _ -> actions.ReopenSession ())}>{Dom.Text.reopenSession}</a>""")
+        | _ -> None
+
+    let private reconnectOffer (actions: ViewActions) (model: ClientModel) : TemplateResult option =
+        match model.Connection, reopenAction actions model Style.noAgentAction with
+        | Disconnected (Some reason), Some action ->
             // What reopening actually costs. Under a `{id}` template the session returns to
             // the same address, so the doc in this browser is still its doc and syncs on
             // reconnect. Addressed by port it returns somewhere new, and everything written
             // here since it went is stranded — say so before they click, not after.
+            //
+            // The transport's own reason for stopping goes BEHIND the disclosure, with the
+            // storage rule when there is one. It used to open this card — so the sentence
+            // somebody reads before pressing a button began with a fault they can do nothing
+            // about, and the one that told them whether their work was safe came second.
             let reopenPromise =
-                if model.EphemeralStorage then
-                    "It reopens at a new address, so anything written here since it stopped will not come with it."
-                else
-                    "Your work is saved here and syncs when it comes back."
+                if model.EphemeralStorage then Dom.Text.reopenPromiseEphemeral else Dom.Text.reopenPromise
+            let why =
+                [ reason
+                  if model.EphemeralStorage then Dom.Text.ephemeralAddress ]
             Some (
                 html
                     $"""
@@ -257,76 +320,130 @@ module View =
                       <div class="{Style.noAgentPrompt}">
                         <span class="{Style.noAgentEdge}"></span>
                         <div class="{Style.noAgentBody}">
-                          <span class="{Style.small}">{reason}. {reopenPromise}</span>
-                          <a class="{Style.cls [ Style.btnPrimary; Style.noAgentAction ]}"
-                             href="{target}"
-                             data-session-reopen="{target}"
-                             @click={Ev(fun _ -> actions.ReopenSession ())}>{Dom.Text.reopenSession}</a>
+                          <span class="{Style.small}">{reopenPromise}</span>
+                          {detailNote "session-gone" why}
+                          {action}
                         </div>
                       </div>
                     </div>"""
             )
         | _ -> None
 
+    /// What the client's transport is doing, when it is doing something worth saying —
+    /// and `None` while both legs are healthy.
+    ///
+    /// Nothing is said about health. "Connected", "Up to date" and a green dot used to be on
+    /// three surfaces at once (the header, the sidebar's sync row, and the sidebar again on
+    /// the feed's line), which made the least actionable fact on the screen the loudest one.
+    /// What is left is the transport's own state token on `data-connection` — a value a test
+    /// reads, not words a person does.
+    ///
+    /// ONE function, two mounts: the nav column carries the report where the column is on
+    /// screen, and `degradedBar` carries it where the column is not — a phone, or a collapsed
+    /// nav. They cannot disagree, and the visibility rule means only ever one is seen.
+    ///
+    /// Three fields: the token a test reads, the status word, and everything else folded
+    /// away behind it.
+    ///
+    /// The status word IS the consequence at a glance — offline is a thing you understand
+    /// from the word — so what the disclosure holds is the rest of the answer somebody asks
+    /// next: what it costs (your work is safe / your work is not), why it happened, and, on a
+    /// deployment that cannot keep the promise, why it cannot. That ordering is also what
+    /// makes the bar affordable on a phone: one line, a known height, and the panes under it
+    /// reserve exactly that much and no more.
+    let private connectionReport
+        (model: ClientModel)
+        : (string * TemplateResult * string list) option =
+        // Why the promise reads the way it does. Only an ephemeral deployment has anything to
+        // explain: on a stable address the sentence IS the whole story.
+        let promise =
+            if model.EphemeralStorage then Dom.Text.localFallbackEphemeral else Dom.Text.localFallback
+        let why =
+            [ if model.EphemeralStorage then Dom.Text.ephemeralAddress ]
+        let running (word: string) =
+            html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>{word}</span>"""
+        let stopped (word: string) = html $"""<span class="{Style.statusErr}">{word}</span>"""
+        match model.Connection, model.EventConsumer.Feed with
+        // The session leg subsumes the history leg: a Process that cannot be reached cannot
+        // serve its feed either, and one report is the honest account of one problem.
+        | Disconnected reason, _ ->
+            Some (Dom.Text.degradedOffline, stopped "not connected", promise :: (Option.toList reason @ why))
+        | Reconnecting, _ -> Some (Dom.Text.degradedReconnecting, running "reconnecting", promise :: why)
+        | _, FeedRetrying (attempt, reason) ->
+            Some (Dom.Text.feedRetrying, running "history retrying", promise :: sprintf "%s · attempt %d" reason attempt :: why)
+        | _, FeedStalled reason -> Some (Dom.Text.feedPaused, stopped "history paused", promise :: reason :: why)
+        // Connecting is the state every client starts in, so it is not a degradation and says
+        // nothing — a strip that flashed on every load would be chrome, not news.
+        | Connecting, FeedLive
+        | Connected, FeedLive -> None
+
     let private connectionSection (actions: ViewActions) (model: ClientModel) : TemplateResult =
         let consumer = model.EventConsumer
-        // The two legs are reported separately because they fail separately: `data-connection`
-        // is the data channel (collaborative state), `data-feed` (on the section, always
-        // carrying its exact token) is the HTTP history feed. But HEALTHY is one quiet line —
-        // faint caps behind a green dot. Colour, the feed's own line, and the catch-up
-        // offsets appear only while a leg actually needs attention; four stacked green
-        // status lines said "everything is fine" louder than anything else on the page.
-        let dot, connClass =
+        // Catch-up is PROGRESS, not health, so it is the one thing here that still speaks
+        // while everything works — and only once it has lasted long enough to be something
+        // somebody is waiting on (`CatchUpIsSlow`). Offline, freshness is unknowable and
+        // nothing is said either.
+        let showsCatchUp =
             match model.Connection with
-            | Connected -> html $"""<span class="{Style.syncDot} bg-green"></span>""", Style.statusFaint
-            | Connecting | Reconnecting -> html $"""<span class="{Style.syncDotPulse} bg-blue"></span>""", Style.statusRun
-            | Disconnected _ -> html $"""<span class="{Style.syncDot} bg-err"></span>""", Style.statusErr
-        // Catch-up rides the same line, and ONLY while it is worth reporting: the offsets are
-        // progress, so they exist while there is progress to describe, and a catch-up too
-        // brief to have been waited on (every send is one) says nothing rather than blinking
-        // the line. Offline, freshness is unknowable and nothing is said either.
-        //
-        // "Up to date" is deliberately absent: the header says it, and a green dot beside
-        // the word "connected" already says it here.
+            | Disconnected _ -> false
+            | _ -> consumer.IsCatchingUp && consumer.CatchUpIsSlow
         let catchUp =
-            match model.Connection, consumer.IsCatchingUp && consumer.CatchUpIsSlow with
-            | Disconnected _, _ | _, false -> Lit.nothing
-            | _, true ->
-                html $"""<span class="{Style.statusFaint}">·</span><span class="{Style.statusRun}" data-catch-up>{Dom.Text.catchingUp}</span><span class="{Style.label} tabular-nums"><b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> / <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>"""
-        // A reason is only ever known for a settled disconnection; `data-connection` keeps its
-        // exact one-word token so the reason is additive, never a rewrite of the status.
-        let connectionReason =
+            if not showsCatchUp then Lit.nothing
+            else
+                html $"""<span class="{Style.syncRow}"><span class="{Style.statusRun}" data-catch-up>{Dom.Text.catchingUp}</span><span class="{Style.label} tabular-nums"><b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> / <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span></span>"""
+        // The one thing a person can do about a settled disconnection. The supervised loop is
+        // already trying; this is for the client it will not carry — a refused peer parks
+        // until asked — and for anyone who would rather not wait out a backoff.
+        let retry =
             match model.Connection with
-            | Disconnected (Some reason) ->
-                // The reason, and the one thing a person can do about it. The supervised loop
-                // is already trying; this is for the client it will not carry — a refused peer
-                // parks until asked — and for anyone who would rather not wait out a backoff.
+            | Disconnected _ ->
                 html $"""
-                  <span class="{Style.small}" data-connection-reason>{reason}</span>
                   <button type="button" class="{Style.btn}" data-retry-now
                           @click={Ev(fun _ -> actions.RetryNow ())}>{Dom.Text.retryNow}</button>"""
             | _ -> Lit.nothing
-        let feedLine =
-            match consumer.Feed with
-            | FeedLive -> Lit.nothing
-            | FeedRetrying (attempt, reason) ->
-                html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying · {reason} ({attempt})</span>"""
-            | FeedStalled reason -> html $"""<span class="{Style.statusErr}">history paused · {reason}</span>"""
-        // The offer REPLACES the sync row and the reason line rather than sitting under
-        // them: a red dot reading "Disconnected", its reason, and a button to fix it would
-        // be saying the same thing three times. The feed line stays — the history leg is a
-        // separate leg, and it says something the offer does not.
-        let statusOrOffer =
-            match reconnectOffer actions model with
-            | Some offer -> offer
-            | None ->
-                html $"""
-                  <span class="{Style.syncRow}">{dot}<span class="{connClass}" data-connection>{connectionLabel model.Connection}</span>{catchUp}</span>
-                  {connectionReason}"""
+        // The offer REPLACES the report rather than sitting over it: a status reading "not
+        // connected", its reason, and a button to fix it would be saying one thing three
+        // times. The offer carries the same promise and the same disclosure.
+        let offer = reconnectOffer actions model
+        let report = connectionReport model
+        // Whichever of the two this column has to show, it is ONE mount of one report, so it
+        // wears one hook and one visibility rule. Anything narrower and the rule stops being
+        // checkable: the browser suite counts the mounts a person can see, and a mount that
+        // wore the hook only on its status face left the face it actually shows — the card —
+        // uncounted, so the suite passed over a phone reporting the same fault twice.
+        let inColumn (inner: TemplateResult) =
+            match report with
+            | None -> inner
+            | Some (token, _, _) ->
+                html $"""<div class="{Style.connectionInColumn}" data-degraded="{token}">{inner}</div>"""
+        let body =
+            match offer, report with
+            | Some offer, _ -> inColumn offer
+            | None, None -> Lit.nothing
+            | None, Some (_, status, why) ->
+                inColumn (
+                    html $"""
+                      <span class="{Style.syncRow}">{status}</span>
+                      {detailNote "connection" why}
+                      {retry}""")
+        // The section is always in the document, and always carries BOTH legs' exact state
+        // tokens, because that is the markup contract a test reads. What is conditional is
+        // the words — they appear when something is wrong and at no other time — and, with
+        // them, the section's own box: a section with nothing in it still costs its padding,
+        // which on a healthy client is a band of empty panel under the wordmark that reads as
+        // something that failed to load.
+        //
+        // (The tokens used to disappear on exactly the state most worth asserting: the offer
+        // replaced the row that carried `data-connection`, so a stopped session had no state
+        // to read off the page at all.)
+        let quiet = offer.IsNone && report.IsNone && not showsCatchUp
+        let shape =
+            if quiet then Style.navLane1 else Style.cls [ Style.sideSectionFirst; Style.navLane1 ]
         html $"""
-            <section class="{Style.cls [ Style.sideSectionFirst; Style.navLane1 ]}" data-feed="{feedToken consumer.Feed}">
-              {statusOrOffer}
-              {feedLine}
+            <section class="{shape}"
+                     data-feed="{feedToken consumer.Feed}" data-connection="{connectionLabel model.Connection}">
+              {body}
+              {catchUp}
             </section>"""
 
     /// Where a peer is, as the roster says it: a stable field token for the markup contract,
@@ -435,7 +552,7 @@ module View =
     let private sharedScopeLabel (owner: string option) : string =
         match owner with
         | Some "user" -> "All my sessions"
-        | _ -> "Everyone using this Yession"
+        | _ -> "All sessions"
 
     /// How a connected credential reads on a panel row: green and its kind, or the fault
     /// style and the words that name the fix. ONE function, because both connection panels
@@ -459,7 +576,16 @@ module View =
     let private credentialReason (hook: string) (scopeChoice: string) (credential: ConnectionView) : TemplateResult =
         match credential.SignInRequired with
         | None -> Lit.nothing
-        | Some reason -> html $"""<span class="{Style.small}" {hook}="{scopeChoice}">{reason}</span>"""
+        | Some reason ->
+            // The row above already says the consequence, in the words the prompt over the
+            // timeline uses: this credential needs signing in again. So the provider's own
+            // sentence is the mechanism here, and it folds away like every other one — the
+            // hook stays on it, so a test still reads the fault off the scope it was found on.
+            html $"""
+                <details class="{Style.detailNote}" {hook}="{scopeChoice}" data-detail="credential">
+                  <summary class="{Style.detailSummary}">{Dom.Text.details}</summary>
+                  <span class="{Style.detailBody}">{reason}</span>
+                </details>"""
 
     /// The Claude connection panel (Plan 08), living in the settings drawer: status per
     /// sign-in scope, the OAuth flow (approve on claude.ai → paste the shown code), and
@@ -546,7 +672,7 @@ module View =
             match model.Models with
             | ModelsUnknown -> html $"""<span class="{Style.small}" data-model-note="pending">…</span>"""
             | ModelsLoaded [] ->
-                html $"""<span class="{Style.small}" data-model-note="empty">this provider offered no models to choose from</span>"""
+                html $"""<span class="{Style.small}" data-model-note="empty">this provider offered no models</span>"""
             | ModelsLoaded _ -> Lit.nothing
             | ModelsUnavailable reason ->
                 html $"""<span class="{Style.small}" data-model-note="unavailable">{reason}</span>"""
@@ -702,6 +828,7 @@ module View =
                 <section class="{Style.sideSection}" data-history-store="none">
                   <span class="{Style.label}">history</span>
                   <span class="{Style.small}">{Dom.Text.historyNotKept}</span>
+                  {detailNote "history-store" [ Dom.Text.historyNotKeptWhy ]}
                 </section>"""
 
     let private settingsPane (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) : TemplateResult =
@@ -775,86 +902,44 @@ module View =
             html $"""
                 <section class="{Style.signInPrompt}" data-signin-required="{provider}">
                   <span class="{Style.statusErr}"><span class="{Style.statusDot}"></span>{provider}</span>
-                  <span class="{Style.cls [ Style.small; Style.signInPromptReason ]}">{reason}</span>
+                  <span class="{Style.small}">{Dom.Text.signInLost provider}</span>
+                  <span class="{Style.signInPromptReason}">{detailNote "signin" [ reason ]}</span>
                   <button type="button" class="{Style.btnPrimary}"
                           data-signin-again data-settings-toggle="prompt"
                           @click={Ev(fun _ -> actions.RevealSettings ())}>{Dom.Text.signInAgain}</button>
                 </section>"""
 
 
-    /// ONE degradation strip over the timeline: whichever leg is down, said once, with what
-    /// still works. Nothing here disables anything below it — the composer, the queue, and the
-    /// title are CRDT state in a local doc, not reads off the network.
-    let private degradedBanner (model: ClientModel) : TemplateResult =
-        // The local-first promise, stated only where it is true. A deployment that addresses
-        // sessions by port brings them back at a new origin, and a browser partitions storage
-        // by origin — so "everything is saved locally" is exactly wrong there, and wrong at
-        // the one moment someone would rely on it.
-        let localPromise =
-            if model.EphemeralStorage then Dom.Text.localFallbackEphemeral else Dom.Text.localFallback
-        let strip (token: string) (status: TemplateResult) (detail: string) =
+    /// The connection report where the nav column is NOT on screen: a phone, or a desktop
+    /// with the column collapsed. Same visibility rule the header's "no agent" stand-in
+    /// already uses, and for the same reason — news that reaches you only if a column happens
+    /// to be open is news that does not reach you.
+    ///
+    /// It is the conversation column's first child, which is where it belongs on a desktop
+    /// whose nav is shut: in flow, above the header, the width of the column it reports for.
+    ///
+    /// On a phone it leaves that flow — `position: fixed` above all three panes — because a
+    /// phone shows one pane at a time, and a notice that lives inside one of them cannot be
+    /// read from the other two. The panes make room for it through `Style.degradedShell`, a
+    /// class this view puts on the shell whenever there is something to say, so nothing
+    /// reserves a band of dead space while everything is fine.
+    let private degradedBar (actions: ViewActions) (model: ClientModel) : TemplateResult =
+        match connectionReport model with
+        | None -> Lit.nothing
+        | Some (token, status, why) ->
+            // The way back rides the bar, right-aligned, because this mount is the ONLY thing
+            // a phone reader has: the card that carries it in the column is hidden at that
+            // width by the rule that stops the report being read twice.
+            let action =
+                match reopenAction actions model Style.degradedBarAction with
+                | Some action -> action
+                | None -> Lit.nothing
             html $"""
-                <section class="{Style.degradedBanner}" data-degraded="{token}">
-                  {status}
-                  <span class="{Style.small}">{detail}</span>
+                <section class="{Style.degradedBar}" data-degraded="{token}">
+                  <span class="{Style.degradedBarStatus}">{status}</span>
+                  {detailNote "degraded" why}
+                  {action}
                 </section>"""
-        match model.Connection, model.EventConsumer.Feed with
-        // The session leg subsumes the history leg: a Process that cannot be reached cannot
-        // serve its feed either, and one strip is the honest report of one problem.
-        // Deliberately bare: `reconnectOffer` is on screen for exactly this case, saying
-        // what happened AND offering the way back. Repeating the local-first promise here
-        // would state it twice on the one screen where it matters most — and, on an
-        // ephemeral deployment, would have been wrong twice.
-        | Disconnected (Some reason), _ ->
-            strip
-                Dom.Text.degradedOffline
-                (html $"""<span class="{Style.statusErr}">not connected</span>""")
-                reason
-        | Reconnecting, _ ->
-            strip
-                Dom.Text.degradedReconnecting
-                (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>""")
-                localPromise
-        | _, FeedRetrying (attempt, reason) ->
-            strip
-                Dom.Text.feedRetrying
-                (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying</span>""")
-                (sprintf "%s · attempt %d · %s" reason attempt localPromise)
-        | _, FeedStalled reason ->
-            strip
-                Dom.Text.feedPaused
-                (html $"""<span class="{Style.statusErr}">history paused</span>""")
-                (reason + " · " + localPromise)
-        | _, FeedLive -> Lit.nothing
-
-    let private headerStatus (model: ClientModel) : TemplateResult =
-        // A stalled feed outranks the connection line: "up to date" would be a lie while
-        // history is not arriving, even though the data channel is perfectly healthy.
-        match model.EventConsumer.Feed, model.Connection with
-        | FeedStalled _, _ ->
-            html $"""<span class="{Style.cls [ Style.statusErr; Style.headerStatus ]}">history paused</span>"""
-        | FeedRetrying _, _ ->
-            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>history retrying</span>"""
-        // Catching up is the NORMAL state for a moment after anything happens — your own
-        // send puts you behind your own event until the page comes back — so it is reported
-        // only once it has lasted long enough to be something you are waiting on
-        // (`CatchUpIsSlow`). Reporting the raw truth made the header flicker green → blue →
-        // green on every message sent, which reads as a fault rather than as progress.
-        | FeedLive, Connected when model.EventConsumer.IsCatchingUp && model.EventConsumer.CatchUpIsSlow ->
-            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>catching up</span>"""
-        | FeedLive, Connected ->
-            // The ONE place this is said (the sidebar's sync row used to say it too, three
-            // words away from the same green dot). Suppressed on a phone: "everything is
-            // fine" is the least actionable thing in a 390px header, and it costs the
-            // session title the room it needs. Every UNhealthy state above stays, at every
-            // width.
-            html $"""<span class="{Style.cls [ Style.statusOk; Style.headerStatus ]} max-md:hidden"><span class="{Style.statusDot}"></span>{Dom.Text.upToDate}</span>"""
-        | FeedLive, Connecting ->
-            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>connecting</span>"""
-        | FeedLive, Reconnecting ->
-            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>"""
-        | FeedLive, Disconnected _ ->
-            html $"""<span class="{Style.cls [ Style.statusFaint; Style.headerStatus ]}">disconnected</span>"""
 
     /// The `(selectionStart, selectionEnd)` of the event's target input, or `None`. Read live
     /// from the DOM; only ever invoked in the browser (SSR drops event bindings), so the `.NET`
@@ -965,7 +1050,6 @@ module View =
               </div>
               <div class="{Style.headerAside}">
                 {agentAbsence actions model.Claude}
-                {headerStatus model}
                 {terminalsReopen dispatch model}
               </div>
             </header>"""
@@ -1233,7 +1317,7 @@ module View =
                         data-chat-block="{BlockId.value blockId}"
                         data-chat-block-status="{terminalBlockStatusLabel block.Status}"
                         data-terminal-id="{TerminalId.value terminalId}"
-                        @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (BlockTab (terminalId, blockId))); actions.FocusPane ())}>
+                        @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (BlockTab (terminalId, blockId)))); actions.FocusPane ())}>
                   <span class="{Style.terminalPrompt}">$</span>
                   <code class="{Style.chatChipCommand}">{block.Command}</code>
                   <span class="shrink-0">{terminalBlockStatus model block.Status}</span>
@@ -1245,7 +1329,7 @@ module View =
                         data-chat-stretch="{TerminalStretch.key stretch}"
                         data-chat-stretch-end="{stretchEndLabel stretch.End}"
                         data-terminal-id="{TerminalId.value stretch.TerminalId}"
-                        @click={Ev(fun _ -> dispatch (OpenPaneTabMsg (StretchTab stretch)); actions.FocusPane ())}>
+                        @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (StretchTab stretch))); actions.FocusPane ())}>
                   <span class="{Style.chatChipText}">typed in {stretch.Title} for {length}</span>
                   <span class="shrink-0">{stretchEnding model stretch.End}</span>
                 </button>"""
@@ -1778,7 +1862,8 @@ module View =
                 html $"""
                     <div class="{Style.terminalBandRow}" data-terminal-lost="{TerminalId.value terminal}" aria-live="polite">
                       <span class="{Style.statusErr}">not marking</span>
-                      <span class="{Style.small}">queued commands held</span>
+                      <span class="{Style.small}">{Dom.Text.terminalNotMarking}</span>
+                      {detailNote "terminal-lost" [ Dom.Text.terminalNotMarkingWhy ]}
                       <div class="ml-auto flex items-center gap-2">
                         <button type="button" class="{Style.btnPrimary}" data-terminal-rearm="{TerminalId.value terminal}"
                                 @click={Ev(fun _ -> actions.RearmTerminal terminal)}>Re-arm</button>
@@ -1803,6 +1888,52 @@ module View =
     /// commands has two reads of one history, and printing both at once put a player of the
     /// same two lines under every command and its result. The blocks are the read; the
     /// recording is where you go (`terminalBody`).
+    /// A terminal's one control between its two reads (Plan 14, stage 7; Plan 25, stage 3):
+    /// its TEXT — the live screen, or the blocks it ran — and its RECORDING.
+    ///
+    /// It was four controls with four names: two ways in at the top of the scrollback
+    /// (`↑ replay from the start`, `↑ play the recording`) and two ways out floating over it
+    /// (`Back to blocks`, `Jump to live`). Each removed another from the document, so each
+    /// press had to hand focus on after itself; and each was named after the projection it
+    /// mounted rather than after anything a reader wants. One control that relabels in place
+    /// is the same act with neither problem — the press keeps its own focus, because the
+    /// button it was pressed on is still there saying the other thing.
+    ///
+    /// A surface with only ONE read offers nothing: a recording that is the only read
+    /// (`ReplayIsTheRead`) has no text behind it, and a terminal with nothing recorded has no
+    /// recording to go to. Both are rules about the terminal, asked here rather than decided
+    /// here.
+    let private terminalWatchToggle
+        (dispatch: ClientMsg -> unit)
+        (model: ClientModel)
+        (view: TerminalView)
+        : TemplateResult =
+        let tab = TerminalTab view.TerminalId
+        let feed = ClientModel.terminalFeed view.TerminalId model
+        let rewound = ClientModel.isRewound view.TerminalId model
+        let playing = ClientModel.playsRecording tab model
+        // `None` for the press means the rewind's own message: watching a LIVE terminal is
+        // pinning its edge, and the pin is read off the feed there rather than by whoever
+        // remembered to look it up first.
+        let offer =
+            if rewound then Some ("live", "Live", Some (Reading tab))
+            elif playing then
+                // Back to the text, where there is text to go back to.
+                if List.isEmpty view.Blocks then None else Some ("output", "Show output", Some (Reading tab))
+            elif view.IsOpen then
+                if feed.KnownLength > 0 then Some ("watch", "Watch", None) else None
+            elif ClientModel.playable tab model then Some ("watch", "Watch", Some (Watching tab))
+            else None
+        match offer with
+        | None -> Lit.nothing
+        | Some (face, label, next) ->
+            html $"""
+                <button type="button" class="{Style.terminalBarAct}" data-terminal-watch="{face}"
+                        @click={Ev(fun _ ->
+                                      match next with
+                                      | Some mode -> dispatch (ShowInPaneMsg mode)
+                                      | None -> dispatch (RewindTerminalMsg view.TerminalId))}>{label}</button>"""
+
     let private terminalClosedBand (model: ClientModel) (view: TerminalView) : TemplateResult =
         let feed = ClientModel.terminalFeed view.TerminalId model
         // The per-terminal output cap (stage 3d) can eat a whole recording. Saying so is the
@@ -1889,7 +2020,7 @@ module View =
     ///
     /// The very same renderer the terminal's own history uses — a block read from the chat
     /// must not be a second rendering of a block, free to drift from the first.
-    let private paneBlockView (dispatch: ClientMsg -> unit) (model: ClientModel) (terminalId: TerminalId) (blockId: BlockId) : TemplateResult =
+    let private paneBlockView (actions: ViewActions) (dispatch: ClientMsg -> unit) (model: ClientModel) (terminalId: TerminalId) (blockId: BlockId) : TemplateResult =
         let found =
             TerminalProjection.tryFind terminalId model.Terminals
             |> Option.bind (fun view -> view.Blocks |> List.tryFind (fun b -> b.BlockId = blockId))
@@ -1897,24 +2028,32 @@ module View =
         | None ->
             html $"""
                 <div class="{Style.paneReadonly}" data-pane-block="{BlockId.value blockId}">
-                  <div class="{Style.terminalOutputEmpty}">not in this client's record</div>
+                  <div class="{Style.terminalOutputEmpty}">not on this device</div>
                 </div>"""
         | Some block ->
             let tab = BlockTab (terminalId, blockId)
             let playing = ClientModel.playsRecording tab model
-            // The step-out, offered only where there is a whole recording to step out INTO.
-            // A live terminal's recording is still being written, and rewinding one of those
-            // is the DVR — a different mechanism, and not this one pretending.
-            let isClosed =
-                TerminalProjection.tryFind terminalId model.Terminals
-                |> Option.map (fun v -> not v.IsOpen)
-                |> Option.defaultValue false
-            let stepOut =
-                if not isClosed then Lit.nothing
+            // The reader's OTHER question about this command: not what it printed, which the
+            // text above already answers, but what was going on around it. That is a question
+            // about POSITION, and the answer is more of the same text — the terminal's own
+            // history, scrolled to this command — not a recording of it.
+            //
+            // It used to be "play whole terminal", which answered a text question with a
+            // video, mounted a player twenty seconds of dead air away from the command it
+            // named, and left the reader with no way back to the block they stepped out of.
+            // Watching from here is still one press away: this moves them, and the toggle
+            // below is then the same toggle, at the command they were sent to.
+            let showInTerminal =
+                if List.isEmpty (TerminalProjection.tryFind terminalId model.Terminals
+                                 |> Option.map (fun v -> v.Blocks)
+                                 |> Option.defaultValue []) then Lit.nothing
                 else
                     html $"""
-                        <button type="button" class="{Style.btn}" data-pane-play-whole="{BlockId.value blockId}"
-                                @click={Ev(fun _ -> dispatch (PlayRecordingMsg (TerminalTab terminalId, Some block.FromSeq)))}>Play whole terminal</button>"""
+                        <button type="button" class="{Style.btn}" data-pane-show-in-terminal="{BlockId.value blockId}"
+                                @click={Ev(fun _ ->
+                                              dispatch (ShowInPaneMsg (ReadingAt (terminalId, blockId)))
+                                              actions.RevealBlock terminalId blockId
+                                              actions.FocusPane ())}>Show in terminal</button>"""
             // Text, then the recording behind one press — the same rule the terminal's own
             // panel follows, because a block IS the case that made it: a command and its
             // result, printed, needed no player of the same two lines under it.
@@ -1924,21 +2063,20 @@ module View =
             // Offered only where there is something to play, which for a block means it ran
             // and finished — a refusal never ran, and a recording still being written has no
             // end to replay to.
-            let playToggle =
+            let watchToggle =
                 if not (ClientModel.playable tab model) then Lit.nothing
                 else
-                    let label = if playing then "Back to output" else "Play recording"
+                    let face = if playing then "output" else "watch"
+                    let label = if playing then "Show output" else "Watch"
                     html $"""
-                        <button type="button" class="{Style.btn}" data-pane-play="{BlockId.value blockId}"
+                        <button type="button" class="{Style.btn}" data-pane-watch="{face}"
                                 @click={Ev(fun _ ->
-                                              dispatch (if playing then SelectPaneTabMsg tab
-                                                        else PlayRecordingMsg (tab, None)))}>{label}</button>"""
+                                              dispatch (ShowInPaneMsg (if playing then Reading tab else Watching tab)))}>{label}</button>"""
             // A bordered strip with nothing in it is a control bar that says there are no
             // controls. An open terminal's block has no whole recording to step out into, and
             // a refusal has nothing to play.
             let actionsRow =
-                if not (isClosed || ClientModel.playable tab model) then Lit.nothing
-                else html $"""<div class="{Style.paneActions}">{playToggle}{stepOut}</div>"""
+                html $"""<div class="{Style.paneActions}">{watchToggle}{showInTerminal}</div>"""
             let body =
                 if playing then replayMount "Command output, played" tab
                 else
@@ -2044,10 +2182,14 @@ module View =
                 else
                     html $"""
                         <button type="button" class="{Style.btnIconBare}" data-terminal-list-rewind="{id}"
-                                aria-label="Rewind {view.Title}"
+                                aria-label="Watch {view.Title} from behind its edge"
                                 @click={Ev(fun _ ->
+                                              // ONE message. It used to be this and a select
+                                              // beside it, and the second cleared the pin the
+                                              // first had just taken — a verb that did nothing
+                                              // but leave the list. The rewind states the whole
+                                              // face now, list included.
                                               dispatch (RewindTerminalMsg view.TerminalId)
-                                              dispatch (SelectFromListMsg view.TerminalId)
                                               actions.FocusPane ())}>{Icon.rewind}</button>"""
             let reattach =
                 if not affords.CanReattach then Lit.nothing
@@ -2069,7 +2211,7 @@ module View =
                   {state}
                   <span class="min-w-0 flex items-center">
                     <button type="button" class="{nameClass}" data-terminal-list-row="{id}"
-                            @click={Ev(fun _ -> dispatch (SelectFromListMsg view.TerminalId); actions.FocusPane ())}>{view.Title}</button>
+                            @click={Ev(fun _ -> dispatch (ShowInPaneMsg (Reading (TerminalTab view.TerminalId))); actions.FocusPane ())}>{view.Title}</button>
                     <span class="{Style.terminalTabPeers}">{peers}</span>
                   </span>
                   <span class="{Style.terminalListVerbs}">{rewind}{reattach}{kill}</span>
@@ -2171,10 +2313,9 @@ module View =
         let tabButton (tab: PaneTab) =
             let pinnable = PaneTab.isLive model.Terminals tab
             let pinned = pinnable && ClientModel.isPinned tab model
-            let select () =
-                match tab with
-                | TerminalTab id -> dispatch (SelectTerminalMsg id)
-                | BlockTab _ | StretchTab _ -> dispatch (SelectPaneTabMsg tab)
+            // One message whichever kind of tab it is: showing a tab is showing a tab, and
+            // the two spellings only ever differed in which fields they remembered to clear.
+            let select () = dispatch (ShowInPaneMsg (Reading tab))
             let activate () =
                 if isOn tab && pinnable then dispatch (TogglePinMsg tab) else select ()
             // The mark says the tab is kept, and only when it is. `role="img"` with a name,
@@ -2214,66 +2355,26 @@ module View =
                 if not (List.isEmpty view.Blocks) then view.Blocks |> List.map (terminalBlockView model feed)
                 elif view.IsOpen then []
                 else [ html $"""<div class="{Style.terminalOutputEmpty}"><span class="{Style.terminalPrompt}">$</span></div>""" ]
-            // The DVR (Plan 14, stage 7): step back through what this terminal has recorded so
-            // far while it keeps running, and catch back up. Offered on any LIVE terminal — the
-            // mechanism does not care which mode it is in, and both are one growing byte stream
-            // — but only once something IS recorded: a DVR with nothing behind it is a control
-            // with nothing to do. Each press hands focus to the control that replaces the
-            // pressed one, which leaves the document.
+            // A terminal's two reads, and the ONE control between them (Plan 14, stage 7;
+            // Plan 25, stage 3): its text — the live screen, or the blocks it ran — and its
+            // recording. On a live terminal watching means going behind the edge while it
+            // keeps running, and the way back says `Live`.
             //
-            // The two halves are not one control and no longer share a band. Going back is a
-            // DESTINATION, so in block mode it sits at the top of the scrollback, where the
-            // history runs out — earlier is up, and you get there by scrolling. (In live mode
-            // there is no scrollback to scroll up through, so the bar carries it instead.)
-            // Coming back is TRANSIENT and is about where you are in the scroll, so it floats
-            // over the scroller, in the slot every reader already knows.
+            // It was four controls: two ways in at the top of the scrollback and two ways out
+            // floating over it, each removing another from the document, each needing focus
+            // handed on after it, and each named after the projection it mounted rather than
+            // after anything a reader wants. One control that relabels in place is the same
+            // act with none of that — and because it never leaves, the press keeps its focus
+            // and the reader keeps their place.
             let tab = TerminalTab view.TerminalId
             let rewound = ClientModel.isRewound view.TerminalId model
             let playing = ClientModel.playsRecording tab model
-            // The way INTO the recording, live or closed, in one slot: the top of the
-            // scrollback, where the history runs out. A closed terminal's recording used to
-            // render under its blocks instead of being somewhere you go — a player of the
-            // same two lines beneath every command and its result — and the DVR beside it had
-            // already worked out where the way back belongs.
-            let replayFrom =
-                if playing || Option.isSome view.Lease then Lit.nothing
-                elif view.IsOpen && feed.KnownLength > 0 then
-                    html $"""
-                        <button type="button" class="{Style.terminalReplayFrom}"
-                                data-terminal-rewind="{TerminalId.value view.TerminalId}"
-                                @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>↑ replay from the start</button>"""
-                // Closed, with a recording kept and blocks to read instead of it. The other
-                // way round — a recording that is the only read there is — never reaches
-                // here: that terminal is already playing.
-                elif not view.IsOpen && ClientModel.playable tab model then
-                    html $"""
-                        <button type="button" class="{Style.terminalReplayFrom}"
-                                data-terminal-play="{TerminalId.value view.TerminalId}"
-                                @click={Ev(fun _ -> dispatch (PlayRecordingMsg (tab, None)); actions.FocusDvr view.TerminalId)}>↑ play the recording</button>"""
-                else Lit.nothing
-            // The way back OUT of a player, in the slot every reader already knows: floating
-            // over the scroller, transient, about where you are rather than what you are
-            // reading. Two destinations because there are two things behind a player — the
-            // live edge of a terminal still running, and the blocks of one that stopped —
-            // and one control that had to say which would say neither well.
-            //
-            // Offered only where there is somewhere to go back TO: a terminal whose recording
-            // is its only read has no blocks behind the player, and "back to blocks" over a
-            // bare `$` is a control that undoes itself.
-            let backToBlocks =
-                if not (playing && not rewound && not (List.isEmpty view.Blocks)) then Lit.nothing
-                else
-                    html $"""
-                        <div class="{Style.terminalLiveFloat}">
-                          <button type="button" class="{Style.btnPrimary}"
-                                  data-terminal-blocks="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (SelectTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Back to blocks</button>
-                        </div>"""
-            let backToLive =
+            // How far behind the edge a rewound reader is, in the recording's clock, growing
+            // as it moves away from them. A fact rather than a control, so it stays where a
+            // reader parked behind live will see it.
+            let behindLabel =
                 if not (view.IsOpen && rewound) then Lit.nothing
                 else
-                    // Say HOW FAR behind, in the recording's clock, as it grows — a reader
-                    // parked behind live deserves to know the edge is moving away.
                     let behind =
                         match ClientModel.behindLive view.TerminalId model with
                         | Some seconds when seconds >= 1.0 ->
@@ -2282,9 +2383,6 @@ module View =
                     html $"""
                         <div class="{Style.terminalLiveFloat}">
                           <span class="{Style.statusFaint}" data-terminal-behind="{TerminalId.value view.TerminalId}">{behind}</span>
-                          <button type="button" class="{Style.btnPrimary}"
-                                  data-terminal-live="{TerminalId.value view.TerminalId}"
-                                  @click={Ev(fun _ -> dispatch (JumpToLiveMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>Jump to live</button>
                         </div>"""
             // In live mode the block history gives way to the SCREEN (Plan 14, stage 6). A
             // program is running here and what it displays is not a list of commands and
@@ -2301,8 +2399,7 @@ module View =
                     html $"""
                         <div class="{Style.terminalReplayRegion}">
                           {replayMount label tab}
-                          {backToLive}
-                          {backToBlocks}
+                          {behindLabel}
                         </div>"""
                 else
                     match view.Lease with
@@ -2321,7 +2418,6 @@ module View =
                             <div class="{Style.terminalScrollback}" data-terminal-scrollback
                                  data-terminal-id="{TerminalId.value view.TerminalId}">
                               <div class="{Style.terminalStream}">
-                                {replayFrom}
                                 {truncated}
                                 {blocks}
                               </div>
@@ -2330,7 +2426,7 @@ module View =
                 {above}
                 {if not view.IsOpen then terminalClosedBand model view
                  // Behind the live edge there is nothing to type into and nothing to queue
-                 // against what you are watching: the way back is "jump to live", above.
+                 // against what you are watching: the way back is the bar's `Live`.
                  elif rewound then Lit.nothing
                  else terminalComposer actions dispatch model view.TerminalId}"""
         // A thunk, because the list renders INSTEAD of this: a pane body built on every
@@ -2355,7 +2451,7 @@ module View =
                         match TerminalProjection.tryFind id model.Terminals with
                         | Some view -> terminalBody view
                         | None -> Lit.nothing
-                    | BlockTab (terminalId, blockId) -> paneBlockView dispatch model terminalId blockId
+                    | BlockTab (terminalId, blockId) -> paneBlockView actions dispatch model terminalId blockId
                     | StretchTab stretch -> paneStretchView model stretch
                 // `tabindex="-1"` so the panel can take focus programmatically when a chip
                 // opens it, without becoming a Tab stop of its own. A DOM swap that leaves
@@ -2383,19 +2479,13 @@ module View =
                             html $"""
                                 <button type="button" class="{Style.terminalBarAct}" data-terminal-take="{TerminalId.value view.TerminalId}"
                                         @click={Ev(fun _ -> actions.TakeTerminal view.TerminalId)}>take</button>"""
-                    // In LIVE mode the way into the recording has no spatial home: the content
-                    // is a screen, not a scrollback, so there is no top of the history to scroll
-                    // up to. It is an act about this terminal, so it says so from the bar. In
-                    // block mode the stream carries it instead, where the history runs out.
-                    let feed = ClientModel.terminalFeed view.TerminalId model
-                    let rewind =
-                        if view.IsOpen && Option.isSome view.Lease
-                           && not (ClientModel.isRewound view.TerminalId model) && feed.KnownLength > 0 then
-                            html $"""
-                                <button type="button" class="{Style.terminalBarAct}" data-terminal-rewind="{TerminalId.value view.TerminalId}"
-                                        @click={Ev(fun _ -> dispatch (RewindTerminalMsg view.TerminalId); actions.FocusDvr view.TerminalId)}>rewind</button>"""
-                        else Lit.nothing
-                    html $"""<span class="{Style.terminalBarActs}">{take}{rewind}</span>"""
+                    // The one control between this terminal's two reads, in one slot whatever
+                    // it is doing (Plan 25, stage 3). In the bar rather than in the content
+                    // because it is an act about the TERMINAL, and because live mode has no
+                    // spatial home for it: what is on screen there is a screen, not a
+                    // scrollback, so there is no top of the history to scroll up to.
+                    let watch = terminalWatchToggle dispatch model view
+                    html $"""<span class="{Style.terminalBarActs}">{take}{watch}</span>"""
             | _ -> Lit.nothing
         // The bar names the SELECTED tab, which is the thing a reader cannot work out for
         // themselves. It used to say "terminals" — the largest text on a phone screen, telling
@@ -2440,11 +2530,11 @@ module View =
                           @click={Ev(fun _ -> actions.OpenTerminal "terminal")}>+ new</button>
                 </div>"""
         // ONE control with two faces rather than a pair that swap places: it never leaves the
-        // document, so pressing it can never strand the focus that is on it — the stranded-focus
-        // case the DVR's pair needs `FocusDvr` to answer. Its value is the face it will show,
-        // which is the same contract `data-nav-toggle` and `data-settings-toggle` carry.
+        // document, so pressing it can never strand the focus that is on it. Its value is the
+        // face it will show, which is the same contract `data-nav-toggle`,
+        // `data-settings-toggle` and the terminal's own `data-terminal-watch` carry.
         let listToggle =
-            let showingList = model.TerminalList
+            let showingList = ClientModel.showsList model
             html $"""
                 <button type="button" class="{Style.cls [ Style.btnIcon; "w-8 h-8 ml-auto" ]}"
                         data-terminal-list-toggle="{if showingList then "pane" else "list"}"
@@ -2473,18 +2563,25 @@ module View =
                                         // reader came from, exactly as closing a tab does.
                                         selected |> Option.iter (PaneTab.key >> actions.FocusChat))}>{Icon.right}</button>
                 </div>
-                {if model.TerminalList then Lit.nothing else strip}
-                {if model.TerminalList then terminalListView actions dispatch model else body ()}
+                {if ClientModel.showsList model then Lit.nothing else strip}
+                {if ClientModel.showsList model then terminalListView actions dispatch model else body ()}
               </div>
             </aside>"""
 
     /// The client shell, rendered into `#app`.
+    ///
+    /// The three panes are wrapped in a `display: contents` element carrying one class:
+    /// whether anything is degraded. It changes no layout of its own (the panes remain
+    /// `#app`'s flex children) and exists so the panes can make room on a phone for the bar
+    /// that is fixed above them — which they must do only while it is there.
     let view (actions: ViewActions) (model: ClientModel) (dispatch: ClientMsg -> unit) : TemplateResult =
+        let shellState = if (connectionReport model).IsSome then Style.degradedShell else ""
         html $"""
+            <div class="contents {shellState}">
             {sidebar actions dispatch model}
             <div class="{Style.mainColumn}">
+              {degradedBar actions model}
               {header actions dispatch model}
-              {degradedBanner model}
               {signInPrompt actions model}
               {chat actions dispatch model}
               {pendingActs actions dispatch model}
@@ -2492,4 +2589,5 @@ module View =
               {queue dispatch model.Synced}
               {drafts actions dispatch model}
             </div>
-            {terminals actions dispatch model}"""
+            {terminals actions dispatch model}
+            </div>"""

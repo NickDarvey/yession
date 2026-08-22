@@ -1769,6 +1769,50 @@ module Codec =
 /// means the replay rides the browser's HTTP cache rather than a second whole-file route.
 module TranscriptReplay =
 
+    /// The `.cast` text for a header, the records under it, and CHAPTER MARKERS spliced in
+    /// as asciicast's own `"m"` events (Plan 25, stage 1).
+    ///
+    /// Markers belong in the file rather than in the player's `markers` option, and the
+    /// difference is not cosmetic. The player idle-compresses EVENTS as it loads a recording
+    /// (`idleTimeLimit`), then multiplexes an option-supplied marker list in afterwards, on
+    /// the clock the file was written in — so option markers land in dead air the
+    /// compression just removed. Everything downstream of that reads wrong at once: the
+    /// duration shown is the uncompressed one, playback trudges through gaps to reach a
+    /// marker, a `startAt` computed against the compressed clock lands short of the chapter
+    /// it names, and the last marker is dropped by the chapter list's `time < duration`
+    /// filter because it has become the final event. A marker written into the cast rides
+    /// the same compression as every record around it and none of that happens.
+    ///
+    /// A marker sorts BEFORE a record at the same time — the order the player's own
+    /// multiplex picks — so a chapter names the command whose first byte follows it.
+    ///
+    /// `"m"` is not a `TranscriptKind`, and it should not become one: no transcript on disk
+    /// contains a marker. Chapters are a fact about the BLOCKS a terminal ran, folded from
+    /// the event log at the moment a recording is assembled for a reader.
+    let castWithMarkers
+        (header: TranscriptHeader)
+        (records: (int * TranscriptRecord) list)
+        (markers: (float * string) list)
+        : string =
+        let markerLine (at: float) (label: string) =
+            [ Encode.float at; Encode.string "m"; Encode.string label ]
+            |> Encode.list
+            |> Encode.toString 0
+        let recordLine (record: TranscriptRecord) =
+            Codec.toString Codec.transcriptLine (TranscriptRecordLine record)
+        let rec merge (records: (int * TranscriptRecord) list) (markers: (float * string) list) =
+            match records, markers with
+            | [], [] -> []
+            | [], (at, label) :: restMarkers -> markerLine at label :: merge [] restMarkers
+            | (_, record) :: restRecords, [] -> recordLine record :: merge restRecords []
+            | (_, record) :: restRecords, (at, label) :: restMarkers ->
+                if at <= record.At then markerLine at label :: merge records restMarkers
+                else recordLine record :: merge restRecords markers
+        let lines =
+            (Codec.toString Codec.transcriptLine (TranscriptHeaderLine header))
+            :: merge (records |> List.sortBy fst) (markers |> List.sortBy fst)
+        String.concat "\n" lines + "\n"
+
     /// The `.cast` text for a header and the records under it, in sequence order.
     ///
     /// Gaps are simply absent rather than filled: a record the client never fetched, or one
@@ -1776,14 +1820,11 @@ module TranscriptReplay =
     /// inventing a placeholder would put something in the recording that the terminal never
     /// printed. Whether the recording is COMPLETE is a separate question, answered by the
     /// terminal's `DroppedBytes` and said in the surface rather than smuggled into the file.
+    ///
+    /// A recording with no chapters: the same text `castWithMarkers` writes when nothing
+    /// marks it, so the two can never disagree about the shape of a cast.
     let cast (header: TranscriptHeader) (records: (int * TranscriptRecord) list) : string =
-        let lines =
-            (Codec.toString Codec.transcriptLine (TranscriptHeaderLine header))
-            :: (records
-                |> List.sortBy fst
-                |> List.map (fun (_, record) ->
-                    Codec.toString Codec.transcriptLine (TranscriptRecordLine record)))
-        String.concat "\n" lines + "\n"
+        castWithMarkers header records []
 
     /// The `.cast` text for the half-open transcript range `[fromSeq, toSeq)` — one block's
     /// output, or one stretch of live mode — as a standalone recording the stock player

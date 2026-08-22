@@ -200,7 +200,7 @@ let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<
                                     """async () => JSON.stringify({
                                          url: location.href,
                                          title: document.title,
-                                         connection: document.querySelector('[data-connection]')?.textContent ?? null,
+                                         connection: document.querySelector('[data-connection]')?.getAttribute('data-connection') ?? null,
                                          conversation: document.querySelector('[data-conversation]')?.textContent?.slice(0, 200) ?? null,
                                          degraded: document.querySelector('[data-degraded]')?.getAttribute('data-degraded') ?? null,
                                          // What this client KEPT, by store and entry count. An
@@ -265,7 +265,11 @@ let private waitFor (what: string) (page: IPage) (predicate: string) : Async<uni
     }
 
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
-let private connected = """document.querySelector('[data-connection]')?.textContent === 'Connected'"""
+
+// Read off the ATTRIBUTE, never off the words. A healthy client says nothing about being
+// healthy any more — "Connected" was on three surfaces at once and is now on none — so the
+// state token is the only place this can come from, which is where a markup contract belongs.
+let private connected = """document.querySelector('[data-connection]')?.getAttribute('data-connection') === 'Connected'"""
 
 // The open draft is a ProseMirror editable (`.ProseMirror`) inside the editable
 // (`data-rich-readonly="false"`) body-mount host — and it is whichever draft this peer has open,
@@ -937,6 +941,49 @@ let editorTests =
                 return ()
             }
 
+        // The same player over a recording with DEAD AIR in it (Plan 25, stage 1) — the shape
+        // the pane actually replays, and the one the case above cannot fail in: its recording
+        // has no gap to compress and its single chapter sits at t=0, so chapters on the wrong
+        // clock still look right there.
+        //
+        // The arrangement is shared by the two cases below and lives in the harness
+        // (`#replay-gappy`): thirty seconds of nothing between two commands, a chapter on each,
+        // and a start position naming the far one. What each case asserts is its own.
+        editorCase "a chapter past a long idle gap still reaches the chapter list" (EDITOR_PORT + 13) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#replay-gappy .ap-player")
+                let! _ = await (page.WaitForSelectorAsync "#replay-gappy .ap-overlay-start")
+                do! awaitU (page.ClickAsync "#replay-gappy .ap-overlay-start")
+                // Both of them. The player idle-compresses the EVENTS it loads, so a chapter
+                // list built on the recording's raw clock disagrees with them: the far chapter
+                // becomes the last event and the list's own `time < duration` filter drops it,
+                // leaving one mark where the recording has two. Chapters written into the cast
+                // as `"m"` events ride the same compression as the records around them.
+                //
+                // Asserted after play, like the case above: where a mark sits on the bar is
+                // not known until the recording's duration is.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelectorAll('#replay-gappy .ap-marker').length === 2")
+                return ()
+            }
+
+        editorCase "a watch that starts past a long idle gap lands there, not before it" (EDITOR_PORT + 14) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#replay-gappy .ap-overlay-start")
+                do! awaitU (page.ClickAsync "#replay-gappy .ap-overlay-start")
+                // The WAIT is the assertion, and the timeout is what makes it one: a start
+                // position the player honours puts this text on screen as fast as it can
+                // start, while one that lands short of the gap could only reach it after the
+                // gap has played out in real time.
+                let! _ =
+                    await (page.WaitForFunctionAsync (
+                        "document.querySelector('#replay-gappy').textContent.includes('second')",
+                        null,
+                        PageWaitForFunctionOptions (Timeout = 10_000f)))
+                return ()
+            }
+
         // Terminal work in the chat, and the pane's tabs (Plan 14, stages 1-2). Host-free,
         // like the editor and the replay beside it: what needs a real browser here is not the
         // Session Process but the DOM swaps — where FOCUS goes when a chip in the chat opens
@@ -974,7 +1021,7 @@ let editorTests =
                 // opened: a stream renderer would show a cursor-moving program as garbage,
                 // which is the whole reason the transcript was written as asciicast.
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-block] [data-terminal-output]")
-                do! awaitU (page.ClickAsync "#shell [data-pane-play]")
+                do! awaitU (page.ClickAsync "#shell [data-pane-watch]")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay] .ap-overlay-start")
                 do! awaitU (page.ClickAsync "#shell [data-pane-replay] .ap-overlay-start")
                 let! _ =
@@ -1231,16 +1278,17 @@ let editorTests =
                 do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
 
-                // Rewinding replaces the live screen with the recording, in a real player.
-                do! awaitU (page.ClickAsync "#shell [data-terminal-rewind='term-live']")
+                // Watching replaces the live screen with the recording, in a real player.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-watch='watch']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-terminal-screen='term-live']")""")
 
-                // The swap removed the pressed Rewind button from the document; focus must
-                // land on the control that replaced it, never on `body`.
+                // One control in one slot, relabelled — so the press KEEPS its own focus.
+                // There used to be four controls swapping each other out of the document, and
+                // every press had to hand focus on after itself or strand it on `body`.
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        """document.activeElement?.getAttribute('data-terminal-live') === 'term-live'""")
+                        """document.activeElement?.getAttribute('data-terminal-watch') === 'live'""")
 
                 // It lands AT the pinned edge: the poster is the screen as it stood at the
                 // pin, shown before anyone presses play — not a blank player parked at 0:00.
@@ -1249,21 +1297,57 @@ let editorTests =
                         """document.querySelector("#shell [data-pane-replay='terminal:term-live']")?.textContent.includes('earlier output') === true""")
 
                 // Playing off the pinned end IS catching up: the player's `ended` drops the
-                // rewind by itself — live screen back, player down, focus handed to the
-                // Rewind control that replaced the pane's face.
+                // rewind by itself. Nobody pressed anything, so this is the one case that
+                // still hands focus on — the player being read is unmounted under the reader.
                 do! awaitU (page.ClickAsync "#shell [data-pane-replay='terminal:term-live'] .ap-overlay-start")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        """document.activeElement?.getAttribute('data-terminal-rewind') === 'term-live'""")
+                        """document.activeElement?.getAttribute('data-terminal-watch') === 'watch'""")
 
-                // And the way back works by hand too: rewind again, jump to live again.
-                do! awaitU (page.ClickAsync "#shell [data-terminal-rewind='term-live']")
+                // And by hand too: watch again, live again — the same control both times.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-watch='watch']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
-                do! awaitU (page.ClickAsync "#shell [data-terminal-live='term-live']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-watch='live']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
+                return ()
+            }
+
+        // "Show in terminal" (Plan 25, stage 3). The reader's context question, answered with
+        // text: the terminal's own history, scrolled to the command they came from. Only a
+        // browser can say whether it actually SCROLLED — and whether that scroll survives the
+        // render which returns a freshly rendered scrollback to its end, the one thing this
+        // could quietly lose to.
+        editorCase "showing a command in its terminal scrolls the history to it" (EDITOR_PORT + 15) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-block]")
+                do! awaitU (page.ClickAsync "#shell [data-chat-block]")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-show-in-terminal]")
+                do! awaitU (page.ClickAsync "#shell [data-pane-show-in-terminal]")
+
+                // The pane moved to the terminal's own text.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel')?.startsWith('terminal:') === true""")
+
+                // …and the command is inside the scroller's viewport rather than somewhere
+                // off it. A position promise, measured off the real boxes — not a style, and
+                // not a claim about which pixel it landed on.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """(() => {
+                             const scroller = document.querySelector('#shell [data-terminal-scrollback]')
+                             const block = scroller && scroller.querySelector('[data-terminal-block=block-harness]')
+                             if (!block) return false
+                             const a = scroller.getBoundingClientRect(), b = block.getBoundingClientRect()
+                             return b.top >= a.top - 1 && b.top < a.bottom
+                           })()""")
+
+                // Focus followed into the pane, as it does for a chip: the control that was
+                // pressed left the document with the tab it was in.
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
                 return ()
             }
 
@@ -1766,7 +1850,58 @@ let mountedTests =
                         waitFor
                             "the client to stop claiming it is connected"
                             page
-                            """document.querySelector('[data-connection]')?.textContent !== 'Connected'"""
+                            """document.querySelector('[data-connection]')?.getAttribute('data-connection') !== 'Connected'"""
+                })
+
+        // The report has two mounts — the nav column's, and the bar for where the column
+        // cannot be seen — and what keeps them ONE report is a visibility rule. No markup test
+        // can settle it: both are in the document at once by design, so a `Contains` sees the
+        // intended thing and a person sees a screen saying it twice (which is what a phone
+        // with its nav open did, before `connectionInColumn`).
+        //
+        // Counted by HOOK, never by the words in it. The first version of this test counted
+        // occurrences of "not connected" and "reconnecting" and went red against a surface
+        // that says "session stopped" — the invariant was right and the assertion had been
+        // written against the copy.
+        offlineReopen
+            "the connection is never reported by two surfaces at once"
+            (fun _ -> async { return () })
+            (fun page ->
+                async {
+                    // Visible means a person can SEE it, which neither `offsetParent` (null for
+                    // anything fixed — the bar is) nor a bounding rect (non-zero for the
+                    // collapsed nav's contents, clipped to nothing by `overflow-hidden`) can
+                    // tell you. Hit-test the centre and ask what is painted there.
+                    let counted =
+                        """(() => {
+                             const seen = el => {
+                               const r = el.getBoundingClientRect()
+                               if (r.width < 1 || r.height < 1) return false
+                               const x = Math.min(Math.max(r.left + r.width / 2, 1), innerWidth - 1)
+                               const y = Math.min(Math.max(r.top + r.height / 2, 1), innerHeight - 1)
+                               const hit = document.elementFromPoint(x, y)
+                               return !!hit && (el.contains(hit) || hit.contains(el))
+                             }
+                             const reports = [...document.querySelectorAll('[data-degraded]')].filter(seen)
+                             const offer = [...document.querySelectorAll('[data-session-gone]')].filter(seen)
+                             return { reports: reports.length, offer: offer.length }
+                           })()"""
+                    let atMostOne = sprintf "%s.reports <= 1" counted
+                    // And not zero everywhere: the column may be showing the reconnect card
+                    // INSTEAD of the status, so what must always hold is that something on
+                    // screen says the session is gone. Without this the case above passes on a
+                    // client that reports nothing at all.
+                    let saidSomewhere = sprintf "(%s.reports + %s.offer) >= 1" counted counted
+                    do! waitFor "the client to notice the session is gone" page
+                            """document.querySelector('[data-degraded]') !== null"""
+                    for width, height, what in [ 1440, 900, "a desktop"; 390, 844, "a phone" ] do
+                        do! awaitU (page.SetViewportSizeAsync (width, height))
+                        do! waitFor (sprintf "one report at most on %s" what) page atMostOne
+                        do! waitFor (sprintf "and something saying it on %s" what) page saidSomewhere
+                    // The pane a phone reader can be on when it happens. The bar is fixed above
+                    // all three, so bringing the nav out over it must not reveal a second copy.
+                    do! awaitU (page.Locator("[data-nav-toggle='show']").First.ClickAsync ())
+                    do! waitFor "still one report with the nav open over it" page atMostOne
                 })
 
         // Plan 22, and the other half of the bug report: the conversation came back offline
