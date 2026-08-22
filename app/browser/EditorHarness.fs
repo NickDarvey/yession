@@ -403,7 +403,21 @@ let private shellModel : ClientModel =
                           Background = true
                           FromSeq = 2
                           ToSeq = None
-                          Status = BlockRunning } ]
+                          Status = BlockRunning }
+                        // Enough history that the scrollback actually OVERFLOWS its box.
+                        // "Show in terminal" (Plan 25, stage 3) scrolls to a command, and a
+                        // history that fits on screen is one where every scroll is a no-op —
+                        // a surface on which that case could not fail.
+                        yield!
+                          [ for i in 1 .. 24 ->
+                              { BlockId = BlockId.create (sprintf "block-filler-%d" i) |> expect
+                                QueueId = None
+                                Authority = Authority.ofAuthor (PeerRef peerId)
+                                Command = sprintf "echo line %d" i
+                                Background = false
+                                FromSeq = 2
+                                ToSeq = Some 2
+                                Status = BlockFinished (CommandSucceeded 0) } ] ]
                     DroppedBytes = 0 }
                   { TerminalId = liveId
                     Title = "shell"
@@ -488,7 +502,8 @@ do
         { ViewActions.ssr with
             FocusPane = PaneShell.toPane
             FocusChat = PaneShell.toChatItem
-            FocusDvr = fun id -> PaneShell.toDvrControl (TerminalId.value id)
+            FocusWatch = PaneShell.toWatchToggle
+            RevealBlock = fun id blockId -> PaneShell.revealBlock (TerminalId.value id) (BlockId.value blockId)
             TypeIntoTerminal = recordTyped }
     // The app's own player sync, so a block tab in the harness really plays its recording —
     // which is the point of driving this in a browser rather than asserting a string. The

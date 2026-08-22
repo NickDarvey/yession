@@ -233,29 +233,35 @@ module Dom =
         let paneReplay = "data-pane-replay"
         /// A stretch's facts, above its recording.
         let paneStretch = "data-pane-stretch"
-        /// The step-out from a block's view to the whole terminal's recording.
-        let panePlayWhole = "data-pane-play-whole"
-        /// A block's own way between its two reads: the output it printed, and the recording
-        /// of it printing. One control saying whichever the reader is not looking at, so the
-        /// press that swaps the body keeps the focus it was pressed with.
-        let panePlay = "data-pane-play"
+        /// From a block, to that command in its terminal's own history (Plan 25, stage 3):
+        /// the same text, scrolled to it and marking it. The reader's other question — not
+        /// "what did this print", which the block already answers, but "what was going on
+        /// around it" — and text answers it, where a player used to.
+        let paneShowInTerminal = "data-pane-show-in-terminal"
+        /// A block's way between its two reads: the output it printed, and the recording of
+        /// it printing. One control saying whichever the reader is not looking at, so the
+        /// press that swaps the body keeps the focus it was pressed with. Its VALUE is the
+        /// face it will show — `watch` / `output` — the same contract the list toggle keeps.
+        let paneWatch = "data-pane-watch"
         /// The live screen of a terminal in live mode (Plan 14, stage 6). Its value is the
         /// terminal's id; the holder's copy is the one that takes keystrokes, and every other
         /// peer's is the same screen read-only.
         let terminalScreen = "data-terminal-screen"
-        /// The DVR (Plan 14, stage 7): step back through what a LIVE terminal has recorded
-        /// so far, and catch back up to its edge. Offered on any live terminal, whichever
-        /// mode it is in — both are one growing byte stream, and a rule that offered it for
-        /// an interactive session and not for a running build would be a special case to
-        /// explain rather than a feature.
-        let terminalRewind = "data-terminal-rewind"
-        let terminalLive = "data-terminal-live"
-        /// The same pair on a CLOSED terminal: the way into its recording, and the way back
-        /// to the blocks it ran. One mechanism with two ends — a recording is somewhere you
-        /// GO, live or finished — so these sit in the same two slots as the DVR's and hand
-        /// focus on the same way.
-        let terminalPlay = "data-terminal-play"
-        let terminalBlocks = "data-terminal-blocks"
+        /// A terminal's one way between its two reads (Plan 14, stage 7; Plan 25, stage 3):
+        /// its text — the live screen, or the blocks that ran — and its recording.
+        ///
+        /// ONE control, in one slot, whatever the terminal is doing. It was four: two ways in
+        /// at the top of the scrollback (`↑ replay from the start`, `↑ play the recording`)
+        /// and two ways out floating over it (`Back to blocks`, `Jump to live`), each
+        /// removing another from the document and each needing focus handed on after it.
+        /// A toggle that relabels in place is the same act with none of that, and the words
+        /// are the reader's: on a live terminal, watching means going behind its edge and the
+        /// way back is `Live`.
+        ///
+        /// Its VALUE is the face it will show — `watch` / `output` / `live` — so a test can
+        /// read the state off the attribute it clicks, and the browser can hand focus to
+        /// whichever control replaced the one it just lost.
+        let terminalWatch = "data-terminal-watch"
         /// How far behind live the rewound reader is, growing as the terminal keeps
         /// printing under them.
         let terminalBehind = "data-terminal-behind"
@@ -268,8 +274,8 @@ module Dom =
         /// One row, carrying its terminal's id — and the control that shows that terminal,
         /// so a row is keyboard-operable by construction rather than by a handler on a div.
         let terminalListRow = "data-terminal-list-row"
-        /// The rewind, on a row. Its own hook because the pane keeps a DVR rewind of its own
-        /// (`terminalRewind`) for the terminal it is showing, and the two are different
+        /// The rewind, on a row. Its own hook because the pane keeps a watch toggle of its own
+        /// (`terminalWatch`) for the terminal it is showing, and the two are different
         /// controls in different places — unlike the kill and the attach-again, which the
         /// list is now the ONLY home of (Plan 20, stage 1) and which therefore keep the names
         /// they have always had: `terminalClose`, `terminalReattach`.

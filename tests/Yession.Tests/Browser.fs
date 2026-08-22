@@ -1017,7 +1017,7 @@ let editorTests =
                 // opened: a stream renderer would show a cursor-moving program as garbage,
                 // which is the whole reason the transcript was written as asciicast.
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-block] [data-terminal-output]")
-                do! awaitU (page.ClickAsync "#shell [data-pane-play]")
+                do! awaitU (page.ClickAsync "#shell [data-pane-watch]")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay] .ap-overlay-start")
                 do! awaitU (page.ClickAsync "#shell [data-pane-replay] .ap-overlay-start")
                 let! _ =
@@ -1274,16 +1274,17 @@ let editorTests =
                 do! awaitU (page.ClickAsync "#shell [data-terminal-tab='term-live']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
 
-                // Rewinding replaces the live screen with the recording, in a real player.
-                do! awaitU (page.ClickAsync "#shell [data-terminal-rewind='term-live']")
+                // Watching replaces the live screen with the recording, in a real player.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-watch='watch']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-terminal-screen='term-live']")""")
 
-                // The swap removed the pressed Rewind button from the document; focus must
-                // land on the control that replaced it, never on `body`.
+                // One control in one slot, relabelled — so the press KEEPS its own focus.
+                // There used to be four controls swapping each other out of the document, and
+                // every press had to hand focus on after itself or strand it on `body`.
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        """document.activeElement?.getAttribute('data-terminal-live') === 'term-live'""")
+                        """document.activeElement?.getAttribute('data-terminal-watch') === 'live'""")
 
                 // It lands AT the pinned edge: the poster is the screen as it stood at the
                 // pin, shown before anyone presses play — not a blank player parked at 0:00.
@@ -1292,21 +1293,57 @@ let editorTests =
                         """document.querySelector("#shell [data-pane-replay='terminal:term-live']")?.textContent.includes('earlier output') === true""")
 
                 // Playing off the pinned end IS catching up: the player's `ended` drops the
-                // rewind by itself — live screen back, player down, focus handed to the
-                // Rewind control that replaced the pane's face.
+                // rewind by itself. Nobody pressed anything, so this is the one case that
+                // still hands focus on — the player being read is unmounted under the reader.
                 do! awaitU (page.ClickAsync "#shell [data-pane-replay='terminal:term-live'] .ap-overlay-start")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
                 let! _ =
                     await (page.WaitForFunctionAsync
-                        """document.activeElement?.getAttribute('data-terminal-rewind') === 'term-live'""")
+                        """document.activeElement?.getAttribute('data-terminal-watch') === 'watch'""")
 
-                // And the way back works by hand too: rewind again, jump to live again.
-                do! awaitU (page.ClickAsync "#shell [data-terminal-rewind='term-live']")
+                // And by hand too: watch again, live again — the same control both times.
+                do! awaitU (page.ClickAsync "#shell [data-terminal-watch='watch']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-replay='terminal:term-live'] .ap-player")
-                do! awaitU (page.ClickAsync "#shell [data-terminal-live='term-live']")
+                do! awaitU (page.ClickAsync "#shell [data-terminal-watch='live']")
                 let! _ = await (page.WaitForSelectorAsync "#shell [data-terminal-screen='term-live']")
                 let! _ = await (page.WaitForFunctionAsync """!document.querySelector("#shell [data-pane-replay='terminal:term-live']")""")
+                return ()
+            }
+
+        // "Show in terminal" (Plan 25, stage 3). The reader's context question, answered with
+        // text: the terminal's own history, scrolled to the command they came from. Only a
+        // browser can say whether it actually SCROLLED — and whether that scroll survives the
+        // render which returns a freshly rendered scrollback to its end, the one thing this
+        // could quietly lose to.
+        editorCase "showing a command in its terminal scrolls the history to it" (EDITOR_PORT + 15) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-chat-block]")
+                do! awaitU (page.ClickAsync "#shell [data-chat-block]")
+                let! _ = await (page.WaitForSelectorAsync "#shell [data-pane-show-in-terminal]")
+                do! awaitU (page.ClickAsync "#shell [data-pane-show-in-terminal]")
+
+                // The pane moved to the terminal's own text.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """document.querySelector('#shell [data-pane-panel]')?.getAttribute('data-pane-panel')?.startsWith('terminal:') === true""")
+
+                // …and the command is inside the scroller's viewport rather than somewhere
+                // off it. A position promise, measured off the real boxes — not a style, and
+                // not a claim about which pixel it landed on.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        """(() => {
+                             const scroller = document.querySelector('#shell [data-terminal-scrollback]')
+                             const block = scroller && scroller.querySelector('[data-terminal-block=block-harness]')
+                             if (!block) return false
+                             const a = scroller.getBoundingClientRect(), b = block.getBoundingClientRect()
+                             return b.top >= a.top - 1 && b.top < a.bottom
+                           })()""")
+
+                // Focus followed into the pane, as it does for a chip: the control that was
+                // pressed left the document with the tab it was in.
+                let! _ = await (page.WaitForFunctionAsync """document.activeElement?.hasAttribute('data-pane-panel') === true""")
                 return ()
             }
 

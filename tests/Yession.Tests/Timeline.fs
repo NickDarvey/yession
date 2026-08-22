@@ -586,6 +586,42 @@ let private videoTests =
                 Expect.isNone replay.StartAt "and it starts at the start until somebody asks for a command"
             | None -> failwith "the header is known, so there is a recording"
 
+        // Position and fidelity are two axes, and the toggle only ever moves ONE of them
+        // (Plan 25, stage 3). These pin that, because it is the whole reason the reader
+        // cannot lose their place any more.
+        testCase "the toggle swaps the read and leaves the position alone" <| fun () ->
+            let tab = TerminalTab terminalA
+            Expect.equal (TabMode.toggled (Reading tab)) (Watching tab) "text to recording"
+            Expect.equal (TabMode.toggled (Watching tab)) (Reading tab) "and back"
+
+        testCase "a read positioned at a command watches from that command, and back" <| fun () ->
+            // The round trip the old step-out could not make: it replaced the block tab, so
+            // there was nothing to come back to. Here the position is the same fact on both
+            // sides of the flip.
+            let anchored = ReadingAt (terminalA, block "2")
+            Expect.equal (TabMode.toggled anchored) (WatchingFrom (terminalA, block "2")) "watching from where they were"
+            Expect.equal (TabMode.toggled (WatchingFrom (terminalA, block "2"))) anchored "and back to the same command"
+
+        testCase "coming back to live drops the pin that only watching had" <| fun () ->
+            // A pin is a fact about watching from behind an edge. Carried into a read it
+            // would be a rewind nothing is showing.
+            Expect.equal
+                (TabMode.toggled (WatchingBehind (terminalA, 7)))
+                (Reading (TerminalTab terminalA))
+                "the live text, with no pin left over"
+
+        testCase "a watch entered from a command starts at that command" <| fun () ->
+            // The anchor IS the start position: nothing rides a message, and the line is
+            // resolved against the blocks the projection actually has.
+            let model =
+                withRecords (clientOf recordedTerminal)
+                |> ClientModel.update (ShowInPaneMsg (ReadingAt (terminalA, block "2")))
+            Expect.equal (ClientModel.paneAnchor model) (Some (terminalA, block "2")) "positioned at the command"
+            let watching = ClientModel.update (ShowInPaneMsg (TabMode.toggled (ReadingAt (terminalA, block "2")))) model
+            match ClientModel.paneReplay (TerminalTab terminalA) watching with
+            | Some replay -> Expect.equal replay.StartAt (Some 40.0) "and the recording starts where it did"
+            | None -> failwith "the header is known, so there is a recording"
+
         testCase "a chapter is written before the record it names" <| fun () ->
             // The order the player's own multiplex picks, and the one a reader means: a
             // chapter names the command whose first byte follows it, never the silence before.
@@ -695,21 +731,22 @@ let private videoTests =
             Expect.isTrue (html.Contains "rejected by swift-heron") "the tab says who refused it"
             Expect.isFalse (html.Contains (Dom.attr Dom.Hooks.paneReplay "block:term-a:b-no")) "and mounts no player"
 
-        testCase "the step-out is offered only where there IS a whole recording" <| fun () ->
-            // A live terminal's recording is still being written, and rewinding one of those
-            // is the DVR — a different mechanism, not this one pretending.
+        testCase "a block offers the way to its command in the terminal's own history" <| fun () ->
+            // The reader's other question — what was going on around this — is about POSITION,
+            // and its answer is more of the same text. Offered wherever there is a history to
+            // be positioned in, open or closed: the question is as real on a running terminal.
             let closed =
                 withRecords (clientOf recordedTerminal)
                 |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
             Expect.isTrue
-                ((Support.render closed).Contains (Dom.attr Dom.Hooks.panePlayWhole "b-1"))
-                "a closed terminal's block can step out to the whole recording"
+                ((Support.render closed).Contains (Dom.attr Dom.Hooks.paneShowInTerminal "b-1"))
+                "a closed terminal's block can be shown where it ran"
             let stillOpen =
                 withRecords (clientOf (recordedTerminal |> List.filter (fun e -> match e.Event with SessionEvent.TerminalClosed _ -> false | _ -> true)))
                 |> ClientModel.update (ShowInPaneMsg (Reading (BlockTab (terminalA, block "1"))))
-            Expect.isFalse
-                ((Support.render stillOpen).Contains Dom.Hooks.panePlayWhole)
-                "a live one does not, because there is no finished recording to step into"
+            Expect.isTrue
+                ((Support.render stillOpen).Contains (Dom.attr Dom.Hooks.paneShowInTerminal "b-1"))
+                "and so can a running one's"
 
         testCase "the keyframe a tab needs is asked for exactly once, and only when it can help" <| fun () ->
             let model = withRecords (clientOf recordedTerminal)
@@ -772,10 +809,10 @@ let private readsTests =
                 withRecords (clientOf recordedTerminal)
                 |> ClientModel.update (ShowInPaneMsg (Watching (TerminalTab terminalA)))
             Expect.isTrue
-                ((Support.render played).Contains (Dom.attr Dom.Hooks.terminalBlocks (TerminalId.value terminalA)))
-                "blocks to go back to"
+                ((Support.render played).Contains (Dom.attr Dom.Hooks.terminalWatch "output"))
+                "text to go back to"
             Expect.isFalse
-                ((Support.render (withRecords (clientOf liveOnlyTerminal))).Contains Dom.Hooks.terminalBlocks)
+                ((Support.render (withRecords (clientOf liveOnlyTerminal))).Contains (Dom.attr Dom.Hooks.terminalWatch "output"))
                 "and none where the recording is the only read — that control undoes itself"
 
         testCase "a rewind that outlives its live edge is still a reader watching a recording" <| fun () ->
@@ -799,7 +836,7 @@ let private readsTests =
             // a terminal that printed nothing, which is the fact the drop is recorded to say.
             let model = clientOf recordedTerminal
             Expect.isFalse (ClientModel.playable (TerminalTab terminalA) model) "nothing kept, nothing to play"
-            Expect.isFalse ((Support.render model).Contains Dom.Hooks.terminalPlay) "so nothing offers it"
+            Expect.isFalse ((Support.render model).Contains Dom.Hooks.terminalWatch) "so nothing offers it"
 
         testCase "a block's output is text until somebody asks for the recording" <| fun () ->
             // The case that made the rule: a command and its result, printed, needed no
@@ -876,7 +913,7 @@ let private dvrTests =
         testCase "a live terminal with NOTHING recorded offers no rewind" <| fun () ->
             // A DVR with nothing behind it is a control with nothing to do.
             let bare = clientOf [ at 1L 0.0 (opened terminalA "shell") ]
-            Expect.isFalse ((Support.render bare).Contains Dom.Hooks.terminalRewind) "no recording, no control"
+            Expect.isFalse ((Support.render bare).Contains Dom.Hooks.terminalWatch) "no recording, no control"
 
         testCase "a terminal that CLOSES under a rewound reader is simply its recording again" <| fun () ->
             // The pin outlived its live edge, so it is no rewind any more. Left unresolved
@@ -905,7 +942,7 @@ let private dvrTests =
                 ((html.Length - html.Replace(mountAttr, "").Length) / mountAttr.Length)
                 1
                 "ONE player over the recording, not two"
-            Expect.isFalse (html.Contains Dom.Hooks.terminalLive) "and no way-back-to-live for a terminal with no live"
+            Expect.isFalse (html.Contains (Dom.attr Dom.Hooks.terminalWatch "live")) "and no way-back-to-live for a terminal with no live"
 
         testCase "jumping to live drops the rewind, and the newest bytes are back" <| fun () ->
             let live = [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef bob) 1) ]
@@ -936,16 +973,16 @@ let private dvrTests =
             // one and not the other would be a special case to explain rather than a feature.
             let inBlockMode = withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell") ])
             Expect.isTrue
-                ((Support.render inBlockMode).Contains (Dom.attr Dom.Hooks.terminalRewind "term-a"))
+                ((Support.render inBlockMode).Contains (Dom.attr Dom.Hooks.terminalWatch "watch"))
                 "a terminal in block mode is rewindable"
             let inLiveMode =
                 withRecords (clientOf [ at 1L 0.0 (opened terminalA "shell"); at 2L 1.0 (took terminalA (PeerRef ada) 1) ])
             Expect.isTrue
-                ((Support.render inLiveMode).Contains (Dom.attr Dom.Hooks.terminalRewind "term-a"))
+                ((Support.render inLiveMode).Contains (Dom.attr Dom.Hooks.terminalWatch "watch"))
                 "and so is one in live mode"
             let rewound = ClientModel.update (RewindTerminalMsg terminalA) inLiveMode
             let html = Support.render rewound
-            Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.terminalLive "term-a")) "the way back to the edge"
+            Expect.isTrue (html.Contains (Dom.attr Dom.Hooks.terminalWatch "live")) "the way back to the edge"
             Expect.isTrue
                 (html.Contains (Dom.attr Dom.Hooks.paneReplay "terminal:term-a"))
                 "the recording mounts through the same player a finished terminal uses"
@@ -960,7 +997,7 @@ let private dvrTests =
                         [ at 1L 0.0 (opened terminalA "shell")
                           at 2L 1.0 (SessionEvent.TerminalClosed { TerminalId = terminalA; Reason = "done" }) ])
             Expect.isFalse
-                ((Support.render closed).Contains Dom.Hooks.terminalRewind)
+                ((Support.render closed).Contains (Dom.attr Dom.Hooks.terminalWatch "live"))
                 "there is no live edge to be behind"
     ]
 

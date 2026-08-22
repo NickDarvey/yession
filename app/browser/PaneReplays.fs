@@ -52,7 +52,7 @@ let create (dispatch: ClientMsg -> unit) : Syncer =
                     replay.BehindLive
                     |> Option.map (fun terminal () ->
                         dispatch (ShowInPaneMsg (Reading (TerminalTab terminal)))
-                        PaneShell.toDvrControl (TerminalId.value terminal))
+                        PaneShell.toWatchToggle ())
                 players.[key] <- (Replay.mount (unbox el) replay caughtUp, replay.Cast)
 
     { Sync =
