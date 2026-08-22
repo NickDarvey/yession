@@ -71,11 +71,16 @@ type Mounted =
 /// keeps the recorded geometry (the header's width and height are what make a replay come out
 /// the shape the terminal actually was) while scaling to the panel.
 ///
-/// `markers`, `startAt` and `poster` are the player's own options (Plan 14, stage 4), which is
-/// why the step-out from a chip needs no second recording: a whole-terminal cast with a start
-/// position expresses everything a slice can, and its chapters come from the blocks that ran.
-/// `poster: "npt:<t>"` costs nothing extra — the player builds the still by replaying to that
-/// point internally.
+/// `startAt` and `poster` are the player's own options (Plan 14, stage 4), which is why a
+/// watch entered from a chip needs no second recording: a whole-terminal cast with a start
+/// position expresses everything a slice can. Both are given in the RECORDING's clock and the
+/// player maps them onto the compressed one itself; `poster: "npt:<t>"` costs nothing extra,
+/// because the player builds the still by replaying to that point internally.
+///
+/// There is deliberately no `markers` option (Plan 25, stage 1). Chapters are written into the
+/// cast as `"m"` events, so they ride the same idle compression as the records around them —
+/// and supplying the option would STRIP the events in the file, which is how one mechanism
+/// here stays one mechanism.
 ///
 /// `caughtUp` is the DVR's half (Plan 14, stage 7): a rewound live terminal's cast ends at
 /// the pin, so playing off its end means the reader has caught up — the handler jumps back
@@ -91,8 +96,6 @@ let mount (element: Browser.Types.Element) (replay: PaneReplay) (caughtUp: (unit
           // a different typeface than the terminal beside it — invisible on a box where both
           // fell back to the platform mono, plain on any box where they did not.
           "terminalFontFamily" ==> "var(--font-terminal)" ]
-        @ (if List.isEmpty replay.Markers then []
-           else [ "markers" ==> (replay.Markers |> List.map (fun (at, label) -> box [| box at; box label |]) |> Array.ofList) ])
         @ (match replay.StartAt with Some at -> [ "startAt" ==> at ] | None -> [])
         @ (match replay.Poster with Some at -> [ "poster" ==> sprintf "npt:%f" at ] | None -> [])
     let player = create (box url) element (createObj options)

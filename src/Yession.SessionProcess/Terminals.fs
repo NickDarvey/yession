@@ -546,7 +546,12 @@ module SessionTerminals =
           /// a close and an open, and those already exist. `None` for an ATTACHED source
           /// (Plan 16, part D) — its process is somebody else's, in nothing we run.
           Sandbox : SandboxName option
-          mutable Shell : PtyHandle option }
+          mutable Shell : PtyHandle option
+          /// Whether the last output chunk this terminal captured ended in `\r` — the carry
+          /// `Onlcr.normalize` needs to leave a CRLF split across two reads alone. Mutable
+          /// for the same reason `Shell` is: it is a property of the live capture, not of
+          /// the terminal's identity, and it changes on every chunk.
+          mutable OutputEndedCr : bool }
 
     /// Bytes of output one block may write to the transcript. Beyond it, output is dropped
     /// and the drop is RECORDED (`TerminalTranscriptTruncated`) — a runaway `yes` must not
@@ -867,6 +872,26 @@ module SessionTerminals =
             let transcript = terminal.Transcript
             let emulator = terminal.Emulator
             let key = TerminalId.value id
+            // The tty's ONLCR, for the sources that never had a tty (Plan 25, stage 1). Here
+            // rather than at either destination, because this is the one point both of them
+            // are fed from: normalizing at the cast builder would fix the player and leave
+            // the emulator — and therefore every keyframe, and every ranged replay painted
+            // from one — still drawing the staircase. Before the cap, so the cap counts the
+            // bytes the transcript actually keeps.
+            //
+            // Recordings written before this stay as they were captured: the store is
+            // append-only and nothing rewrites it.
+            let data =
+                match kind with
+                | TranscriptOutput | TranscriptStderr ->
+                    let normalized, endedCr = Onlcr.normalize terminal.OutputEndedCr data
+                    terminal.OutputEndedCr <- endedCr
+                    normalized
+                // The command echo, which a tty would have echoed as CRLF when the line was
+                // submitted. It is not part of the output stream, so it neither reads nor
+                // moves that stream's carry.
+                | TranscriptInput -> fst (Onlcr.normalize false data)
+                | TranscriptResize -> data
             // The transcript's lifetime ceiling (Plan 13, stage 3d). Output only: input and
             // resize records are the audit's spine and are bounded by the number of commands
             // rather than by what any of them printed.
@@ -1178,7 +1203,8 @@ module SessionTerminals =
                           OpenedAt = openedAt
                           Emulator = openEmulator 80 24
                           Sandbox = sandbox
-                          Shell = None }
+                          Shell = None
+                          OutputEndedCr = false }
                     // In the live map BEFORE the shell starts: the pty's output callback finds
                     // the terminal by id, and bytes can arrive the instant it spawns.
                     live.[TerminalId.value id] <- terminal

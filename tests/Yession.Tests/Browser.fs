@@ -937,6 +937,49 @@ let editorTests =
                 return ()
             }
 
+        // The same player over a recording with DEAD AIR in it (Plan 25, stage 1) — the shape
+        // the pane actually replays, and the one the case above cannot fail in: its recording
+        // has no gap to compress and its single chapter sits at t=0, so chapters on the wrong
+        // clock still look right there.
+        //
+        // The arrangement is shared by the two cases below and lives in the harness
+        // (`#replay-gappy`): thirty seconds of nothing between two commands, a chapter on each,
+        // and a start position naming the far one. What each case asserts is its own.
+        editorCase "a chapter past a long idle gap still reaches the chapter list" (EDITOR_PORT + 13) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#replay-gappy .ap-player")
+                let! _ = await (page.WaitForSelectorAsync "#replay-gappy .ap-overlay-start")
+                do! awaitU (page.ClickAsync "#replay-gappy .ap-overlay-start")
+                // Both of them. The player idle-compresses the EVENTS it loads, so a chapter
+                // list built on the recording's raw clock disagrees with them: the far chapter
+                // becomes the last event and the list's own `time < duration` filter drops it,
+                // leaving one mark where the recording has two. Chapters written into the cast
+                // as `"m"` events ride the same compression as the records around them.
+                //
+                // Asserted after play, like the case above: where a mark sits on the bar is
+                // not known until the recording's duration is.
+                let! _ =
+                    await (page.WaitForFunctionAsync
+                        "document.querySelectorAll('#replay-gappy .ap-marker').length === 2")
+                return ()
+            }
+
+        editorCase "a watch that starts past a long idle gap lands there, not before it" (EDITOR_PORT + 14) <| fun page ->
+            async {
+                let! _ = await (page.WaitForSelectorAsync "#replay-gappy .ap-overlay-start")
+                do! awaitU (page.ClickAsync "#replay-gappy .ap-overlay-start")
+                // The WAIT is the assertion, and the timeout is what makes it one: a start
+                // position the player honours puts this text on screen as fast as it can
+                // start, while one that lands short of the gap could only reach it after the
+                // gap has played out in real time.
+                let! _ =
+                    await (page.WaitForFunctionAsync (
+                        "document.querySelector('#replay-gappy').textContent.includes('second')",
+                        null,
+                        PageWaitForFunctionOptions (Timeout = 10_000f)))
+                return ()
+            }
+
         // Terminal work in the chat, and the pane's tabs (Plan 14, stages 1-2). Host-free,
         // like the editor and the replay beside it: what needs a real browser here is not the
         // Session Process but the DOM swaps — where FOCUS goes when a chip in the chat opens
