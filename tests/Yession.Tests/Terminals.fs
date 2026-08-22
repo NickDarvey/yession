@@ -2038,6 +2038,10 @@ let private refusingEnvironment () =
 /// is also the only way to pin what happens when one does.
 let private loopback () =
     let written = ResizeArray<string> ()
+    // What the device says, on demand. A fixture that could only speak once at attach could
+    // not produce a transcript long enough to READ ACROSS, which is exactly where a cursor
+    // is wrong or right.
+    let mutable say : string -> unit = ignore
     let mutable ended : SandboxRun option = None
     let mutable resume : (SandboxRun -> unit) option = None
     // Both orders work: a test that ends the stream before anything awaits it, and one that
@@ -2064,6 +2068,7 @@ let private loopback () =
     let attach : AttachTerminal =
         fun _ _ _ onData ->
             async {
+                say <- onData
                 return
                     Ok
                         { Write = fun text -> written.Add text
@@ -2075,7 +2080,7 @@ let private loopback () =
                         onData "ready\n"
                         handle)
             }
-    attach, written, finish
+    attach, written, finish, (fun (text: string) -> say text)
 
 /// A stream that will not dial — the provider is down, the url is wrong, nothing is
 /// listening. `AttachWs` answers exactly this way, in the caller's own words.
@@ -2110,7 +2115,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = refusingEnvironment ()
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 Expect.isError shell "a shell terminal IS a need, so a refused sandbox refuses the open"
@@ -2126,7 +2131,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, opens = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2154,7 +2159,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2202,7 +2207,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, endStream = loopback ()
+                let attach, _, endStream, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2219,7 +2224,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, endStream = loopback ()
+                let attach, _, endStream, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let _ = opened |> expect
@@ -2238,7 +2243,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, endStream = loopback ()
+                let attach, _, endStream, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = codedTicket; Renewable = false }) "remote shell"
                 let _ = opened |> expect
@@ -2256,7 +2261,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, endStream = loopback ()
+                let attach, _, endStream, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let _ = opened |> expect
@@ -2273,7 +2278,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2292,7 +2297,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2302,24 +2307,81 @@ let private sourceTests =
                 Expect.stringContains page.Text "ready" "and carries what the device said first"
             }
 
-        // Chained reads are the whole point of the cursor: whatever `Through` says is where
-        // the next read starts, and a page that reported a line it did not return would put a
-        // hole in the middle of a boot log nobody would ever see.
-        testCaseAsync "a read carries the line the next one starts at" <|
+        // Reading ACROSS a transcript, which is the only way a cursor can be caught being
+        // wrong. Asserting `next.From = first.Through` checks the cursor against itself and
+        // passes while off by one; the question that bites is whether the pages, laid end to
+        // end, are the transcript — no line twice, none missing.
+        //
+        // This is the test that would have caught the off-by-one shipped in the paging step:
+        // `readTranscript` indexes LINES and line 0 is the asciicast header, so a page that
+        // counted the RECORDS it received reported a cursor one short, and the next read
+        // handed back what the last one already had.
+        testCaseAsync "pages laid end to end are the transcript, with nothing said twice" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, say = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
+                // Distinct lines, so a repeat is visible as a repeat rather than as a longer
+                // run of the same thing.
+                for line in [ "alpha\n"; "bravo\n"; "charlie\n"; "delta\n" ] do
+                    say line
+                let! whole = terminals.Tail id (Some 0) None
+                let whole = (whole |> expect).Text
+                // Walk it in pages, following the cursor exactly as an agent would.
+                let rec walk (at: int) (seen: string) (guard: int) =
+                    async {
+                        if guard <= 0 then return failwith "the cursor never reached the end"
+                        let! page = terminals.Tail id (Some at) None
+                        let page = page |> expect
+                        if page.Through >= page.Length then return seen + page.Text
+                        else return! walk page.Through (seen + page.Text) (guard - 1)
+                    }
+                let! walked = walk 0 "" 20
+                Expect.equal walked whole "the same bytes, in the same order, exactly once"
+            }
+
+        // The tail's promise, asked of a page: a window that reached the end says so. With
+        // the cursor counted in the wrong currency this is off by exactly the header, so it
+        // fails without needing a transcript long enough to page.
+        testCaseAsync "a page that reached the end is up to date, exactly as a tail is" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                say "one\n"
+                say "two\n"
+                let! page = terminals.Tail id (Some 0) None
+                let page = page |> expect
+                Expect.equal page.Through page.Length "a page holding everything has reached the live edge"
+            }
+
+        // The other direction, and it fails separately: a cursor that ran AHEAD would skip
+        // lines silently, which is the failure a duplicate at least makes visible.
+        testCaseAsync "a read from the cursor misses nothing the previous one did not return" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                say "before\n"
                 let! first = terminals.Tail id (Some 0) None
                 let first = first |> expect
-                let! next = terminals.Tail id (Some first.Through) None
-                let next = next |> expect
-                Expect.equal next.From first.Through "the second starts exactly where the first stopped"
-                Expect.isTrue (next.Through >= next.From) "and never goes backwards"
+                say "after\n"
+                let! second = terminals.Tail id (Some first.Through) None
+                let second = second |> expect
+                Expect.stringContains second.Text "after" "what arrived since is returned"
+                Expect.isFalse (second.Text.Contains "before") "and what was already handed over is not"
             }
 
         // How a reader tells a whole answer from the end of a long one. The tail reaches the
@@ -2330,7 +2392,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2346,7 +2408,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2365,7 +2427,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2385,7 +2447,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2401,7 +2463,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2414,7 +2476,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2433,7 +2495,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written, _ = loopback ()
+                let attach, written, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2458,7 +2520,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2475,7 +2537,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written, _ = loopback ()
+                let attach, written, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2498,7 +2560,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
 
@@ -2518,7 +2580,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = expect device
@@ -2535,7 +2597,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _, _ = loopback ()
+                let attach, _, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
 
@@ -2549,7 +2611,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written, _ = loopback ()
+                let attach, written, _, _ = loopback ()
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
