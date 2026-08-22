@@ -51,7 +51,8 @@ is for the client and not the model; capabilities left out entirely because the 
 "bytes and nothing else", which is what a serial line honestly is; `renewable` because
 acquiring a device you already hold mints a fresh token once the last stream has ended — so
 "ask again" really does get you another one. A client that has never heard of the key ignores
-it and still gets the prose.
+it and still gets the prose. The contract behind the url is
+[docs/streams.md](../../docs/streams.md).
 
 **A claim needs a lifetime.** MCP sessions are the lifetime: a claim dies with the session
 that took it, which is what stops a crashed client holding hardware forever. That is why this

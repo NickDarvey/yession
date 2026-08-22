@@ -2,6 +2,12 @@ module Yession.Host.AttachWs
 
 // Attaching a terminal to a byte stream somebody else is producing (Plan 16, part D).
 //
+// This file is the client half of a contract somebody outside this repository implements,
+// and `docs/streams.md` is that contract written down — MUST/SHOULD/MAY, and which two
+// rules are load-bearing. Change what happens here and change it there; a spec that drifts
+// from its only implementation is worse than none, which is how `{"type":"failed"}` came to
+// be sent, parsed, and specified nowhere.
+//
 // WebSocket, for three reasons and not because it is fashionable: the client costs nothing
 // (Node 22+ ships a global `WebSocket`, and the repo pins 24), a provider is already running
 // an HTTP server for its MCP endpoint so the upgrade rides the same port, and
@@ -54,11 +60,21 @@ and private Ending =
   ws.binaryType = 'arraybuffer'
   let exitCode = null
   let failure = null
+  let warnedText = false
   ws.addEventListener('message', (ev) => {
     const d = ev.data
     if (typeof d === 'string') {
+      // Text is CONTROL. A provider that reaches for its framework's `send_text` to emit
+      // device output gets a terminal showing nothing, and every layer below here is
+      // working correctly, so nothing else can say why. Said once per connection: the
+      // fault repeats per frame and the diagnosis does not.
       let f = null
-      try { f = JSON.parse(d) } catch (e) { return }
+      try { f = JSON.parse(d) } catch (e) { f = null }
+      const known = f && (f.type === 'exited' || f.type === 'failed')
+      if (!known && !warnedText) {
+        warnedText = true
+        console.warn('attach ' + target + ': ignoring a TEXT frame — text frames are control, device output goes in BINARY frames (docs/streams.md)')
+      }
       if (!f) return
       if (f.type === 'exited') exitCode = (f.code | 0)
       else if (f.type === 'failed') failure = String(f.reason || 'the source failed')
