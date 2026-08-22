@@ -768,6 +768,11 @@ module SessionTerminals =
         // trusted cannot forge a block's outcome.
         (mintNonce: unit -> string)
         (onRecord: TerminalId -> int -> TranscriptRecord -> unit)
+        // A terminal now exists. Separate from `onRecord` rather than folded into it because
+        // the two are different facts arriving at different times — "here is a line" and
+        // "here is where a screen starts" — and only the second can reach a peer that was
+        // already connected when the terminal opened.
+        (onOpened: TerminalId -> unit)
         // Re-arm the terminal drain (Plan 13, stage 2e). A lease ending frees a terminal
         // exactly as a block finishing does, so whatever queued behind it must start now —
         // and unlike block completion, a lease can end from inside here (the alt-screen flip,
@@ -1260,6 +1265,9 @@ module SessionTerminals =
                                   Title = title
                                   Sandbox = sandbox
                                   Renewable = renewable })
+                    // After the open is on the record, so a peer told a terminal exists can
+                    // find it in the projection it is folding.
+                    onOpened id
                     // A stream that ends closes its terminal. Armed here and nowhere else,
                     // and AFTER the open is on the record so a source that has already gone
                     // cannot close a terminal nothing has yet been told about.

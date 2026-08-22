@@ -134,6 +134,8 @@ let private withLiveTerminal
                     (let mutable n = 0 in fun () -> n <- n + 1; BlockId.create (sprintf "b-%d" n) |> expect)
                     (fun () -> name + "-nonce")
                     (fun _ _ _ -> ())
+                    // What a peer would be told; this fixture has none.
+                    ignore
                     (fun () -> reDrains <- reDrains + 1)
                     AttachTerminal.unavailable
                     Classifier.approveAll
