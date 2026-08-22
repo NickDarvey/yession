@@ -200,7 +200,7 @@ let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<
                                     """async () => JSON.stringify({
                                          url: location.href,
                                          title: document.title,
-                                         connection: document.querySelector('[data-connection]')?.textContent ?? null,
+                                         connection: document.querySelector('[data-connection]')?.getAttribute('data-connection') ?? null,
                                          conversation: document.querySelector('[data-conversation]')?.textContent?.slice(0, 200) ?? null,
                                          degraded: document.querySelector('[data-degraded]')?.getAttribute('data-degraded') ?? null,
                                          // What this client KEPT, by store and entry count. An
@@ -265,7 +265,11 @@ let private waitFor (what: string) (page: IPage) (predicate: string) : Async<uni
     }
 
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
-let private connected = """document.querySelector('[data-connection]')?.textContent === 'Connected'"""
+
+// Read off the ATTRIBUTE, never off the words. A healthy client says nothing about being
+// healthy any more — "Connected" was on three surfaces at once and is now on none — so the
+// state token is the only place this can come from, which is where a markup contract belongs.
+let private connected = """document.querySelector('[data-connection]')?.getAttribute('data-connection') === 'Connected'"""
 
 // The open draft is a ProseMirror editable (`.ProseMirror`) inside the editable
 // (`data-rich-readonly="false"`) body-mount host — and it is whichever draft this peer has open,
@@ -1766,7 +1770,7 @@ let mountedTests =
                         waitFor
                             "the client to stop claiming it is connected"
                             page
-                            """document.querySelector('[data-connection]')?.textContent !== 'Connected'"""
+                            """document.querySelector('[data-connection]')?.getAttribute('data-connection') !== 'Connected'"""
                 })
 
         // Plan 22, and the other half of the bug report: the conversation came back offline

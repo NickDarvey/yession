@@ -44,15 +44,17 @@ module Dom =
         let sessionId = "data-session-id"
         let cursorPeer = "data-cursor-peer"
         // Sidebar — identity & live sync state.
+        /// The transport's exact state token, ALWAYS present and never words on the screen:
+        /// a healthy client says nothing about being healthy, so this is the only thing a
+        /// test (or the browser suite, waiting for a session to come up) can read it off.
         let connection = "data-connection"
         let displayName = "data-display-name"
         let catchUp = "data-catch-up"
-        /// Why the client is not connected, when it knows; absent otherwise.
-        let connectionReason = "data-connection-reason"
         /// The durable event feed's health (sidebar), carrying a `Text.feed*` token.
         let feed = "data-feed"
-        /// The one degradation strip over the timeline, carrying the token of whichever leg
-        /// is down (`Text.degraded*` or `Text.feed*`); absent when everything is healthy.
+        /// The connection report where the nav column cannot be seen — a phone, a collapsed
+        /// nav — carrying the token of whichever leg is down (`Text.degraded*` or
+        /// `Text.feed*`); absent entirely when everything is healthy.
         let degraded = "data-degraded"
         let lastProcessedOffset = "data-last-processed-offset"
         let latestKnownOffset = "data-latest-known-offset"

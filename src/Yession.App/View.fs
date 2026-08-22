@@ -303,73 +303,112 @@ module View =
             )
         | _ -> None
 
+    /// What the client's transport is doing, when it is doing something worth saying —
+    /// and `None` while both legs are healthy.
+    ///
+    /// Nothing is said about health. "Connected", "Up to date" and a green dot used to be on
+    /// three surfaces at once (the header, the sidebar's sync row, and the sidebar again on
+    /// the feed's line), which made the least actionable fact on the screen the loudest one.
+    /// What is left is the transport's own state token on `data-connection` — a value a test
+    /// reads, not words a person does.
+    ///
+    /// ONE function, two mounts: the nav column carries the report where the column is on
+    /// screen, and `degradedBar` carries it where the column is not — a phone, or a collapsed
+    /// nav. They cannot disagree, and the visibility rule means only ever one is seen.
+    ///
+    /// Three fields: the token a test reads, the status word, and everything else folded
+    /// away behind it.
+    ///
+    /// The status word IS the consequence at a glance — offline is a thing you understand
+    /// from the word — so what the disclosure holds is the rest of the answer somebody asks
+    /// next: what it costs (your work is safe / your work is not), why it happened, and, on a
+    /// deployment that cannot keep the promise, why it cannot. That ordering is also what
+    /// makes the bar affordable on a phone: one line, a known height, and the panes under it
+    /// reserve exactly that much and no more.
+    let private connectionReport
+        (model: ClientModel)
+        : (string * TemplateResult * string list) option =
+        // Why the promise reads the way it does. Only an ephemeral deployment has anything to
+        // explain: on a stable address the sentence IS the whole story.
+        let promise =
+            if model.EphemeralStorage then Dom.Text.localFallbackEphemeral else Dom.Text.localFallback
+        let why =
+            [ if model.EphemeralStorage then Dom.Text.ephemeralAddress ]
+        let running (word: string) =
+            html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>{word}</span>"""
+        let stopped (word: string) = html $"""<span class="{Style.statusErr}">{word}</span>"""
+        match model.Connection, model.EventConsumer.Feed with
+        // The session leg subsumes the history leg: a Process that cannot be reached cannot
+        // serve its feed either, and one report is the honest account of one problem.
+        | Disconnected reason, _ ->
+            Some (Dom.Text.degradedOffline, stopped "not connected", promise :: (Option.toList reason @ why))
+        | Reconnecting, _ -> Some (Dom.Text.degradedReconnecting, running "reconnecting", promise :: why)
+        | _, FeedRetrying (attempt, reason) ->
+            Some (Dom.Text.feedRetrying, running "history retrying", promise :: sprintf "%s · attempt %d" reason attempt :: why)
+        | _, FeedStalled reason -> Some (Dom.Text.feedPaused, stopped "history paused", promise :: reason :: why)
+        // Connecting is the state every client starts in, so it is not a degradation and says
+        // nothing — a strip that flashed on every load would be chrome, not news.
+        | Connecting, FeedLive
+        | Connected, FeedLive -> None
+
     let private connectionSection (actions: ViewActions) (model: ClientModel) : TemplateResult =
         let consumer = model.EventConsumer
-        // The two legs are reported separately because they fail separately: `data-connection`
-        // is the data channel (collaborative state), `data-feed` (on the section, always
-        // carrying its exact token) is the HTTP history feed. But HEALTHY is one quiet line —
-        // faint caps behind a green dot. Colour, the feed's own line, and the catch-up
-        // offsets appear only while a leg actually needs attention; four stacked green
-        // status lines said "everything is fine" louder than anything else on the page.
-        let dot, connClass =
+        // Catch-up is PROGRESS, not health, so it is the one thing here that still speaks
+        // while everything works — and only once it has lasted long enough to be something
+        // somebody is waiting on (`CatchUpIsSlow`). Offline, freshness is unknowable and
+        // nothing is said either.
+        let showsCatchUp =
             match model.Connection with
-            | Connected -> html $"""<span class="{Style.syncDot} bg-green"></span>""", Style.statusFaint
-            | Connecting | Reconnecting -> html $"""<span class="{Style.syncDotPulse} bg-blue"></span>""", Style.statusRun
-            | Disconnected _ -> html $"""<span class="{Style.syncDot} bg-err"></span>""", Style.statusErr
-        // Catch-up rides the same line, and ONLY while it is worth reporting: the offsets are
-        // progress, so they exist while there is progress to describe, and a catch-up too
-        // brief to have been waited on (every send is one) says nothing rather than blinking
-        // the line. Offline, freshness is unknowable and nothing is said either.
-        //
-        // "Up to date" is deliberately absent: the header says it, and a green dot beside
-        // the word "connected" already says it here.
+            | Disconnected _ -> false
+            | _ -> consumer.IsCatchingUp && consumer.CatchUpIsSlow
         let catchUp =
-            match model.Connection, consumer.IsCatchingUp && consumer.CatchUpIsSlow with
-            | Disconnected _, _ | _, false -> Lit.nothing
-            | _, true ->
-                html $"""<span class="{Style.statusFaint}">·</span><span class="{Style.statusRun}" data-catch-up>{Dom.Text.catchingUp}</span><span class="{Style.label} tabular-nums"><b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> / <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span>"""
-        // A reason is only ever known for a settled disconnection; `data-connection` keeps its
-        // exact one-word token so the reason is additive, never a rewrite of the status.
-        let connectionReason =
+            if not showsCatchUp then Lit.nothing
+            else
+                html $"""<span class="{Style.syncRow}"><span class="{Style.statusRun}" data-catch-up>{Dom.Text.catchingUp}</span><span class="{Style.label} tabular-nums"><b class="text-ink-dim" data-last-processed-offset>{offsetText consumer.LastProcessedOffset}</b> / <b class="text-ink-dim" data-latest-known-offset>{offsetText consumer.LatestKnownOffset}</b></span></span>"""
+        // The one thing a person can do about a settled disconnection. The supervised loop is
+        // already trying; this is for the client it will not carry — a refused peer parks
+        // until asked — and for anyone who would rather not wait out a backoff.
+        let retry =
             match model.Connection with
-            | Disconnected (Some reason) ->
-                // The reason, and the one thing a person can do about it. The supervised loop
-                // is already trying; this is for the client it will not carry — a refused peer
-                // parks until asked — and for anyone who would rather not wait out a backoff.
+            | Disconnected _ ->
                 html $"""
-                  <span class="{Style.small}" data-connection-reason>{reason}</span>
                   <button type="button" class="{Style.btn}" data-retry-now
                           @click={Ev(fun _ -> actions.RetryNow ())}>{Dom.Text.retryNow}</button>"""
             | _ -> Lit.nothing
-        // The history leg's own line. The status word is the whole of what this row is for;
-        // the fault behind it went inline once — `history paused · ECONNREFUSED` — which put
-        // a string only an operator can read in a column a person reads for its status.
-        let feedLine =
-            match consumer.Feed with
-            | FeedLive -> Lit.nothing
-            | FeedRetrying (attempt, reason) ->
+        // The offer REPLACES the report rather than sitting over it: a status reading "not
+        // connected", its reason, and a button to fix it would be saying one thing three
+        // times. The offer carries the same promise and the same disclosure.
+        let offer = reconnectOffer actions model
+        let report = connectionReport model
+        let body =
+            match offer, report with
+            | Some offer, _ -> offer
+            | None, None -> Lit.nothing
+            | None, Some (_, status, why) ->
                 html $"""
-                  <span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying</span>
-                  {detailNote "feed" [ sprintf "%s · attempt %d" reason attempt ]}"""
-            | FeedStalled reason ->
-                html $"""
-                  <span class="{Style.statusErr}">history paused</span>
-                  {detailNote "feed" [ reason ]}"""
-        // The offer REPLACES the sync row and the reason line rather than sitting under
-        // them: a red dot reading "Disconnected", its reason, and a button to fix it would
-        // be saying the same thing three times. The feed line stays — the history leg is a
-        // separate leg, and it says something the offer does not.
-        let statusOrOffer =
-            match reconnectOffer actions model with
-            | Some offer -> offer
-            | None ->
-                html $"""
-                  <span class="{Style.syncRow}">{dot}<span class="{connClass}" data-connection>{connectionLabel model.Connection}</span>{catchUp}</span>
-                  {connectionReason}"""
+                  <div class="{Style.connectionInColumn}">
+                    <span class="{Style.syncRow}">{status}</span>
+                    {detailNote "connection" why}
+                    {retry}
+                  </div>"""
+        // The section is always in the document, and always carries BOTH legs' exact state
+        // tokens, because that is the markup contract a test reads. What is conditional is
+        // the words — they appear when something is wrong and at no other time — and, with
+        // them, the section's own box: a section with nothing in it still costs its padding,
+        // which on a healthy client is a band of empty panel under the wordmark that reads as
+        // something that failed to load.
+        //
+        // (The tokens used to disappear on exactly the state most worth asserting: the offer
+        // replaced the row that carried `data-connection`, so a stopped session had no state
+        // to read off the page at all.)
+        let quiet = offer.IsNone && report.IsNone && not showsCatchUp
+        let shape =
+            if quiet then Style.navLane1 else Style.cls [ Style.sideSectionFirst; Style.navLane1 ]
         html $"""
-            <section class="{Style.cls [ Style.sideSectionFirst; Style.navLane1 ]}" data-feed="{feedToken consumer.Feed}">
-              {statusOrOffer}
-              {feedLine}
+            <section class="{shape}"
+                     data-feed="{feedToken consumer.Feed}" data-connection="{connectionLabel model.Connection}">
+              {body}
+              {catchUp}
             </section>"""
 
     /// Where a peer is, as the roster says it: a stable field token for the markup contract,
@@ -836,96 +875,28 @@ module View =
                 </section>"""
 
 
-    /// ONE degradation strip over the timeline: whichever leg is down, said once, with what
-    /// still works. Nothing here disables anything below it — the composer, the queue, and the
-    /// title are CRDT state in a local doc, not reads off the network.
-    let private degradedBanner (model: ClientModel) : TemplateResult =
-        // The local-first promise, stated only where it is true. A deployment that addresses
-        // sessions by port brings them back at a new origin, and a browser partitions storage
-        // by origin — so "everything is saved locally" is exactly wrong there, and wrong at
-        // the one moment someone would rely on it.
-        let localPromise =
-            if model.EphemeralStorage then Dom.Text.localFallbackEphemeral else Dom.Text.localFallback
-        // Why the promise reads the way it does, folded away. Only the ephemeral deployment
-        // has anything to explain: on a stable address the sentence IS the whole story.
-        let localPromiseWhy =
-            [ if model.EphemeralStorage then Dom.Text.ephemeralAddress ]
-        // One shape for every leg: the status word, what it costs you, and — behind the
-        // disclosure — the machinery that produced it. The `detail` used to be one string,
-        // which is how a retrying feed came to read "ECONNREFUSED · attempt 3 · Your work is
-        // saved…": three unlike facts spliced into one line by a middot, led by the one
-        // nobody can act on.
-        let strip (token: string) (status: TemplateResult) (says: string) (why: string list) =
-            let consequence =
-                if says = "" then Lit.nothing
-                else html $"""<span class="{Style.small}">{says}</span>"""
+    /// The connection report where the nav column is NOT on screen: a phone, or a desktop
+    /// with the column collapsed. Same visibility rule the header's "no agent" stand-in
+    /// already uses, and for the same reason — news that reaches you only if a column happens
+    /// to be open is news that does not reach you.
+    ///
+    /// It is the conversation column's first child, which is where it belongs on a desktop
+    /// whose nav is shut: in flow, above the header, the width of the column it reports for.
+    ///
+    /// On a phone it leaves that flow — `position: fixed` above all three panes — because a
+    /// phone shows one pane at a time, and a notice that lives inside one of them cannot be
+    /// read from the other two. The panes make room for it through `Style.degradedShell`, a
+    /// class this view puts on the shell whenever there is something to say, so nothing
+    /// reserves a band of dead space while everything is fine.
+    let private degradedBar (model: ClientModel) : TemplateResult =
+        match connectionReport model with
+        | None -> Lit.nothing
+        | Some (token, status, why) ->
             html $"""
-                <section class="{Style.degradedBanner}" data-degraded="{token}">
+                <section class="{Style.degradedBar}" data-degraded="{token}">
                   {status}
-                  {consequence}
                   {detailNote "degraded" why}
                 </section>"""
-        match model.Connection, model.EventConsumer.Feed with
-        // The session leg subsumes the history leg: a Process that cannot be reached cannot
-        // serve its feed either, and one strip is the honest report of one problem.
-        // Deliberately bare: `reconnectOffer` is on screen for exactly this case, saying
-        // what happened AND offering the way back. Repeating the local-first promise here
-        // would state it twice on the one screen where it matters most — and, on an
-        // ephemeral deployment, would have been wrong twice.
-        | Disconnected (Some reason), _ ->
-            strip
-                Dom.Text.degradedOffline
-                (html $"""<span class="{Style.statusErr}">not connected</span>""")
-                ""
-                [ reason ]
-        | Reconnecting, _ ->
-            strip
-                Dom.Text.degradedReconnecting
-                (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>""")
-                localPromise
-                localPromiseWhy
-        | _, FeedRetrying (attempt, reason) ->
-            strip
-                Dom.Text.feedRetrying
-                (html $"""<span class="{Style.statusRun}"><span class="{Style.statusDotPulse}"></span>history retrying</span>""")
-                localPromise
-                (sprintf "%s · attempt %d" reason attempt :: localPromiseWhy)
-        | _, FeedStalled reason ->
-            strip
-                Dom.Text.feedPaused
-                (html $"""<span class="{Style.statusErr}">history paused</span>""")
-                localPromise
-                (reason :: localPromiseWhy)
-        | _, FeedLive -> Lit.nothing
-
-    let private headerStatus (model: ClientModel) : TemplateResult =
-        // A stalled feed outranks the connection line: "up to date" would be a lie while
-        // history is not arriving, even though the data channel is perfectly healthy.
-        match model.EventConsumer.Feed, model.Connection with
-        | FeedStalled _, _ ->
-            html $"""<span class="{Style.cls [ Style.statusErr; Style.headerStatus ]}">history paused</span>"""
-        | FeedRetrying _, _ ->
-            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>history retrying</span>"""
-        // Catching up is the NORMAL state for a moment after anything happens — your own
-        // send puts you behind your own event until the page comes back — so it is reported
-        // only once it has lasted long enough to be something you are waiting on
-        // (`CatchUpIsSlow`). Reporting the raw truth made the header flicker green → blue →
-        // green on every message sent, which reads as a fault rather than as progress.
-        | FeedLive, Connected when model.EventConsumer.IsCatchingUp && model.EventConsumer.CatchUpIsSlow ->
-            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>catching up</span>"""
-        | FeedLive, Connected ->
-            // The ONE place this is said (the sidebar's sync row used to say it too, three
-            // words away from the same green dot). Suppressed on a phone: "everything is
-            // fine" is the least actionable thing in a 390px header, and it costs the
-            // session title the room it needs. Every UNhealthy state above stays, at every
-            // width.
-            html $"""<span class="{Style.cls [ Style.statusOk; Style.headerStatus ]} max-md:hidden"><span class="{Style.statusDot}"></span>{Dom.Text.upToDate}</span>"""
-        | FeedLive, Connecting ->
-            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>connecting</span>"""
-        | FeedLive, Reconnecting ->
-            html $"""<span class="{Style.cls [ Style.statusRun; Style.headerStatus ]}"><span class="{Style.statusDotPulse}"></span>reconnecting</span>"""
-        | FeedLive, Disconnected _ ->
-            html $"""<span class="{Style.cls [ Style.statusFaint; Style.headerStatus ]}">disconnected</span>"""
 
     /// The `(selectionStart, selectionEnd)` of the event's target input, or `None`. Read live
     /// from the DOM; only ever invoked in the browser (SSR drops event bindings), so the `.NET`
@@ -1036,7 +1007,6 @@ module View =
               </div>
               <div class="{Style.headerAside}">
                 {agentAbsence actions model.Claude}
-                {headerStatus model}
                 {terminalsReopen dispatch model}
               </div>
             </header>"""
@@ -2551,12 +2521,19 @@ module View =
             </aside>"""
 
     /// The client shell, rendered into `#app`.
+    ///
+    /// The three panes are wrapped in a `display: contents` element carrying one class:
+    /// whether anything is degraded. It changes no layout of its own (the panes remain
+    /// `#app`'s flex children) and exists so the panes can make room on a phone for the bar
+    /// that is fixed above them — which they must do only while it is there.
     let view (actions: ViewActions) (model: ClientModel) (dispatch: ClientMsg -> unit) : TemplateResult =
+        let shellState = if (connectionReport model).IsSome then Style.degradedShell else ""
         html $"""
+            <div class="contents {shellState}">
             {sidebar actions dispatch model}
             <div class="{Style.mainColumn}">
+              {degradedBar model}
               {header actions dispatch model}
-              {degradedBanner model}
               {signInPrompt actions model}
               {chat actions dispatch model}
               {pendingActs actions dispatch model}
@@ -2564,4 +2541,5 @@ module View =
               {queue dispatch model.Synced}
               {drafts actions dispatch model}
             </div>
-            {terminals actions dispatch model}"""
+            {terminals actions dispatch model}
+            </div>"""

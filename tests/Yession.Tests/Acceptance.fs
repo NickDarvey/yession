@@ -336,7 +336,7 @@ let private uiChecklistTests =
             let html = Support.render representativeModel
             let required =
                 [ "session connection status", Dom.Hooks.connection
-                  "connection state value", Dom.hookText Dom.Hooks.connection Dom.Text.connected
+                  "connection state value", Dom.attr Dom.Hooks.connection Dom.Text.connected
                   "editable session title", Dom.Hooks.sessionTitle
                   "title body", "planning the launch"
                   "session id secondary identifier", Dom.hookText Dom.Hooks.sessionId "demo-session"
@@ -1000,27 +1000,35 @@ let private reconnectOfferTests =
                 (html.Contains "http://127.0.0.1:8321/sessions/demo-session/open")
                 "pointing at the manager's open route for THIS session"
 
+        /// The nav column's connection section alone. The report has two mounts now — the
+        /// column, and the bar for where the column cannot be seen — so a whole-page
+        /// `Contains` is answered by whichever happened to be right.
+        let navConnection (html: string) : string =
+            let at = html.IndexOf Dom.Hooks.feed
+            Expect.isTrue (at >= 0) "the connection section renders at all"
+            let start = html.LastIndexOf ("<section", at)
+            html.Substring (start, html.IndexOf ("</section>", at) - start)
+
         // Replaces, never accompanies: the status word and a button to fix it would be
         // saying the same thing twice.
         testCase "the offer replaces the connection status word" <| fun () ->
-            let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
-            // `data-connection-reason` has `data-connection` as a prefix, so this one
-            // assertion covers both the status word and its separate reason line.
-            Expect.isFalse (html.Contains Dom.Hooks.connection) "neither the status word nor its reason line"
-            // The reason itself is not lost — it moves into the card's copy.
-            Expect.isTrue (html.Contains "the session did not answer") "the reason still reaches the reader"
+            let column = navConnection (Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId)))
+            Expect.isTrue (column.Contains Dom.Hooks.sessionGone) "the card is what the column shows"
+            Expect.isFalse (column.Contains "not connected") "not the status word as well"
+            // The reason itself is not lost — it moves behind the card's disclosure.
+            Expect.isTrue (column.Contains "the session did not answer") "the reason still reaches the reader"
 
         // The three ways the offer must decline to render, each of which would otherwise be
         // a button that cannot work.
         testCase "no manager origin means no offer, just the status" <| fun () ->
-            let html = Support.render (stopped None (Some sessionId))
-            Expect.isFalse (html.Contains Dom.Hooks.sessionGone) "nothing to ask, so nothing offered"
-            Expect.isTrue (html.Contains Dom.Hooks.connection) "the ordinary status still renders"
+            let column = navConnection (Support.render (stopped None (Some sessionId)))
+            Expect.isFalse (column.Contains Dom.Hooks.sessionGone) "nothing to ask, so nothing offered"
+            Expect.isTrue (column.Contains "not connected") "the ordinary status still renders"
 
         testCase "no session id means no offer" <| fun () ->
-            let html = Support.render (stopped (Some "http://127.0.0.1:8321") None)
-            Expect.isFalse (html.Contains Dom.Hooks.sessionGone) "nothing to ask FOR"
-            Expect.isTrue (html.Contains Dom.Hooks.connection) "the ordinary status still renders"
+            let column = navConnection (Support.render (stopped (Some "http://127.0.0.1:8321") None))
+            Expect.isFalse (column.Contains Dom.Hooks.sessionGone) "nothing to ask FOR"
+            Expect.isTrue (column.Contains "not connected") "the ordinary status still renders"
 
         testCase "a session that is merely reconnecting is not offered a reopen" <| fun () ->
             let html =
@@ -1045,15 +1053,15 @@ let private reconnectOfferTests =
             Expect.isTrue (html.Contains Dom.Text.reopenPromiseEphemeral) "it says what reopening costs"
             Expect.isFalse (html.Contains Dom.Text.reopenPromise) "and never both"
 
-        // The banner and the card both render for a settled disconnection. The card is the
-        // more specific message, so the banner must not restate the promise underneath it.
-        testCase "the degraded banner does not repeat the promise while the offer shows" <| fun () ->
-            let html = Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId))
+        // The card is the more specific message, so within the column it is the ONLY one:
+        // a status word, a promise and a card that repeats both would be one fact three times.
+        testCase "the column says it once, by the card" <| fun () ->
+            let column = navConnection (Support.render (stopped (Some "http://127.0.0.1:8321") (Some sessionId)))
             Expect.equal
-                ((html.Split Dom.Text.reopenPromise |> Array.length) - 1)
+                ((column.Split Dom.Text.reopenPromise |> Array.length) - 1)
                 1
-                "stated once, by the card"
-            Expect.isFalse (html.Contains Dom.Text.localFallback) "the banner's own promise stays out of it"
+                "the promise is stated once"
+            Expect.isFalse (column.Contains Dom.Text.localFallback) "and never beside the bar's wording of it"
 
         testCase "a connected session shows no offer" <| fun () ->
             Expect.isFalse
@@ -1181,26 +1189,26 @@ let private syncStatusTests =
                         IsCatchingUp = false
                         CatchUpIsSlow = false } }
 
-        // Case-INSENSITIVE on purpose: the two reports differed in their capitals (one used
-        // the shared token, the other a literal), so a case-sensitive count saw one of each
-        // and called it fine.
-        testCase "'up to date' is said exactly once on the screen" <| fun () ->
+        // It used to be said once, having been said three times before that. Now it is said
+        // nowhere: "everything is fine" is the least actionable thing a screen can carry, and
+        // a client that is working says so by working. What survives is the state TOKEN, on
+        // an attribute, which is what a test should have been reading all along.
+        testCase "a healthy client says nothing about its connection" <| fun () ->
             let html = (Support.render settled).ToLowerInvariant ()
-            let rec count (from: int) (n: int) =
-                match html.IndexOf ("up to date", from) with
-                | -1 -> n
-                | i -> count (i + 1) (n + 1)
-            Expect.equal (count 0 0) 1 "one report of a healthy sync, not one per surface"
+            for word in [ "up to date"; ">connected<"; ">connecting<"; "not connected" ] do
+                Expect.isFalse (html.Contains word) (sprintf "nothing on the screen reads %s" word)
+            Expect.isTrue
+                ((Support.render settled).Contains (Dom.attr Dom.Hooks.connection Dom.Text.connected))
+                "but the state is still on the attribute a test reads"
 
         testCase "a brief catch-up says nothing at all" <| fun () ->
             let html = Support.render { representativeModel with EventConsumer = { representativeModel.EventConsumer with CatchUpIsSlow = false } }
             Expect.isFalse (html.Contains Dom.Hooks.catchUp) "the sidebar line stays put"
-            Expect.isFalse (html.Contains "catching up") "and the header keeps saying what it was saying"
+            Expect.isFalse (html.Contains "Catching up") "and nothing anywhere else says it either"
 
         testCase "a catch-up worth waiting on is reported, with its progress" <| fun () ->
             let html = Support.render representativeModel
             Expect.isTrue (html.Contains (Dom.hookText Dom.Hooks.catchUp Dom.Text.catchingUp)) "the sidebar names it"
-            Expect.isTrue (html.Contains "catching up") "and so does the header"
             Expect.isTrue (html.Contains Dom.Hooks.lastProcessedOffset) "with how far it has got"
 
         // The flag describes a catch-up that is RUNNING, so it cannot outlive one: a timer
@@ -1253,19 +1261,27 @@ let private chromeTests =
         // reason the terminal list is: a surface the floor's scan cannot see is a surface the
         // floor does not cover, and the disclosures these notices fold their detail into are
         // controls like any other.
-        let noticeShell =
+        // Two, because the session leg SUBSUMES the history leg — a Process nobody can reach
+        // cannot serve its feed either, and the report says one problem — so a stalled feed
+        // is only ever reported over a session that is otherwise fine.
+        let stoppedShell =
             Support.render
                 { representativeModel with
                     Connection = Disconnected (Some "the session did not answer")
                     Manager = Some "http://127.0.0.1:8321"
                     CanKeepHistory = false
                     EphemeralStorage = true
-                    EventConsumer = { representativeModel.EventConsumer with Feed = FeedStalled "ECONNREFUSED" }
                     GitHub =
                         { representativeModel.GitHub with
                             Status =
                                 { representativeModel.GitHub.Status with
                                     MineCredential = Some { Kind = "static"; SignInRequired = Some "github rejected this credential" } } } }
+        let stalledShell =
+            Support.render
+                { representativeModel with
+                    Connection = Connected
+                    EventConsumer = { representativeModel.EventConsumer with Feed = FeedStalled "ECONNREFUSED" } }
+        let noticeShell = stoppedShell + stalledShell
 
         // Every input either wears the ONE field face (a ring that goes blue on focus) or
         // wears nothing at all, because the row around it carries the stroke. What is ruled
