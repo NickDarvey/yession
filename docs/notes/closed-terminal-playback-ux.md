@@ -1,5 +1,7 @@
 # Closed-terminal playback — UX tryout notes (2026-08-21)
 
+> The fix is planned: [Plan 25 — terminal history as position × fidelity](../plans/25-terminal-history-position-fidelity.md).
+
 How this was exercised: real app booted in the dev container (`node app/out/Main.js --auth
 localhost`, scratch `YESSION_DATA_DIR`, `YESSION_SANDBOX_NESTED=weak`), one session, one
 terminal, three block commands (`ls -la`, a colored `printf`, `echo … && sleep 1 && echo …`),
