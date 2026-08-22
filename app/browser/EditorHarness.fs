@@ -286,11 +286,11 @@ let private shellModel : ClientModel =
     let wideBody =
         String.concat
             "\n"
-            [ "Cleared the broken checkout at /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/repos/NickDarvey/yession"
+            [ "Cleared the broken checkout at /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/workspace/repos/NickDarvey/yession"
               "and retried, see https://github.com/NickDarvey/yession/actions/runs/1234567890123/job/9876543210987."
               ""
               "```"
-              "git -C /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/repos clone --depth 1 --filter=blob:none https://github.com/NickDarvey/yession.git"
+              "git -C /home/user/.yession/sessions/AAZFRYD11S65Q4P64KHATP8YYG/workspace/repos clone --depth 1 --filter=blob:none https://github.com/NickDarvey/yession.git"
               "```" ]
     let offset (n: int64) : EventOffset = EventOffset.create n |> expect
     { ClientModel.init { PeerId = peerId; DisplayName = "swift-heron" } with

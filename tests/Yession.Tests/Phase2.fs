@@ -412,7 +412,7 @@ let private sandboxPolicyTests =
             Expect.equal (Map.tryFind "HOME" host.Env) (Some "/workspace-home") "the spec's variable wins"
             Expect.equal (Map.tryFind "PATH" host.Env) (Some "/usr/bin") "the baseline fills the rest"
             Expect.equal host.WorkingDirectory (Some "/ws") "the workspace is the default cwd"
-            Expect.equal host.WritePaths [ "/ws"; "/repos" ] "the repos dir is writable beside the workspace (Plan 14)"
+            Expect.equal host.WritePaths [ "/ws"; "/repos" ] "the repos dir is a write path of its own (Plan 14)"
             let docker = Sandboxes.policyFor DockerBackend ambient resolved None None
             Expect.equal (Map.tryFind "PATH" docker.Env) None "a docker image supplies its own base env"
             Expect.equal (Map.tryFind "TOKEN" docker.Env) (Some "t") "only the spec's variables inject"
