@@ -555,50 +555,107 @@ let private seeOther (res: ServerResponse) (location: string) =
 [<Fable.Core.Emit("JSON.stringify($0)")>]
 let private jsonLiteral (s: string) : string = Fable.Core.Util.jsNative
 
+/// GET a URL and report the status its answer carried; `0` when nothing answered at all.
+/// Redirects are followed, because a session that bounces its shell through sign-in has
+/// still answered.
+[<Fable.Core.Emit("fetch($0, { redirect: 'follow', cache: 'no-store' }).then(r => r.status, () => 0)")>]
+let private statusOf (url: string) : Fable.Core.JS.Promise<int> = Fable.Core.Util.jsNative
+
+/// Is something answering FOR this address yet?
+///
+/// A front door that has not mapped this session yet does not stay silent — it answers, which
+/// is the whole trap: `404` (nothing routed here) or a gateway status (a route to nothing).
+/// `0` is nothing answering at all. Everything else, the `401` an authenticating proxy gives
+/// included, is somebody answering for this address, which is the question being asked.
+let private answeredFor (status: int) : bool =
+    status <> 0 && status <> 404 && not (status >= 502 && status <= 504)
+
+/// One of the Manager's own standalone pages: the two below are the only surfaces a browser
+/// reaches that are not the management page, and they wear the same plain sheet.
+///
+/// HTML, and that is the point rather than a detail. Every other answer this file gives is
+/// read by the page's script, so `text/plain` is right for them — but these are NAVIGATIONS
+/// by construction: a browser is the only thing that ever lands on `/open`. A browser that is
+/// handed `text/plain` does not necessarily show it; a phone downloads it, so an operator who
+/// pressed Create is left holding a file called `document.txt` and no idea what went wrong.
+let private standalonePage (title: string) (body: string) : string =
+    sprintf
+        """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>%s</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}p{color:#444}</style>
+</head><body>
+<h1>%s</h1>
+%s
+</body></html>"""
+        (Ssr.escapeText title)
+        (Ssr.escapeText title)
+        body
+
+/// What `/open` says when it cannot hand the browser over: the refusal, and the way back to
+/// the page that can do something about it.
+let private problemPage (title: string) (detail: string) : string =
+    standalonePage
+        title
+        (sprintf """<p>%s</p>
+<p><a href="/">Back to the session manager</a></p>""" (Ssr.escapeText detail))
+
+/// A refusal a BROWSER is holding: the status it deserves, and a page that says so.
+let private problem (res: ServerResponse) (status: int) (title: string) (detail: string) =
+    respond res status "text/html; charset=utf-8" (problemPage title detail)
+
+/// Where the opening page asks whether the front door has caught up. Spelled once, beside
+/// the page that fetches it and the route that answers it.
+let private readyRoute (sessionId: SessionId) : string =
+    sprintf "/sessions/%s/ready" (SessionId.value sessionId)
+
 /// The `/sessions/{id}/open` landing page (Plan 11).
 ///
 /// Not a bare 302. A session that had to be launched is reachable at its own address only
 /// once the operator's proxy has a mapping for it, and a reconciler driven by
 /// `/sessions/stream` gets there in a few hundred milliseconds — quick, but a race against
-/// a redirect the browser follows immediately. So the page polls its own target and goes
-/// when it answers.
+/// a redirect the browser follows immediately. So the page waits until the address really
+/// answers and only then goes.
+///
+/// It asks the MANAGER, at `/sessions/{id}/ready`, rather than probing the target itself —
+/// see that route for why the browser is the one place this question cannot be answered.
 ///
 /// Bounded, and it says why it gave up. An `/open` that spins forever is indistinguishable
 /// from one that is about to work, which is the failure mode this whole feature is supposed
 /// to remove rather than add.
-let private openingPage (target: string) : string =
-    sprintf
-        """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Opening session</title>
-<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}p{color:#444}</style>
-</head><body>
-<h1>Opening session…</h1>
-<p id="status">Waiting for it to answer.</p>
+let private openingPage (target: string) (readyUrl: string) : string =
+    standalonePage
+        "Opening session…"
+        (sprintf
+            """<p id="status">Waiting for it to answer.</p>
 <p><a id="target" href="%s">Open it directly</a></p>
 <script>
   const target = %s
+  const ready = %s
   let attempts = 0
   async function poll () {
     attempts++
     try {
-      await fetch(target, { mode: 'no-cors', cache: 'no-store' })
-      location.replace(target)
+      // `ok`, not "the request settled". A front door that has not mapped this session yet
+      // answers — with a 404, or a gateway error — and a fetch that only caught THROWN
+      // requests reads that as the session answering, redirects into it, and leaves whoever
+      // pressed Create looking at the front door's 404. This route reports the difference.
+      const answer = await fetch(ready, { cache: 'no-store' })
+      if (answer.ok) { location.replace(target); return }
+    } catch (e) { /* the Manager itself is unreachable: the same wait, bounded the same way */ }
+    if (attempts >= 40) {
+      document.getElementById('status').textContent =
+        'The session started, but its address is not answering after 20 seconds. ' +
+        'If this deployment maps session ports through a proxy, that mapping has not appeared.'
       return
-    } catch (e) {
-      if (attempts >= 40) {
-        document.getElementById('status').textContent =
-          'The session started, but its address is not answering after 20 seconds. ' +
-          'If this deployment maps session ports through a proxy, that mapping has not appeared.'
-        return
-      }
-      setTimeout(poll, 500)
     }
+    setTimeout(poll, 500)
   }
   poll()
-</script>
-</body></html>"""
-        (Ssr.escapeAttr target)
-        (jsonLiteral target)
+</script>"""
+            (Ssr.escapeAttr target)
+            (jsonLiteral target)
+            (jsonLiteral readyUrl))
 
 /// Handle a management-UI request against the Manager. Returns false for paths that
 /// are not the UI's (the composing server falls through — e.g. to the control routes).
@@ -798,12 +855,12 @@ let tryHandle
             | "GET", [| id; "open" |] ->
                 Some (fun () ->
                     match SessionId.create id with
-                    | Error e -> respond res 400 "text/plain" e
+                    | Error e -> problem res 400 "That is not a session id" e
                     | Ok sessionId ->
                         Async.StartImmediate (
                             async {
                                 match pm.TryFind sessionId with
-                                | None -> respond res 404 "text/plain" (sprintf "unknown session %s" id)
+                                | None -> problem res 404 "No such session" (sprintf "This Manager has no session %s." id)
                                 | Some view ->
                                     // Already running is the common case once a client has
                                     // reconnected on its own; asking for the port it already
@@ -814,11 +871,49 @@ let tryHandle
                                         | ProcessManager.NotRunning
                                         | ProcessManager.Exited _ -> pm.Launch sessionId
                                     match port with
-                                    | Error reason -> respond res (refusalStatus sessionId) "text/plain" reason
+                                    | Error reason -> problem res (refusalStatus sessionId) "Cannot open this session" reason
                                     | Ok port ->
                                         let address = PublicAccess.sessionAddress sessionId port pm.Public
-                                        html res (openingPage (sprintf "%s/" address.Url))
+                                        html res (openingPage (sprintf "%s/" address.Url) (readyRoute sessionId))
                             }))
+            // Does this deployment's front door reach the session yet? The question the
+            // opening page above is really asking, answered HERE because here is the only
+            // place it CAN be answered: a browser can read the status of a same-origin
+            // address and learns nothing at all about a cross-origin one (an opaque `no-cors`
+            // answer carries status `0` whether the session served the page or the proxy
+            // served a 404), while this process has no origin to be blinded by. The page that
+            // guessed instead redirected whoever pressed Create straight into the front
+            // door's 404, a few hundred milliseconds before the mapping appeared.
+            //
+            // Read by a script, so `text/plain` — unlike `/open` beside it, nothing navigates
+            // here.
+            | "GET", [| id; "ready" |] ->
+                Some (fun () ->
+                    match SessionId.create id with
+                    | Error e -> respond res 400 "text/plain" e
+                    | Ok sessionId ->
+                        match pm.TryFind sessionId with
+                        | None -> respond res 404 "text/plain" (sprintf "unknown session %s" id)
+                        | Some view ->
+                            match view.Status with
+                            // Not running is not ready, and it is not an error either: `/open`
+                            // launches, and a session can exit under a reader who is watching.
+                            | ProcessManager.NotRunning
+                            | ProcessManager.Exited _ ->
+                                respond res 503 "text/plain" "the session is not running"
+                            | ProcessManager.Running (port, _) ->
+                                let address = PublicAccess.sessionAddress sessionId port pm.Public
+                                Async.StartImmediate (
+                                    async {
+                                        let! status = statusOf (sprintf "%s/" address.Url) |> awaitPromise
+                                        if answeredFor status then respond res 200 "text/plain" "ready"
+                                        else
+                                            respond
+                                                res
+                                                503
+                                                "text/plain"
+                                                (sprintf "%s answered %d" address.Url status)
+                                    }))
             | _ -> None
         | _ -> None
     match route with

@@ -107,6 +107,10 @@ let all =
         // path-preserving proxy: the only check that `<base href>` resolution works in a
         // real browser rather than in reasoning about one (docs/plans/10).
         Tag.needs "Path-mounted session (browser)" [ Tag.Browser; Tag.Native ] (fun () -> Browser.mountedTests)
+        // Creating a session behind a deployment's front door, pressed in a real browser: the
+        // only place the difference between "the address answered" and "the session answered"
+        // is observable, because it is the browser that acts on the answer.
+        Tag.needs "Creating a session behind a front door (browser)" [ Tag.Browser; Tag.Native ] (fun () -> Browser.frontDoorTests)
     ]
 
 [<EntryPoint>]
