@@ -865,7 +865,7 @@ let createWithUi
                             async {
                                 match! b.CompleteCallback state code with
                                 | Ok _ ->
-                                    respondHtml 200 (connectionsCallbackPage "Connected" "You can close this tab and return to your session.")
+                                    respondHtml 200 (connectionsCallbackPage "Connected" "Close this tab and return to your session.")
                                 | Error e ->
                                     respondHtml 400 (connectionsCallbackPage "Sign-in failed" e)
                             })

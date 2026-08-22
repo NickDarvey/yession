@@ -461,12 +461,52 @@ true no matter how the screen is redrawn:
 Not: which element marks an empty state, what a style token's Tailwind string contains,
 whether a control recedes by border or by opacity, the presence of a decorative mark, the copy
 of a label that is not itself a promise. Those are the design changing, which is what a design
-is FOR. **If a screenshot would settle it, it is not a test** — look at the screen (the
-`ui-exploration` skill drives real ones) and move on.
+is FOR.
 
 The tell that you are about to write one anyway: the assertion quotes a class name, or it
 would still pass if the surface rendered upside down in the dark. Both mean the test knows how
 the view is BUILT rather than what it PROMISES. Write the promise, or write nothing.
+
+**A screenshot and a test answer different questions.** The screenshot answers *is this any
+good* — is it crowded, is the hierarchy right, does the eye land where it should. That is a
+judgement about the design as it stands today, it has no answer that stays true, and writing
+it down as an assertion is how the suite fills up with tests nobody believes. Go and look
+(the `ui-exploration` skill drives real ones), decide, and move on without writing anything.
+
+A test answers *is this still true* — and needing a browser to SEE the answer says nothing
+about whether it is worth pinning. Visibility, focus, stacking, overflow, contrast: these are
+promises that only a rendered page can settle, and they are exactly the promises that break
+silently, because every cheap tier reads the markup and the markup still looks right. A
+whole-page render contains both mounts of a notice and calls it fine; a person sees a screen
+saying the same thing twice. So when the invariant is real and only a browser can observe it,
+the browser tier is where it goes. "I looked once and it was fine" is not a substitute — it
+is the state every regression starts from.
+
+(This paragraph replaced a rule that said the opposite — *if a screenshot would settle it, it
+is not a test* — which read as licence to delete one. The invariant deleted under it was
+"whatever is wrong with the connection is on the screen exactly once", verified by eye across
+four states and then thrown away. It was a promise, and one no markup test can reach.)
+
+**What makes a browser test brittle is the COUPLING, not the browser.** That deleted test
+failed on its first run for a reason that had nothing to do with its invariant: it counted
+occurrences of the words *not connected* and *reconnecting*, and the surface that was showing
+said *session stopped*. The invariant was right; the assertion had been written against the
+copy. Assert on what a browser can measure that a redesign does not move:
+
+- **Hooks, and how many of them are VISIBLE** — one `data-*` per report, however many mounts
+  it has. Count the mounts a person can see, never the words in them. Beware the cheap
+  visibility checks: `offsetParent` is null for anything `position: fixed`, and a bounding
+  rect stays non-zero for an element clipped to nothing by an `overflow-hidden` parent (this
+  is how a collapsed nav's contents measure as on screen). Hit-test the element's own centre
+  and ask whether what is painted there belongs to it.
+- **Geometry** — that a fixed bar does not cover the header under it, that nothing overflows
+  the viewport sideways. Compare measurements, never pixel-match a screenshot: a reference
+  image fails on a font tweak, which is the coupling all over again.
+- **Computed values** — that a focus ring actually paints, that a token resolves to the
+  contrast it promises.
+
+The same "regress it and watch it go red" rule applies, and it is worth more here than
+anywhere: a browser test that cannot fail is expensive silence.
 
 One caveat, because loosening a UI assertion is how it quietly stops testing: a whole-page
 render contains every surface at once, so a bare `.Contains "swift-heron"` is satisfied by the

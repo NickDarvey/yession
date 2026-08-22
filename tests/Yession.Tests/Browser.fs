@@ -200,7 +200,7 @@ let private reporting (label: string) (page: IPage) (ev: Evidence) (body: Async<
                                     """async () => JSON.stringify({
                                          url: location.href,
                                          title: document.title,
-                                         connection: document.querySelector('[data-connection]')?.textContent ?? null,
+                                         connection: document.querySelector('[data-connection]')?.getAttribute('data-connection') ?? null,
                                          conversation: document.querySelector('[data-conversation]')?.textContent?.slice(0, 200) ?? null,
                                          degraded: document.querySelector('[data-degraded]')?.getAttribute('data-degraded') ?? null,
                                          // What this client KEPT, by store and entry count. An
@@ -265,7 +265,11 @@ let private waitFor (what: string) (page: IPage) (predicate: string) : Async<uni
     }
 
 // Browser-evaluated predicate strings: JS by necessity — they run inside Chromium via CDP.
-let private connected = """document.querySelector('[data-connection]')?.textContent === 'Connected'"""
+
+// Read off the ATTRIBUTE, never off the words. A healthy client says nothing about being
+// healthy any more — "Connected" was on three surfaces at once and is now on none — so the
+// state token is the only place this can come from, which is where a markup contract belongs.
+let private connected = """document.querySelector('[data-connection]')?.getAttribute('data-connection') === 'Connected'"""
 
 // The open draft is a ProseMirror editable (`.ProseMirror`) inside the editable
 // (`data-rich-readonly="false"`) body-mount host — and it is whichever draft this peer has open,
@@ -1846,7 +1850,58 @@ let mountedTests =
                         waitFor
                             "the client to stop claiming it is connected"
                             page
-                            """document.querySelector('[data-connection]')?.textContent !== 'Connected'"""
+                            """document.querySelector('[data-connection]')?.getAttribute('data-connection') !== 'Connected'"""
+                })
+
+        // The report has two mounts — the nav column's, and the bar for where the column
+        // cannot be seen — and what keeps them ONE report is a visibility rule. No markup test
+        // can settle it: both are in the document at once by design, so a `Contains` sees the
+        // intended thing and a person sees a screen saying it twice (which is what a phone
+        // with its nav open did, before `connectionInColumn`).
+        //
+        // Counted by HOOK, never by the words in it. The first version of this test counted
+        // occurrences of "not connected" and "reconnecting" and went red against a surface
+        // that says "session stopped" — the invariant was right and the assertion had been
+        // written against the copy.
+        offlineReopen
+            "the connection is never reported by two surfaces at once"
+            (fun _ -> async { return () })
+            (fun page ->
+                async {
+                    // Visible means a person can SEE it, which neither `offsetParent` (null for
+                    // anything fixed — the bar is) nor a bounding rect (non-zero for the
+                    // collapsed nav's contents, clipped to nothing by `overflow-hidden`) can
+                    // tell you. Hit-test the centre and ask what is painted there.
+                    let counted =
+                        """(() => {
+                             const seen = el => {
+                               const r = el.getBoundingClientRect()
+                               if (r.width < 1 || r.height < 1) return false
+                               const x = Math.min(Math.max(r.left + r.width / 2, 1), innerWidth - 1)
+                               const y = Math.min(Math.max(r.top + r.height / 2, 1), innerHeight - 1)
+                               const hit = document.elementFromPoint(x, y)
+                               return !!hit && (el.contains(hit) || hit.contains(el))
+                             }
+                             const reports = [...document.querySelectorAll('[data-degraded]')].filter(seen)
+                             const offer = [...document.querySelectorAll('[data-session-gone]')].filter(seen)
+                             return { reports: reports.length, offer: offer.length }
+                           })()"""
+                    let atMostOne = sprintf "%s.reports <= 1" counted
+                    // And not zero everywhere: the column may be showing the reconnect card
+                    // INSTEAD of the status, so what must always hold is that something on
+                    // screen says the session is gone. Without this the case above passes on a
+                    // client that reports nothing at all.
+                    let saidSomewhere = sprintf "(%s.reports + %s.offer) >= 1" counted counted
+                    do! waitFor "the client to notice the session is gone" page
+                            """document.querySelector('[data-degraded]') !== null"""
+                    for width, height, what in [ 1440, 900, "a desktop"; 390, 844, "a phone" ] do
+                        do! awaitU (page.SetViewportSizeAsync (width, height))
+                        do! waitFor (sprintf "one report at most on %s" what) page atMostOne
+                        do! waitFor (sprintf "and something saying it on %s" what) page saidSomewhere
+                    // The pane a phone reader can be on when it happens. The bar is fixed above
+                    // all three, so bringing the nav out over it must not reveal a second copy.
+                    do! awaitU (page.Locator("[data-nav-toggle='show']").First.ClickAsync ())
+                    do! waitFor "still one report with the nav open over it" page atMostOne
                 })
 
         // Plan 22, and the other half of the bug report: the conversation came back offline

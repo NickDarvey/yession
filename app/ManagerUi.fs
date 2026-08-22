@@ -198,7 +198,7 @@ let private tableTemplate
         | _, true -> "no filter selected — pick active or archived above"
         | _, false ->
             let hidden = List.length all - List.length views
-            sprintf "no sessions match this filter — %d hidden" hidden
+            sprintf "no sessions match — %d hidden" hidden
     let rows =
         match views with
         | [] ->
@@ -385,7 +385,7 @@ let private mcpTemplate (views: ProcessManager.SessionView list) (declarations: 
         | [] ->
             [ html $"""
                 <tr>
-                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers declared — a session reaches only its own tools</td>
+                  <td colspan="4" class="py-10 text-center {Style.small}">no MCP servers — a session reaches only its own tools</td>
                 </tr>""" ]
         | declarations -> declarations |> List.map (mcpRowTemplate views)
     let options =
@@ -572,7 +572,7 @@ let private openingPage (target: string) : string =
 <html lang="en"><head><meta charset="utf-8"><title>Opening session</title>
 <style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}p{color:#444}</style>
 </head><body>
-<h1>Opening your session…</h1>
+<h1>Opening session…</h1>
 <p id="status">Waiting for it to answer.</p>
 <p><a id="target" href="%s">Open it directly</a></p>
 <script>
@@ -587,7 +587,7 @@ let private openingPage (target: string) : string =
     } catch (e) {
       if (attempts >= 40) {
         document.getElementById('status').textContent =
-          'The session started, but its address is still not answering after 20 seconds. ' +
+          'The session started, but its address is not answering after 20 seconds. ' +
           'If this deployment maps session ports through a proxy, that mapping has not appeared.'
         return
       }
