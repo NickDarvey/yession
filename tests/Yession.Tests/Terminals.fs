@@ -2284,6 +2284,61 @@ let private sourceTests =
                 Expect.equal reasons [ "closed by a peer" ] "one closure, and it is the one a person asked for"
             }
 
+        // The invariant that did not exist: an agent could only ever see the last 500 lines,
+        // so a device that had been talking since before it arrived was unreadable from the
+        // beginning however much of it was on disk.
+        testCaseAsync "a read from the beginning returns the beginning" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! head = terminals.Tail id (Some 0)
+                let page = head |> expect
+                Expect.equal page.From 0 "it starts where it was asked to"
+                Expect.stringContains page.Text "ready" "and carries what the device said first"
+            }
+
+        // Chained reads are the whole point of the cursor: whatever `Through` says is where
+        // the next read starts, and a page that reported a line it did not return would put a
+        // hole in the middle of a boot log nobody would ever see.
+        testCaseAsync "a read carries the line the next one starts at" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! first = terminals.Tail id (Some 0)
+                let first = first |> expect
+                let! next = terminals.Tail id (Some first.Through)
+                let next = next |> expect
+                Expect.equal next.From first.Through "the second starts exactly where the first stopped"
+                Expect.isTrue (next.Through >= next.From) "and never goes backwards"
+            }
+
+        // How a reader tells a whole answer from the end of a long one. The tail reaches the
+        // live edge by construction, and saying so is what stops a model reading "the last
+        // 2000 characters of a day" as "everything this device ever said".
+        testCaseAsync "the tail says it has reached the live edge" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _ = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! tail = terminals.Tail id None
+                let tail = tail |> expect
+                Expect.equal tail.Through tail.Length "a tail is up to date, and says so"
+            }
+
         testCaseAsync "an attached source's bytes reach the transcript" <|
             async {
                 let log = newLog ()
@@ -2377,7 +2432,7 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
 
-                match! terminals.Tail (expect device) with
+                match! terminals.Tail (expect device) None with
                 | Error e -> failwithf "a device has nothing but its transcript to read: %s" e
                 | Ok tail ->
                     // `loopback` greets with "ready\n" on attach, so there is something to read
@@ -2400,7 +2455,7 @@ let private sourceTests =
                 let! closed = terminals.Close id "the device went away"
                 Expect.isOk closed "the terminal closes"
 
-                match! terminals.Tail id with
+                match! terminals.Tail id None with
                 | Error e -> failwithf "a closed device still has a recording: %s" e
                 | Ok tail -> Expect.stringContains tail.Text "ready" "and it still reads"
             }
@@ -2414,7 +2469,7 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
 
-                match! terminals.Tail (expect shell) with
+                match! terminals.Tail (expect shell) None with
                 | Ok _ -> failwith "a shell's output is its blocks', and reading it twice is two answers to one question"
                 | Error reason -> Expect.stringContains reason "execute_command" "and it says where the answer is"
             }

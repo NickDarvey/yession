@@ -238,12 +238,30 @@ type CheckPending = QueueId -> Async<Result<PendingOutcome, string>>
 /// `execute_command` and the classifier that gates it.
 type WriteTerminal = TerminalId -> string -> Async<Result<string, string>>
 
-/// The tail of what a terminal has said, and how much of it was left out.
+/// A window of what a terminal has said, and where in its recording that window sits.
 ///
-/// `Elided` is stated rather than silently dropped, for `TerminalCommandOutcome`'s reason: a
-/// model that cannot tell a short output from a truncated one will confidently describe the
-/// wrong thing.
-type TerminalTail = { Text : string; Elided : int }
+/// It carries its own bounds because a reader that cannot say WHERE it read cannot read on.
+/// The tail answers "what is it saying now"; everything else worth asking — what did this say
+/// before I arrived, what did it say between these two lines — is the same question asked
+/// from a different line, and `Through` is what makes asking it possible.
+type TerminalTail =
+    { Text : string
+      /// Characters left out of the START of this window. Non-zero only on a TAIL, which is
+      /// bounded by characters so it fits a context window and says what it dropped. A PAGE
+      /// is bounded by where it STOPPED and says so with `Through` instead — a page that
+      /// elided its own middle would hand back a cursor skipping lines nobody was told about.
+      ///
+      /// Stated rather than silently dropped, for `TerminalCommandOutcome`'s reason: a model
+      /// that cannot tell a short output from a truncated one will confidently describe the
+      /// wrong thing.
+      Elided : int
+      /// The first transcript line this window covers.
+      From : int
+      /// One past the last line it covers. Pass it back as `from` to read on.
+      Through : int
+      /// One past the last line the terminal has. `Through = Length` means this window
+      /// reaches the live edge, and is the only way a reader can tell that it does.
+      Length : int }
 
 /// Read what a terminal with no blocks has said (Plan 19).
 ///
@@ -256,7 +274,11 @@ type TerminalTail = { Text : string; Elided : int }
 /// comes back from `execute_command`, and every block since the last turn is already in the
 /// context pack. A second way to read the same bytes would be a second answer to one
 /// question.
-type ReadTerminal = TerminalId -> Async<Result<TerminalTail, string>>
+///
+/// `from` is a line a previous read handed back, or `None` for the tail. Reading an hour back
+/// is not more of a claim on the device than reading the last line — it is the same read from
+/// a different place, which is why it is an argument rather than a second verb.
+type ReadTerminal = TerminalId -> int option -> Async<Result<TerminalTail, string>>
 
 /// One terminal, as the AGENT is told about it (Plan 20, stage 3). What a person reads off a
 /// row in the list, in the shape a model reads — the same facts, because they are looking at
@@ -427,7 +449,7 @@ module AgentCapabilities =
         { ExecuteCommand = fun _ -> async { return Error "no terminal capability" }
           CheckPending = fun _ -> async { return Error "no terminal capability" }
           WriteTerminal = fun _ _ -> async { return Error "no terminal capability" }
-          ReadTerminal = fun _ -> async { return Error "no terminal capability" }
+          ReadTerminal = fun _ _ -> async { return Error "no terminal capability" }
           OpenTerminal = fun _ _ -> async { return Error "no terminal capability" }
           CloseTerminal = fun _ -> async { return Error "no terminal capability" }
           ListTerminals = fun () -> async { return Error "no terminal capability" }
