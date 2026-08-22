@@ -1156,23 +1156,18 @@ module SessionTerminals =
                             rearmers.Remove key |> ignore
             }
 
-        /// Attach to a stream somebody else is producing (Plan 16, part D). The same output
-        /// path a shell gets — the emulator, the transcript, the broadcast — over bytes this
-        /// process did not spawn. No mark scanning and no rc bootstrap: an uninstrumentable
-        /// source has no prompt to bootstrap, and typing one at a serial device would put
-        /// our instrumentation on somebody's wire.
-        let openAttached (id: TerminalId) (terminal: LiveTerminal) (ticket: AttachTicket) : Async<unit> =
-            async {
-                let key = TerminalId.value id
-                let onOutput (data: string) =
-                    match live.TryGetValue key with
-                    | false, _ -> ()
-                    | true, current -> emit id current TranscriptOutput data
-                let! attached = attach ticket 80 24 onOutput
-                match attached with
-                | Error _ -> return ()
-                | Ok handle -> terminal.Shell <- Some handle
-            }
+        /// Where an attached source's bytes go once there is a terminal to put them in
+        /// (Plan 16, part D). The same output path a shell gets — the emulator, the
+        /// transcript, the broadcast — over bytes this process did not spawn. No mark
+        /// scanning and no rc bootstrap: an uninstrumentable source has no prompt to
+        /// bootstrap, and typing one at a serial device would put our instrumentation on
+        /// somebody's wire.
+        let attachedSink (id: TerminalId) : string -> unit =
+            let key = TerminalId.value id
+            fun data ->
+                match live.TryGetValue key with
+                | false, _ -> ()
+                | true, current -> emit id current TranscriptOutput data
 
         let openTerminal (openedBy: ActorRef) (source: TerminalSource) (title: string) : Async<Result<TerminalId, string>> =
             async {
@@ -1190,6 +1185,33 @@ module SessionTerminals =
                 match ensured with
                 | EnvironmentUnavailable reason -> return Error reason
                 | EnvironmentAvailable ->
+                // An attached source is DIALLED FIRST, before anything durable exists, and a
+                // dial that fails is a failed open. This is where it parts company with a
+                // shell, and the difference is not an inconsistency: `openShell` failing
+                // leaves `Shell = None`, which is a designed state where blocks still run as
+                // separate spawns, so a shell that would not start is still a terminal. A
+                // stream that would not open is not one — nothing to type into, nothing to
+                // read, and a transcript that would only ever hold its own header. It used
+                // to be swallowed, and the model was told "Opened as terminal X" about a
+                // terminal with no source behind it.
+                //
+                // Bytes are HELD rather than dropped in the gap between the socket opening
+                // and the terminal existing: a provider is free to speak the instant it is
+                // attached to, and the head of a stream is exactly where a boot banner lives.
+                let queued = ResizeArray<string> ()
+                let sink = ref (fun (data: string) -> queued.Add data)
+                let! dialled =
+                    match source with
+                    | SandboxShell _ -> async { return Ok None }
+                    | Attached offer ->
+                        async {
+                            match! attach offer.Ticket 80 24 (fun data -> sink.Value data) with
+                            | Error reason -> return Error reason
+                            | Ok handle -> return Ok (Some handle)
+                        }
+                match dialled with
+                | Error reason -> return Error reason
+                | Ok dialledHandle ->
                     let id = mintTerminalId ()
                     let openedAt = clock ()
                     let transcript =
@@ -1213,7 +1235,15 @@ module SessionTerminals =
                     sources.[TerminalId.value id] <- TerminalSource.capabilities source
                     match source with
                     | SandboxShell name -> do! openShell id terminal name
-                    | Attached offer -> do! openAttached id terminal offer.Ticket
+                    | Attached _ ->
+                        dialledHandle |> Option.iter (fun handle -> terminal.Shell <- Some handle)
+                        // Point the sink at the terminal, then let go of what arrived before
+                        // there was one — in that order, so nothing said early is published
+                        // after something said late.
+                        sink.Value <- attachedSink id
+                        for held in queued do
+                            sink.Value held
+                        queued.Clear ()
                     let renewable =
                         match source with
                         | Attached offer -> offer.Renewable

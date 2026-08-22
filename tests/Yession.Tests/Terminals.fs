@@ -2046,6 +2046,11 @@ let private loopback () =
             }
     attach, written
 
+/// A stream that will not dial — the provider is down, the url is wrong, nothing is
+/// listening. `AttachWs` answers exactly this way, in the caller's own words.
+let private refusingStream () : AttachTerminal =
+    fun _ _ _ _ -> async { return Error "could not attach to ws://127.0.0.1:0/device" }
+
 let private deviceTicket =
     { Url = "ws://127.0.0.1:0/device"
       Capabilities = SourceCapabilities.byteStream
@@ -2067,6 +2072,35 @@ let private sourceTests =
                 Expect.isError shell "a shell terminal IS a need, so a refused sandbox refuses the open"
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 Expect.isOk device "an attached one needs nothing this session runs"
+            }
+
+        // An attached source has no degraded mode to fall back to, unlike a shell that would
+        // not start — so a dial that fails is a failed OPEN. It used to be swallowed, and the
+        // caller was handed an id for a terminal with nothing behind it.
+        testCaseAsync "a stream that will not open is not a terminal" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminalsWith (refusingStream ()) log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                Expect.isError opened "the open carries the dial's own reason"
+            }
+
+        // The other half, and it fails separately: an open that reported an error while still
+        // appending the event would leave an open-looking terminal in every projection,
+        // reattachable, listed, and answering reads about a stream that never existed.
+        testCaseAsync "a stream that will not open records no terminal either" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let terminals, _ = makeTerminalsWith (refusingStream ()) log environment openTranscript readTranscript []
+                let! _ = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let! events = eventsOf log
+                let opens =
+                    events |> List.choose (function SessionEvent.TerminalOpened e -> Some e | _ -> None)
+                Expect.isEmpty opens "nothing durable says a terminal was opened"
             }
 
         testCaseAsync "an attached source's bytes reach the transcript" <|
