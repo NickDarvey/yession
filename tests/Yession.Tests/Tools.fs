@@ -236,6 +236,37 @@ let private sessionTests =
                     "in the words a block's output already uses"
             }
 
+        // Two fields rather than a mode flag, and this is what it buys: a caller that means
+        // a pattern and sets the literal field gets a refusal instead of a literal match on a
+        // regex string — which would be wrong, silent, and look exactly like a device that
+        // never answered.
+        testCaseAsync "asking for a literal and a pattern at once is refused" <|
+            async {
+                let registry = AgentTools.registry AgentCapabilities.none
+                let! answer =
+                    registry.Invoke (
+                        call "yession" "read_terminal"
+                            ("""{"terminal":"t1","wait_for":"x","wait_for_pattern":"y"}"""))
+                match answer with
+                | Error reason -> Expect.stringContains reason "give one" "and says what to do about it"
+                | Ok other -> failwithf "expected a refusal, got %A" other
+            }
+
+        // Compiled at the boundary, so a pattern outside the subset is an answer to THIS call
+        // rather than something discovered part-way through a wait that then has to explain
+        // why it stopped.
+        testCaseAsync "a pattern outside the subset is refused at the call, and named" <|
+            async {
+                let registry = AgentTools.registry AgentCapabilities.none
+                let! answer =
+                    registry.Invoke (
+                        call "yession" "read_terminal"
+                            ("""{"terminal":"t1","wait_for_pattern":"(a)\\1"}"""))
+                match answer with
+                | Error reason -> Expect.stringContains reason "backreference" "the construct, by name"
+                | Ok other -> failwithf "expected a refusal, got %A" other
+            }
+
         testCaseAsync "a terminal that has said nothing says so, rather than answering blank" <|
             async {
                 let! answer = readingTerminal { Text = ""; Elided = 0; From = 0; Through = 0; Length = 0; Matched = None }

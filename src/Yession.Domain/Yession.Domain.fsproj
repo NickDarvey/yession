@@ -45,6 +45,10 @@
          this declares, so the policy types precede the collaborative state that holds
          them. Before Terminals.fs too, because a terminal's mode is one case of it. -->
     <Compile Include="Classify.fs" />
+    <!-- Matching a pattern against terminal output (Plan 25, step 9). Before Agent.fs,
+         which carries the wait that uses it, and standalone: it knows nothing about
+         terminals beyond the fact that a console is lines. -->
+    <Compile Include="TerminalPattern.fs" />
     <Compile Include="Terminals.fs" />
     <Compile Include="TerminalMarks.fs" />
     <!-- After both projections it merges: the chat as a person reads it, said and run

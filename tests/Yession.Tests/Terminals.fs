@@ -2412,7 +2412,7 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
-                let! answer = terminals.Tail id (Some 0) (Some { Until = "ready"; TimeoutSeconds = 5.0 })
+                let! answer = terminals.Tail id (Some 0) (Some { Until = MatchLiteral "ready"; TimeoutSeconds = 5.0 })
                 let answer = answer |> expect
                 Expect.equal answer.Matched (Some true) "it arrived"
                 Expect.stringContains answer.Text "ready" "and the text carries it"
@@ -2435,7 +2435,7 @@ let private sourceTests =
                 let first = first |> expect
                 Expect.stringContains first.Text "ready" "the caller has been handed it"
                 // Waiting from where that read stopped: "ready" is behind the cursor now.
-                let! again = terminals.Tail id (Some first.Through) (Some { Until = "ready"; TimeoutSeconds = 0.05 })
+                let! again = terminals.Tail id (Some first.Through) (Some { Until = MatchLiteral "ready"; TimeoutSeconds = 0.05 })
                 let again = again |> expect
                 Expect.equal again.Matched (Some false) "what it already saw does not count as having arrived"
             }
@@ -2451,10 +2451,57 @@ let private sourceTests =
                 let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
-                let! answer = terminals.Tail id (Some 0) (Some { Until = "never-appears"; TimeoutSeconds = 0.05 })
+                let! answer = terminals.Tail id (Some 0) (Some { Until = MatchLiteral "never-appears"; TimeoutSeconds = 0.05 })
                 let answer = answer |> expect
                 Expect.equal answer.Matched (Some false) "it did not arrive"
                 Expect.stringContains answer.Text "ready" "and what DID arrive is the answer"
+            }
+
+        // The cursor rule has to hold for a PATTERN too, and it gets its own case rather than
+        // an assumption of symmetry: a pattern takes a different path through the matcher, and
+        // "the stale match is unexpressible" would be a much weaker promise if it turned out to
+        // be true only of literals.
+        testCaseAsync "a pattern cannot be satisfied by output the caller already read" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                say "root@box:~# "
+                let pattern = TerminalPattern.compile "[#$>] $" |> expect
+                let! first = terminals.Tail id (Some 0) None
+                let first = first |> expect
+                Expect.stringContains first.Text "#" "the prompt has been handed over"
+                let! again =
+                    terminals.Tail
+                        id
+                        (Some first.Through)
+                        (Some { Until = MatchPattern (pattern, "[#$>] $"); TimeoutSeconds = 0.05 })
+                Expect.equal (again |> expect).Matched (Some false) "a prompt already read is not a prompt that just arrived"
+            }
+
+        testCaseAsync "a pattern matches output that arrives after the cursor" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _, say = loopback ()
+                let terminals, _, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! first = terminals.Tail id (Some 0) None
+                let first = first |> expect
+                say "U-Boot 2024.01\n"
+                let pattern = TerminalPattern.compile "U-Boot \\d+\\.\\d+" |> expect
+                let! found =
+                    terminals.Tail
+                        id
+                        (Some first.Through)
+                        (Some { Until = MatchPattern (pattern, "U-Boot"); TimeoutSeconds = 2.0 })
+                Expect.equal (found |> expect).Matched (Some true) "what arrived since is what a wait is for"
             }
 
         // A read that was not waiting says so, rather than reporting a wait nobody asked for.

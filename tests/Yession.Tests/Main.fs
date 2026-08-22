@@ -63,6 +63,7 @@ let all =
         Tag.needs "The jumpstarter provider" [ Tag.Jumpstarter ] (fun () -> Jumpstarter.tests)
         Tag.needs "SessionProcess" [] (fun () -> SessionProcess.tests)
         Tag.needs "Sync" [] (fun () -> Sync.tests)
+        Tag.needs "TerminalPattern" [] (fun () -> TerminalPattern.tests)
         Tag.needs "Terminals" [] (fun () -> Terminals.tests)
         Tag.needs "Timeline" [] (fun () -> Timeline.tests)
         // The upgrade IS the thing being tested, and there is no in-memory stand-in for it.
