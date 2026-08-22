@@ -171,9 +171,6 @@ let tests =
                           "mcp__jumpstarter__driver_call"
                           "mcp__jumpstarter__power"
                           "mcp__jumpstarter__release"
-                          "mcp__jumpstarter__serial_expect"
-                          "mcp__jumpstarter__serial_read"
-                          "mcp__jumpstarter__serial_send"
                           "mcp__jumpstarter__status" ]
                         "our client and their server agree about what this exporter offers"
 
@@ -195,11 +192,9 @@ let tests =
                     let! powered = call registries "power" """{"action":"on"}"""
                     Expect.stringContains powered "done" "the power driver answered"
 
-                    // The console, both ways: the exporter's serial line is a loopback, so
-                    // what comes back is what went out.
-                    let! _ = call registries "serial_send" """{"data":"ping over the wire\n"}"""
-                    let! heard = call registries "serial_read" """{"timeout_seconds":2}"""
-                    Expect.stringContains heard "ping over the wire" "the console carried bytes both ways"
+                    // The console is NOT here, and that is the claim: this provider owns
+                    // control, and its console is reached as a terminal over the stream leg
+                    // — which the next case drives.
                 })
 
         // The loop Plan 19 closes, across two languages: THEIR provider offers a stream in
@@ -231,16 +226,11 @@ let tests =
                     let! echoed = until (fun () -> heard.ToString().Contains "over the stream")
                     Expect.isTrue echoed "what a person types reaches the device and comes back"
 
-                    // One drain, two readers: a terminal being open must not blind the agent
-                    // that still holds the claim.
-                    let! read = call registries "serial_read" """{"timeout_seconds":2}"""
-                    Expect.stringContains read "over the stream" "the tools read what the stream read"
-
-                    // One writer: with a terminal attached, the provider sends the agent
-                    // there rather than opening a second door onto one console.
-                    let! sent = call registries "serial_send" """{"data":"second door\n"}"""
-                    Expect.stringContains sent "attached to a terminal" "the provider says where writes go"
-
+                    // The console has ONE door, and this is it. There used to be two — the
+                    // provider offered its own read and write tools beside the stream — and
+                    // the pair had to be kept in step by a tee that starved neither. Both are
+                    // gone: what an agent reads it reads through the terminal this stream
+                    // becomes, past the lease, where everyone can see who is typing.
                     handle.Kill ()
                     let! ending = handle.Exited
                     Expect.equal ending (SandboxExited 0) "the stream ends in band, not by an abrupt close"

@@ -10,14 +10,16 @@ own — the same shape the serial example uses, and the same shape ttyd, gotty a
   * Termination is {"type":"exited","code":N} and THEN a close, because an abnormal closure
     carries nothing and that path exists anyway.
 
-The interesting problem is not the socket, it is that the console now has TWO readers. The
-SDK's console is a `pexpect` spawn: whoever reads it consumes it, so a drain loop feeding a
-socket would starve `serial_read`/`serial_expect` of the very bytes they exist to return —
-the agent would go blind the moment a human opened the terminal.
+The console has exactly ONE reader, and that is the whole simplification. It used to have
+two: this provider offered `serial_read`/`serial_expect` as well, and since a `pexpect` spawn
+is consumed by whoever reads it, the drain had to tee every chunk into a buffer those tools
+could read instead — with an arrival event to wake them and a cap to bound it. All of that
+existed to keep two readers from starving each other.
 
-So while a stream is attached, ONE drain owns the console and everything else reads what it
-has already read. Writes are the opposite: they collapse to one door rather than two, and
-that door is the terminal, where the lease says who is typing.
+The tools are gone. Yession's own `read_terminal` reads the same console through the terminal
+this stream becomes, against a durable transcript rather than a handle that is consumed by
+looking at it — so the drain now reads the console and writes it to the socket, and there is
+nothing to keep in step.
 """
 
 from __future__ import annotations
@@ -36,10 +38,6 @@ from .exporter import ExporterError
 # one is a queue round trip to the SDK thread.
 DRAIN_SECONDS = 0.2
 
-# What the drain keeps for a reader that has not asked yet. A boot log is bigger than any
-# answer worth returning, and the terminal has the whole thing anyway — this bound is for
-# the TOOLS, which is why it is characters rather than lines.
-BUFFER_LIMIT = 64 * 1024
 
 
 class Console:
@@ -51,8 +49,6 @@ class Console:
         self._token: str | None = None
         self._holder: str | None = None
         self._send: Callable[[bytes], Awaitable[None]] | None = None
-        self._buffer = ""
-        self._arrived = anyio.Event()
 
     # --- the offer -------------------------------------------------------------------
 
@@ -84,42 +80,12 @@ class Console:
         """The claim ended. The stream is the claim's, so it ends too."""
         self._token = None
         self._holder = None
-        self._buffer = ""
 
     # --- what the tools read ----------------------------------------------------------
     #
     # Reads answer from the drain while a stream is attached and from the console itself
     # otherwise. Same question, same shape of answer; the difference is only who is holding
     # the `pexpect` handle, which is not something a caller should have to know.
-
-    async def read(self, timeout: float) -> str:
-        if not self.attached:
-            return await self._off_loop(lambda: self._exporter.console_read(timeout))
-        if not self._buffer:
-            with anyio.move_on_after(timeout):
-                await self._arrived.wait()
-        seen, self._buffer = self._buffer, ""
-        return seen
-
-    async def expect(self, pattern: str, timeout: float) -> tuple[bool, str]:
-        if not self.attached:
-            return await self._off_loop(lambda: self._exporter.console_expect(pattern, timeout))
-        try:
-            expression = re.compile(pattern)
-        except re.error as error:
-            raise ExporterError(f"'{pattern}' is not a usable regular expression: {error}") from None
-        deadline = anyio.current_time() + timeout
-        while True:
-            found = expression.search(self._buffer)
-            if found is not None:
-                seen, self._buffer = self._buffer[: found.end()], self._buffer[found.end() :]
-                return True, seen
-            remaining = deadline - anyio.current_time()
-            if remaining <= 0:
-                seen, self._buffer = self._buffer, ""
-                return False, seen
-            with anyio.move_on_after(remaining):
-                await self._arrived.wait()
 
     # --- the socket -------------------------------------------------------------------
 
@@ -187,9 +153,6 @@ class Console:
                 )
                 return
             if chunk:
-                self._buffer = (self._buffer + chunk)[-BUFFER_LIMIT:]
-                self._arrived.set()
-                self._arrived = anyio.Event()
                 await send({"type": "websocket.send", "bytes": chunk.encode()})
 
     async def _pump(self, receive: Any) -> None:

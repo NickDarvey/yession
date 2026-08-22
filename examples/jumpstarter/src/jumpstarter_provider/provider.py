@@ -302,53 +302,6 @@ class Provider:
             # every answer in quotes, so a list of readings read as one long string.
             return f"{driver}.{method} returned {result}"
 
-        @mcp.tool()
-        async def serial_send(ctx: Context, data: str) -> str:
-            """Write to the device's serial console. Nothing is appended, so end a command with \\n yourself. The console opens on first use and stays open until you release the exporter. Needs the claim. This says only that the bytes went out — read or expect to find out what happened."""
-            refusal = self._refusal(ctx)
-            if refusal:
-                return refusal
-            # One writer, and while a terminal is attached it is the terminal's — where a
-            # lease says who is typing and everyone can see the keystrokes. Writing here as
-            # well would be a second door onto one console, past that lease.
-            if self.console.attached:
-                return (
-                    "the console is attached to a terminal — type into it there "
-                    "(write_terminal), where people can see who is typing"
-                )
-            try:
-                await _off_loop(lambda: self.exporter.console_send(data))
-            except ExporterError as error:
-                return f"the console refused the write: {error}"
-            return f"sent {len(data)} characters"
-
-        @mcp.tool()
-        async def serial_read(ctx: Context, timeout_seconds: float = 2.0) -> str:
-            """Everything the console has said since you last read it, up to a pause of timeout_seconds. Needs the claim. Use expect instead when you know what you are waiting for — this one always waits the whole timeout out."""
-            refusal = self._refusal(ctx)
-            if refusal:
-                return refusal
-            try:
-                seen = await self.console.read(_timeout(timeout_seconds))
-            except ExporterError as error:
-                return f"the console is not readable: {error}"
-            return seen if seen else "(the console said nothing)"
-
-        @mcp.tool()
-        async def serial_expect(ctx: Context, pattern: str, timeout_seconds: float = 10.0) -> str:
-            """Wait for the console to say something matching pattern (a Python regular expression) and return everything up to and including it — a login prompt, a boot banner, a shell prompt after a command. Returns as soon as it matches. On a timeout you still get what WAS said, which is usually where the answer is. Needs the claim."""
-            refusal = self._refusal(ctx)
-            if refusal:
-                return refusal
-            try:
-                matched, seen = await self.console.expect(pattern, _timeout(timeout_seconds))
-            except ExporterError as error:
-                return f"the console is not readable: {error}"
-            if matched:
-                return seen
-            body = seen if seen else "(nothing at all)"
-            return f"'{pattern}' did not appear within {_timeout(timeout_seconds):.0f}s. The console said:\n{body}"
-
     # --- the app -----------------------------------------------------------------------
 
     def app(self) -> Any:
