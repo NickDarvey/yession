@@ -213,16 +213,14 @@ class Exporter:
         self._do(run)
 
     def console_read(self, timeout: float) -> str:
-        """Whatever the console has said, up to a quiet period.
+        """Whatever the console has said SINCE THE LAST READ, up to a quiet period.
 
-        A read is an `expect` for nothing: pexpect returns what it buffered when the
-        timeout expires, which is exactly "everything it said and then stopped".
+        "Since the last read" is the promise, so the read has to consume what it returns —
+        see `_drain`, which is where that turns out to be the harder half.
         """
 
         def run(connection: _Connection) -> str:
-            console = connection.open_console()
-            console.expect([pexpect.TIMEOUT], timeout=timeout)
-            return _text(console.before)
+            return _drain(connection.open_console(), timeout)
 
         return self._do(run, timeout=timeout + 60.0)
 
@@ -236,9 +234,14 @@ class Exporter:
                 re.compile(pattern)
             except re.error as error:
                 raise ExporterError(f"'{pattern}' is not a usable regular expression: {error}") from None
-            index = console.expect([pattern, pexpect.TIMEOUT], timeout=timeout)
-            seen = _text(console.before) + (_text(console.after) if index == 0 else "")
-            return index == 0, seen
+            if console.expect([pattern, pexpect.TIMEOUT], timeout=timeout) == 0:
+                # A match consumes up to and including itself, so what is left in the buffer
+                # is what came AFTER — which is what the next read should see, and does.
+                return True, _text(console.before) + _text(console.after)
+            # A miss returns what was seen, so it has to consume it too. Leaving it behind is
+            # how the same output came back from the next read and was then matched, later,
+            # by an expect that had no business seeing it.
+            return False, _drain(console, 0.0)
 
         return self._do(run, timeout=timeout + 60.0)
 
@@ -312,3 +315,30 @@ def _text(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return str(value)
+
+
+# How long a read waits for MORE, once something has arrived. A caller asking for "what it
+# said and then stopped" wants the pause that ENDED it, not the timeout it was willing to
+# wait: a device that answers in 20ms should not cost two seconds to hear.
+QUIET_SECONDS = 0.05
+
+
+def _drain(console: Any, timeout: float) -> str:
+    """Everything the console has said, CONSUMED.
+
+    `(?s).+` and not `[pexpect.TIMEOUT]`, which is the same call with the opposite effect.
+    pexpect consumes what it MATCHED and leaves the buffer alone when it times out, so an
+    expect for TIMEOUT hands back `before` — the whole buffer — and keeps it. Every read
+    then answered with everything the console had ever said, growing without bound; the
+    stream re-sent that history five times a second; and the next `expect` matched a prompt
+    from ten minutes ago and reported it as having just arrived.
+
+    Matching a real pattern consumes it, which is the whole of the fix.
+    """
+    chunks: list[str] = []
+    wait = timeout
+    while True:
+        if console.expect([r"(?s).+", pexpect.TIMEOUT], timeout=wait) == 1:
+            return "".join(chunks)
+        chunks.append(_text(console.after))
+        wait = QUIET_SECONDS
