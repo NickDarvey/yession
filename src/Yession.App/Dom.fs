@@ -52,9 +52,13 @@ module Dom =
         let catchUp = "data-catch-up"
         /// The durable event feed's health (sidebar), carrying a `Text.feed*` token.
         let feed = "data-feed"
-        /// The connection report where the nav column cannot be seen — a phone, a collapsed
-        /// nav — carrying the token of whichever leg is down (`Text.degraded*` or
-        /// `Text.feed*`); absent entirely when everything is healthy.
+        /// A mount of the connection report, carrying the token of whichever leg is down
+        /// (`Text.degraded*` or `Text.feed*`); absent entirely when everything is healthy.
+        ///
+        /// TWO elements wear it — the nav column's, and the bar for where the column cannot be
+        /// seen — and they are complementary, so a person only ever sees one. That is a
+        /// VISIBILITY rule, which no markup test can settle: both mounts are in the document
+        /// at once by design. The browser suite counts the visible ones.
         let degraded = "data-degraded"
         let lastProcessedOffset = "data-last-processed-offset"
         let latestKnownOffset = "data-latest-known-offset"

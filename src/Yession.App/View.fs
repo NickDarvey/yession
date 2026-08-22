@@ -380,17 +380,26 @@ module View =
         // times. The offer carries the same promise and the same disclosure.
         let offer = reconnectOffer actions model
         let report = connectionReport model
+        // Whichever of the two this column has to show, it is ONE mount of one report, so it
+        // wears one hook and one visibility rule. Anything narrower and the rule stops being
+        // checkable: the browser suite counts the mounts a person can see, and a mount that
+        // wore the hook only on its status face left the face it actually shows — the card —
+        // uncounted, so the suite passed over a phone reporting the same fault twice.
+        let inColumn (inner: TemplateResult) =
+            match report with
+            | None -> inner
+            | Some (token, _, _) ->
+                html $"""<div class="{Style.connectionInColumn}" data-degraded="{token}">{inner}</div>"""
         let body =
             match offer, report with
-            | Some offer, _ -> offer
+            | Some offer, _ -> inColumn offer
             | None, None -> Lit.nothing
             | None, Some (_, status, why) ->
-                html $"""
-                  <div class="{Style.connectionInColumn}">
-                    <span class="{Style.syncRow}">{status}</span>
-                    {detailNote "connection" why}
-                    {retry}
-                  </div>"""
+                inColumn (
+                    html $"""
+                      <span class="{Style.syncRow}">{status}</span>
+                      {detailNote "connection" why}
+                      {retry}""")
         // The section is always in the document, and always carries BOTH legs' exact state
         // tokens, because that is the markup contract a test reads. What is conditional is
         // the words — they appear when something is wrong and at no other time — and, with
