@@ -179,6 +179,24 @@ module TerminalSource =
         | SandboxShell name -> Some name
         | Attached _ -> None
 
+    /// How a source ENDING is stated, given what that source said it has.
+    ///
+    /// Here rather than at the call site because it is a rule about a declaration: only a
+    /// source that claimed an exit code is described as having exited with one. Saying
+    /// "exit 0" about a serial line that merely went quiet would invent the exact fact
+    /// `HasExitCode = false` exists to deny — and it is the fact somebody deciding whether
+    /// to reattach is reading.
+    ///
+    /// A failure carries the provider's own words, whether it said them in band
+    /// (`{"type":"failed"}`) or simply vanished, because `AttachWs` already maps both here
+    /// and the second one's "the stream closed without saying why" is the honest thing to
+    /// put in front of a person.
+    let endedReason (capabilities: SourceCapabilities) (ending: SandboxRun) : string =
+        match ending with
+        | SandboxExited code when capabilities.HasExitCode -> sprintf "the stream ended with code %d" code
+        | SandboxExited _ -> "the stream ended"
+        | SandboxRunFailed reason -> reason
+
 /// Reach a byte stream somebody else is producing, and hand back a handle shaped exactly
 /// like a pty's.
 ///

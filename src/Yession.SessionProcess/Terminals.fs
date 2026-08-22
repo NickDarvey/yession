@@ -1169,7 +1169,10 @@ module SessionTerminals =
                 | false, _ -> ()
                 | true, current -> emit id current TranscriptOutput data
 
-        let openTerminal (openedBy: ActorRef) (source: TerminalSource) (title: string) : Async<Result<TerminalId, string>> =
+        // Mutually recursive with `closeTerminal`, because a stream that ends closes its own
+        // terminal and the watcher for that is armed at open. One direction only in practice:
+        // closing never opens anything.
+        let rec openTerminal (openedBy: ActorRef) (source: TerminalSource) (title: string) : Async<Result<TerminalId, string>> =
             async {
                 // A SHELL terminal is a need, and the need is identified before the terminal
                 // exists — so a failed environment start is reported as a failed open
@@ -1257,25 +1260,73 @@ module SessionTerminals =
                                   Title = title
                                   Sandbox = sandbox
                                   Renewable = renewable })
+                    // A stream that ends closes its terminal. Armed here and nowhere else,
+                    // and AFTER the open is on the record so a source that has already gone
+                    // cannot close a terminal nothing has yet been told about.
+                    //
+                    // `RunBlock` awaits `Exited` for the shells it SPAWNS, which a live-only
+                    // source never reaches — it has no blocks, so nothing enters that path.
+                    // A device that stopped therefore left its terminal open for ever: no
+                    // exit, no reason, and `CanReattach` (which wants `not IsOpen`) dark, so
+                    // the only way back was pressing Kill on something already dead.
+                    match dialledHandle with
+                    | Some handle ->
+                        let capabilities = TerminalSource.capabilities source
+                        // A stream ends once, and this acts once. `Exited` PROMISES to resolve
+                        // exactly once, so the flag is not that promise restated — it is the
+                        // guard for a handle that breaks it. Closing a terminal kills its
+                        // handle, so a handle that resolved again on kill would re-enter the
+                        // close it was called from: `isOpen` is still true at that point,
+                        // because the kill happens before the terminal leaves the live map.
+                        // One test double did exactly this and looped until the suite gave up.
+                        let mutable ending = false
+                        // `StartImmediate` because Fable has no other kind — `Async.Start` is
+                        // a compile error there rather than a silent difference. It runs as
+                        // far as the first suspension, which is the await below, so a source
+                        // that has not ended yet parks exactly where it should.
+                        Async.StartImmediate (
+                            async {
+                                let! outcome = handle.Exited
+                                // Also idempotent against a deliberate close, which is the
+                                // ordinary case: `closeTerminal` refuses a terminal that is
+                                // not open, and a `Kill` a person asked for resolves this too.
+                                if not ending && isOpen id then
+                                    ending <- true
+                                    do!
+                                        closeTerminal id (TerminalSource.endedReason capabilities outcome)
+                                        |> Async.Ignore
+                            })
+                    | None -> ()
                     return Ok id
             }
 
-        let closeTerminal (id: TerminalId) (reason: string) : Async<Result<unit, string>> =
+        and closeTerminal (id: TerminalId) (reason: string) : Async<Result<unit, string>> =
             async {
                 if not (isOpen id) then return Error "terminal is not open"
                 else
+                    // OUT of the live map before the handle is killed, because killing it is
+                    // what makes its stream end — and an attached source's ending closes its
+                    // terminal. Taken in the other order, a close asked for by a person fires
+                    // the stream watcher while `isOpen` is still true, and the terminal is
+                    // closed twice: once as "the stream ended" and once for the reason
+                    // somebody actually gave. Two answers to when this ended, and the wrong
+                    // one first.
+                    let closing =
+                        match live.TryGetValue (TerminalId.value id) with
+                        | true, terminal -> Some terminal
+                        | _ -> None
+                    live.Remove (TerminalId.value id) |> ignore
+                    leftOpen <- Set.remove (TerminalId.value id) leftOpen
                     // The emulator is a live JS object; a closed terminal keeps its blocks
                     // (the audit outlives the process) but not its screen.
-                    match live.TryGetValue (TerminalId.value id) with
-                    | true, terminal ->
+                    match closing with
+                    | Some terminal ->
                         terminal.Emulator.Dispose ()
                         terminal.Shell |> Option.iter (fun pty -> pty.Kill ())
-                    | _ -> ()
+                    | None -> ()
                     pending.Remove (TerminalId.value id) |> ignore
                     runningAuthor.Remove (TerminalId.value id) |> ignore
                     appliedSize.Remove (TerminalId.value id) |> ignore
-                    live.Remove (TerminalId.value id) |> ignore
-                    leftOpen <- Set.remove (TerminalId.value id) leftOpen
                     busy <- Set.remove (TerminalId.value id) busy
                     // The lease goes with the terminal, and WITHOUT an event: `TerminalClosed`
                     // already clears the holder in the projection, so appending a release

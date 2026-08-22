@@ -2027,9 +2027,38 @@ let private refusingEnvironment () =
     let environment, spawned = scriptedEnvironment (fun _ -> [], 0)
     { environment with Ensure = fun _ _ -> async { return EnvironmentUnavailable "no sandbox here" } }, spawned
 
-/// A stream that records what was written to it and never ends on its own.
+/// A stream that records what was written to it and never ends until a test says so.
+///
+/// The third member is that latch. `Exited` used to resolve immediately, which was harmless
+/// while nobody awaited it and became a trap the moment something did: every attached
+/// terminal would close the instant it opened, and nine tests about something else would
+/// fail for a reason none of them names. A stream ending is now a thing a test DOES, which
+/// is also the only way to pin what happens when one does.
 let private loopback () =
     let written = ResizeArray<string> ()
+    let mutable ended : SandboxRun option = None
+    let mutable resume : (SandboxRun -> unit) option = None
+    // Both orders work: a test that ends the stream before anything awaits it, and one that
+    // ends it after. A latch that only handled the second would turn a scheduling detail
+    // into a hang.
+    // A stream ends ONCE — `PtyHandle.Exited` says so, and a double that resolved twice sent
+    // the real thing into a loop: closing a terminal kills its handle, the kill re-fired the
+    // continuation, and the close ran again, for ever.
+    let finish (run: SandboxRun) =
+        match ended with
+        | Some _ -> ()
+        | None ->
+            ended <- Some run
+            match resume with
+            | Some ok ->
+                resume <- None
+                ok run
+            | None -> ()
+    let exited =
+        Async.FromContinuations (fun (ok, _, _) ->
+            match ended with
+            | Some run -> ok run
+            | None -> resume <- Some ok)
     let attach : AttachTerminal =
         fun _ _ _ onData ->
             async {
@@ -2037,14 +2066,14 @@ let private loopback () =
                     Ok
                         { Write = fun text -> written.Add text
                           Resize = fun _ _ -> ()
-                          Kill = ignore
-                          Exited = async { return SandboxExited 0 }
+                          Kill = fun () -> finish (SandboxExited 0)
+                          Exited = exited
                           }
                     |> Result.map (fun handle ->
                         onData "ready\n"
                         handle)
             }
-    attach, written
+    attach, written, finish
 
 /// A stream that will not dial — the provider is down, the url is wrong, nothing is
 /// listening. `AttachWs` answers exactly this way, in the caller's own words.
@@ -2056,6 +2085,19 @@ let private deviceTicket =
       Capabilities = SourceCapabilities.byteStream
       Label = "USB serial" }
 
+/// A source that DID claim an exit code — a remote shell rather than a serial line — so
+/// "is the code reported" and "is one invented" are two different questions with two
+/// different tickets.
+let private codedTicket =
+    { deviceTicket with Capabilities = { SourceCapabilities.byteStream with HasExitCode = true } }
+
+/// The reasons a terminal was closed for, in order.
+let private closureReasons (log: EventLog<SessionEvent>) =
+    async {
+        let! events = eventsOf log
+        return events |> List.choose (function SessionEvent.TerminalClosed e -> Some e.Reason | _ -> None)
+    }
+
 let private sourceTests =
     testList "Foreign terminal sources" [
 
@@ -2066,7 +2108,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = refusingEnvironment ()
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
+                let attach, _, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 Expect.isError shell "a shell terminal IS a need, so a refused sandbox refuses the open"
@@ -2103,12 +2145,102 @@ let private sourceTests =
                 Expect.isEmpty opens "nothing durable says a terminal was opened"
             }
 
+        // `RunBlock` awaits `Exited` for the shells it spawns, which a live-only source never
+        // reaches — it has no blocks. So a device that stopped used to leave its terminal open
+        // for ever, and the only way back was pressing Kill on something already dead.
+        testCaseAsync "a stream that ends closes its terminal" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, endStream = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                endStream (SandboxExited 0)
+                do! Async.Sleep 20
+                Expect.isFalse (terminals.IsOpen id) "the terminal goes with the stream that fed it"
+            }
+
+        // A serial line has no exit code, and `HasExitCode = false` is the source saying so.
+        // Reporting "exit 0" for one that merely went quiet invents the exact fact that flag
+        // exists to deny — and it is the fact somebody deciding whether to reattach reads.
+        testCaseAsync "a source that claimed no exit code is not given one" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, endStream = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let _ = opened |> expect
+                endStream (SandboxExited 0)
+                do! Async.Sleep 20
+                let! reasons = closureReasons log
+                match reasons with
+                | [ reason ] ->
+                    Expect.stringContains reason "ended" "it says the stream ended"
+                    Expect.isFalse (reason.Contains "code") "and claims no code it was never given"
+                | other -> failwithf "expected one closure, got %A" other
+            }
+
+        testCaseAsync "a source that claimed an exit code reports it" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, endStream = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = codedTicket; Renewable = false }) "remote shell"
+                let _ = opened |> expect
+                endStream (SandboxExited 7)
+                do! Async.Sleep 20
+                let! reasons = closureReasons log
+                Expect.equal reasons [ "the stream ended with code 7" ] "the code it declared it would have"
+            }
+
+        // `{"type":"failed"}` and an abrupt close both arrive here as `SandboxRunFailed`, and
+        // the provider's own words are the only thing worth putting in front of a person.
+        // They used to reach no surface at all.
+        testCaseAsync "a stream that failed says why, in the provider's words" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, endStream = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let _ = opened |> expect
+                endStream (SandboxRunFailed "the exporter went away")
+                do! Async.Sleep 20
+                let! reasons = closureReasons log
+                Expect.equal reasons [ "the exporter went away" ] "carried through unchanged"
+            }
+
+        // A `Kill` we sent resolves `Exited` too, so the watcher fires on a terminal already
+        // closed. Two closures for one ending would be two answers to "when did this end".
+        testCaseAsync "a terminal closed by hand is not closed twice by its own stream" <|
+            async {
+                let log = newLog ()
+                let environment, _ = scriptedEnvironment (fun _ -> [], 0)
+                let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
+                let attach, _, _ = loopback ()
+                let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
+                let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
+                let id = opened |> expect
+                let! closed = terminals.Close id "closed by a peer"
+                Expect.isOk closed "the hand close succeeds"
+                do! Async.Sleep 20
+                let! reasons = closureReasons log
+                Expect.equal reasons [ "closed by a peer" ] "one closure, and it is the one a person asked for"
+            }
+
         testCaseAsync "an attached source's bytes reach the transcript" <|
             async {
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, linesOf, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
+                let attach, _, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2127,7 +2259,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written = loopback ()
+                let attach, written, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2152,7 +2284,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
+                let attach, _, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2169,7 +2301,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written = loopback ()
+                let attach, written, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = opened |> expect
@@ -2192,7 +2324,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
+                let attach, _, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
 
@@ -2212,7 +2344,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
+                let attach, _, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! device = terminals.Open (PeerRef ada) (Attached { Ticket = deviceTicket; Renewable = false }) "USB serial"
                 let id = expect device
@@ -2229,7 +2361,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, _ = loopback ()
+                let attach, _, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! shell = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
 
@@ -2243,7 +2375,7 @@ let private sourceTests =
                 let log = newLog ()
                 let environment, _ = scriptedEnvironment (fun _ -> [], 0)
                 let openTranscript, _, _, _, readTranscript = recordingTranscripts ()
-                let attach, written = loopback ()
+                let attach, written, _ = loopback ()
                 let terminals, _ = makeTerminalsWith attach log environment openTranscript readTranscript []
                 let! opened = terminals.Open (PeerRef ada) (SandboxShell SandboxName.defaultName) "build"
                 let id = opened |> expect
