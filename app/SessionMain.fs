@@ -25,8 +25,14 @@ let private expect =
 
 let private sessionId = SessionId.create (Interop.envOr "YESSION_SESSION" "local-session") |> expect
 let private port = Interop.envOr "YESSION_PORT" "0" |> int
+// ABSOLUTE, whatever it was given. The default below is relative, and so is what the test
+// harness passes; every path this session stores, binds into a sandbox, or reports to a
+// person is derived from it. A relative one still WORKS for anything resolved once — which
+// is why it survived this long — and silently breaks whatever resolves it twice. `Repos`
+// guards its own boundary too (see `Repos.create`): that is the same rule at the place a
+// relative path becomes a wrong answer rather than the place it is born.
 let private dataDir =
-    Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId))
+    Fs.absolute (Interop.envOr "YESSION_SESSION_DATA" (sprintf ".yession/sessions/%s" (SessionId.value sessionId)))
 
 // The control channel to the Manager (Step 24): supervision reports, secrets custody,
 // AND this launch's OAuth client registration all authenticate with the same

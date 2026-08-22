@@ -356,6 +356,41 @@ let private srtTests =
                 "the listing is the filesystem's answer, and it says where"
         }
 
+        // Every case here uses an absolute mkdtemp; a SESSION's data directory need not be
+        // one — the unset-`YESSION_SESSION_DATA` default is relative, and so is what the
+        // live suite passes. That difference was invisible and total: the clone landed and
+        // then every verb, `add_repo`'s own listing included, reported `cannot change to
+        // ...: No such file or directory` about the checkout it had just made, because
+        // `git -C <relative>` runs in a sandbox whose cwd is already that directory and so
+        // resolves it twice. A repo on disk that no verb would admit to.
+        testCaseAsync "a relative repos directory is still one, however git is asked about it" <| async {
+            let fixtures = mkdtemp nodeFs nodeOs
+            makeBareFixture fixtures "hello" |> ignore
+            // Relative on purpose. Fixtures stay absolute so the only variable is this.
+            let relRepos =
+                Sandboxes.SessionLayout.reposDir
+                    (sprintf "tests/Yession.Tests/out/.data/relative-%s" (string (Guid.NewGuid ())))
+            mkdir nodeFs relRepos
+            let log = freshLog ()
+            let service =
+                Repos.create
+                    { Backend = SrtBackend
+                      ReposDir = relRepos
+                      VisibleAt = Sandboxes.reposVisibleAt SrtBackend relRepos
+                      ExtraReadPaths = [ fixturesIn fixtures ]
+                      Git = namedGit
+                      AllowedDomains = []
+                      AllowProtocol = "file"
+                      CloneUrl = fun ref -> sprintf "file://%s/%s.git" (fixturesIn fixtures) (RepoRef.repo ref)
+                      ResolveToken = fun _ -> async { return None }
+                      OnNetworkFailure = fun _ _ -> async { return () }
+                      Log = log }
+                |> expect
+            let repo = RepoRef.create "octo/hello" |> expect
+            let! listing = service.AddRepo caller repo
+            Expect.equal (expect listing).Branch "main" "the verb reports the checkout it made"
+        }
+
         testCaseAsync "a git that cannot run inside the sandbox refuses the verb in words that name a knob" <| async {
             // The shape that shipped: on macOS the verbs ran PATH's `/usr/bin/git`, a shim
             // that resolves a developer directory through files the read scope denies, so
