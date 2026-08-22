@@ -4,8 +4,9 @@
 # fast when already done. Laptops and CI never need this: they install devenv normally and
 # use the committed devenv.yaml (see AGENTS.md Bootstrap).
 #
-# Also the SessionStart hook (.claude/settings.json): with --hook it only refreshes
-# devenv.local.yaml — never installs, never builds — and exits quietly if Nix is absent.
+# Also the SessionStart hook (.claude/settings.json): with --hook it refreshes
+# devenv.local.yaml and settles devenv.lock — never installs, never builds — and exits
+# quietly if Nix is absent.
 set -euo pipefail
 
 hook_only=false
@@ -113,6 +114,42 @@ else
   echo "setup: could not resolve devenv.src from cache (proxy not ready?); keeping the existing devenv.local.yaml"
 fi
 
+# devenv rewrites devenv.lock on every run, re-adding a `devenv` node that names THIS
+# container's /nix/store path (see .gitignore for why the committed lock carries nixpkgs only).
+# That left a tracked file permanently modified: noise in every `git status`, and one
+# `git commit -a` away from pinning the repo's devenv input to a path no other checkout has.
+#
+# A clean filter states what is actually true — that node is not part of the file's TRACKED
+# content — so git hashes the working copy without it and the file matches HEAD. Nothing to
+# see, and nothing to commit even by accident: the node cannot reach the index at all. Local
+# to this clone (`.git/info/attributes`, never the committed `.gitattributes`), so a laptop or
+# CI checkout is untouched by any of it. An upstream nixpkgs bump still shows, still merges.
+mkdir -p "$repo/.git/info"
+grep -qs '^devenv\.lock filter=devenv-lock$' "$repo/.git/info/attributes" \
+  || echo 'devenv.lock filter=devenv-lock' >> "$repo/.git/info/attributes"
+git -C "$repo" config filter.devenv-lock.clean "python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"nodes\"].pop(\"devenv\",None); d[\"nodes\"].get(\"root\",{}).get(\"inputs\",{}).pop(\"devenv\",None); json.dump(d,sys.stdout,indent=2); sys.stdout.write(chr(10))'"
+
+# Git re-hashes through the filter but does not record the result, so the file keeps reporting
+# as modified until something stages it. Staging it is a no-op once filtered — and it is done
+# ONLY when there is no real change left after filtering, so a deliberate `devenv update` is
+# left in the working tree to be reviewed rather than silently added.
+#
+# `devenv info` first, because the settle has to happen to a lock that ALREADY carries the
+# node: settling a pristine one achieves nothing and the session's first real devenv command
+# dirties it all over again. It costs ~0.1s, it is the cheapest devenv verb that resolves
+# inputs (`version` does not), and once the node is there devenv leaves the file alone — so
+# this runs once per container and every later command finds the tree clean.
+#
+# The one thing it does not cover: a `git checkout` that rewrites devenv.lock puts back the
+# node-less blob, and the next devenv command re-adds the node, so the file reports modified
+# again until the next session start settles it. Committing it is still impossible — the filter
+# is what guarantees that, and it holds whatever the stat cache believes.
+settle_lock() {
+  ( cd "$repo" && command -v devenv >/dev/null 2>&1 && devenv info >/dev/null 2>&1 ) || true
+  git -C "$repo" diff --quiet -- devenv.lock 2>/dev/null && git -C "$repo" add -- devenv.lock 2>/dev/null || true
+}
+settle_lock
+
 $hook_only && exit 0
 
 # The devenv CLI itself, on PATH permanently — same nixpkgs the input resolution above uses.
@@ -125,4 +162,5 @@ $hook_only && exit 0
 # Warm everything: dev shell, offline node_modules, dotnet tools, full build.
 cd "$repo"
 devenv shell -- build
+settle_lock
 echo "setup: done — use 'devenv shell -- <task>' (check / build / verify ...)"
