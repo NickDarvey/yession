@@ -111,6 +111,14 @@ module private ToolArgs =
                 |> Result.map (fun compiled ->
                     terminal, from, Some { Until = MatchPattern (compiled, source); TimeoutSeconds = timeout })
 
+    /// `remove_repo`'s pair: which repo, and whether uncommitted changes may go with it.
+    let repoForce (json: string) : Result<string * bool, string> =
+        read
+            (Decode.object (fun get ->
+                get.Required.Field "repo" Decode.string,
+                get.Optional.Field "force" Decode.bool |> Option.defaultValue false))
+            json
+
     let repoBranchCreate (json: string) : Result<string * string * bool, string> =
         read
             (Decode.object (fun get ->
@@ -363,6 +371,14 @@ module AgentTools =
                 match! capabilities.AddRepo repo with
                 | Ok outcome -> return renderCommandOutcome outcome
                 | Error e -> return sprintf "could not add the repo: %s" e
+            })
+
+    let private removeRepo (capabilities: AgentCapabilities) (raw: string) (force: bool) : Async<string> =
+        withRepo raw (fun repo ->
+            async {
+                match! capabilities.RemoveRepo repo force with
+                | Ok outcome -> return renderCommandOutcome outcome
+                | Error e -> return sprintf "could not remove the repo: %s" e
             })
 
     let private switchBranch (capabilities: AgentCapabilities) (raw: string) (branch: string) (create: bool) : Async<string> =
@@ -622,6 +638,18 @@ module AgentTools =
               "Clone a GitHub repo into this session's shared repos directory (visible to everyone here, and inside the work environment). Takes owner/repo — never a URL — and only repos the session's GitHub credential can reach: GitHub says \"not found\" for a repo it will not show you, so a not-found on a repo that exists means nobody has connected GitHub here — say that rather than retrying. Answers with the path the checkout is at: that is the path to cd to in a terminal, so use it rather than guessing one. Read-only bootstrap: to commit or push, use execute_command in a terminal. Already-added repos just report their current state."
               [ ToolField.required "repo" "string" "the repo as owner/name, e.g. \"octocat/hello-world\"" ]
               (ofRepo (addRepo capabilities))
+
+          tool
+              "remove_repo"
+              "Delete a repo's checkout from this session. Use it when a checkout is unreadable and add_repo told you to, and when the session is finished with a repo — everyone here sees it go from the repos list. A checkout with uncommitted changes is REFUSED unless you pass `force`, because removing it deletes that work and adding the repo again brings back the commits and nothing else: read the refusal and decide, rather than passing force by reflex. If terminals were set to start inside the checkout, they go back to starting wherever the sandbox puts them, and the answer says so. add_repo is the way back."
+              [ ToolField.required "repo" "string" "the repo as owner/name, e.g. \"octocat/hello-world\""
+                ToolField.optional "force" "boolean" "true to delete uncommitted changes along with the checkout" ]
+              (fun args ->
+                  async {
+                      match ToolArgs.repoForce args with
+                      | Error e -> return Error e
+                      | Ok (repo, force) -> return! ok (removeRepo capabilities repo force)
+                  })
 
           tool
               "switch_branch"

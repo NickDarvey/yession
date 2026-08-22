@@ -217,7 +217,15 @@ type ReposService =
       RepoStatus : RepoRef -> Async<Result<string, string>>
       RepoLog : RepoRef -> Async<Result<string, string>>
       RepoDiff : RepoRef -> Async<Result<string, string>>
-      RemoveRepo : RepoCaller -> RepoRef -> Async<Result<unit, string>> }
+      /// Delete a checkout, and answer with the path it was at AS A TERMINAL SAW IT (Plan
+      /// 26). That path rather than `unit`, because it is the one fact only this service has
+      /// and the only one a shell profile could have been holding — the git sandbox's own
+      /// path is visible to no terminal in this session.
+      ///
+      /// `force` is required to delete a checkout with uncommitted changes. An UNREADABLE
+      /// checkout needs none: clearing one is what this verb was advertised for long before
+      /// it existed, and refusing there would leave no way out of an interrupted clone.
+      RemoveRepo : RepoCaller -> RepoRef -> bool -> Async<Result<string, string>> }
 
 [<ImportAll("node:fs")>]
 let private fs : obj = jsNative
@@ -376,6 +384,9 @@ let create (config: ReposConfig) : Result<ReposService, string> =
             }
 
         let pathOf (repo: RepoRef) = sprintf "%s/%s" reposDir (RepoRef.relativePath repo)
+        /// The same checkout as a TERMINAL in this session reaches it. What the listing
+        /// reports, and the only path anything outside the git sandbox can act on.
+        let visiblePathOf (repo: RepoRef) = sprintf "%s/%s" config.VisibleAt (RepoRef.relativePath repo)
         let present (repo: RepoRef) = Fs.exists (sprintf "%s/.git" (pathOf repo))
 
         let listingOf (repo: RepoRef) : Async<Result<RepoListing, string>> =
@@ -391,7 +402,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                                 { Repo = repo
                                   Branch = branch.Stdout.Trim ()
                                   Dirty = status.Stdout.Trim () <> ""
-                                  Path = sprintf "%s/%s" config.VisibleAt (RepoRef.relativePath repo) }
+                                  Path = visiblePathOf repo }
             }
 
         let mintMessageId () : MessageId =
@@ -558,12 +569,36 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                         return Ok (if said = "" then "(clean — nothing to show)" else capText outputLimit said)
                 })
 
-        let removeRepo (caller: RepoCaller) (repo: RepoRef) : Async<Result<unit, string>> =
+        let removeRepo (caller: RepoCaller) (repo: RepoRef) (force: bool) : Async<Result<string, string>> =
             requirePresent repo (fun () ->
                 async {
-                    rmRecursive fs (pathOf repo)
-                    do! append caller.Actor (SessionEvent.RepoRemoved { MessageId = mintMessageId (); Repo = repo; Actor = caller.Actor })
-                    return Ok ()
+                    let remove () =
+                        async {
+                            rmRecursive fs (pathOf repo)
+                            do!
+                                append
+                                    caller.Actor
+                                    (SessionEvent.RepoRemoved
+                                        { MessageId = mintMessageId (); Repo = repo; Actor = caller.Actor })
+                            return Ok (visiblePathOf repo)
+                        }
+                    // Uncommitted work is the one thing removal cannot undo: `add_repo` brings
+                    // back the commits and nothing else. So it is refused, and `force` is a
+                    // second decision — taken here, with the checkout, because a caller who
+                    // could delete without asking is the caller this exists to stop.
+                    match! listingOf repo with
+                    | Ok listing when listing.Dirty && not force ->
+                        return
+                            Error (
+                                sprintf
+                                    "%s has uncommitted changes, and removing it deletes them — adding the repo again brings back the commits and nothing else. Commit or push them first, or pass force to delete them."
+                                    (RepoRef.value repo))
+                    | Ok _ -> return! remove ()
+                    // git cannot read the checkout: exactly what an interrupted clone leaves
+                    // behind, and exactly what `add_repo` points at this verb to clear. There
+                    // is no dirtiness to protect, because there is nothing git can tell us
+                    // about — refusing here would leave that state with no way out.
+                    | Error _ -> return! remove ()
                 })
 
         { AddRepo = addRepo

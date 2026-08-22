@@ -355,6 +355,21 @@ let private shellProfileTests =
                 (profileSet SandboxName.defaultName (Some "/repos/octo/hello"))
                 "the durable form decodes to the event"
 
+        testCase "a directory under a tree is inside it, and so is the tree itself" <| fun () ->
+            // What a caller deleting a checkout asks about every profile it might invalidate.
+            Expect.isTrue (ShellProfile.isInside "/repos/octo/hello" "/repos/octo/hello") "the tree itself"
+            Expect.isTrue (ShellProfile.isInside "/repos/octo/hello" "/repos/octo/hello/src") "and anything under it"
+            Expect.isTrue (ShellProfile.isInside "/repos/octo/hello/" "/repos/octo/hello") "however either side spells a directory"
+
+        testCase "a sibling that merely shares a prefix is not inside it" <| fun () ->
+            // The bug a bare `StartsWith` has, and the reason this is a function rather than
+            // an inline test at the caller: `/repos/octo/hello-world` is a different checkout,
+            // and clearing its profile because `/repos/octo/hello` went would be silent.
+            Expect.isFalse
+                (ShellProfile.isInside "/repos/octo/hello" "/repos/octo/hello-world")
+                "a prefix is not a parent unless it ends on a directory boundary"
+            Expect.isFalse (ShellProfile.isInside "/repos/octo/hello" "/repos/octo") "nor is the parent inside the child"
+
         testCase "a profile change reads in the timeline as a sentence" <| fun () ->
             // Everyone in the session is affected — the next terminal a PERSON opens lands
             // there too — and the timeline is the only place they would learn it.
