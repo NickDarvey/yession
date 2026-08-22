@@ -244,13 +244,39 @@ type WriteTerminal = TerminalId -> string -> Async<Result<string, string>>
 /// type `AT\r` and the answer arrives when it arrives, so a read taken immediately after
 /// returns nothing and a read taken later is a guess about how much later. Polling burns
 /// turns and still races the device.
+/// What a wait is waiting for. A closed choice rather than two nullable fields, so "both at
+/// once" is not a state anything downstream has to consider: the tool boundary refuses it,
+/// and past there it cannot be said.
+type TerminalMatch =
+    /// Exactly these characters. The honest minimum, and what "wait for `login: `" wants.
+    | MatchLiteral of string
+    /// A pattern over the subset `TerminalPattern` accepts — compiled at the boundary, so a
+    /// pattern outside the subset is an answer to the tool call rather than a surprise in the
+    /// middle of a wait.
+    | MatchPattern of pattern: TerminalPattern * source: string
+
+module TerminalMatch =
+
+    /// Does what a terminal said satisfy this — or, if the matcher could not answer, why.
+    ///
+    /// A literal always answers. A pattern answers unless the matcher exceeded its own step
+    /// budget, which is a fault in this code rather than in the caller's pattern; it is
+    /// carried rather than swallowed, because a wait that quietly reported "not yet" for a
+    /// broken matcher would look exactly like a device that never spoke.
+    let isMet (target: TerminalMatch) (text: string) : Result<bool, string> =
+        match target with
+        | MatchLiteral literal -> Ok (text.Contains literal)
+        | MatchPattern (compiled, _) -> TerminalPattern.matches compiled text
+
+    /// How to name it when saying it never arrived.
+    let describe (target: TerminalMatch) : string =
+        match target with
+        | MatchLiteral literal -> literal
+        | MatchPattern (_, source) -> sprintf "the pattern %s" source
+
 type TerminalWait =
-    { /// LITERAL text, never a pattern. What this is for is "wait for `login: `", and a
-      /// regular expression composed by a model over bytes a device chose is a
-      /// catastrophic-backtracking risk with a plausible cover story. The cost is real —
-      /// "wait for a prompt matching `[#$>] $`" cannot be said — and if it bites, the fix is
-      /// a bounded matcher here rather than handing the regex engine to the model.
-      Until : string
+    { /// What to wait for. Literal text or a pattern — see `TerminalMatch`.
+      Until : TerminalMatch
       /// How long to hold before answering with what WAS said. Bounded here rather than by
       /// the caller: a tool call that could be asked to wait an hour is a turn somebody
       /// loses.

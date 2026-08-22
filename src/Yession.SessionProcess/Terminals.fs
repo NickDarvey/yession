@@ -1699,24 +1699,34 @@ module SessionTerminals =
                     // instantly, and carry on as though it were up.
                     let waited =
                         match waitFor with
-                        | None -> async { return None }
+                        | None -> async { return Ok None }
                         | Some wait ->
                             let bound = max 0.0 (min wait.TimeoutSeconds turnBoundSeconds)
                             let start = match from with Some requested -> max 0 requested | None -> max 0 (lengthNow () - tailWindow)
                             let rec look (waitedMs: float) =
                                 async {
                                     let seen = readTranscript id start None |> Transcript.printed
-                                    if seen.Contains wait.Until then return Some true
-                                    elif waitedMs >= bound * 1000.0 then return Some false
-                                    // A closed terminal will not say anything else, so waiting
-                                    // out the timeout on one is waiting for nothing.
-                                    elif not (isOpen id) then return Some false
-                                    else
-                                        do! Async.Sleep lookAgainMs
-                                        return! look (waitedMs + float lookAgainMs)
+                                    match TerminalMatch.isMet wait.Until seen with
+                                    // The matcher could not answer. Carried out rather than
+                                    // read as "not yet": a broken matcher reporting a timeout
+                                    // looks exactly like a device that never spoke, and the
+                                    // caller would go looking at the device.
+                                    | Error fault -> return Error fault
+                                    | Ok true -> return Ok (Some true)
+                                    | Ok false ->
+                                        if waitedMs >= bound * 1000.0 then return Ok (Some false)
+                                        // A closed terminal will not say anything else, so
+                                        // waiting one out is waiting for nothing.
+                                        elif not (isOpen id) then return Ok (Some false)
+                                        else
+                                            do! Async.Sleep lookAgainMs
+                                            return! look (waitedMs + float lookAgainMs)
                                 }
                             look 0.0
-                    let! matched = waited
+                    match! waited with
+                    | Error fault -> return Error fault
+                    | Ok matched ->
+
                     let length = lengthNow ()
                     match from with
                     | None ->

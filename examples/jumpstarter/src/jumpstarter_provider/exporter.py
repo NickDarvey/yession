@@ -17,7 +17,6 @@ from __future__ import annotations
 import inspect
 import os
 import queue
-import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -221,27 +220,6 @@ class Exporter:
 
         def run(connection: _Connection) -> str:
             return _drain(connection.open_console(), timeout)
-
-        return self._do(run, timeout=timeout + 60.0)
-
-    def console_expect(self, pattern: str, timeout: float) -> tuple[bool, str]:
-        """(matched, what was seen). A miss still returns the output — a timeout that says
-        only "no match" makes the caller guess whether anything arrived at all."""
-
-        def run(connection: _Connection) -> tuple[bool, str]:
-            console = connection.open_console()
-            try:
-                re.compile(pattern)
-            except re.error as error:
-                raise ExporterError(f"'{pattern}' is not a usable regular expression: {error}") from None
-            if console.expect([pattern, pexpect.TIMEOUT], timeout=timeout) == 0:
-                # A match consumes up to and including itself, so what is left in the buffer
-                # is what came AFTER — which is what the next read should see, and does.
-                return True, _text(console.before) + _text(console.after)
-            # A miss returns what was seen, so it has to consume it too. Leaving it behind is
-            # how the same output came back from the next read and was then matched, later,
-            # by an expect that had no business seeing it.
-            return False, _drain(console, 0.0)
 
         return self._do(run, timeout=timeout + 60.0)
 
