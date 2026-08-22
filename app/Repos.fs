@@ -250,18 +250,35 @@ let create (config: ReposConfig) : Result<ReposService, string> =
     Sandboxes.forBackend config.Backend "git" EnvironmentSpec.defaults
     |> Result.map (fun createSandbox ->
 
+        /// The repos directory as an ABSOLUTE path, resolved once here and used for every
+        /// path below — never `config.ReposDir` again.
+        ///
+        /// Every verb but the clone runs `git -C (pathOf repo)` in a sandbox whose working
+        /// directory IS this directory, so a relative one is resolved twice: git looks for
+        /// `<reposDir>/<reposDir>/owner/repo` and exits 128 with `cannot change to ...: No
+        /// such file or directory`. The clone is the one verb that survives it, because it
+        /// passes a target relative to that same cwd on purpose — so the checkout lands and
+        /// then every verb, `add_repo`'s own listing included, reports a failure about it.
+        /// A session whose data directory is relative (the unset-`YESSION_SESSION_DATA`
+        /// default is) had exactly that: a repo on disk that no verb would admit to.
+        ///
+        /// Resolved HERE rather than only at the composition root because this is where a
+        /// relative path stops being a path and starts being a wrong answer, and the next
+        /// caller to build one of these has not read the root.
+        let reposDir = Fs.absolute config.ReposDir
+
         let policy : SandboxPolicy =
-            { ReadPaths = config.ReposDir :: config.ExtraReadPaths
-              WritePaths = [ config.ReposDir ]
+            { ReadPaths = reposDir :: config.ExtraReadPaths
+              WritePaths = [ reposDir ]
               AllowedDomains = Some config.AllowedDomains
               Env = Sandboxes.hostBaseline (Sandboxes.ambientEnv ())
-              WorkingDirectory = Some config.ReposDir
+              WorkingDirectory = Some reposDir
               Filesystem = Confined }
 
         /// Every git this service spawns, built in the one place that carries the hardened
         /// env (`gitExec`) — so the probe below cannot drift from the verbs it speaks for.
         let execFor (token: string option) (args: string list) : SandboxExec =
-            gitExec config.Git config.ReposDir config.AllowProtocol token args
+            gitExec config.Git reposDir config.AllowProtocol token args
 
         /// `git --version` inside the sandbox, before any verb runs one. A sandbox that
         /// cannot run git is not a git sandbox, and this is where it says so: the
@@ -358,7 +375,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 | Ok run -> return Ok run
             }
 
-        let pathOf (repo: RepoRef) = sprintf "%s/%s" config.ReposDir (RepoRef.relativePath repo)
+        let pathOf (repo: RepoRef) = sprintf "%s/%s" reposDir (RepoRef.relativePath repo)
         let present (repo: RepoRef) = Fs.exists (sprintf "%s/.git" (pathOf repo))
 
         let listingOf (repo: RepoRef) : Async<Result<RepoListing, string>> =
@@ -404,7 +421,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 // Relative, because the sandbox's working directory is the repos dir; git
                 // creates the leading directories itself.
                 let relative = sprintf "%s/%s" stagingDirName (string (Guid.NewGuid ()))
-                let staging = sprintf "%s/%s" config.ReposDir relative
+                let staging = sprintf "%s/%s" reposDir relative
                 // `--template=` is empty deliberately: git's default templates are a
                 // set of `.git/hooks/*.sample` files, and srt's macOS profile denies
                 // every write under `**/.git/hooks/**` unconditionally — so the copy
@@ -423,7 +440,7 @@ let create (config: ReposConfig) : Result<ReposService, string> =
                 | Ok _ ->
                     // The owner directory is the rename's destination PARENT, and git made
                     // it inside the staging area rather than here.
-                    Fs.ensureDir (sprintf "%s/%s" config.ReposDir (RepoRef.owner repo))
+                    Fs.ensureDir (sprintf "%s/%s" reposDir (RepoRef.owner repo))
                     Fs.rename staging (pathOf repo)
                     match! listingOf repo with
                     | Error e -> return Error e
@@ -477,12 +494,12 @@ let create (config: ReposConfig) : Result<ReposService, string> =
         let listRepos () : Async<Result<RepoListing list, string>> =
             async {
                 let refs =
-                    readdirSafe fs config.ReposDir
+                    readdirSafe fs reposDir
                     |> Array.collect (fun owner ->
-                        readdirSafe fs (sprintf "%s/%s" config.ReposDir owner)
+                        readdirSafe fs (sprintf "%s/%s" reposDir owner)
                         |> Array.choose (fun repo ->
                             match RepoRef.create (sprintf "%s/%s" owner repo) with
-                            | Ok ref when Fs.exists (sprintf "%s/%s/%s/.git" config.ReposDir owner repo) -> Some ref
+                            | Ok ref when Fs.exists (sprintf "%s/%s/%s/.git" reposDir owner repo) -> Some ref
                             | _ -> None))
                     |> Array.toList
                 let mutable listings = []

@@ -58,3 +58,18 @@ let writeTextAtomic (path: string) (text: string) : unit =
     let temp = path + ".tmp"
     writeSyncedImpl fs temp text
     renameSyncImpl fs temp path
+
+[<ImportAll("node:path")>]
+let private nodePath : obj = jsNative
+
+[<Emit("$0.resolve($1)")>]
+let private resolveImpl (path: obj) (target: string) : string = jsNative
+
+/// A path as an ABSOLUTE one, resolved against the process's working directory.
+///
+/// The rule it exists for: a path that is stored, handed to another process, or used as
+/// BOTH a working directory and an argument must not depend on where anybody happens to
+/// stand. `git -C <p>` run with the cwd already set to `p`'s parent resolves `p` twice —
+/// so a relative repos directory made every verb say `cannot change to ...: No such file
+/// or directory` about a checkout that was sitting right there.
+let absolute (path: string) : string = resolveImpl nodePath path
