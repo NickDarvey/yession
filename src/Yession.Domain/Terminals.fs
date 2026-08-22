@@ -144,7 +144,19 @@ type TerminalAffordances =
       /// and an empty block list is not a read, it is a `$`. Asked of the BLOCKS rather than
       /// of the source, because blocks are what the other read is made of: a source flag
       /// would answer "could this have had blocks" about a terminal that has none.
-      ReplayIsTheRead : bool }
+      ReplayIsTheRead : bool
+      /// `ReplayIsTheRead`'s live twin: whether the SCREEN is the only read this terminal
+      /// has, so its panel shows one rather than a list of commands.
+      ///
+      /// The screen used to be shown only while somebody held the LEASE. That is right for a
+      /// shell — a held lease there means a program has taken the screen, and letting go
+      /// brings the blocks back — and wrong for a device, which has no blocks to come back
+      /// to. An attached serial port nobody had taken rendered an empty block list beside a
+      /// stream that was arriving the whole time, and the way to see anything was to claim
+      /// the keyboard.
+      ///
+      /// Watching is not typing. This is what a reader gets; the keyboard stays the lease's.
+      ScreenIsTheRead : bool }
 
 module TerminalAffordances =
 
@@ -161,7 +173,14 @@ module TerminalAffordances =
           // the other end, and refusing the way back because the RECORD is gone would answer
           // a question nobody asked.
           CanReattach = not view.IsOpen && view.Renewable
-          ReplayIsTheRead = not view.IsOpen && recorded && List.isEmpty view.Blocks }
+          ReplayIsTheRead = not view.IsOpen && recorded && List.isEmpty view.Blocks
+          // The sandbox AND the blocks, and both earn their place. `None` is a stream
+          // somebody else produces, which is what makes the screen the whole of it — a shell
+          // that has not run its first command yet is still a shell, and its read is the
+          // blocks it is about to have. And a source that declared `instrument` gets blocks
+          // while still having no sandbox, so the sandbox alone would take the block read
+          // away from exactly the source that has one.
+          ScreenIsTheRead = view.IsOpen && Option.isNone view.Sandbox && List.isEmpty view.Blocks }
 
 /// Every terminal this session has had, in the order they were opened.
 type TerminalProjection = { Terminals : TerminalView list }

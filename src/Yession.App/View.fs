@@ -1755,7 +1755,7 @@ module View =
     /// The holder's copy takes keystrokes. Everyone else's is the identical screen, live and
     /// read-only, which is the whole point of a shared terminal: watching is not a lesser
     /// mode, it is the ordinary one.
-    let private terminalScreenView (actions: ViewActions) (model: ClientModel) (terminal: TerminalId) (holder: ActorRef) : TemplateResult =
+    let private terminalScreenView (actions: ViewActions) (model: ClientModel) (terminal: TerminalId) (holder: ActorRef option) : TemplateResult =
         let mine = ActorRef.PeerRef model.Peer.PeerId
         let screen = ClientModel.terminalScreen terminal model |> Option.defaultValue ""
         let id = TerminalId.value terminal
@@ -1763,6 +1763,16 @@ module View =
             if screen = "" then
                 html $"""<div class="{Style.terminalOutputEmpty}">…</div>"""
             else html $"""{ansiText screen}"""
+        match holder with
+        | None ->
+            // Nobody is typing, and a device streams anyway. Read-only for the same reason
+            // everyone else's copy is: the keyboard belongs to the lease, and there is no
+            // lease to belong to yet.
+            html $"""
+                <div class="{Style.terminalScreen}" data-terminal-screen="{id}"
+                     role="region" aria-live="off" aria-label="Live terminal, nobody is typing">{body}</div>"""
+        | Some holder ->
+
         if holder = mine then
             // `tabindex="0"` and a keydown handler rather than a text input: what is being
             // typed here is not a value, it is a byte stream, and an input would fight the
@@ -2340,6 +2350,7 @@ module View =
             | BlockTab _ | StretchTab _ -> readonlyTabButton activate pinMark pinnedAttr hint tab
         let terminalBody (view: TerminalView) =
             let feed = ClientModel.terminalFeed view.TerminalId model
+            let affords = ClientModel.affordances view model
             let truncated =
                 if view.DroppedBytes > 0 then
                     html $"""<div class="{Style.terminalTruncated}" data-terminal-truncated="{string view.DroppedBytes}">{view.DroppedBytes} bytes dropped</div>"""
@@ -2402,8 +2413,12 @@ module View =
                           {behindLabel}
                         </div>"""
                 else
-                    match view.Lease with
-                    | Some holder ->
+                    // The screen, when it is what this terminal HAS to read — somebody holds
+                    // the keyboard, or there are no blocks to show instead. Gated on the
+                    // lease alone, a device nobody had taken rendered an empty block list
+                    // beside a stream arriving the whole time, and the only way to see it was
+                    // to claim the keyboard. Watching is not typing.
+                    if affords.ScreenIsTheRead || Option.isSome view.Lease then
                         // The blocks give way to the screen — and so does their BOX. It used
                         // to stay behind as an empty `flex-1` region holding only the
                         // truncation notice, so a live terminal spent a third of its column
@@ -2412,8 +2427,8 @@ module View =
                         // third. The notice is a line and now renders as one.
                         html $"""
                             {truncated}
-                            {terminalScreenView actions model view.TerminalId holder}"""
-                    | None ->
+                            {terminalScreenView actions model view.TerminalId view.Lease}"""
+                    else
                         html $"""
                             <div class="{Style.terminalScrollback}" data-terminal-scrollback
                                  data-terminal-id="{TerminalId.value view.TerminalId}">
