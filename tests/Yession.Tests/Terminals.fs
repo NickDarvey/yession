@@ -2517,6 +2517,36 @@ let private affordanceTests =
             Expect.isFalse (afforded true ran) "the commands it ran are the read instead"
             Expect.isFalse (afforded false (viewOf false false)) "and a recording the cap ate is no read at all"
             Expect.isFalse (afforded true (viewOf true false)) "a live terminal is not a recording yet"
+
+        testCase "the screen is the only read exactly where a live terminal has no blocks" <| fun () ->
+            // The live twin, and the rule a device needs. Gated on the LEASE, the screen
+            // appeared only while somebody was typing — so a serial port nobody had taken
+            // rendered an empty block list beside a stream arriving the whole time, and the
+            // only way to see anything was to claim the keyboard.
+            let afforded view = (TerminalAffordances.ofView true view).ScreenIsTheRead
+            let device = { viewOf true false with Sandbox = None }
+            Expect.isTrue (afforded device) "an open stream with no blocks is its screen"
+            Expect.isFalse (afforded (viewOf true false)) "a shell's read is the blocks it is about to have"
+            Expect.isFalse (afforded { device with IsOpen = false }) "a closed one is a recording, not a screen"
+
+        testCase "a stream that resolves into blocks reads as its blocks, not its screen" <| fun () ->
+            // Why the rule asks the BLOCKS as well as the sandbox. A source that declared
+            // `instrument` has no sandbox either, so the sandbox alone would take the block
+            // read away from exactly the source that has one.
+            let afforded view = (TerminalAffordances.ofView true view).ScreenIsTheRead
+            let instrumented =
+                { viewOf true false with
+                    Sandbox = None
+                    Blocks =
+                        [ { BlockId = block "1"
+                            QueueId = None
+                            Authority = Authority.ofAuthor (PeerRef ada)
+                            Command = "make"
+                            Background = false
+                            FromSeq = 1
+                            ToSeq = Some 3
+                            Status = BlockFinished (CommandSucceeded 0) } ] }
+            Expect.isFalse (afforded instrumented) "it has a cheaper read of the same history"
     ]
 
 // The agent's own terminal (Plan 15, stage 2), as a rule the manager owns rather than one the
