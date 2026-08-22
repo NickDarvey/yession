@@ -141,6 +141,14 @@ let private servicesOver (service: Repos.ReposService) : Commands.CommandService
       Terminals = fun () -> SessionTerminals.unavailable
       Invalidate = ignore }
 
+/// The same, with a shell profile already set for the default sandbox — a session where
+/// somebody has already said where terminals start.
+let private servicesProfiledOver (cwd: string) (service: Repos.ReposService) : Commands.CommandServices =
+    let profile : ShellProfileProjection =
+        { Profiles = Map.ofList [ SandboxName.defaultName, { WorkingDirectory = Some cwd } ] }
+    { servicesOver service with
+        Terminals = fun () -> { SessionTerminals.unavailable with Profiles = fun () -> profile } }
+
 /// A session whose `add_repo` succeeds at once.
 let private cloningAt (branch: string) =
     openToolSession (
@@ -195,6 +203,36 @@ let private tests' =
                 let session = cloningAt "main"
                 let! answer = addRepo session "octo/hello"
                 Expect.stringContains (answered answer) "/repos/octo/hello" "where to cd, not just what was cloned"
+            }
+
+        // Terminals do not follow a checkout on their own, and an agent that does not learn
+        // that at the moment one appears learns it by putting `cd` in front of every command
+        // for the rest of the session. The same advice sits on `set_shell_profile`, where
+        // only an agent already reaching for that tool would read it.
+        testCaseAsync "a checkout with nowhere pointed at it says so" <|
+            async {
+                let session = cloningAt "main"
+                let! answer = addRepo session "octo/hello"
+                Expect.stringContains
+                    (answered answer)
+                    "set_shell_profile"
+                    "the way to stop cd-ing, named where it is worth acting on"
+            }
+
+        // ...and stops saying it once somebody has decided. Advice that survives being taken
+        // is noise, and noise in a tool result is spent context on every later call.
+        testCaseAsync "a session that has already decided where terminals start is not told again" <|
+            async {
+                let session =
+                    openToolSession (
+                        servicesProfiledOver
+                            "/repos/octo/hello"
+                            (reposAnswering (fun repo ->
+                                async { return Ok { Repo = repo; Branch = "main"; Dirty = false; Path = "/repos/octo/hello" } })))
+                let! answer = addRepo session "octo/hello"
+                let text = answered answer
+                Expect.stringContains text "added octo/hello" "the add still reports what it did"
+                Expect.isFalse (text.Contains "set_shell_profile") "and nothing is suggested twice"
             }
 
         // A repo name the domain refuses never reaches the gate, and the model is told what

@@ -1969,105 +1969,123 @@ module SessionTerminals =
         let setProfile (actor: ActorRef) (sandbox: SandboxName) (cwd: string option) : Async<Result<string, string>> =
             async {
                 let name = SandboxName.value sandbox
-                match cwd with
-                // Relative paths are refused outright: a shell's idea of "relative to what" is
-                // precisely the thing being configured, so the answer would depend on the
-                // setting it is meant to establish.
-                | Some path when not (path.StartsWith "/") ->
-                    return
-                        Error (
-                            sprintf
-                                "'%s' is not an absolute path. A relative one would be relative to whatever a shell already had, which is the thing this sets — pass a checkout path from add_repo or the repos query."
-                                path)
-                | _ ->
-                    // Checked INSIDE the sandbox, by asking it. A host-side existence check
-                    // would be wrong twice over: under docker the path is in a container this
-                    // process cannot see, and under srt the sandbox's read scope is not ours.
-                    // The path rides as an argv element and is never interpolated into a
-                    // command line — the one place this feature could become a second door.
-                    let! ensured =
-                        match cwd with
-                        | Some _ -> (environmentFor sandbox).Ensure None "the shell profile was set"
-                        | None -> async { return EnvironmentAvailable }
-                    let! checked' =
-                        match ensured, cwd with
-                        | EnvironmentUnavailable reason, _ -> async { return Error reason }
-                        | EnvironmentAvailable, None -> async { return Ok () }
-                        | EnvironmentAvailable, Some path ->
-                            async {
-                                let! spawned =
-                                    (environmentFor sandbox).Spawn
-                                        { Executable = shell.Executable
-                                          Arguments = shell.Arguments @ [ "test -d \"$1\""; "sh"; path ]
-                                          Env = Map.empty
-                                          WorkingDirectory = None }
-                                        ignore
-                                match spawned with
-                                | Error reason -> return Error reason
-                                | Ok handle ->
-                                    match! handle.Exited with
-                                    | SandboxExited 0 -> return Ok ()
-                                    | SandboxExited _ ->
+                // Checked INSIDE the sandbox, by asking it. A host-side existence check
+                // would be wrong twice over: under docker the path is in a container this
+                // process cannot see, and under srt the sandbox's read scope is not ours.
+                // The path rides as an argv element and is never interpolated into a
+                // command line — the one place this feature could become a second door.
+                let! ensured =
+                    match cwd with
+                    | Some _ -> (environmentFor sandbox).Ensure None "the shell profile was set"
+                    | None -> async { return EnvironmentAvailable }
+                // Checked AND RESOLVED in one spawn, by the sandbox, because the sandbox
+                // is the only thing that knows both. `cd` lands a relative path against
+                // the sandbox's own working directory — the same root a terminal opens in,
+                // which is what makes `repos/octo/hello` mean anything — and `pwd` says
+                // where that turned out to be. What gets stored is always the absolute
+                // answer, so the projection, the spawn and Plan 26's tree matching never
+                // see a path whose meaning depends on where anyone stood.
+                //
+                // This is why a relative path is no longer refused. The old objection was
+                // that "relative to what" is the very thing being set — true of a SHELL's
+                // idea of relative, and not true of the sandbox's, which is fixed and
+                // known before any of this runs.
+                let! checked' =
+                    match ensured, cwd with
+                    | EnvironmentUnavailable reason, _ -> async { return Error reason }
+                    | EnvironmentAvailable, None -> async { return Ok None }
+                    | EnvironmentAvailable, Some path ->
+                        async {
+                            let mutable answered = ""
+                            let! spawned =
+                                (environmentFor sandbox).Spawn
+                                    { Executable = shell.Executable
+                                      Arguments = shell.Arguments @ [ "cd \"$1\" && pwd"; "sh"; path ]
+                                      Env = Map.empty
+                                      WorkingDirectory = None }
+                                    (fun (stream, chunk) ->
+                                        match stream with
+                                        | Stdout -> answered <- answered + chunk
+                                        | Stderr -> ())
+                            match spawned with
+                            | Error reason -> return Error reason
+                            | Ok handle ->
+                                match! handle.Exited with
+                                | SandboxExited 0 ->
+                                    match answered.Trim () with
+                                    | "" ->
+                                        // `cd` succeeded and `pwd` said nothing, which no
+                                        // shell does. Refused rather than stored: a profile
+                                        // of "" is a terminal that opens nowhere.
                                         return
                                             Error (
                                                 sprintf
-                                                    "there is no directory %s in the %s sandbox. The paths add_repo and the repos query answer with are what this takes."
-                                                    path
-                                                    name)
-                                    | SandboxRunFailed reason -> return Error reason
-                            }
-                    match checked' with
-                    | Error reason -> return Error reason
-                    | Ok () ->
-                        // ONE event, appended and then folded — rather than a durable write
-                        // beside a separate assignment, which is two mechanisms for one fact
-                        // and free to disagree the moment a replay disagrees with a live set.
-                        let event =
-                            SessionEvent.ShellProfileSet
-                                { MessageId = mintMessageId ()
-                                  Sandbox = sandbox
-                                  WorkingDirectory = cwd
-                                  Actor = actor }
-                        do! appendAs actor event
-                        profiles <- ShellProfileProjection.applyEvent profiles event
-                        // The agent's GENERAL-PURPOSE terminal in this sandbox is retired, and
-                        // only that one. Left alone, a profile change would be invisible in
-                        // exactly the flow that motivates it: set the profile, run `pwd`, get
-                        // the old directory, conclude the tool did nothing. It is the manager's
-                        // own — minted on demand, never named by anyone — so the next command
-                        // reopens it in the new directory and nothing is lost but a shell's
-                        // history. Terminals the agent NAMED, and the people's, were asked for:
-                        // taking somebody's shell away because a default changed is not a
-                        // default's business. A BUSY one is left alone too, because killing a
-                        // running command to change a default is the wrong trade in the one
-                        // direction that cannot be undone.
-                        let retired =
-                            match agentTerminals.TryGetValue name with
-                            | true, id when isOpen id -> Some (id, not (Set.contains (TerminalId.value id) busy))
-                            | _ -> None
+                                                    "the %s sandbox could not say where %s is, so nothing was set."
+                                                    name
+                                                    path)
+                                    | resolved -> return Ok (Some resolved)
+                                | SandboxExited _ ->
+                                    return
+                                        Error (
+                                            sprintf
+                                                "there is no directory %s in the %s sandbox. The paths add_repo and the repos query answer with are what this takes."
+                                                path
+                                                name)
+                                | SandboxRunFailed reason -> return Error reason
+                        }
+                match checked' with
+                | Error reason -> return Error reason
+                | Ok resolved ->
+                    // ONE event, appended and then folded — rather than a durable write
+                    // beside a separate assignment, which is two mechanisms for one fact
+                    // and free to disagree the moment a replay disagrees with a live set.
+                    let event =
+                        SessionEvent.ShellProfileSet
+                            { MessageId = mintMessageId ()
+                              Sandbox = sandbox
+                              // The RESOLVED path, never what the caller typed.
+                              WorkingDirectory = resolved
+                              Actor = actor }
+                    do! appendAs actor event
+                    profiles <- ShellProfileProjection.applyEvent profiles event
+                    // The agent's GENERAL-PURPOSE terminal in this sandbox is retired, and
+                    // only that one. Left alone, a profile change would be invisible in
+                    // exactly the flow that motivates it: set the profile, run `pwd`, get
+                    // the old directory, conclude the tool did nothing. It is the manager's
+                    // own — minted on demand, never named by anyone — so the next command
+                    // reopens it in the new directory and nothing is lost but a shell's
+                    // history. Terminals the agent NAMED, and the people's, were asked for:
+                    // taking somebody's shell away because a default changed is not a
+                    // default's business. A BUSY one is left alone too, because killing a
+                    // running command to change a default is the wrong trade in the one
+                    // direction that cannot be undone.
+                    let retired =
+                        match agentTerminals.TryGetValue name with
+                        | true, id when isOpen id -> Some (id, not (Set.contains (TerminalId.value id) busy))
+                        | _ -> None
+                    match retired with
+                    | Some (id, true) ->
+                        let! _ = closeTerminal id "the shell profile changed"
+                        ()
+                    | _ -> ()
+                    let where =
+                        match cwd with
+                        | Some path -> sprintf "new terminals in %s start in %s." name path
+                        | None -> sprintf "new terminals in %s start where the sandbox puts them." name
+                    let mine =
                         match retired with
-                        | Some (id, true) ->
-                            let! _ = closeTerminal id "the shell profile changed"
-                            ()
-                        | _ -> ()
-                        let where =
-                            match cwd with
-                            | Some path -> sprintf "new terminals in %s start in %s." name path
-                            | None -> sprintf "new terminals in %s start where the sandbox puts them." name
-                        let mine =
-                            match retired with
-                            | Some (_, true) -> [ "Your command terminal was closed and reopens there on your next command." ]
-                            | Some (_, false) ->
-                                [ "Your command terminal has a command running, so it was left alone and keeps the directory it is in." ]
-                            | None -> []
-                        return
-                            Ok (
-                                String.concat
-                                    " "
-                                    ([ where ]
-                                     @ mine
-                                     @ [ "Terminals you opened, and the people's, keep the directory they are in." ]))
-            }
+                        | Some (_, true) -> [ "Your command terminal was closed and reopens there on your next command." ]
+                        | Some (_, false) ->
+                            [ "Your command terminal has a command running, so it was left alone and keeps the directory it is in." ]
+                        | None -> []
+                    return
+                        Ok (
+                            String.concat
+                                " "
+                                ([ where ]
+                                 @ mine
+                                 @ [ "Terminals you opened, and the people's, keep the directory they are in." ]))
+        }
 
         /// Every profile pointing inside a tree that is about to go, cleared (Plan 26).
         ///

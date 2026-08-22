@@ -95,11 +95,30 @@ let dispatch (services: CommandServices) : CommandDispatch =
                                     match! service.AddRepo (repoCaller invocation) repo with
                                     | Error e -> return Error e
                                     | Ok listing ->
+                                        // Said HERE, at the moment a checkout first exists,
+                                        // because that is when it is worth acting on. The
+                                        // same advice sits on `set_shell_profile`, where only
+                                        // an agent already reaching for that tool reads it —
+                                        // which is not the agent about to `cd` in front of
+                                        // every command for the rest of the session.
+                                        //
+                                        // Conditioned on there being no profile rather than
+                                        // on this being the first repo: the point is that
+                                        // terminals still start somewhere else, and it stops
+                                        // saying so once somebody has decided where.
+                                        let unset =
+                                            (services.Terminals ()).Profiles ()
+                                            |> ShellProfileProjection.workingDirectory SandboxName.defaultName
+                                            |> Option.isNone
                                         return
                                             Ok (
                                                 sprintf
-                                                    "added %s — the checkout is shared with everyone in this session and visible in the work environment"
-                                                    (RepoListing.describe listing))
+                                                    "added %s — the checkout is shared with everyone in this session and visible in the work environment%s"
+                                                    (RepoListing.describe listing)
+                                                    (if unset then
+                                                         ". Terminals do not start there: set_shell_profile with that path if this is where the work is."
+                                                     else
+                                                         ""))
                                 })
                 | Some _, other -> return Error (sprintf "add_repo takes one repo, got %d arguments" (List.length other))
             }

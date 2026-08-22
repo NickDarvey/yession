@@ -635,7 +635,7 @@ module AgentTools =
 
           tool
               "add_repo"
-              "Clone a GitHub repo into this session's shared repos directory (visible to everyone here, and inside the work environment). Takes owner/repo — never a URL — and only repos the session's GitHub credential can reach: GitHub says \"not found\" for a repo it will not show you, so a not-found on a repo that exists means nobody has connected GitHub here — say that rather than retrying. Answers with the path the checkout is at: that is the path to cd to in a terminal, so use it rather than guessing one. Read-only bootstrap: to commit or push, use execute_command in a terminal. Already-added repos just report their current state."
+              "Clone a GitHub repo into this session's shared repos directory (visible to everyone here, and inside the work environment). Takes owner/repo — never a URL — and only repos the session's GitHub credential can reach: GitHub says \"not found\" for a repo it will not show you, so a not-found on a repo that exists means nobody has connected GitHub here — say that rather than retrying. Answers with the checkout's path as a terminal here reaches it — usually relative to where a terminal starts, so `cd` it as given, pass it to set_shell_profile as given, and never rebuild it from a longer one. Read-only bootstrap: to commit or push, use execute_command in a terminal. Already-added repos just report their current state."
               [ ToolField.required "repo" "string" "the repo as owner/name, e.g. \"octocat/hello-world\"" ]
               (ofRepo (addRepo capabilities))
 
@@ -704,7 +704,7 @@ module AgentTools =
 
           tool
               "set_shell_profile"
-              "Say where terminals opened from now on should start. Use it once after add_repo, with the path add_repo gave you, and stop putting `cd` at the front of every command — every terminal opened afterwards starts there, yours and the people's, and it survives a restart. It takes a DIRECTORY, not a script: there is nothing to run here, and execute_command is still the only way to run anything. The directory must already exist inside that sandbox, and be absolute — this checks, and says so rather than leaving you a terminal that opens nowhere. Omit `cwd` to put it back the way it was. Terminals that are already open keep the directory they are in; the one exception is the terminal your plain execute_command runs in, which is reopened for you."
+              "Say where terminals opened from now on should start. Use it once after add_repo, with the path add_repo gave you, and stop putting `cd` at the front of every command — every terminal opened afterwards starts there, yours and the people's, and it survives a restart. It takes a DIRECTORY, not a script: there is nothing to run here, and execute_command is still the only way to run anything. The directory must already exist inside that sandbox — this checks, and says so rather than leaving you a terminal that opens nowhere. A path from add_repo or the repos query goes in as given: the sandbox resolves it against the directory its terminals start in. Omit `cwd` to put it back the way it was. Terminals that are already open keep the directory they are in; the one exception is the terminal your plain execute_command runs in, which is reopened for you."
               [ ToolField.optional
                     "cwd"
                     "string"
